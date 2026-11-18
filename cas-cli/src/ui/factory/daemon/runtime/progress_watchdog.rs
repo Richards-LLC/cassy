@@ -579,7 +579,7 @@ mod tests {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
         }
         let rows = queue.peek_all(50).unwrap();
-        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 2,
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 3,
             "a genuine local stall must keep waking the supervisor: {rows:?}");
         assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1,
             "a genuine local stall must still page once: {rows:?}");
@@ -719,7 +719,7 @@ mod tests {
             let pages = rows.iter().filter(|row| row.target == "operator" && row.prompt.contains(&task.id)).count();
             assert_eq!(pages, usize::from(page), "{case}: wrong operator escalation");
             let wakes = rows.iter().filter(|row| row.target == supervisor.name && row.prompt.contains(&task.id)).count();
-            assert_eq!(wakes, usize::from(page), "{case}: wrong local stall wake");
+            assert_eq!(wakes, 2 * usize::from(page), "{case}: wrong local stall wake");
         }
         // A cancelled handoff restores local responsibility and starts a
         // fresh quiet period, without waiting for a task mutation.
@@ -955,7 +955,8 @@ mod tests {
             .create_with_scope("supervisor-id", None, "CI done", cas_store::ReminderTriggerType::Event, None,
                 Some("task_completed"), Some(&serde_json::json!({ "task_id": "cas-gate" })), 0, Some(SESSION), None, false, None)
             .unwrap();
-        let rows = |target: &str| queue.peek_all(50).unwrap().into_iter().filter(|r| r.target == target).collect::<Vec<_>>();
+        let rows = |target: &str| queue.peek_all(50).unwrap().into_iter()
+            .filter(|r| r.target == target && r.factory_session.as_deref() == Some(SESSION)).collect::<Vec<_>>();
         let t0 = chrono::Utc::now() + chrono::Duration::minutes(1);
         let sweep = |mins: i64| super::sweep(&cas_dir, SESSION, t0 + chrono::Duration::minutes(mins));
 

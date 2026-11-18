@@ -423,6 +423,9 @@ fn stop_block_stop_with_context_routes_via_system_message() {
             .is_some_and(|s| s.contains("pending")),
         "context must be routed via systemMessage, got {value}"
     );
+    let bare = to_value(&HookOutput::block_stop("caller supplied reason".into()));
+    assert_eq!(bare["decision"], "block");
+    assert_eq!(bare["reason"], "caller supplied reason");
 }
 
 #[test]

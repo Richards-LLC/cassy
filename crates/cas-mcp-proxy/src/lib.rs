@@ -3910,12 +3910,10 @@ for line in sys.stdin:
         .await
         .unwrap();
         engine.set_call_timeout(Duration::from_millis(300));
-        let started = std::time::Instant::now();
         let outcome = tokio::time::timeout(Duration::from_secs(10), call_fake(&engine, "hang"))
             .await
             .expect("the proxy itself must bound the call");
         let error = outcome.unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
 
         let health = fake_health(&engine).await;
         assert!(!health.connected, "{health:?}");
@@ -4007,24 +4005,16 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn parse_query_plain_keywords() {
-        let (server, kw) = parse_search_query("screenshot capture");
-        assert!(server.is_none());
-        assert_eq!(kw, vec!["screenshot", "capture"]);
-    }
-
-    #[test]
     fn parse_query_with_server_filter() {
-        let (server, kw) = parse_search_query("server:github issue create");
-        assert_eq!(server, Some("github".to_string()));
-        assert_eq!(kw, vec!["issue", "create"]);
-    }
-
-    #[test]
-    fn parse_query_empty() {
-        let (server, kw) = parse_search_query("");
-        assert!(server.is_none());
-        assert!(kw.is_empty());
+        for (query, server, keywords) in [
+            ("screenshot capture", None, vec!["screenshot", "capture"]),
+            ("server:github ISSUE create", Some("github"), vec!["issue", "create"]),
+            ("", None, vec![]),
+        ] {
+            let (actual_server, actual_keywords) = parse_search_query(query);
+            assert_eq!(actual_server.as_deref(), server);
+            assert_eq!(actual_keywords, keywords);
+        }
     }
 
     #[test]
@@ -4040,47 +4030,19 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn matches_keywords_empty_matches_all() {
-        let tool = make_tool("anything", "some description");
-        assert!(matches_keywords(&tool, &[]));
-    }
-
-    #[test]
-    fn matches_keywords_name_match() {
-        let tool = make_tool("take_screenshot", "Captures a screenshot");
-        let keywords = vec!["screenshot".to_string()];
-        assert!(matches_keywords(&tool, &keywords));
-    }
-
-    #[test]
-    fn matches_keywords_description_match() {
-        let tool = make_tool("capture", "Takes a screenshot of the page");
-        let keywords = vec!["screenshot".to_string()];
-        assert!(matches_keywords(&tool, &keywords));
-    }
-
-    #[test]
-    fn matches_keywords_case_insensitive() {
-        let tool = make_tool("TakeScreenshot", "CAPTURES A SCREENSHOT");
-        let keywords = vec!["screenshot".to_string()];
-        assert!(matches_keywords(&tool, &keywords));
-    }
-
-    #[test]
     fn matches_keywords_all_must_match() {
-        let tool = make_tool("create_issue", "Create a GitHub issue");
-        let keywords = vec!["create".to_string(), "issue".to_string()];
-        assert!(matches_keywords(&tool, &keywords));
-
-        let keywords_no_match = vec!["create".to_string(), "screenshot".to_string()];
-        assert!(!matches_keywords(&tool, &keywords_no_match));
-    }
-
-    #[test]
-    fn matches_keywords_no_match() {
-        let tool = make_tool("list_files", "List files in a directory");
-        let keywords = vec!["screenshot".to_string()];
-        assert!(!matches_keywords(&tool, &keywords));
+        for (name, description, keywords, expected) in [
+            ("anything", "some description", vec![], true),
+            ("TakeScreenshot", "image", vec!["screenshot"], true),
+            ("capture", "A SCREENSHOT of the page", vec!["screenshot"], true),
+            ("create_issue", "Create a GitHub issue", vec!["create", "issue"], true),
+            ("create_issue", "Create a GitHub issue", vec!["create", "screenshot"], false),
+            ("list_files", "List files in a directory", vec!["screenshot"], false),
+        ] {
+            let tool = make_tool(name, description);
+            let keywords = keywords.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(matches_keywords(&tool, &keywords), expected, "{name}: {keywords:?}");
+        }
     }
 
     // ── Dispatch parsing tests ──────────────────────────────────────

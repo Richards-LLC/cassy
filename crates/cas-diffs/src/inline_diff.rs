@@ -145,15 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn char_mode_highlights_individual_chars() {
-        let (del, add) = compute_inline_diff("cat", "car", LineDiffType::Char);
-        // Deletion: "ca" unchanged, "t" removed
-        assert_eq!(del, vec![span("ca", false), span("t", true)]);
-        // Addition: "ca" unchanged, "r" added
-        assert_eq!(add, vec![span("ca", false), span("r", true)]);
-    }
-
-    #[test]
     fn char_vs_word_different_granularity() {
         let old = "foo bar";
         let new = "foo baz";

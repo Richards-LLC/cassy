@@ -18,6 +18,55 @@ pub struct MetadataUnavailable {
     pub reason: &'static str,
 }
 
+/// Local records and synced references cannot establish an exhaustive Cloud
+/// inventory. Keep that boundary explicit even when this receiver knows none.
+#[derive(serde::Serialize)]
+pub struct ArtifactListing {
+    pub task_id: String,
+    pub state: &'static str,
+    pub artifacts: Vec<PublishedArtifact>,
+    pub warnings: Vec<&'static str>,
+}
+
+pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<ArtifactListing> {
+    let store = SqliteArtifactStore::open(cas_root)?;
+    let mut records = store.list_for_task(task_id)?.into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut warnings = std::collections::BTreeSet::new();
+    let task = crate::store::open_task_store_local(cas_root)
+        .and_then(|tasks| tasks.get(task_id).map_err(Into::into));
+    match task {
+        Ok(task) => {
+            for json in task.notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
+                let Ok(record) = serde_json::from_str::<PublishedArtifact>(json) else {
+                    warnings.insert("invalid_publication_reference");
+                    continue;
+                };
+                // A local revocation remains authoritative over an older note.
+                if records.get(&record.id).is_some_and(|local| local.revocation.is_some()) {
+                    continue;
+                }
+                if validate(&record, task_id).is_err() {
+                    warnings.insert("invalid_publication_reference");
+                } else if let Some(local) = records.get(&record.id) {
+                    if !same_artifact(local, &record) {
+                        warnings.insert("conflicting_publication_reference");
+                    }
+                } else {
+                    records.insert(record.id.clone(), record);
+                }
+            }
+        }
+        Err(crate::error::CasError::StoreErr(cas_store::StoreError::TaskNotFound(_))) => {}
+        Err(_) => { warnings.insert("task_references_unavailable"); }
+    }
+    Ok(ArtifactListing {
+        task_id: task_id.into(), state: "partial",
+        artifacts: records.into_values().collect(), warnings: warnings.into_iter().collect(),
+    })
+}
+
 /// Share every successful publication through the existing trusted task-note
 /// transport, including publications that did not request a prose proof note.
 pub(crate) fn record_published(
@@ -481,25 +530,43 @@ fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathB
         .map_err(anyhow::Error::msg)
 }
 
-/// cas-e571: a build routed from another machine publishes every file in its
-/// task evidence directory through the artifact path at park, then records a
-/// sha256 manifest, so the routing machine's reviewer can materialize it.
-pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -> Result<(), String> {
-    let Some(source) = crate::factory_build_routing::routed_from(task) else { return Ok(()) };
+/// Publish park evidence for a reviewer on either machine. Routed builds keep
+/// their strict manifest; ordinary deliveries use the existing portable artifact
+/// references, without introducing a new review-admission gate (cas-dae1).
+pub(crate) fn publish_routed_evidence(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    proof_repo: &Path,
+) -> Result<(), String> {
+    let source = crate::factory_build_routing::routed_from(task);
     let machine_id = cas_types::Agent::get_or_generate_machine_id();
-    if source == machine_id {
-        return Ok(());
-    }
+    let routed = source.as_deref().is_some_and(|source| source != machine_id);
     let dir = evidence_dir(cas_root, task).map_err(|error| error.to_string())?;
     let fail = |detail: String| format!(
-        "EVIDENCE SYNC FAILED: {detail}. This build was routed from {source}, whose reviewer reads \
-         the task evidence directory under {source}'s artifacts root; this machine's is {}. \
-         Re-run close once Cloud accepts the upload.", dir.display());
-    if !dir.exists() {
-        return Ok(());
+        "EVIDENCE PUBLICATION INCOMPLETE: {detail}. Task {} has local evidence in {}; publish it before a peer reviews the delivery.",
+        task.id, dir.display());
+    let mut paths = if dir.exists() {
+        evidence_files(&dir).map_err(|error| fail(error.to_string()))?
+    } else { Vec::new() };
+    // A close can also cite a capped runner log in the worker checkout.
+    // Publish only evidence locations, never arbitrary source mentions.
+    for (index, segment) in task.deliverables.parked_close_reason.as_deref().unwrap_or_default().split('`').enumerate() {
+        let tokens = if index % 2 == 1 { vec![segment] } else { segment.split_whitespace().collect() };
+        for token in tokens {
+            let token = token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\''));
+            let token = token.split_once('=').map_or(token, |(_, value)| value);
+            let expanded = crate::qa_evidence::expand_home(token);
+            let path = if expanded.is_absolute() { expanded } else { proof_repo.join(expanded) };
+            if !path.starts_with(proof_repo.join("target"))
+                && !token.contains("/.cas/artifacts/") && !token.starts_with(".cas/artifacts/")
+            { continue; }
+            if path.is_file() && !paths.iter().any(|(_, existing)| *existing == path) {
+                let leaf = path.file_name().and_then(|name| name.to_str()).unwrap_or("proof.log");
+                paths.push((format!("cited/{leaf}"), path));
+            }
+        }
     }
-    let paths = evidence_files(&dir)
-        .map_err(|error| fail(format!("cannot read {}: {error}", dir.display())))?;
+    if paths.is_empty() { return Ok(()); }
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
@@ -534,6 +601,8 @@ pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -
         };
         files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
     }
+    if !routed { return Ok(()); }
+    let source = source.unwrap_or_default();
     let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files };
     let note = format!(
         "[{}] Evidence synced for review on {source}\n{EVIDENCE_SYNC}{}",
@@ -751,4 +820,43 @@ mod tests {
         assert_eq!(Ok(first), second, "the retry holds on the same dispatch");
         assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
     }
+    /// cas-dae1: ordinary parked deliveries carry their cited worktree logs,
+    /// without requiring a routed-build marker or a manual publish round trip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_park_publishes_cited_worktree_evidence_cas_dae1() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-log", "upload_url": format!("{}/blob", server.uri()), "required_headers": {}
+            }))).expect(1).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/blob"))
+            .and(wiremock::matchers::body_bytes(b"test: PASS fixture\n".to_vec()))
+            .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/artifacts/cloud-log/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+            .expect(1).mount(&server).await;
+        let task = cas_types::Task::new("cas-dae1-fixture".into(), "ordinary park".into());
+        let mut owner = PeerReviewer::new(&server.uri(), task);
+        env.set("CAS_ROOT", &owner.root);
+        let log = owner.repo.join("target/runner.log");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "test: PASS fixture\n").unwrap();
+        std::fs::create_dir_all(owner.evidence_dir()).unwrap();
+        owner.task.deliverables.parked_close_reason = Some(format!("VERIFIED `{}`", log.display()));
+        tokio::task::spawn_blocking(move || {
+            publish_routed_evidence(&owner.root, &owner.task, &owner.repo).unwrap();
+            let records = SqliteArtifactStore::open(&owner.root).unwrap().list_for_task(&owner.task.id).unwrap();
+            assert_eq!(records.len(), 1);
+            validate(&records[0], &owner.task.id).unwrap();
+            assert_eq!(records[0].name, "runner.log");
+            assert_eq!(records[0].sha256, digest_file(&log).unwrap().0);
+            let task = crate::store::open_task_store(&owner.root).unwrap().get(&owner.task.id).unwrap();
+            assert!(from_notes(&task.notes, &records[0].id, &task.id).unwrap().is_some());
+            // Ordinary evidence uses fetchable references without a strict
+            // routed-build manifest introducing a new admission requirement.
+            assert!(!task.notes.lines().any(|line| line.starts_with(EVIDENCE_SYNC)));
+        }).await.unwrap();
+    }
+
 }

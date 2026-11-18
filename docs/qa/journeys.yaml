@@ -1831,6 +1831,16 @@ bug_families:
     tasks: [cas-6aa9]
     journeys: [FACTORY-CLOSE]
     invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]
+  cloud-login-and-capped-fixture-isolation:
+    title: Rejected Cloud credentials recover once while capped fixtures preserve real login files
+    tasks: [cas-73d0]
+    journeys: [FACTORY-QA-RECEIPT, FACTORY-CLOSE]
+    invariants: [FACTORY-ARTIFACT-METADATA]
+  factory-routing-recovery:
+    title: Factory routing and workspace recovery
+    tasks: [cas-4379, cas-c58f]
+    journeys: [HUB-J13]
+    statement: Exercise account recommendation, lane admission, peer routing, worktree provisioning, startup brief and Git hook paths with disposable profiles and repositories.
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

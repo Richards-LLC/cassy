@@ -271,7 +271,7 @@ struct RepositoryFacts {
 
 #[derive(Debug, Clone, Copy)]
 enum RepositoryFailure {
-    Missing,
+    Missing(&'static str),
     Wrong,
     Ambiguous,
     StaleBinding,
@@ -314,6 +314,8 @@ struct PreflightFacts {
     required_harnesses: HashSet<Harness>,
     capability_snapshot: cas_factory::CapabilitySnapshot,
     cloud_queue: CloudQueueFacts,
+    disk_percent: Option<u8>,
+    last_sweep: Option<crate::artifacts::retention::host::SweepReport>,
     runtime_elapsed_ms: u64,
 }
 
@@ -370,6 +372,9 @@ pub fn collect_factory_preflight(
         default_versions,
         required_harnesses: required_harnesses(project_root),
         cloud_queue: collect_cloud_queue_facts(cas_root),
+        disk_percent: crate::artifacts::retention::host::disk_percent(cas_root)
+            .into_iter().chain(crate::artifacts::retention::host::disk_percent(&crate::store::known_repos::host_cas_dir())).max(),
+        last_sweep: crate::artifacts::retention::host::last_report(),
         runtime_elapsed_ms: started.elapsed().as_millis() as u64,
     };
     build_report(facts)
@@ -402,6 +407,7 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
     let cas_mcp = classify_mcp(facts.mcp, &mut findings);
     let optional_upstreams = classify_proxy(facts.proxy, &mut findings);
     classify_cloud_queue(facts.cloud_queue, &mut findings);
+    classify_disk_pressure(facts.disk_percent, facts.last_sweep.as_ref(), &mut findings);
     let harnesses = classify_harnesses(
         facts.receipts,
         facts.default_versions,
@@ -440,6 +446,24 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
 
 /// Read persisted queue evidence without creating a database or reaching the
 /// cloud. Preflight remains a bounded, read-only local diagnostic.
+fn classify_disk_pressure(percent: Option<u8>, last: Option<&crate::artifacts::retention::host::SweepReport>, findings: &mut Vec<PreflightFinding>) {
+    if let Some(percent) = percent.filter(|percent| *percent > crate::artifacts::retention::host::PRESSURE_PERCENT) {
+        let evidence = last.map(|report| {
+            let preserved = report.rows.iter().filter(|row| row.disposition.starts_with("retained:") || row.disposition.starts_with("pending"))
+                .take(5).map(|row| format!("{}: {}", row.path.display(), row.disposition)).collect::<Vec<_>>().join("; ");
+            format!("last sweep at {} reclaimed_bytes={} incomplete={}; preserved: {}; errors: {}",
+                report.at, report.reclaimed_bytes(), report.incomplete, preserved, report.errors.join("; "))
+        }).unwrap_or_else(|| "No completed host sweep recorded".into());
+        findings.push(PreflightFinding {
+            code: "disk.pressure".into(), severity: PreflightSeverity::Warning,
+            component: "disk".into(),
+            message: format!("Disk usage {percent}% exceeds 80%; {evidence}"),
+            remediation: "Run cas factory gc cleanup; inspect retained paths before reclaiming additional space".into(),
+            last_evidence_at: last.and_then(|report| chrono::DateTime::from_timestamp(report.at, 0)).map(|at| at.to_rfc3339()),
+        });
+    }
+}
+
 fn collect_cloud_queue_facts(cas_root: &Path) -> CloudQueueFacts {
     let cloud = Config::load(cas_root)
         .unwrap_or_default()
@@ -648,9 +672,9 @@ fn classify_repository(
         },
         Err(reason) => {
             let (code, message, remediation) = match reason {
-                RepositoryFailure::Missing => (
+                RepositoryFailure::Missing(input) => (
                     "repository.unresolved",
-                    "Canonical repository identity or active branch cannot be resolved.",
+                    input,
                     "Run from the intended initialized Git checkout and ensure it has a canonical project ID or origin remote.",
                 ),
                 RepositoryFailure::Wrong => (
@@ -1433,32 +1457,32 @@ fn collect_repository_facts(
     use crate::mcp::tools::core::task::repo_context::BoundedRepoError;
     use cas_types::WorkTarget;
 
-    let map_error = |error| match error {
+    let map_error = |error, input| match error {
         BoundedRepoError::TimedOut => RepositoryFailure::TimedOut,
         BoundedRepoError::CandidateLimit => RepositoryFailure::CandidateLimit,
-        BoundedRepoError::Unavailable => RepositoryFailure::Missing,
+        BoundedRepoError::Unavailable => RepositoryFailure::Missing(input),
         BoundedRepoError::Ambiguous => RepositoryFailure::Ambiguous,
         BoundedRepoError::StaleBinding => RepositoryFailure::StaleBinding,
     };
     let branch = probe
         .output(project_root, &["symbolic-ref", "--short", "HEAD"])
-        .map_err(map_error)?;
+        .map_err(|error| map_error(error, "Active Git branch could not be resolved; detached HEAD needs a named branch."))?;
     if branch.is_empty() {
-        return Err(RepositoryFailure::Missing);
+        return Err(RepositoryFailure::Missing("Active Git branch is empty; select the intended branch."));
     }
     let active = crate::mcp::tools::core::task::repo_context::resolve_path_context_bounded(
         project_root,
         &branch,
         probe,
     )
-    .map_err(map_error)?;
+    .map_err(|error| map_error(error, "Active checkout identity could not be resolved from its canonical project ID or origin remote."))?;
     let cas_project = cas_root.parent().unwrap_or(cas_root);
     let configured = crate::mcp::tools::core::task::repo_context::resolve_path_context_bounded(
         cas_project,
         &branch,
         probe,
     )
-    .map_err(map_error)?;
+    .map_err(|error| map_error(error, "Cassy project identity could not be resolved from its canonical project ID or origin remote."))?;
     if active.repo_selector != configured.repo_selector || active.repo_root != configured.repo_root
     {
         return Err(RepositoryFailure::Wrong);
@@ -1932,6 +1956,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn disk_pressure_threshold_and_last_sweep_cas_d740() {
+        let last = crate::artifacts::retention::host::SweepReport { at: 1_000, applied: true, used_percent: 70, ..Default::default() };
+        for (percent, idle, now, due) in [(80, false, 1_001, false), (81, false, 1_001, true), (70, true, 1_001, false), (70, true, 1_300, true)] {
+            assert_eq!(crate::artifacts::retention::host::automatic_due(Some(&last), percent, idle, now), due);
+        }
+        for (percent, warning) in [(79, false), (80, false), (81, true), (84, true)] {
+            let mut facts = healthy_facts();
+            facts.disk_percent = Some(percent);
+            facts.last_sweep = Some(crate::artifacts::retention::host::SweepReport {
+                at: 1_000, applied: true, incomplete: true, ..Default::default()
+            });
+            let report = build_report(facts);
+            let finding = report.findings.iter().find(|finding| finding.code == "disk.pressure");
+            assert_eq!(finding.is_some(), warning);
+            if let Some(finding) = finding {
+                assert_eq!(finding.severity, PreflightSeverity::Warning);
+                assert!(finding.last_evidence_at.is_some());
+            }
+        }
+    }
+
     fn healthy_facts() -> PreflightFacts {
         let receipts = vec![
             receipt(Harness::ClaudeCode, "2.1.0"),
@@ -2007,6 +2053,8 @@ mod tests {
                 }
                 snapshot
             },
+            disk_percent: Some(40),
+            last_sweep: None,
             cloud_queue: CloudQueueFacts {
                 held_personal: 0,
                 team_only: false,
@@ -2973,14 +3021,9 @@ mod tests {
             "remote",
             "add",
             "origin",
-            "git@example.invalid:org/preflight-boundary.git",
+            "fixture@example.invalid:/org/preflight-boundary.git",
         ]);
         std::fs::create_dir(project.path().join(".cas")).unwrap();
-        std::fs::write(
-            project.path().join(".cas/config.toml"),
-            "[project]\ncanonical_id = \"preflight-boundary\"\n",
-        )
-        .unwrap();
 
         let active = crate::mcp::tools::core::task::repo_context::resolve_path_context(
             project.path(),
@@ -2992,7 +3035,7 @@ mod tests {
             "main",
         )
         .unwrap();
-        assert_eq!(active.repo_selector, "project:preflight-boundary");
+        assert_eq!(active.repo_selector, "remote:example.invalid/org/preflight-boundary");
         assert_eq!(active.repo_selector, configured.repo_selector);
         let resolved = crate::mcp::tools::core::task::repo_context::resolve_repo_context(
             &project.path().join(".cas"),
@@ -3011,7 +3054,7 @@ mod tests {
         let facts = collect_repository_facts(project.path(), &project.path().join(".cas"), &probe);
         assert!(
             matches!(facts, Ok(RepositoryFacts { ref selector, ref target_branch })
-                if selector == "project:preflight-boundary" && target_branch == "main"),
+                if selector == "remote:example.invalid/org/preflight-boundary" && target_branch == "main"),
             "unexpected repository facts: {facts:?}"
         );
     }

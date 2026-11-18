@@ -518,6 +518,7 @@ async fn assigning_gate_to_worker_warns_that_gate_is_supervisor_owned() {
 
 #[tokio::test]
 async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_failure() {
+    use cas_store::VerificationStore;
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
@@ -584,9 +585,8 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
         }),
     )
     .await;
-    assert!(fixed.contains("Corrected proof scope"), "{fixed}");
     let corrected = store.get(&task_id).unwrap();
-    assert_eq!(corrected.status, TaskStatus::Open);
+    assert_eq!(corrected.status, TaskStatus::Open, "{fixed}");
     assert_eq!(
         corrected
             .deliverables
@@ -596,13 +596,10 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
             .target_branch,
         "release"
     );
+    // Cloud lifecycle replication consumes this reserved decision marker.
     assert!(corrected.notes.contains("DECISION: proof scope corrected"));
-    assert!(
-        corrected
-            .notes
-            .contains("no failed-review verdict was recorded")
-    );
-    assert!(!corrected.notes.contains("changes requested by supervisor"));
+    let verifications = cas_store::SqliteVerificationStore::open(&cas_dir).unwrap();
+    assert!(verifications.get_latest_for_task(&task_id).unwrap().is_none());
 
     let no_code_created = unified_task(
         &service,
@@ -633,20 +630,11 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
         }),
     )
     .await;
-    assert!(cleared.contains("work target was cleared"), "{cleared}");
     let cleared_task = store.get(&no_code_id).unwrap();
-    assert_eq!(cleared_task.status, TaskStatus::Open);
+    assert_eq!(cleared_task.status, TaskStatus::Open, "{cleared}");
     assert!(cleared_task.deliverables.work_target.is_none());
-    assert!(
-        cleared_task
-            .notes
-            .contains("stale code work target was cleared")
-    );
-    assert!(
-        !cleared_task
-            .notes
-            .contains("changes requested by supervisor")
-    );
+    assert!(cleared_task.deliverables.work_target_cleared);
+    assert!(verifications.get_latest_for_task(&no_code_id).unwrap().is_none());
 
     // A worktree_merge can land before any worker completion receipt exists.
     // Its observed WorkTarget merge is sufficient for an audited correction;
@@ -685,7 +673,7 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
     }))
     .unwrap();
     let rejected = service.task(Parameters(wrong_target)).await.unwrap_err();
-    assert!(rejected.message.contains("WorkTarget"), "{}", rejected.message);
+    assert_eq!(rejected.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     assert_eq!(store.get(&observed_id).unwrap().risk, [cas::types::TaskRisk::Platform]);
     cas_store::record_observed_delivery_merge(
         &cas_dir,
@@ -708,8 +696,8 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
         }),
     )
     .await;
-    assert!(corrected_observed.contains("Corrected proof scope"), "{corrected_observed}");
-    assert_eq!(store.get(&observed_id).unwrap().risk, [cas::types::TaskRisk::None]);
+    assert_eq!(store.get(&observed_id).unwrap().risk, [cas::types::TaskRisk::None], "{corrected_observed}");
+    assert!(verifications.get_latest_for_task(&observed_id).unwrap().is_none());
     assert!(cas_store::get_latest_worker_delivery(&cas_dir, &observed_id)
         .unwrap()
         .is_none());

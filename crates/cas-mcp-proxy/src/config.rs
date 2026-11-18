@@ -1162,8 +1162,10 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
         );
 
         let serialized = toml::to_string(&config).unwrap();
-        assert!(serialized.contains("allowlist = ["));
-        assert!(serialized.contains("neon.run_sql"));
+        let wire: toml::Value = toml::from_str(&serialized).unwrap();
+        assert_eq!(wire["allowlist"][0].as_str(), Some("neon.run_sql"));
+        let round_trip: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(round_trip.allowlist, config.allowlist);
     }
 
     /// GH #988: `supervisor:<route>` is a role-scoped entry that round-trips,
@@ -1197,7 +1199,8 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
             ]
         );
         let serialized = toml::to_string(&config).unwrap();
-        assert!(serialized.contains("\"supervisor:neon.*\""), "{serialized}");
+        let wire: toml::Value = toml::from_str(&serialized).unwrap();
+        assert_eq!(wire["allowlist"][0].as_str(), Some("supervisor:neon.*"));
         let reparsed: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.allowlist, config.allowlist);
         for bad in [

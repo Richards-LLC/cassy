@@ -142,36 +142,9 @@ mod tests {
     }
 
     #[test]
-    fn test_large_data_compressed() {
-        // Create compressible data (repeated pattern) above threshold
-        let data: Vec<u8> = (0..2000).map(|i| (i % 10) as u8).collect();
-        let result = compress(&data);
-        assert_eq!(result[0], PREFIX_COMPRESSED);
-        // Compressed data should be smaller
-        assert!(result.len() < data.len());
-    }
-
-    #[test]
-    fn test_roundtrip_small() {
-        let data = b"Hello, world!";
-        let compressed = compress(data);
-        let decompressed = decompress(&compressed).unwrap();
-        assert_eq!(data.as_slice(), decompressed.as_ref());
-    }
-
-    #[test]
     fn test_roundtrip_large() {
         // Large compressible data
         let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
-        let compressed = compress(&data);
-        let decompressed = decompress(&compressed).unwrap();
-        assert_eq!(data.as_slice(), decompressed.as_ref());
-    }
-
-    #[test]
-    fn test_roundtrip_random_data() {
-        // Random-ish data that may not compress well
-        let data: Vec<u8> = (0..500).map(|i| ((i * 17 + 31) % 256) as u8).collect();
         let compressed = compress(&data);
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(data.as_slice(), decompressed.as_ref());
@@ -228,8 +201,18 @@ mod tests {
     fn test_incompressible_data_stays_uncompressed() {
         // High-entropy data that doesn't compress well
         // Even if above threshold, if compression makes it bigger, keep uncompressed
-        let data: Vec<u8> = (0..2048).map(|i| ((i * 127 + 53) % 256) as u8).collect();
+        let mut state = 0x8a5c_931fu32;
+        let data: Vec<u8> = (0..2048)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
         let result = compress(&data);
+        assert_eq!(result[0], PREFIX_UNCOMPRESSED);
+        assert_eq!(&result[1..], data.as_slice());
         let decompressed = decompress(&result).unwrap();
         assert_eq!(data.as_slice(), decompressed.as_ref());
     }

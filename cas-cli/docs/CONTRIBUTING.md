@@ -2341,8 +2341,10 @@ recorded start ancestry of both tips, source/destination ownership and current
 task/delivery/review state. Commit-time `factory_branch_anchor` or `parked_branch`
 capture alone is not a park. AwaitingMerge, pending verification and active
 review envelopes refuse rewrites; persisted completion receipts and bound QA
-review tips must remain reachable. Unknown state and deletion refuse. Merge
-the target into parked/reviewed branches. Normal fast-forward pushes retain
+review tips must remain reachable. Unknown state refuses. An owned per-task
+diagnostic ref ending in `-diag` may be deleted while checked out on that ref
+only when no task, completion receipt, recorded merge or QA review binds it.
+Merge the target into parked/reviewed branches. Normal fast-forward pushes retain
 the existing ancestry, ownership, fast-row and local-gate checks.
 
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for
@@ -2831,6 +2833,11 @@ Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
 of the changed tests alone, which `node:test` cannot retry.
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
+When discovery cannot classify an input, the capped runner widens to the whole
+test file, or to the nearest JavaScript package/Rust crate for a source input.
+That wider set runs once and records a separate widened receipt at the tested
+commit. Park consumes it without executing tests; identified changed tests still
+owe five consecutive passes. Caller Jest name filters cannot narrow this proof.
 Stability uses the same receipt carry-forward as crate proof: documentation or
 changelog commits preserve it when no test/build inputs change. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
@@ -3129,6 +3136,16 @@ tool discovery and receipt ownership keep the inherited environment; only the
 final test child receives the requested values. Identity, PATH, target-directory,
 compiler and builder-limit overrides remain refused. This does not admit
 environment prefixes on compile-only checks.
+
+JavaScript integration fixtures can declare a child-only loopback database URL
+through `cas factory worker-check --cas-root "$CAS_ROOT" --test-env
+'LEGAL_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/test' -- jest
+path/to/integration.test.ts`. Supported names are `TEST_DATABASE_URL` and
+`*_TEST_DATABASE_URL`; the value must use `postgres` or `postgresql`, name
+`localhost` or a literal loopback IP, and contain no password, query or fragment.
+The exact value reaches discovery and each capped test child, including detached
+runs. It never changes Cassy's parent environment or admission identity. Ambient
+environment inputs continue to be inherited.
 
 For a credential-free CI reproduction, first create a private config directory.
 The hook also accepts this complete fixed profile before a named nextest command

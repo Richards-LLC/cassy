@@ -2043,6 +2043,9 @@ check_builtin_projections_src() {
         printf 'builtin-projections-src: %s is missing\n' "$body"
         return 0
     }
+    # Pure root projections may be intentionally untracked/ignored. Their
+    # runtime copies are not release authority; fresh clones need no copy.
+    if git ls-files --error-unmatch -- "$projection" >/dev/null 2>&1; then
     if ! python3 - "$projection" "$body" <<'PY'
 import sys
 projection, body = sys.argv[1:]
@@ -2059,13 +2062,17 @@ PY
             "$projection" "$body"
         return 1
     fi
+    printf 'builtin-projections-src: %s matches %s\n' "$projection" "$body"
+    else
+        printf 'builtin-projections-src: root projection untracked; %s is authoritative\n' "$body"
+    fi
     stray="$(find .codex/agents -maxdepth 1 -name '*.md' 2>/dev/null || true)"
     if [[ -n "$stray" ]]; then
         printf 'builtin-projections-src: root .codex/agents carries .md agents:\n%s\n' "$stray"
         printf 'FIX: git rm the .md files above; Codex installs no .md agents\n'
         return 1
     fi
-    printf 'builtin-projections-src: %s matches %s\n' "$projection" "$body"
+    return 0
 }
 
 # cas-043b: suggested MCP calls in builtins and runtime templates name accepted

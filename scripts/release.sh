@@ -578,6 +578,18 @@ if context="$("$cas_bin" release context --branch "$branch" 2>&1)" &&
     base="$train_integration"
     train_tracking=true
 else
+    # cas-5529: a local sync alias can still name the frozen train's exact
+    # commit. Resolve those canonical refs through Cassy before deciding this
+    # is a standalone hotfix; track itself requires the canonical checkout.
+    while IFS= read -r train_ref; do
+        train_branch="${train_ref#refs/heads/}"
+        train_branch="${train_branch#refs/remotes/origin/}"
+        if alias_context="$("$cas_bin" release context --branch "$train_branch" 2>/dev/null)" &&
+           jq -e --arg branch "$train_branch" '.branch == $branch' <<<"$alias_context" >/dev/null; then
+            die "release train checkout required before preparation: git checkout -B $train_branch"
+        fi
+    done < <(git for-each-ref --points-at HEAD --format='%(refname)' \
+        'refs/heads/epic/release-train-*' 'refs/remotes/origin/epic/release-train-*')
     say "train tracking skipped; using --base $base (no matching train context)"
     context='{}'
 fi

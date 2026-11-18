@@ -14,14 +14,10 @@ fn identity_adds_only_the_generated_header() {
 #[test]
 fn transform_swaps_prefix_and_applies_gate_markers() {
     let generated = transform_agents_md(
-        "mcp__cas__task\n<!-- claude-only:start -->\nclaude guidance\n<!-- claude-only:end -->\n<!-- codex-only:start -->\ncodex guidance\n<!-- codex-only:end -->\n",
+        "before\nmcp__cas__task\n<!-- claude-only:start -->\nclaude guidance\n<!-- claude-only:end -->\n<!-- codex-only:start -->\ncodex guidance\n<!-- codex-only:end -->\nafter\n",
     );
 
-    assert!(generated.contains("mcp__cs__task"));
-    assert!(generated.contains("codex guidance"));
-    assert!(!generated.contains("mcp__cas__"));
-    assert!(!generated.contains("claude guidance"));
-    assert!(!generated.contains("codex-only"));
+    assert_eq!(generated, format!("{GENERATED_HEADER}before\nmcp__cs__task\ncodex guidance\nafter\n"));
 }
 
 #[test]

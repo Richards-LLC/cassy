@@ -7,6 +7,7 @@ Routing (pane reply versus `target=operator`): [verified Commander messages](ref
 - Bold the decision word or the thing waiting on the operator.
 - Keep prose within the `cas-supervisor` pane budget unless asked for detail. Diagrams, code blocks and tables do not count; use at most one of each, and keep a diagram to about 10 nodes for a 390 px phone.
 - No file paths or ticket IDs unless asked, and no process narration.
+- Success rows say what passed, for example `✅ 6 passed`. Use an explicit status token or emoji for tone; zero counts and negated failures do not mean failure. Put an actual failure in its own row with its positive count.
 
 | Content | Form | Write | Terminal pane shows |
 |---|---|---|---|

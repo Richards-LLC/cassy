@@ -248,8 +248,10 @@ deliver_notice() {
     shift 2
     [[ "$phase" != published ]] || deadline="$publish_timeout"
     [[ "$deadline" =~ ^[1-9][0-9]*$ ]] || { log "invalid $phase timeout: $deadline"; return 1; }
-    perl -MPOSIX=setpgid -e '
+    perl -MPOSIX=setpgid -MJSON::PP -e '
         my $seconds = shift @ARGV;
+        my $phase = shift @ARGV;
+        my $receipt = shift @ARGV;
         my $pid = fork(); defined $pid or die "fork: $!\n";
         if (!$pid) {
             setpgid(0, 0) == 0 or die "setpgid: $!\n";
@@ -278,13 +280,18 @@ deliver_notice() {
             waitpid($pid, 0);
             exit 124;
         };
-        $SIG{ALRM} = $stop; $SIG{TERM} = $stop; $SIG{INT} = $stop;
+        $SIG{ALRM} = sub {
+            print STDERR encode_json({event => "release_adapter_timeout", phase => $phase,
+                deadline_seconds => 0 + $seconds, receipt => $receipt}), "\n";
+            $stop->();
+        };
+        $SIG{TERM} = $stop; $SIG{INT} = $stop;
         alarm $seconds;
         waitpid($pid, 0);
         my $status = $?;
         alarm 0;
         exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
-    ' "$deadline" "$cas_bin" release "$phase" --receipt "$receipt" --repo "$repo" "$@"
+    ' "$deadline" "$phase" "$receipt" "$cas_bin" release "$phase" --receipt "$receipt" --repo "$repo" "$@"
 }
 
 # Reconcile only after version verification, using the same adapter deadline.

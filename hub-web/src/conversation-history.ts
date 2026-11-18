@@ -1011,7 +1011,7 @@ export function waitingQuestion(history: ConversationHistory | undefined): strin
   const ask = history?.waiting()[0];
   if (!ask) return undefined;
   const summary = ask.summary?.trim();
-  const machineCode = /^[a-z0-9_]+$/;
+  const machineCode = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
   if (summary && !machineCode.test(summary)) return summary;
   const first = ask.message?.trim().split(/(?<=[.!?])\s+|\n/, 1)[0]?.trim();
   return first && !machineCode.test(first) ? first : undefined;

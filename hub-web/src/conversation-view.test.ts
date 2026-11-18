@@ -448,6 +448,13 @@ describe("ConversationView (Pebble thread)", () => {
     expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
   });
+  it("tones rendered status cells from their outcome rather than zero or negated failures", () => {
+    const cells = ["✅ 6 green, 0 red", "3 passed, none failed", "❌ 2 failed", "2 passed, 1 failed", "0 failed"];
+    const [table] = renderBody(document, reply(1, "answer", ["| result |", "| --- |", ...cells.map(cell => `| ${cell} |`)].join("\n")));
+    const rendered = [...table!.querySelectorAll("tbody td")];
+    expect(rendered.map(cell => cell.textContent)).toEqual(cells);
+    expect(rendered.map(cell => cell.classList.contains("fail"))).toEqual([false, false, true, true, false]);
+  });
   it("aligns each column once, from its rule or its cells, so mixed columns and headers line up (cas-72ff)", () => {
     // The operator's table, Nov 5 11:10 AM ET: numeric cells used to right-align one by one.
     const table = (rule: string): string[][] => {

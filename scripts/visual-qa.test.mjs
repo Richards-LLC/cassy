@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,6 +13,36 @@ import { runVisualQa as runBuiltinVisualQa } from '../cas-cli/src/builtins/skill
 const here = fileURLToPath(new URL('.', import.meta.url));
 const fixture = (name) => join(here, 'visual-qa-fixtures', name);
 const repoRoot = join(here, '..');
+
+test('explicit Playwright selection wins over a locally installed package', async () => {
+  for (const script of ['scripts/visual-qa.mjs', 'cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs']) {
+    const dir = await mkdtemp(join(tmpdir(), 'visual-qa-module-'));
+    await copyFile(join(repoRoot, script), join(dir, 'visual-qa.mjs'));
+    for (const [name, marker] of [['node_modules/playwright', 11], ['selected', 73]]) {
+      const pkg = join(dir, name);
+      await mkdir(pkg, { recursive: true });
+      await writeFile(join(pkg, 'package.json'), JSON.stringify({ type: 'module', main: 'index.js', version: '1.65.0' }));
+      await writeFile(join(pkg, 'index.js'), `export const marker = ${JSON.stringify(marker)};`);
+    }
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import { resolvePlaywright } from ${JSON.stringify(pathToFileURL(join(dir, 'visual-qa.mjs')).href)}; console.log((await resolvePlaywright()).playwright.marker);`], {
+      encoding: 'utf8', env: { ...process.env, PLAYWRIGHT_MODULE: join(dir, 'selected') },
+    });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(Number(child.stdout.trim()), 73);
+  }
+});
+
+test('strict phone QA reports page overflow from unbroken inline text', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'visual-qa-page-overflow-'));
+  const page = join(dir, 'page.html');
+  await writeFile(page, `<html><body><p><strong>${'unbroken'.repeat(100)}</strong></p></body></html>`);
+  for (const run of [runVisualQa, runBuiltinVisualQa]) {
+    const result = await run({ urls: [page], artifactDir: await mkdtemp(join(dir, 'capture-')), strict: true,
+      schemes: ['light'], viewports: [{ name: 'phone', width: 390, height: 800 }] });
+    assert.equal(result.status, 'FAIL');
+    assert.ok(result.findings.some(finding => finding.type === 'page-overflow' && finding.scrollWidth > finding.clientWidth));
+  }
+});
 
 /**
  * cas-9ebd: where the historical acceptance runs keep their renders. It was a
@@ -475,14 +505,13 @@ test('JavaScript requirement needs a reason and cannot waive print loss', async 
   }
 });
 
-test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
+test('clean exemplars pass while historical phone overflow and Figure 3 defects fail', async () => {
   const artifactDir = await acceptanceDir('visual-qa-acceptance-');
   const exemplarNames = ['product-page.html', 'report.html', 'dashboard.html', 'before-after.html'];
   // Use the runner's bounded capture pool for the independent clean pages.
-  // This keeps all 20 clean captures while avoiding five serial browsers.
+  // Keep every clean exemplar at both widths and in both schemes.
   const cleanPages = exemplarNames.map((name) =>
     join(repoRoot, 'cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars', name));
-  cleanPages.push(await revisionFixture('2420a246'));
   const clean = await runVisualQa({
     urls: cleanPages, artifactDir: join(artifactDir, 'clean'),
     schemes: ['light', 'dark'], viewports: [
@@ -492,6 +521,14 @@ test('acceptance surfaces pass and the historical Figure 3 defect fails', async 
   });
   assert.equal(clean.status, 'PASS', JSON.stringify(clean.findings));
   assert.equal(clean.screenshots.length, cleanPages.length * 4);
+
+  // The old report fixed Figure 3 but still expands the phone page to 1051px.
+  // Page-level overflow is now a defect, rather than a passing historical baseline.
+  const phoneOverflow = await acceptanceRender(await revisionFixture('2420a246'), join(artifactDir, 'review-2420a246'));
+  assert.equal(phoneOverflow.status, 'FAIL');
+  assert.equal(phoneOverflow.findings.length, 2);
+  assert.ok(phoneOverflow.findings.every(finding => finding.type === 'page-overflow'
+    && finding.viewport.width === 390 && finding.scrollWidth > finding.clientWidth));
 
   const defectiveReview = await acceptanceRender(await revisionFixture('cbac967b'), join(artifactDir, 'review-cbac967b'));
   assert.equal(defectiveReview.status, 'FAIL');

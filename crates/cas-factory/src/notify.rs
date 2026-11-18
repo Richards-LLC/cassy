@@ -79,7 +79,7 @@ impl DaemonNotifier {
     pub fn drain(&mut self) {
         let mut buf = [0u8; 64];
         if let Ok(sock) = self.tokio_socket() {
-            while sock.try_recv(&mut buf).is_ok() {}
+            if sock.try_recv(&mut buf).is_ok() {}
         }
     }
 

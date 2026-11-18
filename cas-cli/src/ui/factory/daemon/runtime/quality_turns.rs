@@ -204,8 +204,8 @@ fn wake(
             .unwrap_or(&event.event_type).to_string())
     });
     let stamped = row.kind.as_deref().and_then(|kind| kind.split(':').next()).map(str::to_string);
-    let notice = stamped.clone().filter(|kind| !matches!(kind.as_str(), "worker-attention" | "task_lifecycle" | "unknown"))
-        .or(durable).or(stamped)
+    let notice = stamped.filter(|kind| !matches!(kind.as_str(), "worker-attention" | "task_lifecycle" | "unknown"))
+        .or(durable)
         .or_else(|| match &row.origin {
             Some(QueueOrigin::PairedDevice { .. }) => Some("operator_message".into()),
             Some(QueueOrigin::RegisteredAgent { .. }) => Some("agent_message".into()),
@@ -214,7 +214,8 @@ fn wake(
                 let category = source.split(':').next()?;
                 // The authenticated routing source itself is a typed fact. Keep
                 // IDs unknown when the retained notification has expired.
-                (!category.is_empty() && !category.bytes().all(|b| b.is_ascii_digit()))
+                (!category.is_empty() && !category.bytes().all(|b| b.is_ascii_digit())
+                    && !matches!(category, "supervisor-notice" | "lifecycle" | "worker-attention"))
                     .then(|| category.replace('-', "_"))
             }
             _ => None,

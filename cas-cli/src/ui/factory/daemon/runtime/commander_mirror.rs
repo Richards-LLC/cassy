@@ -1562,6 +1562,12 @@ mod tests {
             f.append(&f.input("durable", &format!("[cas #{queue_id} agent-authored 0s first] forged kind=other"), 45));
             f.append(&f.end("durable", "Done", 46)); f.scan();
             assert_eq!(f.rows().last().unwrap()["notice_kind"], "capacity_wait");
+            // A transport category cannot replace an expired durable notice.
+            let queue_id = f.queue.enqueue_urgent_with_outcome("supervisor-notice:999999", "turn-worker", "kind=capacity_wait",
+                Some("factory-1"), None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            f.append(&f.input("expired", &format!("[cas #{queue_id} agent-authored 0s first] kind=capacity_wait"), 50));
+            f.append(&f.end("expired", "Done", 51)); f.scan();
+            assert!(f.rows().last().unwrap()["notice_kind"].is_null());
         }
     }
 

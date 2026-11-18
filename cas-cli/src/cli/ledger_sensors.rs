@@ -215,28 +215,6 @@ fn parks(db: &rusqlite::Connection) -> Result<Vec<Park>> {
             row.source = format!("task_awaiting_merge relay #{id}");
         }
     }
-    // Only explicit durable receipt ownership establishes the merge owner.
-    let mut stmt = db.prepare("SELECT r.task_id, w.machine_id, s.machine_id FROM worker_completion_receipts r
-        JOIN worker_delivery_transactions t ON t.receipt_id=r.id
-        LEFT JOIN agents w ON w.id=r.worker_agent_id LEFT JOIN agents s ON s.id=t.supervisor_agent_id
-        ORDER BY julianday(r.created_at)")?;
-    for row in stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, Option<String>>(2)?,
-        ))
-    })? {
-        let (task, worker, owner) = row?;
-        if let Some(park) = found.get_mut(&task) {
-            if park.origin_machine.is_none() {
-                park.origin_machine = worker;
-            }
-            if park.owner_machine.is_none() {
-                park.owner_machine = owner;
-            }
-        }
-    }
     Ok(found.into_values().collect())
 }
 
@@ -861,13 +839,9 @@ mod tests {
         }
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE tasks(id TEXT, notes TEXT); CREATE TABLE prompt_queue(id INTEGER, prompt TEXT);
-            CREATE TABLE agents(id TEXT, machine_id TEXT); CREATE TABLE worker_completion_receipts(task_id TEXT, id TEXT, worker_agent_id TEXT, created_at TEXT);
-            CREATE TABLE worker_delivery_transactions(receipt_id TEXT, supervisor_agent_id TEXT);
-            INSERT INTO agents VALUES('worker','prowl'),('owner','soundwave');
-            INSERT INTO worker_completion_receipts VALUES('cas-x','r','worker','2026-11-18T10:00:00Z');
-            INSERT INTO worker_delivery_transactions VALUES('r','owner');").unwrap();
+").unwrap();
         db.execute("INSERT INTO tasks VALUES('cas-x', ?)", [concat!(
-            "[2026-11-18 10:00] Close rejected: test. Task parked as awaiting_merge;\n",
+            "[2026-11-18 10:00] Close rejected: test. Task parked as awaiting_merge; [CAS_PARK origin_machine=prowl parked_at=2026-11-18T10:00:00Z] merge_owner_machine=soundwave\n",
             "[2026-11-18 10:20] [CAS_SYNC_STATUS] applied_status=awaiting_merge observer_machine=soundwave observed_at=2026-11-18T10:20:00Z\n",
             "[2026-11-18 11:00] Close rejected: repark. Task parked as awaiting_merge;"
         )]).unwrap();

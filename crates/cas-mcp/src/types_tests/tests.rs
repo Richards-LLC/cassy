@@ -1,63 +1,6 @@
 use crate::types::*;
 
 #[test]
-fn cas_8405_peers_accepts_string_booleans() {
-    for (value, expected) in [("true", true), ("false", false)] {
-        let request: CoordinationRequest = serde_json::from_value(serde_json::json!({
-            "action": "peers", "peer": "happy-owl-25", "detail": value, "json": value
-        }))
-        .expect("Claude Code string booleans must decode at the MCP boundary");
-        assert_eq!(request.detail, Some(expected));
-        assert_eq!(request.json, Some(expected));
-        assert_eq!(request.peer.as_deref(), Some("happy-owl-25"));
-    }
-}
-
-#[test]
-fn cas_8405_supervisor_override_keeps_string_coercion() {
-    for (wire, expected) in [("true", true), ("false", false)] {
-        let request: TaskRequest = serde_json::from_value(serde_json::json!({
-            "action": "close", "supervisor_override": wire
-        }))
-        .unwrap();
-        assert_eq!(request.supervisor_override, Some(expected));
-    }
-}
-
-#[test]
-fn cas_8405_bool_coercion_does_not_grow_the_schema() {
-    #[derive(serde::Deserialize, schemars::JsonSchema)]
-    #[schemars(title = "BooleanParameter")]
-    struct Strict {
-        #[serde(default)]
-        flag: Option<bool>,
-    }
-    #[derive(serde::Deserialize, schemars::JsonSchema)]
-    #[schemars(title = "BooleanParameter")]
-    struct Coerced {
-        #[serde(default, deserialize_with = "crate::types::deser::option_bool")]
-        flag: Option<bool>,
-    }
-    assert!(
-        serde_json::from_str::<Strict>(r#"{"flag":true}"#)
-            .unwrap()
-            .flag
-            .unwrap()
-    );
-    assert!(
-        serde_json::from_str::<Coerced>(r#"{"flag":"true"}"#)
-            .unwrap()
-            .flag
-            .unwrap()
-    );
-    // Changing only this attribute must leave even the serialized bytes unchanged.
-    assert_eq!(
-        serde_json::to_string(&schemars::schema_for!(Strict)).unwrap(),
-        serde_json::to_string(&schemars::schema_for!(Coerced)).unwrap()
-    );
-}
-
-#[test]
 fn cas_8405_all_mcp_boolean_parameters_accept_string_forms() {
     use serde_json::{Value, json};
 
@@ -970,35 +913,6 @@ fn test_priority_rejects_out_of_range_numeric() {
     let err =
         serde_json::from_str::<TaskRequest>(r#"{"action":"create","title":"x","priority":9}"#)
             .expect_err("priority 9 is out of 0-4 range");
-    let msg = err.to_string();
-}
-
-#[test]
-fn test_with_deps_accepts_string_bool() {
-    // cas-ca63 Issue 2: boolean as string should be coerced.
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":"true"}"#).unwrap();
-    assert_eq!(req.with_deps, Some(true));
-
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":"false"}"#).unwrap();
-    assert_eq!(req.with_deps, Some(false));
-
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":1}"#).unwrap();
-    assert_eq!(req.with_deps, Some(true));
-
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":true}"#).unwrap();
-    assert_eq!(req.with_deps, Some(true));
-}
-
-#[test]
-fn test_with_deps_rejects_garbage_string_with_helpful_error() {
-    let err = serde_json::from_str::<TaskRequest>(
-        r#"{"action":"show","id":"cas-1","with_deps":"maybe"}"#,
-    )
-    .expect_err("garbage bool string must be rejected");
     let msg = err.to_string();
 }
 

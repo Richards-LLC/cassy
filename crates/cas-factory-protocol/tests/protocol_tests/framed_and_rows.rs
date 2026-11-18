@@ -44,6 +44,11 @@ fn test_framed_encoding_all_message_types() {
             names: vec![],
             force: false,
         },
+        ClientMessage::ShutdownWorkers {
+            count: Some(2),
+            names: vec![],
+            force: false,
+        },
         ClientMessage::InjectPrompt {
             pane_id: "worker".to_string(),
             prompt: "Test prompt".to_string(),

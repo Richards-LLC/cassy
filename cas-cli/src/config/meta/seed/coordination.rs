@@ -332,7 +332,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.max_workers",
         section: "factory",
         name: "Maximum Workers",
-        description: "Machine-wide live worker cap for spawn admission and advertised peer capacity. Counts current heartbeats and live harness processes across local factory sessions. A project without its own value inherits ~/.cas/config.toml, then 8.",
+        description: "In project config, limits this project's live workers. In ~/.cas/config.toml, limits all live workers on the machine (default 8). Spawn admission and advertised peer capacity honor both limits, counting current heartbeats and live harness processes.",
         value_type: ConfigType::Int,
         default: "8",
         constraint: Constraint::Range(1, 256),

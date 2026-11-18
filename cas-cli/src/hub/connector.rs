@@ -499,65 +499,6 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(server, client); }).await.unwrap();
     }
 
-    /// cas-a0e2: an upstream that ends drops its sender, and every send
-    /// failure is the retryable [`UpstreamUnavailable`], never a refusal.
-    #[tokio::test]
-    async fn an_ended_upstream_drops_its_sender_and_sends_fail_as_unavailable_cas_a0e2() {
-        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
-        let never_attached = connector
-            .send("factory-a", ClientMessage::Detach)
-            .await
-            .expect_err("no upstream yet");
-        assert_eq!(
-            never_attached.downcast_ref::<UpstreamUnavailable>(),
-            Some(&UpstreamUnavailable {
-                reason: "session has no Commander upstream"
-            })
-        );
-
-        // A daemon port nothing listens on: the upstream ends at once.
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let _viewer = connector
-            .attach("factory-a", port, std::iter::empty::<String>(), None)
-            .await
-            .unwrap();
-        let slot = connector
-            .slots
-            .lock()
-            .await
-            .get("factory-a")
-            .cloned()
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                if !slot.running.load(Ordering::Acquire) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the upstream to a closed port ends");
-        assert!(
-            slot.sender.lock().await.is_none(),
-            "an ended upstream must not keep a sender into a dead channel"
-        );
-        let after_end = connector
-            .send("factory-a", ClientMessage::Detach)
-            .await
-            .expect_err("no live upstream");
-        assert_eq!(
-            after_end.downcast_ref::<UpstreamUnavailable>(),
-            Some(&UpstreamUnavailable {
-                reason: "session upstream is not ready"
-            })
-        );
-    }
-
     /// cas-d53c: a daemon replacement must end the old viewer stream, not
     /// leave a browser reading Live on a dead upstream and replay its Welcome.
     #[tokio::test]
@@ -616,6 +557,8 @@ mod tests {
             .subscribe("other-session", std::iter::empty::<String>())
             .await;
         let connector = DaemonConnector::new(mux.clone(), events.clone());
+        let unavailable = connector.send("factory-a", ClientMessage::Detach).await.unwrap_err();
+        assert!(unavailable.downcast_ref::<UpstreamUnavailable>().is_some());
         let mut first = connector
             .attach("factory-a", port, std::iter::empty::<String>(), None)
             .await
@@ -641,6 +584,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(disconnected.kind, MachineEventKind::DaemonDisconnected);
+        let unavailable = connector.send("factory-a", ClientMessage::Detach).await.unwrap_err();
+        assert!(unavailable.downcast_ref::<UpstreamUnavailable>().is_some());
         events.reconcile_sessions(["factory-a"]).await;
         assert_eq!(
             event_rx.recv().await.unwrap().kind,

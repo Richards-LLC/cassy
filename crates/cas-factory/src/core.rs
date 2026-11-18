@@ -504,63 +504,9 @@ mod tests {
     }
 
     #[test]
-    fn test_factory_core_new() {
-        let config = test_config();
-        let core = FactoryCore::new(config);
-        assert!(core.is_ok());
-
-        let core = core.unwrap();
-        assert!(core.supervisor_name().is_none());
-        assert!(core.worker_names().is_empty());
-    }
-
-    #[test]
-    fn test_spawn_worker_without_supervisor_fails() {
-        let config = test_config();
-        let mut core = FactoryCore::new(config).unwrap();
-
-        let result = core.spawn_worker("worker-1", None);
-        assert!(matches!(result, Err(FactoryError::NoSupervisor)));
-    }
-
-    #[test]
-    fn test_shutdown_nonexistent_worker_fails() {
-        let config = test_config();
-        let mut core = FactoryCore::new(config).unwrap();
-
-        let result = core.shutdown_worker("nonexistent");
-        assert!(matches!(result, Err(FactoryError::WorkerNotFound(_))));
-    }
-
-    #[test]
     fn test_spawn_supervisor_twice_fails() {
-        let config = test_config();
-        let mut core = FactoryCore::new(config).unwrap();
-
-        // First spawn should succeed (but may fail due to no TTY in test)
-        let first = core.spawn_supervisor(None);
-        if first.is_ok() {
-            // Second spawn should fail
-            let second = core.spawn_supervisor(None);
-            assert!(matches!(second, Err(FactoryError::SupervisorExists)));
-        }
-    }
-
-    #[test]
-    fn test_poll_events_empty() {
-        let config = test_config();
-        let mut core = FactoryCore::new(config).unwrap();
-
-        let events = core.poll_events();
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn test_panes_empty_initially() {
-        let config = test_config();
-        let core = FactoryCore::new(config).unwrap();
-
-        let panes = core.panes();
-        assert!(panes.is_empty());
+        let mut core = FactoryCore::new(test_config()).unwrap();
+        core.supervisor_name = Some("existing-supervisor".into());
+        assert!(matches!(core.spawn_supervisor(None), Err(FactoryError::SupervisorExists)));
     }
 }

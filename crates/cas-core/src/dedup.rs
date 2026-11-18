@@ -248,13 +248,6 @@ mod tests {
     use crate::dedup::*;
 
     #[test]
-    fn test_dedup_action_equality() {
-        assert_eq!(DedupAction::Add, DedupAction::Add);
-        assert_ne!(DedupAction::Add, DedupAction::Skip);
-        assert_ne!(DedupAction::Skip, DedupAction::Merge);
-    }
-
-    #[test]
     fn test_dedup_result_methods() {
         let result = DedupResult {
             action: DedupAction::Add,
@@ -281,26 +274,4 @@ mod tests {
         assert!(result.should_merge());
     }
 
-    #[test]
-    fn test_search_hit_debug() {
-        let hit = SearchHit {
-            id: "test-id".to_string(),
-            bm25_score: 0.95,
-        };
-        let debug_str = format!("{hit:?}");
-        assert!(debug_str.contains("test-id"));
-        assert!(debug_str.contains("0.95"));
-    }
-
-    #[test]
-    fn test_similarity_result_clone() {
-        let entry = Entry::new("test-id".to_string(), "test content".to_string());
-        let result = SimilarityResult {
-            entry,
-            similarity: 0.85,
-        };
-        let cloned = result.clone();
-        assert_eq!(cloned.entry.id, "test-id");
-        assert_eq!(cloned.similarity, 0.85);
-    }
 }

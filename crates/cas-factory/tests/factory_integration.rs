@@ -90,20 +90,6 @@ fn test_notify_config_default() {
     // Backend is detected based on environment
 }
 
-#[test]
-fn test_notify_backend_detect() {
-    // This will return Native on macOS/Linux/Windows, Bell otherwise
-    let backend = NotifyBackend::detect();
-
-    // We can't assert a specific backend since it depends on environment
-    // Just verify it's a valid variant
-    match backend {
-        NotifyBackend::Native | NotifyBackend::Bell | NotifyBackend::ITerm2 => {
-            // Valid backend detected
-        }
-    }
-}
-
 // =============================================================================
 // AutoPromptConfig Tests
 // =============================================================================
@@ -153,18 +139,6 @@ fn test_config() -> FactoryConfig {
         stall_after_secs: cas_factory::DEFAULT_SUPERVISOR_STALL_AFTER_SECS,
         ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
     }
-}
-
-#[test]
-fn test_factory_core_new() {
-    let config = test_config();
-    let result = FactoryCore::new(config);
-
-    assert!(result.is_ok());
-
-    let core = result.unwrap();
-    assert!(core.supervisor_name().is_none());
-    assert!(core.worker_names().is_empty());
 }
 
 #[test]
@@ -223,17 +197,6 @@ fn test_resize() {
     let (cols, rows) = core.terminal_size();
     assert_eq!(cols, 100);
     assert_eq!(rows, 50);
-}
-
-#[test]
-fn test_set_cas_root() {
-    let config = test_config();
-    let mut core = FactoryCore::new(config).unwrap();
-
-    let cas_root = PathBuf::from("/path/to/.cas");
-    core.set_cas_root(cas_root);
-
-    // No direct getter, but this should not panic
 }
 
 // =============================================================================

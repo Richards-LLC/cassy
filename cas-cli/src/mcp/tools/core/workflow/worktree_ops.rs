@@ -5171,6 +5171,11 @@ impl CasCore {
             target_fetched = matches!(refreshed, Ok(Some(_)));
             match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch, refreshed) {
                 Containment::Contained { receipt, origin_verified } => {
+                    let receipt = if deferred_contained_review {
+                        format!("{receipt}\n\nNo review verdict was inferred from containment. A live registered supervisor can record its review directly with {}verification action=add task_id={} dispatch_id=null status=approved|rejected summary=\"<review evidence>\"; the verdict binds the integrated target and parked anchor.",
+                            crate::mcp::tools::core::guidance::caller_prefix(),
+                            scoped_task.as_deref().map(|task| task.id.as_str()).unwrap_or_default())
+                    } else { receipt };
                     // Preserve the existing behind-local checkout repair, but only
                     // after origin has proved that this source needs no CI/merge.
                     // cas-8315: judged against the local target (no origin, or

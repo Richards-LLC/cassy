@@ -222,7 +222,7 @@ fn read_user_source(dir: &Path) -> Result<(toml::Value, Option<usize>), MemError
         // An invalid limit must not also discard the user's valid [qa] defaults.
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| eprintln!(
-            "Warning: invalid factory.max_workers = {value} in {}; using the project value or 8.",
+            "Warning: invalid factory.max_workers = {value} in {}; using the machine default of 8.",
             dir.display()
         ));
     }

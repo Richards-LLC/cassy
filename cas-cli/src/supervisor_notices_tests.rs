@@ -224,7 +224,7 @@ fn release_and_binary_skew_notices_wake_once() {
     let mut owner = Agent::new_with_role("release-owner".into(), "owner".into(), AgentRole::Supervisor);
     owner.factory_session = Some("release-session".into());
     open_agent_store(&root).unwrap().register(&owner).unwrap();
-    for kind in ["release_cut_ready", "release_post_publish", "factory_binary_skew"] {
+    for kind in ["release_cut_ready", "release_post_publish", "factory_binary_skew", "premerge_candidate_ready", "premerge_candidate_failed", "train_ready"] {
         for _ in 0..2 {
             enqueue(&root, &Recipient::agent(&owner), kind, "release action due", "v9.99.2").unwrap();
         }
@@ -236,7 +236,7 @@ fn release_and_binary_skew_notices_wake_once() {
         "failures":["fixture::regression"], "complete_log":"complete.zip", "artifact":"train-rust-suite", "run_url":"https://example.test/runs/17"});
     for _ in 0..2 { crate::train_ci::notify(&root, &epic, None, &state).unwrap(); }
     let rows = open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
-    assert_eq!(rows.len(), 4, "retrying an occurrence must not repeat its wake");
+    assert_eq!(rows.len(), 7, "retrying an occurrence must not repeat its wake");
     // pin: train_ci_red is the action-envelope kind consumed by the supervisor.
     let red = rows.iter().find(|row| row.prompt.contains("train_ci_red")).unwrap();
     for value in [&state["failures"][0], &state["head"], &state["merge_range"][0]["tasks"][0]] {

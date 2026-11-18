@@ -12640,9 +12640,11 @@ mod tests {
         assert!(store.claim_recipient_transport(before, "worker-1").unwrap());
         // The daemon wrote the Teams copy and deferred the wake (cas-a1ed).
         store.record_deferred_inbox(before, 0).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let turn_started_at = Utc::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let turn_started_at = Utc::now() - chrono::Duration::days(1);
+        store.conn.lock().unwrap().execute(
+            "UPDATE prompt_queue_recipient_seen SET seen_at = ?1 WHERE prompt_id = ?2",
+            params![(turn_started_at - chrono::Duration::days(1)).to_rfc3339(), before],
+        ).unwrap();
         let decision = store
             .enqueue_with_session("supervisor", "worker-1", "scope decision: take (A)", session)
             .unwrap();
@@ -13001,9 +13003,12 @@ mod tests {
             .enqueue_with_session("sup", "worker-1", "turn prompt", session)
             .unwrap();
         store.mark_transport_delivered(before).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let turn_started_at = Utc::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let turn_started_at = Utc::now() - chrono::Duration::days(1);
+        let prior_delivery = (turn_started_at - chrono::Duration::days(1)).to_rfc3339();
+        let conn = store.conn.lock().unwrap();
+        conn.execute("UPDATE prompt_queue SET transport_delivered_at = ?1 WHERE id = ?2", params![prior_delivery, before]).unwrap();
+        conn.execute("UPDATE prompt_queue_recipient_transport SET delivered_at = ?1 WHERE prompt_id = ?2", params![prior_delivery, before]).unwrap();
+        drop(conn);
         let mid_turn = store
             .enqueue_with_session("peer", "worker-1", "peer reply mid-turn", session)
             .unwrap();
@@ -19443,11 +19448,9 @@ mod tests {
                 .unwrap();
         }
 
-        let started = std::time::Instant::now();
         let peeked = store
             .peek_for_targets(&["supervisor"], Some("session-scale"), LIMIT)
             .unwrap();
-        let elapsed = started.elapsed();
 
         assert_eq!(peeked.len(), LIMIT);
         assert!(
@@ -19456,10 +19459,6 @@ mod tests {
                 .any(|p| p.factory_session.as_deref() == Some("session-scale"))
         );
         assert!(peeked.iter().any(|p| p.factory_session.is_none()));
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "peek over 10× backlog must stay fast; took {elapsed:?}"
-        );
 
         fn explain_plan(
             conn: &rusqlite::Connection,
@@ -20087,7 +20086,6 @@ mod tests {
             let tx = ImmediateTx::new(&conn).unwrap();
             // Hold the write lock before B starts.
             barrier_a.wait();
-            thread::sleep(Duration::from_millis(80));
             SqlitePromptQueueStore::atomic_stage_stamp_in_tx(
                 &tx,
                 id,

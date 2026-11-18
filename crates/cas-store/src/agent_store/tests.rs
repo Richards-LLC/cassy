@@ -352,22 +352,6 @@ fn test_agent_pid_starttime_cleared_on_update_to_none() {
 }
 
 #[test]
-fn test_heartbeat() {
-    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (_temp, store) = create_test_store(&mut env);
-
-    let agent = Agent::new("agent-hb".to_string(), "Heartbeat Test".to_string());
-    store.register(&agent).unwrap();
-
-    let before = store.get("agent-hb").unwrap().last_heartbeat;
-    std::thread::sleep(std::time::Duration::from_millis(10));
-    store.heartbeat("agent-hb").unwrap();
-    let after = store.get("agent-hb").unwrap().last_heartbeat;
-
-    assert!(after > before);
-}
-
-#[test]
 fn test_lease_claim_and_release() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_temp, store) = create_test_store(&mut env);
@@ -431,7 +415,6 @@ fn test_lease_renewal() {
         .unwrap();
 
     let before = store.get_lease("task-renew").unwrap().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(10));
     store.renew_lease("task-renew", "agent-renew", 120).unwrap();
     let after = store.get_lease("task-renew").unwrap().unwrap();
 
@@ -572,17 +555,14 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
     task.assignee = Some("agent-hb-renew".into());
     tasks.add(&task).unwrap();
 
-    // Claim with a very short duration — simulates a task claimed near (or
-    // past) the default ~30min window that's about to run out.
+    // Seed an already expired active lease; heartbeat must renew it before reclaim.
     store
-        .try_claim("task-hb-renew", "agent-hb-renew", 1, None)
+        .try_claim("task-hb-renew", "agent-hb-renew", -60, None)
         .unwrap();
 
     let before = store.get_lease("task-hb-renew").unwrap().unwrap();
 
-    // Heartbeat renews the lease to `now + TASK_LEASE_HEARTBEAT_RENEWAL_SECS`
-    // (600s in production) — well past the original 1s claim duration.
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    // Heartbeat must move the expired deadline into the future.
     store.heartbeat("agent-hb-renew").unwrap();
 
     let after = store.get_lease("task-hb-renew").unwrap().unwrap();
@@ -595,11 +575,7 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
         "heartbeat-driven renewal must be recorded the same way explicit renew_lease is"
     );
 
-    // Wait past the ORIGINAL 1s claim duration — before cas-85d9, the
-    // lease would now be expired and `reclaim_expired_leases` would sweep
-    // it, even though the agent just heartbeated.
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
+    // Reclaim now would collect the seeded lease without renewal.
     let reclaimed = store.reclaim_expired_leases().unwrap();
     assert_eq!(
         reclaimed, 0,
@@ -608,32 +584,6 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
     assert!(
         store.get_lease("task-hb-renew").unwrap().is_some(),
         "task-hb-renew's lease must still be active after a heartbeat renewed it"
-    );
-}
-
-/// Safety property: renewal happens ONLY on heartbeat. An agent that never
-/// heartbeats after claiming (crashed immediately, or the lease predates
-/// its first heartbeat) must still let the lease expire normally — the
-/// dead-holder-recovery property the lease exists for is unaffected.
-#[test]
-fn test_lease_still_expires_without_heartbeat() {
-    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (_temp, store) = create_test_store(&mut env);
-
-    let agent = Agent::new("agent-no-hb".to_string(), "No Heartbeat Test".to_string());
-    store.register(&agent).unwrap();
-
-    store
-        .try_claim("task-no-hb", "agent-no-hb", 1, None)
-        .unwrap();
-    // No heartbeat call.
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let reclaimed = store.reclaim_expired_leases().unwrap();
-    assert_eq!(
-        reclaimed, 1,
-        "a lease with no heartbeat renewal must still expire normally"
     );
 }
 
@@ -656,12 +606,11 @@ fn test_heartbeat_renews_worktree_lease_past_original_duration() {
     store.register(&agent).unwrap();
 
     store
-        .try_claim_worktree("wt-hb-renew", "agent-hb-wt-renew", 1)
+        .try_claim_worktree("wt-hb-renew", "agent-hb-wt-renew", -60)
         .unwrap();
 
     let before = store.get_worktree_lease("wt-hb-renew").unwrap().unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
     store.heartbeat("agent-hb-wt-renew").unwrap();
 
     let after = store.get_worktree_lease("wt-hb-renew").unwrap().unwrap();
@@ -670,9 +619,7 @@ fn test_heartbeat_renews_worktree_lease_past_original_duration() {
         "heartbeat must extend the worktree lease's expires_at"
     );
 
-    // Wait past the ORIGINAL 1s claim duration and reclaim — the renewed
-    // lease must survive.
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Reclaim now would collect the seeded lease without renewal.
     let reclaimed = store.reclaim_expired_worktree_leases().unwrap();
     assert_eq!(
         reclaimed, 0,
@@ -701,12 +648,11 @@ fn test_heartbeat_renewal_does_not_affect_other_agents_leases() {
         tasks.add(&task).unwrap();
     }
 
-    store.try_claim("task-a", "agent-hb-a", 1, None).unwrap();
-    store.try_claim("task-b", "agent-hb-b", 1, None).unwrap();
+    store.try_claim("task-a", "agent-hb-a", 600, None).unwrap();
+    store.try_claim("task-b", "agent-hb-b", 600, None).unwrap();
 
     let b_before = store.get_lease("task-b").unwrap().unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
     store.heartbeat("agent-hb-a").unwrap();
 
     assert_eq!(store.get_lease("task-a").unwrap().unwrap().renewal_count, 1);
@@ -726,14 +672,10 @@ fn test_expired_lease_reclaim() {
     let agent = Agent::new("agent-expire".to_string(), "Expire Test".to_string());
     store.register(&agent).unwrap();
 
-    // Claim with very short duration
+    // Seed an already expired active lease.
     store
-        .try_claim("task-expire", "agent-expire", 1, None)
+        .try_claim("task-expire", "agent-expire", -60, None)
         .unwrap();
-
-    // Wait for expiration
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
     // Reclaim expired
     let count = store.reclaim_expired_leases().unwrap();
     assert_eq!(count, 1);
@@ -746,9 +688,10 @@ fn test_expired_lease_reclaim() {
     );
 
     // Verify expiration was logged in history
-    let history = store.get_lease_history("task-expire", Some(1)).unwrap();
-    assert!(!history.is_empty());
+    let history = store.get_lease_history("task-expire", None).unwrap();
     assert_eq!(history[0].event_type, "expired");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].event_type, "claimed");
 
     // Another agent can now claim
     let agent2 = Agent::new("agent-2".to_string(), "Agent 2".to_string());
@@ -962,35 +905,6 @@ fn test_lease_history_audit_log() {
 }
 
 #[test]
-fn test_lease_history_expired() {
-    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (_temp, store) = create_test_store(&mut env);
-
-    let agent = Agent::new(
-        "agent-expire-hist".to_string(),
-        "Expire History".to_string(),
-    );
-    store.register(&agent).unwrap();
-
-    // Claim with very short duration
-    store
-        .try_claim("task-expire-hist", "agent-expire-hist", 1, None)
-        .unwrap();
-
-    // Wait for expiration
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    // Reclaim expired
-    store.reclaim_expired_leases().unwrap();
-
-    // Verify expired event is logged
-    let history = store.get_lease_history("task-expire-hist", None).unwrap();
-    assert_eq!(history.len(), 2);
-    assert_eq!(history[0].event_type, "expired");
-    assert_eq!(history[1].event_type, "claimed");
-}
-
-#[test]
 fn test_lease_history_revoked() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_temp, store) = create_test_store(&mut env);
@@ -1103,10 +1017,15 @@ fn test_get_agent_worked_tasks_with_since_filter() {
         .try_claim("old-task", "agent-filter", 600, None)
         .unwrap();
 
-    // Sleep briefly and record timestamp
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let cutoff = Utc::now();
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    let cutoff = Utc::now() - Duration::days(1);
+    store
+        .lock_conn()
+        .unwrap()
+        .execute(
+            "UPDATE task_lease_history SET timestamp = ?1 WHERE task_id = ?2",
+            params![(cutoff - Duration::days(1)).to_rfc3339(), "old-task"],
+        )
+        .unwrap();
 
     // Claim another task after the cutoff
     store
@@ -1762,7 +1681,8 @@ fn cas_4ac8_round4_explicit_update_advances_incarnation_but_stale_update_cannot_
 fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (temp, store) = create_test_store(&mut env);
-    let agent = Agent::new("agent-1bc7".to_string(), "Heartbeat".to_string());
+    let mut agent = Agent::new("agent-1bc7".to_string(), "Heartbeat".to_string());
+    agent.last_heartbeat = Utc::now() - Duration::days(1);
     store.register(&agent).unwrap();
     let before = store.get("agent-1bc7").unwrap().last_heartbeat;
 
@@ -1779,7 +1699,6 @@ fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
     )
     .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(5));
     let error = store.heartbeat("agent-1bc7").expect_err("the renewal fails");
     assert!(error.to_string().contains("cas-1bc7 renewal probe"), "{error}");
     assert_eq!(

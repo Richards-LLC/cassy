@@ -10,16 +10,16 @@ metadata:
 
 ## Fewest tests
 
-Choose the public seam where the caller observes the promised result. Extend an existing case or table before adding a file; keep the fewest cases that fail without the guarded behavior. Cover identity/state combinations as rows when a single happy path hides the incident. Delete obsolete or duplicate tests after checking their importers.
+Read production code first. Name each test's contract and a believable bug it catches at the public seam. Keep one strongest test per contract; extend its cases instead of adding siblings. Cover identity/state variants as rows. Models over-add tests: offset additions by consolidating existing coverage. Delete obsolete/duplicate tests after checking importers.
 
 For browser/e2e/journey authoring, use [cas-playwright-tests](../cas-playwright-tests/SKILL.md); diagnose failures with `cas-playwright-debug`, and audit an existing suite with `cas-test-audit`.
 
 ## Test hygiene
 
 1. Prove a new or changed test red by reverting the fix or deleting the guarded line. Sabotage must break the promised outcome through its real consumer; an unrelated timeout proves nothing. Keep the red command/result, restore the code and record green.
-2. Assert the caller's outcome using independent fixture/source values or stable protocol identifiers. Banned: copy, word lists, punctuation, source-code text and implementation/style pins. Exact caller payloads are data-integrity contracts; fixed safety bytes need a named consumer. Browser accessibility has one narrow computed-style exception in the browser skill.
+2. Assert independent outcomes, not wording/prose, exact output text, source text or mirrored implementation/style. Exact caller payloads and machine protocol bytes remain data-integrity checks; fixed safety bytes need a named consumer. Browser accessibility has one narrow computed-style exception in the browser skill.
 3. Make fakes evaluate the same predicates as the dependency. Keep uniqueness, transactions, locking and Git ancestry on real disposable databases/repos; validate the disposable target before setup or cleanup. A canned success/count can hide races.
-4. Control clocks only for time-dependent logic, before the code reads time. Use bounded event/completion barriers for real processes and IO; do not replace synchronization with sleeps.
+4. Control clocks only for time-dependent logic, before the code reads time. Use bounded event/completion barriers for real processes and IO; do not replace synchronization with sleeps. Derive wall-clock bounds from contracts or measurements, never guesses.
 5. Fail when required fixture/auth/data is missing. A declared optional lane may skip with a visible reason; a soft return is a false pass. Execute known defects as expected failures and fail on an unexpected pass.
 6. Read the runner's executed count and CI coverage. Fail globally empty required selections, unexplained skips or missing required CI lanes; declared optional lanes report their skip. Shards may be empty individually when the aggregate executes required coverage. A test outside every CI lane needs an explicit owner/decision, not a green claim.
 7. Exercise owned behavior, not the library/runtime. Prove dependency/runtime upgrades with existing relevant suites; remove unused dependencies. Keep imports inside tests when they provide module/mock isolation, and share only immutable setup.

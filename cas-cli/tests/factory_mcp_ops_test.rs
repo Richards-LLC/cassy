@@ -1792,56 +1792,79 @@ async fn spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_iso
     assert!(refused.contains("9/8") && refused.contains("source: default"), "{refused}");
 }
 
-/// Nov 13 replay: 1 live worker here, 7 in another factory project. The
-/// refusal and worker_status must state the same 8/8 with both projects.
+/// GH #2118: the project cap counts this project's workers; the user cap
+/// counts every live worker on the machine. Queue state proves admission.
 #[test]
-fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6() {
+fn spawn_respects_project_and_machine_worker_caps_cas_08db() {
     run_isolated_codex_test(
-        "spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child",
+        "spawn_respects_project_and_machine_worker_caps_cas_08db_in_isolated_child",
         IsolatedCodexState::Available,
     );
 }
 
 #[tokio::test]
 #[ignore = "subprocess helper for deterministic available-Codex probe"]
-async fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child() {
+async fn spawn_respects_project_and_machine_worker_caps_cas_08db_in_isolated_child() {
     let env = factory_env_in_isolated_codex_child(
-        "spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child",
+        "spawn_respects_project_and_machine_worker_caps_cas_08db_in_isolated_child",
     );
-    env.create_epic("Shared machine capacity Epic");
-    env.register_worker_with_metadata("local-live", HashMap::new());
+    env.create_epic("Independent worker caps Epic");
+    for index in 0..3 {
+        env.register_worker_with_metadata(&format!("local-{index}"), HashMap::new());
+    }
+    let user = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cas");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("config.toml"), "[factory]\nmax_workers = 20\n").unwrap();
+    let project = env.cas_root.join("config.toml");
+    let original = std::fs::read_to_string(&project).unwrap_or_default();
+    std::fs::write(project, format!("{original}\n[factory]\nmax_workers = 8\n")).unwrap();
+
     let other = TempDir::new().unwrap();
-    // Its own Git root, so store discovery cannot climb into an enclosing repo.
     assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(other.path())
         .status().unwrap().success());
     let other_root = init_cas_dir(other.path()).unwrap();
     let other_agents = open_agent_store(&other_root).unwrap();
-    for index in 0..7 {
+    let register_other = |index| {
         let mut agent = Agent::new(format!("other-{index}"), format!("other-{index}"));
         agent.role = AgentRole::Worker;
         other_agents.register(&agent).unwrap();
-    }
-    let sessions = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cas/sessions");
+    };
+    for index in 0..7 { register_other(index); }
+    let sessions = user.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(sessions.join("other.json"), serde_json::json!({
-        "name": "other", "created_at": "2026-11-13T21:51:00Z", "daemon_pid": 0,
+        "name": "other", "created_at": "2026-11-18T15:06:00Z", "daemon_pid": 0,
         "socket_path": "/nonexistent", "supervisor": {"name": "other-sup", "pid": null, "worktree_path": null},
         "workers": [], "project_dir": other.path().display().to_string(),
     }).to_string()).unwrap();
-    let label = |root: &std::path::Path| root.parent().unwrap().canonicalize().unwrap()
-        .file_name().unwrap().to_string_lossy().into_owned();
-    let mut req = factory_req("spawn_workers");
-    req.count = Some(1);
+    let spawn = |count| {
+        let mut req = factory_req("spawn_workers");
+        req.count = Some(count);
+        env.service.factory_request(Parameters(req))
+    };
+    spawn(1).await.expect("project 3/8 and machine 10/20 must admit a worker");
+    assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
 
-    let status = get_text(&env.service.factory_request(Parameters(factory_req("worker_status"))).await.unwrap());
-    let refused = env.service.factory_request(Parameters(req)).await
-        .expect_err(&format!("spawn must be refused at 8/8; worker_status: {status}")).message;
-    let census = refused.split("Worker capacity: ").nth(1).and_then(|rest| rest.split(';').next())
-        .unwrap_or_else(|| panic!("{refused}"));
-    assert!(census.starts_with("8/8"), "{refused}");
-    assert!(census.contains(&format!("{} 1", label(&env.cas_root))), "{refused}");
-    assert!(census.contains(&format!("{} 7", label(&other_root))), "{refused}");
-    assert!(status.contains(&format!("Worker capacity: {census}")), "{status}");
+    // A batch cannot exceed the project's remaining five slots.
+    let refused = spawn(6).await.unwrap_err();
+    assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_REQUEST);
+    assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
+
+    let added_workers: Vec<_> = (3..8).map(|index| {
+        env.register_worker_with_metadata(&format!("local-{index}"), HashMap::new())
+    }).collect();
+    let refused = spawn(1).await.expect_err("project 8/8 must refuse with machine only 15/20");
+    assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_REQUEST);
+    assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
+    for id in added_workers {
+        let mut worker = env.agent_store().get(&id).unwrap();
+        worker.status = AgentStatus::Shutdown;
+        env.agent_store().update(&worker).unwrap();
+    }
+    for index in 7..17 { register_other(index); }
+    let refused = spawn(1).await.expect_err("machine 20/20 must refuse with project only 3/8");
+    assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_REQUEST);
+    assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
 }
 
 #[tokio::test]

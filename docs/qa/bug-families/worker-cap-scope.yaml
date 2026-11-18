@@ -1,0 +1,4 @@
+title: Project worker caps do not replace the machine worker cap
+tasks: [cas-08db]
+invariants: [FACTORY-FRESH-WORKER-CAPACITY]
+journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]

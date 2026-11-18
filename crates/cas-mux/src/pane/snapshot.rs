@@ -201,7 +201,7 @@ impl Pane {
 
             let text = self
                 .terminal
-                .dump_screen_row(screen_row)
+                .dump_screen_row(0)
                 .unwrap_or_default();
             let style_runs = self
                 .terminal

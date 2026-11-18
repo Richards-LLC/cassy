@@ -35,6 +35,18 @@ pub(super) fn test_file(path: &str) -> bool {
         || path.split('/').any(|part| matches!(part, "__tests__" | "tests" | "test" | "e2e"))
 }
 
+/// Files a runner's default matcher runs as tests (GH #2116, #2127): a test
+/// name suffix, or jest's `__tests__` directory; declarations never are.
+/// `test_file` stays the wide net for files that may hold tests. A file only
+/// that net catches is a support module: a `File` run of it finds no tests,
+/// so it widens to its package, whose run covers its consumers.
+pub(super) fn test_match(path: &str) -> bool {
+    let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    !stem.ends_with(".d")
+        && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
+            || path.split('/').any(|part| part == "__tests__"))
+}
+
 /// A scoped JavaScript stability command, however the shell names its runner.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Invocation {
@@ -2084,6 +2096,55 @@ mod tests {
         let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &[service.to_string(), file.to_string()], None).unwrap();
         assert_eq!(tests, [id(file, "auth signs out")]);
         assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
+    }
+
+    /// GH #2116, #2127: a data module, a `.d.mts` declaration and a helper under
+    /// `test/` or `tests/` hold no tests. The gate widened them to a `File`
+    /// scope whose printed `worker-check -- <runner> <file>` run finds nothing
+    /// and writes no report. They widen to their package, which runs their
+    /// consumers; a real spec stays a `File` scope.
+    #[test]
+    fn support_files_under_test_dirs_widen_to_the_package_gh2116() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let support = [
+            "test/scenarios/conversation-flows/flows.mjs",
+            "tests/config/staging-target.d.mts",
+            "tests/qa/journeys/staging-guard.ts",
+        ];
+        let spec = "tests/scenarios/flows.scenario.spec.ts";
+        for (index, path) in support.iter().chain([&spec]).enumerate() {
+            let full = repo.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, format!("export const value = {index};\n")).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        for path in support {
+            std::fs::write(repo.path().join(path), "export const value = 'changed';\n").unwrap();
+        }
+        git(&["commit", "--quiet", "-am", "head"]);
+        let paths = support.map(str::to_owned);
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
+        assert_eq!(
+            super::super::widened::scope(repo.path(), spec),
+            super::super::widened::Scope::File(spec.into())
+        );
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid

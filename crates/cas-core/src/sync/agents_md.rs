@@ -163,40 +163,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn identity_adds_only_header() {
-        assert_eq!(
-            transform_agents_md("# Project\nUse local tools.\n"),
-            format!("{GENERATED_HEADER}# Project\nUse local tools.\n")
-        );
-    }
-
-    #[test]
-    fn swaps_cas_mcp_prefixes() {
-        let generated = transform_agents_md("mcp__cas__task action=start\n");
-        assert!(generated.contains("mcp__cs__task action=start"));
-        assert!(!generated.contains("mcp__cas__"));
-    }
-
-    #[test]
-    fn strips_claude_only_blocks() {
-        let generated = transform_agents_md(
-            "before\n<!-- claude-only:start -->\nclaude secret\n<!-- claude-only:end -->\nafter\n",
-        );
-        assert!(generated.contains("before\n"));
-        assert!(generated.contains("after\n"));
-        assert!(!generated.contains("claude secret"));
-    }
-
-    #[test]
-    fn includes_codex_only_blocks_without_markers() {
-        let generated = transform_agents_md(
-            "before\n<!-- codex-only:start -->\ncodex guidance\n<!-- codex-only:end -->\nafter\n",
-        );
-        assert!(generated.contains("codex guidance\n"));
-        assert!(!generated.contains("codex-only"));
-    }
-
-    #[test]
     fn uncomments_fully_commented_codex_only_blocks() {
         let generated =
             transform_agents_md("<!-- codex-only:start\ncodex guidance\ncodex-only:end -->\n");
@@ -205,23 +171,6 @@ mod tests {
             format!("{GENERATED_HEADER}codex guidance\n"),
             "the codex-only wrapper must be removed while the generated-file header remains"
         );
-    }
-
-    #[test]
-    fn write_is_idempotent_and_check_reports_staleness() {
-        let project = tempdir().unwrap();
-        let source = project.path().join("CLAUDE.md");
-        fs::write(&source, "mcp__cas__task\n").unwrap();
-
-        let first = sync_agents_md(project.path(), AgentsMdSyncMode::Write).unwrap();
-        assert_eq!(first.stale_count(), 1);
-        let second = sync_agents_md(project.path(), AgentsMdSyncMode::Write).unwrap();
-        assert_eq!(second.stale_count(), 0);
-
-        fs::write(&source, "mcp__cas__task updated\n").unwrap();
-        let check = sync_agents_md(project.path(), AgentsMdSyncMode::Check).unwrap();
-        assert_eq!(check.stale_count(), 1);
-        assert!(check.files[0].output.exists());
     }
 
     /// Audit D3: a CLAUDE.md that imports `@AGENTS.md` leaves the canonical

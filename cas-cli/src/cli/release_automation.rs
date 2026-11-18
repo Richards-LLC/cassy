@@ -357,6 +357,10 @@ fn git_with_timeout(repo: &Path, args: &[&str], timeout: std::time::Duration) ->
 
 /// Prefer the caller's explicit lane; otherwise use the shared default election.
 fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
+    open_train_on_branch(root, None)
+}
+
+fn open_train_on_branch(root: &Path, preferred: Option<&str>) -> Result<(PathBuf, cas_types::Task)> {
     use crate::mcp::tools::core::task::{release_train, repo_context};
     let (repo, integration) =
         repo_context::integration_branch(root).context("no integration branch")?;
@@ -377,7 +381,10 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
         )?,
         "release checkout belongs to another repository"
     );
-    let branch = git(&caller, &["branch", "--show-current"])?;
+    let branch = match preferred {
+        Some(branch) => branch.to_string(),
+        None => git(&caller, &["branch", "--show-current"])?,
+    };
     let explicit = release_train::active_trains(store.as_ref(), &integration)
         .into_iter()
         .find(|train| train.effective_epic_branch() == Some(branch.as_str()));
@@ -426,7 +433,7 @@ pub fn context(args: &ContextArgs, root: &Path) -> Result<()> {
     let value: ReleaseContext = if let Some(version) = &args.version {
         serde_json::from_slice(&fs::read(receipt_path(root, version)?)?)?
     } else {
-        let (repo, train) = open_train(root)?;
+        let (repo, train) = open_train_on_branch(root, args.branch.as_deref())?;
         let value = new_context(&repo, &train)?;
         if let Some(branch) = &args.branch {
             ensure!(

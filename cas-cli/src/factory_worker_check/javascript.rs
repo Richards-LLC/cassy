@@ -2319,16 +2319,18 @@ mod tests {
             source_tests("a.test.ts", escaped, &[(1, 1)]).unwrap(),
             [id("a.test.ts", "reads each post's \"depth\" from its creator's capture")]
         );
-        assert!(source_tests("a.test.ts", "it('a\\u0041', () => {});", &[(1, 1)]).is_err());
+        let unicode = "it('a\\u0041', () => {});";
+        assert!(source_tests("a.test.ts", unicode, &[(1, 1)]).is_err());
         // GH #2112: a parameterized describe around a static test title selects
         // that test under every runtime suite name; the test title stays literal.
-        let looped = "for (const [mode, api] of rows) test.describe(api, () => {\n  test('answers 100% in time', () => {});\n});\ntest.describe(`ssr ${mode} run`, () => {\n  test('defers', () => {});\n});";
+        let looped = "for (const [mode, api] of rows) test.describe(api, () => {\n  test('p100%_ok', () => {});\n});\ntest.describe(`ssr_${mode}_run`, () => {\n  test('defers_ok', () => {});\n});";
         let wildcard = |name: &str| Identity { parameterized: true, ..id("a.test.ts", name) };
-        assert_eq!(source_tests("a.test.ts", looped, &[(2, 2)]).unwrap(), [wildcard("%s answers 100%% in time")]);
-        assert_eq!(source_tests("a.test.ts", looped, &[(5, 5)]).unwrap(), [wildcard("ssr %s run defers")]);
+        let (dynamic, interpolated) = (wildcard("%s p100%%_ok"), wildcard("ssr_%s_run defers_ok"));
+        assert_eq!(source_tests("a.test.ts", looped, &[(2, 2)]).unwrap(), [dynamic.clone()]);
+        assert_eq!(source_tests("a.test.ts", looped, &[(5, 5)]).unwrap(), [interpolated]);
         assert_eq!(
-            [("a.test.ts", "API hangs answers 100% in time"), ("a.test.ts", "answers 100% in time x")]
-                .map(|(path, name)| wildcard("%s answers 100%% in time").selects(&id(path, name))),
+            [("a.test.ts", "api_hangs p100%_ok"), ("a.test.ts", "p100%_ok_x")]
+                .map(|(path, name)| dynamic.selects(&id(path, name))),
             [true, false]
         );
         // GH #1973: a TypeScript generic over an import type parses.

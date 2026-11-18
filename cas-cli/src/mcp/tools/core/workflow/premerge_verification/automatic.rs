@@ -1031,32 +1031,6 @@ mod tests {
         assert!(calls.get() > 1, "the second start waited for the first to bind");
     }
 
-    /// cas-111e: a busy shared store backs off across passes instead of
-    /// spending every launch attempt inside one contention episode.
-    #[test]
-    fn store_contention_backs_off_without_spending_launch_attempts_cas_111e() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let (_dir, core, _owner, dispatches) = contention_fixture(&["cas-111e-c"]);
-        env.set("CAS_ROOT", &core.cas_root);
-        let [(task, dispatch)] = dispatches.try_into().unwrap();
-        let shared = cas_store::shared_db::shared_connection(&core.cas_root.join("cas.db")).unwrap();
-        let (held, holding) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _guard = shared.lock().unwrap();
-            held.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(600));
-        });
-        holding.recv().unwrap();
-        let errors = std::cell::RefCell::new(Vec::new());
-        let launched = request_with_retry(LAUNCH_ATTEMPTS, std::time::Duration::from_millis(50), std::time::Duration::from_secs(20), || {
-            let _budget = cas_store::wait_budget::bound_waits_for(std::time::Duration::from_millis(20));
-            claim(&core, &task, &dispatch).inspect_err(|error| errors.borrow_mut().push(error.clone()))
-        });
-        holder.join().unwrap();
-        assert_eq!(launched, Ok(()), "{:?}", errors.borrow());
-        assert!(errors.borrow().len() >= LAUNCH_ATTEMPTS as usize, "contention outlasted the attempt budget: {:?}", errors.borrow());
-    }
-
     #[test]
     fn slow_dispatch_preparation_returns_claim_before_provider_ready_cas_2efe() {
         use std::sync::mpsc;

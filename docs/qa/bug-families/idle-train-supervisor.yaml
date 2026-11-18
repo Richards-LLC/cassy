@@ -1,4 +1,0 @@
-title: An idle supervisor receives train and candidate actions without an unrelated wake
-tasks: [cas-2ba4]
-invariants: [FACTORY-UNDELIVERED-RELAY-ACTION]
-journeys: [FACTORY-SUPERVISE, HUB-J5]

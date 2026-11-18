@@ -1841,6 +1841,21 @@ bug_families:
     tasks: [cas-4379, cas-c58f]
     journeys: [HUB-J13]
     statement: Exercise account recommendation, lane admission, peer routing, worktree provisioning, startup brief and Git hook paths with disposable profiles and repositories.
+  changed-test-stability-broader-failure:
+    title: Broader selection failures preserve valid passing changed-test stability
+    tasks: [cas-3a252]
+    invariants: [FACTORY-SELECTED-TEST-LOG]
+    journeys: [FACTORY-CLOSE]
+  idle-train-supervisor:
+    title: An idle supervisor receives train and candidate actions without an unrelated wake
+    tasks: [cas-2ba4]
+    invariants: [FACTORY-UNDELIVERED-RELAY-ACTION]
+    journeys: [FACTORY-SUPERVISE, HUB-J5]
+  worker-cap-scope:
+    title: Project worker caps do not replace the machine worker cap
+    tasks: [cas-08db]
+    invariants: [FACTORY-FRESH-WORKER-CAPACITY]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

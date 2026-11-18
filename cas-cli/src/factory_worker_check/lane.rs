@@ -44,6 +44,11 @@ impl Selection {
         Ok(Self { proof: Proof { mode, build, expression }, packages })
     }
 
+    pub(crate) fn summary(&self) -> String {
+        format!("Lane impact: {} plan; build {}; selection {} bytes; changed crates {}",
+            self.proof.mode, self.proof.build.join(" "), self.proof.expression.len(), self.packages.join(","))
+    }
+
     pub(crate) fn args(&self) -> Vec<String> {
         ["nextest", "run"].map(String::from).into_iter()
             .chain(self.proof.build.iter().cloned())
@@ -87,7 +92,6 @@ pub(crate) fn select(repo: &Path, base: &str) -> Result<Selection> {
     if !output.status.success() {
         bail!("lane CI's impact selection failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    print!("{}", String::from_utf8_lossy(&output.stdout));
     let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(&out)?)?;
     let mut packages = plan["plan"]["paths"].as_array().into_iter().flatten()
         .filter_map(|path| path.as_str()).filter(|path| path.ends_with(".rs"))

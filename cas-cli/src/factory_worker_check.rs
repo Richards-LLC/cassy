@@ -2397,6 +2397,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let lane = if lane::requested(args) {
         Some(lane::select(&repo, &proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)?)
     } else { None };
+    if let Some(lane) = &lane { println!("{}", lane.summary()); }
     let test = match &lane {
         Some(lane) => Some(lane.targeted()),
         None => test,

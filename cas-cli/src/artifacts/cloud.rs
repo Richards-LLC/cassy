@@ -894,23 +894,23 @@ mod tests {
 
     #[tokio::test]
     async fn expired_session_reloads_login_and_retries_artifact_begin_once_cas_73d0() {
-        for source in ["stored", "environment", "missing", "invalid_environment", "rejected_retry", "foreign_endpoint", "server_error", "route_unauthorized", "retry_unauthorized"] {
+        for scenario in ["stored", "environment", "missing", "invalid_environment", "rejected_retry", "foreign_endpoint", "server_error", "route_unauthorized", "retry_unauthorized"] {
             let server = MockServer::start().await;
             let foreign = MockServer::start().await;
-            let environment = matches!(source, "environment" | "invalid_environment" | "rejected_retry" | "foreign_endpoint" | "server_error" | "route_unauthorized" | "retry_unauthorized");
-            let verify = environment && !matches!(source, "foreign_endpoint" | "server_error" | "route_unauthorized");
-            let retry = source == "stored" || verify && source != "invalid_environment";
-            let success = matches!(source, "stored" | "environment");
-            let first_status = if source == "server_error" { 503 } else { 401 };
+            let environment = matches!(scenario, "environment" | "invalid_environment" | "rejected_retry" | "foreign_endpoint" | "server_error" | "route_unauthorized" | "retry_unauthorized");
+            let verify = environment && !matches!(scenario, "foreign_endpoint" | "server_error" | "route_unauthorized");
+            let retry = scenario == "stored" || verify && scenario != "invalid_environment";
+            let success = matches!(scenario, "stored" | "environment");
+            let first_status = if scenario == "server_error" { 503 } else { 401 };
             Mock::given(method("POST")).and(path("/api/artifacts/begin"))
                 .and(header("Authorization", "Bearer expired-fixture"))
                 .respond_with(ResponseTemplate::new(first_status).set_body_json(serde_json::json!({
-                    "error":if first_status == 503 { "upstream_unavailable" } else if source == "route_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
+                    "error":if first_status == 503 { "upstream_unavailable" } else if scenario == "route_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
                 .expect(1).mount(&server).await;
             if verify {
                 Mock::given(method("GET")).and(path("/api/sync/status"))
                     .and(header("Authorization", "Bearer rotated-fixture"))
-                    .respond_with(ResponseTemplate::new(if source == "invalid_environment" { 401 } else { 200 })
+                    .respond_with(ResponseTemplate::new(if scenario == "invalid_environment" { 401 } else { 200 })
                         .set_body_json(serde_json::json!({})))
                     .expect(1).mount(&server).await;
             }
@@ -920,11 +920,11 @@ mod tests {
                     .and(body_string_contains("cas-b72a"))
                     .respond_with(ResponseTemplate::new(if success { 200 } else { 401 }).set_body_json(serde_json::json!({
                         "artifact_id":"cloud-refreshed", "upload_url":"https://storage.example/put",
-                        "error":if source == "retry_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
+                        "error":if scenario == "retry_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
                     .expect(1).mount(&server).await;
             }
             let endpoint = server.uri();
-            let environment_endpoint = if source == "foreign_endpoint" { foreign.uri() } else { endpoint.clone() };
+            let environment_endpoint = if scenario == "foreign_endpoint" { foreign.uri() } else { endpoint.clone() };
             let result = tokio::task::spawn_blocking(move || {
                 let mut env = crate::test_support::TestEnvGuard::temp_home();
                 let cas_root = env.home().join("project/.cas");
@@ -937,10 +937,10 @@ mod tests {
                     env.set("CAS_CLOUD_ENDPOINT", &environment_endpoint);
                 }
                 crate::cloud::CloudConfig { endpoint:endpoint.clone(),
-                    token:Some(if source == "stored" { "rotated-fixture" } else { "expired-fixture" }.into()),
+                    token:Some(if scenario == "stored" { "rotated-fixture" } else { "expired-fixture" }.into()),
                     ..Default::default() }.save_user().unwrap();
                 let result = ArtifactUploadClient::new(&endpoint, "expired-fixture").begin(&begin_request());
-                if source == "environment" {
+                if scenario == "environment" {
                     assert_eq!(crate::cloud::CloudConfig::load_user().unwrap().token.as_deref(), Some("rotated-fixture"));
                 }
                 result
@@ -948,10 +948,10 @@ mod tests {
             if success { assert_eq!(result.unwrap().artifact_id, "cloud-refreshed"); }
             else {
                 let error = result.err().expect("authorization or upstream failure");
-                let code = if source == "server_error" { "upstream_unavailable" } else if matches!(source, "route_unauthorized" | "retry_unauthorized") { "unauthorized" } else { "cloud_session_expired" };
-                assert!(error.to_string().contains(code), "{source}: {error}");
+                let code = if scenario == "server_error" { "upstream_unavailable" } else if matches!(scenario, "route_unauthorized" | "retry_unauthorized") { "unauthorized" } else { "cloud_session_expired" };
+                assert!(error.to_string().contains(code), "{scenario}: {error}");
             }
-            assert_eq!(server.received_requests().await.unwrap().len(), 1 + usize::from(verify) + usize::from(retry), "{source}");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1 + usize::from(verify) + usize::from(retry), "{scenario}");
             assert!(foreign.received_requests().await.unwrap().is_empty());
         }
     }

@@ -149,60 +149,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cas_0f5b_canary_refuses_a_claude_worker_whose_hooks_never_ran() {
-        let t = HOOK_CANARY_TIMEOUT;
-        assert_eq!(canary_verdict(true, false, Duration::from_secs(5), t), CanaryVerdict::Pending);
-        assert_eq!(canary_verdict(true, false, t, t), CanaryVerdict::Failed);
-        assert_eq!(canary_verdict(true, true, t * 2, t), CanaryVerdict::Passed);
-        // Harnesses without CAS hooks are not held to the canary.
-        assert_eq!(canary_verdict(false, false, t * 2, t), CanaryVerdict::Passed);
-    }
-
-    /// cas-2a49 regression: the SessionStart hook runs while the daemon is
-    /// still doing post-PTY bookkeeping. A floor taken before the launch
-    /// accepts that marker. A stamp taken after bookkeeping, the old
-    /// behaviour, would reject it, and the refusal must then name the
-    /// existing marker instead of claiming none exists.
-    #[test]
-    fn cas_2a49_marker_written_during_spawn_bookkeeping_counts() {
-        let dir = tempfile::tempdir().unwrap();
-        let floor = launch_floor();
-        std::thread::sleep(Duration::from_millis(5));
-        // PTY started; the hook fires while the daemon is still busy.
-        record_session_start(dir.path(), "steady-leopard-44", "s-2459").unwrap();
-        std::thread::sleep(Duration::from_millis(5));
-        let after_bookkeeping = SystemTime::now();
-
-        assert!(fired_since(dir.path(), "steady-leopard-44", floor));
-        assert!(
-            !fired_since(dir.path(), "steady-leopard-44", after_bookkeeping),
-            "a post-bookkeeping stamp is exactly what rejected the live marker"
-        );
-        let detail = failure_detail_since(
-            dir.path(),
-            "steady-leopard-44",
-            HOOK_CANARY_TIMEOUT,
-            after_bookkeeping,
-        );
-        assert!(detail.contains("A marker exists but was written at"), "{detail}");
-        let none = failure_detail_since(dir.path(), "never-ran", HOOK_CANARY_TIMEOUT, floor);
-        assert!(!none.contains("A marker exists"), "{none}");
-    }
-
-    #[test]
     fn cas_0f5b_only_a_marker_written_since_launch_counts() {
         let dir = tempfile::tempdir().unwrap();
-        let launched = SystemTime::now();
-        assert!(!fired_since(dir.path(), "quick-jaguar-39", launched), "no marker yet");
-        record_session_start(dir.path(), "quick-jaguar-39", "s-1").unwrap();
-        assert!(fired_since(dir.path(), "quick-jaguar-39", launched));
-        // A respawn under the same name must not be confirmed by the old marker.
-        let relaunched = SystemTime::now() + Duration::from_secs(1);
-        assert!(!fired_since(dir.path(), "quick-jaguar-39", relaunched));
+        let agent = "quick-jaguar-39";
+        let launched = launch_floor();
+        let timeout = HOOK_CANARY_TIMEOUT;
+        let fired = fired_since(dir.path(), agent, launched);
+        assert!(!fired);
+        assert_eq!(canary_verdict(true, fired, Duration::from_secs(5), timeout), CanaryVerdict::Pending);
+        assert_eq!(canary_verdict(true, fired, timeout, timeout), CanaryVerdict::Failed);
+        assert_eq!(canary_verdict(false, fired, timeout * 2, timeout), CanaryVerdict::Passed);
+
+        record_session_start(dir.path(), agent, "s-1").unwrap();
+        let fired = fired_since(dir.path(), agent, launched);
+        assert!(fired);
+        assert_eq!(canary_verdict(true, fired, timeout * 2, timeout), CanaryVerdict::Passed);
+
+        // cas-2a49: use the persisted timestamp to check the exact boundary,
+        // without guessing how long launch bookkeeping takes.
+        let at_ms = marker_written_at_ms(dir.path(), agent).unwrap();
+        let written = UNIX_EPOCH + Duration::from_millis(at_ms);
+        assert!(fired_since(dir.path(), agent, written));
+        let relaunched = written + Duration::from_millis(1);
+        let fired = fired_since(dir.path(), agent, relaunched);
+        assert!(!fired);
+        assert_eq!(canary_verdict(true, fired, timeout, timeout), CanaryVerdict::Failed);
+
+        let bare = failure_detail(agent, timeout, &marker_path(dir.path(), agent));
+        assert_ne!(failure_detail_since(dir.path(), agent, timeout, relaunched), bare);
+        let bare = failure_detail("never-ran", timeout, &marker_path(dir.path(), "never-ran"));
+        assert_eq!(failure_detail_since(dir.path(), "never-ran", timeout, launched), bare);
+
         // Names cannot escape the marker directory.
-        assert_eq!(
-            marker_path(dir.path(), "../x/y"),
-            marker_dir(dir.path()).join("___x_y")
-        );
+        assert_eq!(marker_path(dir.path(), "../x/y"), marker_dir(dir.path()).join("___x_y"));
     }
 }

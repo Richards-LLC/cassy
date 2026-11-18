@@ -151,6 +151,7 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             (source.replace('assert.equal', 'assert.strictEqual'), False),
             (source.replace("child.stdout.trim(), 'explicit'", "'explicit', child.stdout.trim()"), False),
             (source.replace('explicit', 'fixture.v1:selected-package'), False),
+            (source.replace('explicit', 'explicit!'), True),
             ("assert.equal(child.stdout.trim(), 'explicit');", False),
             (source.replace('marker', 'identity').replace('explicit', 'selected package'), True),
             (prose, True),

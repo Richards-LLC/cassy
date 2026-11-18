@@ -381,116 +381,6 @@ def javascript_bindings(source):
     return bound
 
 
-def javascript_fixture_output(source, path, start, context, value):
-    """Exact stdout of a child printing a supplied dependency export is data.
-
-    Recognize resolvePlaywright's selection contract: the copied consumer and
-    PLAYWRIGHT_MODULE must point into the same disposable fixture tree. An
-    arbitrary module printing a same-named property has no such provenance.
-    """
-    assertion = re.fullmatch(r'assert\.(?:equal|strictEqual)\(\s*(\w+)\.stdout(?:\.trim\(\))?\s*,\s*', context)
-    if not assertion:
-        return False
-    literals = list(text_literals(source, path))
-    masked = list(source)
-    for left, right, _ in literals:
-        masked[left:right] = ' ' * (right - left)
-    code = re.sub(r'//[^\n]*|/\*.*?\*/', lambda m: ' ' * len(m[0]), ''.join(masked), flags=re.S)
-    stack, closes = [], {}
-    for index, char in enumerate(code):
-        if char in '([{':
-            stack.append(index)
-        elif char in ')]}' and stack:
-            closes[stack.pop()] = index
-    callbacks = [left for left, right in closes.items()
-                 if code[left] == '{' and left < start < right
-                 and re.search(r'=>\s*$', code[:left])]
-    if not callbacks:
-        return False
-    begin = max(callbacks)
-    receiver = re.escape(assertion[1])
-    bindings = list(re.finditer(r'\b' + receiver + r'\s*=', code[begin:start]))
-    if len(bindings) != 1:
-        return False
-    binding = begin + bindings[0].start()
-    child = re.match(receiver + r'\s*=\s*spawnSync\s*\(\s*process\.execPath\s*,\s*\[', code[binding:])
-    if not child or not re.search(r'\bconst\s*$', code[begin:binding]):
-        return False
-    call = code.index('(', binding)
-    args = [(left, right, body) for left, right, body in literals if call < left < closes.get(call, call)]
-    programs = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg[2] == '-e']
-    if len(programs) != 1:
-        return False
-    printed = re.fullmatch(
-        r'\s*import\s*\{\s*resolvePlaywright\s*\}\s*from\s*\$\{JSON\.stringify\(pathToFileURL\(join\((\w+),\s*('
-        + JS_LITERAL + r')\)\)\.href\)\};\s*console\.log\(\(await\s+resolvePlaywright\(\)\)\.playwright\.(\w+)\);?\s*',
-        programs[0][2])
-    if not printed:
-        return False
-    root, consumer, field = printed.groups()
-    def text(literal):
-        return re.sub(r'\\(.)', r'\1', literal[1:-1])
-    temporary = r'\bconst\s+' + root + r'\s*=\s*await\s+mkdtemp\(join\(tmpdir\(\),\s*' + JS_LITERAL + r'\)\);'
-    if not any(code[m.start():].startswith('const') for m in re.compile(temporary).finditer(source, begin, binding)):
-        return False
-    selected = re.fullmatch(
-        r'\s*\]\s*,\s*\{\s*encoding\s*:\s*[\'"]utf8[\'"]\s*,\s*env\s*:\s*\{\s*\.\.\.process\.env\s*,\s*'
-        r'PLAYWRIGHT_MODULE\s*:\s*join\(' + root + r',\s*(' + JS_LITERAL + r')\)\s*\},?\s*\}\s*',
-        source[programs[0][1]:closes[call]])
-    if not selected:
-        return False
-    known_consumers = {'scripts/visual-qa.mjs', 'cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs'}
-    copied = False
-    copy = r'\bcopyFile\(join\(repoRoot,\s*(' + JS_LITERAL + r'|\w+)\),\s*join\(' + root + r',\s*(' + JS_LITERAL + r')\)\)'
-    for match in re.finditer(copy, source[begin:binding]):
-        at = begin + match.start()
-        if not code[at:].startswith('copyFile') or text(match[2]) != text(consumer):
-            continue
-        if match[1][0] in '\'"`':
-            copied |= text(match[1]) in known_consumers
-            continue
-        # The real reproduction copies each of the two shipped consumers.
-        loop = r'\bfor\s*\(\s*const\s+' + re.escape(match[1]) + r'\s+of\s*(\[)'
-        for outer in re.finditer(loop, code[begin:at]):
-            array = begin + outer.start(1)
-            body = code.find('{', closes.get(array, at), at)
-            if body < 0 or closes.get(body, 0) < binding:
-                continue
-            paths = [text(source[left:right]) for left, right, _ in literals if array < left < closes[array]]
-            copied |= bool(paths) and set(paths) <= known_consumers
-    if not copied:
-        return False
-    for left, right, body in literals:
-        if not begin < left < binding:
-            continue
-        export = re.fullmatch(r'export\s+const\s+' + re.escape(field)
-                              + r'\s*=\s*\$\{JSON\.stringify\((\w+)\)\};?', body)
-        if not export:
-            continue
-        writers = [m.end() - 1 for m in re.finditer(r'\bwriteFile\s*\(', code[begin:left])]
-        writers = [begin + opening for opening in writers
-                   if left < right <= closes.get(begin + opening, 0)]
-        package = next((m[1] for opening in writers if (m := re.fullmatch(
-            r'\(join\((\w+),\s*[\'"]index\.js[\'"]\),\s*', source[opening:left]))), None)
-        if package is None:
-            continue
-        loop = r'\bfor\s*\(\s*const\s*\[\s*(\w+)\s*,\s*' + re.escape(export[1]) + r'\s*\]\s+of\s*(\[)'
-        for match in re.finditer(loop, code[begin:left]):
-            array = begin + match.start(2)
-            loop_body = code.find('{', closes.get(array, left), left)
-            if loop_body < 0 or closes.get(loop_body, 0) < right:
-                continue
-            joined = r'\bconst\s+' + package + r'\s*=\s*join\(\s*' + root + r'\s*,\s*' + match[1] + r'\s*\);'
-            if not re.search(joined, code[loop_body:left]):
-                continue
-            rows = source[array:closes[array] + 1]
-            for row in re.finditer(r'\[\s*(' + JS_LITERAL + r')\s*,\s*(' + JS_LITERAL + r')\s*\]', rows):
-                if (code[array + row.start()] == '[' and code[array + row.end() - 1] == ']'
-                        and text(row[1]) == text(selected[1]) and text(row[2]) == value):
-                    return True
-    return False
-
-
 def rust_test_ranges(ts, ps):
     """Reuse the prose check's test-only boundary when reading declarations."""
     ranges = []
@@ -694,8 +584,12 @@ def message_assertions(source, path, changed_lines=None):
         if not human_message_literal(value) or (changed_lines is not None and line not in changed_lines):
             continue
         context = assertion_context(start)
-        if (context is not None and message_operand(context)
-                and not javascript_fixture_output(source, path, start, context, value)):
+        if context is not None and message_operand(context):
+            # Exact stdout marker tokens are machine data. Fixture setup cannot
+            # exempt prose: no provenance tracing or mutable-output assumptions.
+            if (re.fullmatch(r'[A-Za-z0-9_.:-]+', value)
+                    and re.fullmatch(r'assert\.(?:equal|strictEqual)\(\s*\w+\.stdout(?:\.trim\(\))?\s*,\s*', context)):
+                continue
             hits.append((line, 'TEST_ASSERTION_PROSE'))
     return sorted(set(hits))
 

@@ -1,3 +1,3 @@
 ### Fixed — Developer tooling
 
-- **Dependency-selection fixture markers** — Test-shape accepts exact stdout comparisons to supplied package exports in disposable dependency-selection tests. Product-copy assertions remain checked.
+- **Dependency-selection fixture markers** — Test-shape accepts single marker tokens in exact Node stdout comparisons. Multiword prose remains checked even when dependency fixtures are present or overwritten.

@@ -15,7 +15,20 @@ use sha2::{Digest, Sha256};
 /// Short enough to leave room for Unix socket filenames. Full checkout identity
 /// lives in the private directory's marker, rather than its pathname.
 pub(crate) fn test_tmp_dir(cas_dir: &Path, worktree: &Path) -> PathBuf {
-    let root = configured_scratch_root(cas_dir).unwrap_or_else(|| cas_dir.to_path_buf());
+    // Test fixtures must not inherit a checkout or protected .cas ancestry (#2085).
+    let root = configured_scratch_root(cas_dir).filter(|root| {
+        !root.ancestors().any(|part| part.file_name().is_some_and(|name| name == ".cas"))
+            && existing_ancestor(root).is_none_or(|parent|
+                crate::worktree::GitOperations::detect_repo_root(parent).is_err())
+    }).unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            // SAFETY: geteuid has no preconditions and does not mutate process state.
+            PathBuf::from(format!("/tmp/cas-{}", unsafe { libc::geteuid() }))
+        }
+        #[cfg(not(unix))]
+        { std::env::temp_dir().join("cas") }
+    });
     let checkout = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
     let key = hex::encode(Sha256::digest(checkout.as_os_str().as_encoded_bytes()));
     root.join("t").join(&key[..16])

@@ -1131,7 +1131,9 @@ const EPHEMERAL_PORT_START: u16 = 32_768;
 /// directories remain valid destinations for integration-test fixtures.
 fn reject_fixture_cloud_write(path: &Path, config: &CloudConfig) -> Result<(), CasError> {
     let is_cloud_json = path.file_name().is_some_and(|name| name == "cloud.json");
-    let is_fixture = config.token.as_deref() == Some(TEST_FIXTURE_TOKEN)
+    let is_fixture = cfg!(test)
+        || cas_core::env_overlay::var_os("CAS_USER_CLOUD_JSON").is_some_and(|path| !path.is_empty())
+        || config.token.as_deref() == Some(TEST_FIXTURE_TOKEN)
         || is_loopback_ephemeral_endpoint(&config.endpoint);
 
     if is_cloud_json && is_fixture && !path_is_under_system_temp(path) {
@@ -2069,11 +2071,14 @@ mod tests {
         guard.set("CAS_USER_CLOUD_JSON", &user_path);
         guard.set("CAS_ROOT", &project_cas);
 
-        let cached =
-            store_login_credentials("http://127.0.0.1:33749", "test-token", None, None).unwrap();
-
-        assert!(cached.is_none(), "fixture cache writes must be rejected");
-        assert_eq!(std::fs::read(&project_cloud).unwrap(), before);
+        for (endpoint, token) in [
+            ("http://127.0.0.1:33749", "test-token"),
+            ("https://petra-stella-cloud.vercel.app", "fresh-token"),
+        ] {
+            let cached = store_login_credentials(endpoint, token, None, None).unwrap();
+            assert!(cached.is_none(), "fixture cache writes must be rejected");
+            assert_eq!(std::fs::read(&project_cloud).unwrap(), before);
+        }
     }
 
     #[test]

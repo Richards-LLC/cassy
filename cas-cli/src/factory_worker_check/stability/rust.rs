@@ -11,6 +11,10 @@ pub(crate) struct Test {
     parameterized: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("STABILITY_TEST_NOT_DISCOVERABLE: {0}::{1}; wire the test into a Cargo target before park")]
+pub(crate) struct MissingTest(String, String);
+
 fn text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
     &source[node.byte_range()]
 }
@@ -37,6 +41,7 @@ struct Inventory<'a> {
     sources: BTreeMap<&'a str, &'a str>,
     parser: Parser,
     tests: Vec<Test>,
+    errors: Vec<(String, String)>,
     visited: BTreeSet<(String, String, String, Option<String>)>,
 }
 
@@ -59,16 +64,17 @@ impl Inventory<'_> {
         let mut cursor = node.walk();
         for node in node.named_children(&mut cursor) {
             let attrs = attributes(node, source);
+            let result = (|| -> Result<()> {
             match node.kind() {
                 "function_item" => {
                     let attribute = regex::Regex::new(r"^#\[\s*(?:\w+::)*(test|rstest|test_case|test_matrix)\b")?;
-                    if !attrs.iter().any(|(_, attr)| attribute.is_match(attr)) { continue; }
+                    if !attrs.iter().any(|(_, attr)| attribute.is_match(attr)) { return Ok(()); }
                     let name = node.child_by_field_name("name").context("test name missing")?;
                     let name = text(name, source);
                     let name = if prefix.is_empty() { name.into() } else { format!("{prefix}::{name}") };
                     let begin = attrs.iter().map(|(start, _)| *start).min().unwrap_or(node.start_byte());
                     self.tests.push(Test {
-                        identity: Identity { path: path.into(), name }, package: package.into(),
+                        identity: Identity::exact(path, name), package: package.into(),
                         harness: harness.map(str::to_owned), source: source[begin..node.end_byte()].into(),
                         parameterized: attrs.iter().any(|(_, attr)| !attr.contains("test]") && attribute.is_match(attr)
                             && !attr.contains("::test")),
@@ -112,18 +118,25 @@ impl Inventory<'_> {
                 "ERROR" => self.items(node, source, path, prefix, directory, package, harness)?,
                 _ => {},
             }
+            Ok(())
+            })();
+            if let Err(error) = result {
+                // Keep independent module inputs discoverable. The caller
+                // widens only an input whose own structure is uncertain.
+                self.errors.push((path.to_string(), format!("{error:#}")));
+            }
         }
         Ok(())
     }
 }
 
-fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<Vec<Test>> {
+fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<(Vec<Test>, Vec<(String, String)>)> {
     let tree = delivered_tree(repo, head).context("STABILITY_DELIVERY_TREE")?;
     let sources = tree.rust_sources(repo).context("STABILITY_SOURCE_READ")?;
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
     let mut inventory = Inventory { parser, sources: sources.iter().map(|(path, body)| (path.as_str(), body.as_str())).collect(),
-        tests: Vec::new(), visited: BTreeSet::new() };
+        tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new() };
     let manifests = paths.iter().filter(|path| path.ends_with(".rs"))
         .filter_map(|path| tree.manifest_dir_for_source(path)).collect::<BTreeSet<_>>();
     for directory in manifests {
@@ -158,13 +171,16 @@ fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<Vec<Test>> {
             inventory.file(&path, "", parent, package, Some(&name))?;
         }
     }
-    Ok(inventory.tests)
+    Ok((inventory.tests, inventory.errors))
 }
 
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
-    let prior = inventory(repo, base, paths)?.into_iter()
+    let prior = inventory(repo, base, paths)?.0.into_iter()
         .map(|test| ((test.identity, test.package, test.harness), test.source)).collect::<BTreeMap<_, _>>();
-    let current = inventory(repo, head, paths)?;
+    let (current, errors) = inventory(repo, head, paths)?;
+    if let Some((path, error)) = errors.iter().find(|(path, _)| paths.contains(path)) {
+        return Err(anyhow::anyhow!("{path}: {error}"));
+    }
     // A new test in an unreferenced source file must not silently disappear
     // from the gate. It either resolves through a Cargo root or needs repair.
     let tree = delivered_tree(repo, head).context("STABILITY_DELIVERY_TREE")?;
@@ -175,8 +191,11 @@ pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> 
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
         let parsed = parser.parse(source, None).context("STABILITY_RUST_PARSE")?;
-        let mut standalone = Inventory { parser, sources: BTreeMap::new(), tests: Vec::new(), visited: BTreeSet::new() };
+        let mut standalone = Inventory { parser, sources: BTreeMap::new(), tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new() };
         standalone.items(parsed.root_node(), source, path, "", "", "", None)?;
+        if let Some((_, error)) = standalone.errors.first() {
+            return Err(anyhow::anyhow!("{path}: {error}"));
+        }
         let source_tests = std::mem::take(&mut standalone.tests);
         let old = git(repo, &["show", &format!("{base}:{path}")]).unwrap_or_default();
         let parsed = standalone.parser.parse(&old, None).context("STABILITY_RUST_PARSE")?;
@@ -187,7 +206,11 @@ pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> 
                 && (resolved.identity.name == test.identity.name
                     || resolved.identity.name.ends_with(&format!("::{}", test.identity.name))))
             {
-                bail!("STABILITY_TEST_NOT_DISCOVERABLE: {}::{}; wire the test into a Cargo target before park", path, test.identity.name);
+                if let Some((source, error)) = errors.first() {
+                    // An uncertain module graph cannot prove a test missing.
+                    return Err(anyhow::anyhow!("{source}: {error}"));
+                }
+                return Err(MissingTest(path.clone(), test.identity.name).into());
             }
         }
     }
@@ -195,8 +218,14 @@ pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> 
         && prior.get(&(test.identity.clone(), test.package.clone(), test.harness.clone())) != Some(&test.source)).collect())
 }
 
-pub(crate) fn live(repo: &Path, head: &str, paths: &[String]) -> Result<BTreeSet<Identity>> {
-    Ok(inventory(repo, head, paths)?.into_iter().map(|test| test.identity).collect())
+/// The one changed-test model (cas-e751): Rust tests whose source differs
+/// between `base` (the merge-base with the target) and `head`. Park's
+/// stability requirement and the capped runner's repeat set both read it,
+/// so a delivery edit the target later superseded is owed by neither.
+pub(crate) fn net_changed(repo: &Path, base: &str, head: &str) -> Result<Vec<Test>> {
+    let paths = git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", base, head, "--"])
+        .context("STABILITY_DIFF_READ")?;
+    changed(repo, base, head, &paths)
 }
 
 pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
@@ -206,12 +235,30 @@ pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
     }))
 }
 
-pub(crate) fn selected(repo: &Path, base: &str, head: &str, test: &TargetedTest) -> Result<Vec<Test>> {
+pub(crate) fn selected_inputs(repo: &Path, base: &str, head: &str, test: &TargetedTest) -> Result<(Vec<Test>, bool)> {
+    let (package, _) = package_selector(&test.package).context("test package")?;
     let paths = git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", base, head, "--"])
         .context("STABILITY_DIFF_READ")?;
-    let (package, _) = package_selector(&test.package).context("test package")?;
-    Ok(changed(repo, base, head, &paths)?.into_iter().filter(|own| own.package == package
-        && own.harness == test.harness && filter_matches(&test.filter, &own.identity.name)).collect())
+    let mut selected = Vec::new();
+    let mut uncertain = false;
+    for path in paths.into_iter().filter(|path| path.ends_with(".rs")) {
+        if let crate::factory_worker_check::widened::Scope::Crate(owner) = super::super::widened::scope(repo, &path)
+            && owner != package { continue; }
+        match changed(repo, base, head, std::slice::from_ref(&path)) {
+            Ok(tests) => selected.extend(tests.into_iter().filter(|own| own.package == package
+                && own.harness == test.harness && filter_matches(&test.filter, &own.identity.name))),
+            Err(error) if error.downcast_ref::<MissingTest>().is_some() => return Err(error),
+            Err(error) => {
+                eprintln!("Changed-test classification uncertain for {path} ({error:#}); widening crate {package} once");
+                uncertain = true;
+            }
+        }
+    }
+    Ok((selected, uncertain))
+}
+
+pub(crate) fn selected(repo: &Path, base: &str, head: &str, test: &TargetedTest) -> Result<Vec<Test>> {
+    Ok(selected_inputs(repo, base, head, test)?.0)
 }
 
 pub(crate) fn repeat_filter(tests: &[Test]) -> String {

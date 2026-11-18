@@ -1822,6 +1822,20 @@ bug_families:
     statement: Task creation claims a GitHub issue from external_ref, an issue-owning title boundary, or Fixes/Closes #N; incidental citations remain suggestions.
     tasks: [cas-bfc8]
     invariants: [FACTORY-SOURCE-WORK-DELEGATION]
+  conditional-describe-identity:
+    title: A conditional or aliased describe keeps its suite title in the capped JavaScript identity, so the changed case runs instead of being filtered out as skipped
+    statement: '`(cond ? describe : describe.skip)(title, fn)` and `const suite = cond ? describe : describe.skip` resolve as suites, so the anchored runner name pattern matches the full runtime name; a conditional whose branches are different kinds is refused with G-61 instead of silently skipping.'
+    fixed_by: [cas-6a3c]
+    tasks: [cas-6a3c]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]
+  typescript-type-import-parse:
+    title: A TypeScript call whose type argument is `typeof import('module')`, and a generic tagged template like Prisma's `$queryRaw<Row[]>`, parse in the capped JavaScript discovery, and any remaining parse error names path:line:column
+    statement: tree-sitter-typescript 0.23.2 misparses `f<typeof import('m')>()` and type arguments on a tagged template; the capped runner blanks those type arguments to same-length text before parsing so test identities still resolve. A parse error on the base side or in a non-test file declares no tests, a file importing or requiring `node:test` is prescribed `node --test`, and a test file's parse refusal reports the first unparsed or missing node's location and text.
+    fixed_by: [cas-6aa9]
+    tasks: [cas-6aa9]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

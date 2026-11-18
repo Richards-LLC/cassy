@@ -705,6 +705,11 @@ mod tests {
         let mut train = store.get("cas-tr").unwrap();
         train.epic_verification_owner = Some("sup-id".into());
         store.update(&train).unwrap();
+        // Auto-cut waits for unfinished repair children. This lift scenario
+        // starts only after the fixture's repair has completed.
+        let mut repair = store.get("cas-fix").unwrap();
+        repair.status = cas_types::TaskStatus::Closed;
+        store.update(&repair).unwrap();
         let tip = git(repo, &["rev-parse", lane]);
         let poll = |tip: &str| attempt(&root, &store.get("cas-tr").unwrap(), lane, tip, false, false, Utc::now()).unwrap();
 

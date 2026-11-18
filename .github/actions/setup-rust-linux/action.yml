@@ -39,6 +39,32 @@ outputs:
 runs:
   using: composite
   steps:
+    - id: self-hosted-rust
+      name: Prepare pinned Rust in the self-hosted runner home
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+        export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+        export PATH="$CARGO_HOME/bin:$PATH"
+        mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
+        # Runner slots share a home; serialize bootstrap and toolchain installs.
+        exec 9>"${CASSY_RUSTUP_LOCK_FILE:-$RUSTUP_HOME/cassy-rustup.lock}"
+        flock -x 9
+        toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+        if ! command -v rustup >/dev/null || ! command -v cargo >/dev/null; then
+          installer="$(mktemp "$RUNNER_TEMP/rustup-init.XXXXXX")"
+          curl --fail --location --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$installer"
+          sh "$installer" -y --no-modify-path --profile minimal --default-toolchain "$toolchain"
+          rm -f "$installer"
+        fi
+        if ! rustup run "$toolchain" cargo --version; then
+          rustup toolchain install "$toolchain" --profile minimal
+        fi
+        printf '%s\n' "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" \
+          "RUSTUP_TOOLCHAIN=$toolchain" 'RUSTC_WRAPPER=' 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
+        printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
     - name: Install dependencies
       uses: ./.github/actions/setup-linux-linker
 
@@ -47,7 +73,7 @@ runs:
       run: ./scripts/bootstrap-zig.sh
 
     - name: Setup sccache
-      if: env.RUSTC_WRAPPER != ''
+      if: runner.environment != 'self-hosted' && env.RUSTC_WRAPPER != ''
       # v0.0.5 speaks GitHub's retired cache-service protocol and silently
       # fell back to a runner-local cache (0 hits across repeated CI runs).
       # v0.0.9+ uses ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN (cache v2).
@@ -58,7 +84,7 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.11
 
     - name: Probe sccache backend
-      if: env.RUSTC_WRAPPER != ''
+      if: runner.environment != 'self-hosted' && env.RUSTC_WRAPPER != ''
       shell: bash
       run: |
         if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then

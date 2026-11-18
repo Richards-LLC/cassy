@@ -124,14 +124,29 @@ async fn a_published_artifact_is_readable_through_show_and_list() {
 #[tokio::test]
 async fn listing_a_task_with_no_artifacts_is_a_plain_answer_not_an_error() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, service) = setup_cas_service(&mut test_env);
+    let (temp, service) = setup_cas_service(&mut test_env);
     let mut list = req("list");
     list.task_id = Some("cas-nothing".to_string());
-    let text = extract_text(service.artifact(Parameters(list)).await.unwrap());
-    assert!(
-        text.contains("No artifacts published for cas-nothing"),
-        "{text}"
-    );
+    let response = service.artifact(Parameters(list.clone())).await.unwrap();
+    let data = response.structured_content.unwrap();
+    assert_eq!(data["state"], "partial");
+    assert_eq!(data["artifacts"], serde_json::json!([]));
+
+    // A cold receiver has the publication note, but no artifact cache row.
+    let root = temp.path().join(".cas");
+    let tasks = cas::store::open_task_store(&root).unwrap();
+    tasks.add(&cas::types::Task::new("cas-nothing".into(), "cold peer".into())).unwrap();
+    let proof = serde_json::json!({
+        "id":"art-cold", "task_id":"cas-nothing", "name":"peer.log", "mime":"text/plain",
+        "size_bytes":11, "sha256":"b".repeat(64), "cloud_artifact_id":"cloud-cold",
+        "status":"committed", "created_at":"2026-11-10T12:00:00Z",
+    });
+    tasks.append_trusted_note("cas-nothing", &format!("ARTIFACT_PROOF: {proof}")).unwrap();
+    let response = service.artifact(Parameters(list)).await.unwrap();
+    let data = response.structured_content.unwrap();
+    assert_eq!(data["artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(data["artifacts"][0]["id"], "art-cold");
+    assert!(cas_store::SqliteArtifactStore::open(&root).unwrap().list_for_task("cas-nothing").unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -164,11 +179,8 @@ async fn a_missing_file_is_refused_rather_than_recorded() {
 
     let mut list = req("list");
     list.task_id = Some("cas-b72a".to_string());
-    let listed = extract_text(service.artifact(Parameters(list)).await.unwrap());
-    assert!(
-        listed.contains("No artifacts"),
-        "no row may be left: {listed}"
-    );
+    let listed = service.artifact(Parameters(list)).await.unwrap();
+    assert_eq!(listed.structured_content.unwrap()["artifacts"], serde_json::json!([]));
 }
 
 #[tokio::test]

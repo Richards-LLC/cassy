@@ -357,6 +357,10 @@ fn git_with_timeout(repo: &Path, args: &[&str], timeout: std::time::Duration) ->
 
 /// Prefer the caller's explicit lane; otherwise use the shared default election.
 fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
+    open_train_on_branch(root, None)
+}
+
+fn open_train_on_branch(root: &Path, preferred: Option<&str>) -> Result<(PathBuf, cas_types::Task)> {
     use crate::mcp::tools::core::task::{release_train, repo_context};
     let (repo, integration) =
         repo_context::integration_branch(root).context("no integration branch")?;
@@ -377,7 +381,10 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
         )?,
         "release checkout belongs to another repository"
     );
-    let branch = git(&caller, &["branch", "--show-current"])?;
+    let branch = match preferred {
+        Some(branch) => branch.to_string(),
+        None => git(&caller, &["branch", "--show-current"])?,
+    };
     let explicit = release_train::active_trains(store.as_ref(), &integration)
         .into_iter()
         .find(|train| train.effective_epic_branch() == Some(branch.as_str()));
@@ -426,7 +433,7 @@ pub fn context(args: &ContextArgs, root: &Path) -> Result<()> {
     let value: ReleaseContext = if let Some(version) = &args.version {
         serde_json::from_slice(&fs::read(receipt_path(root, version)?)?)?
     } else {
-        let (repo, train) = open_train(root)?;
+        let (repo, train) = open_train_on_branch(root, args.branch.as_deref())?;
         let value = new_context(&repo, &train)?;
         if let Some(branch) = &args.branch {
             ensure!(
@@ -1054,6 +1061,18 @@ pub(super) mod tests {
     fn track_on_train(args: &TrackArgs, root: &Path, repo: &Path, train: &cas_types::Task) -> Result<()> {
         let scope = cut_scope(root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
         super::track_on_train(args, root, repo, train, preview_scope(root, repo, scope)?)
+    }
+
+    #[test]
+    fn frozen_train_context_resolves_explicit_lane_from_local_alias_cas_5529() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let (temp, root, mut train, _, tracking) = fixture();
+        train.labels.push(format!("release-train-frozen:{}:{}", chrono::Utc::now().timestamp(), tracking.commit));
+        open_task_store(&root).unwrap().update(&train).unwrap();
+        git(temp.path(), &["checkout", "-b", "sync-8b79"]).unwrap();
+        let _cwd = env.enter_dir(temp.path());
+        context(&ContextArgs { branch: train.branch.clone(), version: None }, &root).unwrap();
+        assert_eq!(git(temp.path(), &["branch", "--show-current"]).unwrap(), "sync-8b79");
     }
 
     #[test]

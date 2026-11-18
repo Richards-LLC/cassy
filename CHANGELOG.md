@@ -7,6 +7,47 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.35.0] - 2026-11-18
+
+### Fixed — Issue intake
+
+- **Match repeated refusals across file paths** — Find-or-file now collapses path tokens in refusal fingerprints, so the same refusal on different files matches the existing issue. Different refusal words still produce distinct keys, and path-heavy headlines cannot create a key on their own.
+
+### Fixed — Factory
+
+- **Capped JavaScript checks run tests inside a conditional describe** — Was: a spec written as `(url ? describe : describe.skip)('suite', …)`, the usual opt-in for a database-backed integration test, lost its suite title in the capped runner's test identity. The runner's exact-name filter then matched nothing, jest reported every case skipped, and the delivery could not park, even with the database URL set. Now: a conditional describe, or a variable aliasing one, keeps its title, so the changed cases run and earn their five passes. A conditional whose branches mix describe and test is refused by name (G-61) instead of being silently skipped.
+- **Capped JavaScript checks parse TypeScript type imports, and name the spot when they can't parse** — Was: a valid TypeScript test using `importOriginal<typeof import('#imports')>()`, the usual Vitest partial-mock pattern, made the capped runner refuse the whole file with "JavaScript parse error" and no location. Prisma's generic tagged template, `prisma.$queryRaw<Row[]>` followed by a template literal, failed the same way. Both are gaps in tree-sitter-typescript 0.23.2, the newest grammar release, and the delivery could not park. Now: those type arguments are blanked before parsing, so line numbers, offsets and test titles are unchanged. A parse error in the unchanged base revision, or in a non-test source file, no longer blocks the delivery. A test file that imports or requires `node:test` is now matched to Node's own runner (`worker-check -- node --test <file>`), even inside a Jest package, where it used to be sent to Jest and report "No tests found". Any remaining parse error in the tip names its `path:line:column` and the text it could not read.
+
+### Fixed — Factory checks
+
+- **Changed-test proof judges the delivered tip** — Before: park and
+  `worker-check` could refuse work over tests the delivery never changed. That
+  happened with a reverted `it.each` edit, target edits merged into the lane,
+  another author's commits on the branch, or an earlier commit that did not
+  parse. Now: only tests whose lines the task's own commits changed in the
+  delivered tree are selected, measured from the scoped proof base.
+- **Parameterized tests are proved, not refused** — Before: a changed
+  `it.each`/`describe.each` row stopped close with "dynamic/parameterized test
+  title". Now: the table is one stability identity, proved when every row it
+  runs passes five times.
+- **worker-check runs the JavaScript command workers type** — Before: `npx`,
+  `pnpm exec`, `vitest run`, package-relative paths and a suite's own
+  `--config` were refused with a Cargo-only message. Now: they run, and any
+  other flag is refused with the JavaScript command shape.
+- **test-shape stops calling machine data prose** — Before: `data-*`
+  attribute state and explicit `CHANGELOG.md` fixture reads were refused as
+  prose or Rust source. Now: they pass, and real prose and source-text pins are
+  still refused. A test path next to wording, such as
+  `id("a.test.ts", "...")`, does not exempt the wording.
+
+### Fixed — Factory delivery
+
+- **Park no longer asks for stability runs on a test the target replaced** — Was: if a delivery edited a Rust test and a later train sync resolved that test to the train's version, park still asked for five capped passes of it. The capped runner compared against the target, found nothing of the delivery's left in that test, and would not repeat it, so the worker could never supply the proof. Now: park and the runner use one changed-test function that compares the merge-base with the target to the tip, so a superseded edit is owed by neither. The Rust rerun hint now gives the `--cas-root` form for callers outside the worker hook. When a supervisor records a log holding more than one nextest summary, the refusal points to worker-check's selected test log.
+
+### Changed — Pre-merge review
+
+- **Return one non-behavioural repair directly to its worker** — Cassy now reopens the first eligible documentation, evidence or simplicity rejection to the same live worker and sends its findings directly. A portable dispatch receipt limits this to one automatic repair per work cycle. Receipt-path returns require the exact failed transaction. An unchanged or unprovable source cannot start another review through merges or completion receipts; another rejection holds for the supervisor. Runtime validation, duplication, behavioural, security, correctness, missing-triage and money/data-loss findings remain held. Every correction still requires independent approval before publication.
+
 ## [4.34.0] - 2026-11-17
 
 ### Fixed — CI

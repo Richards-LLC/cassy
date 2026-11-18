@@ -1,0 +1,5 @@
+## Core Concepts
+
+Factory alerts are rechecked against current task and close-refusal state before delivery. A resolved member leaves a grouped close-hold notice; the remaining members retain an updated action notice. Deliberate task holds and retirement of a blocked worker do not become fresh supervisor blockers.
+
+Worker queues retain an unstarted spawn promise when their pending tail changes. A queued code task can reclaim a clean shared checkout when no other work owns it; queued no-code tasks preserve the shared branch and files. Isolated worker checkouts retain their ownership checks. Commander keeps a task transition label as its subject when it has no separator and treats ordinary one-word questions as text.

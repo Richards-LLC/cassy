@@ -1214,6 +1214,27 @@ impl PtyConfig {
         if !brief_dir.starts_with(&worktree) {
             return Err(Error::pty("Worker brief directory resolves outside its worktree"));
         }
+        // A freshly initialized repository need not ignore .cas. Exclude
+        // only our transient brief files, preserving visibility of user work.
+        let exclude = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"])
+            .current_dir(&worktree).output();
+        if let Ok(output) = exclude && output.status.success() {
+            use fs2::FileExt;
+            let path = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            let ensure_excluded = || -> std::io::Result<()> {
+                if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+                let mut file = std::fs::OpenOptions::new().create(true).append(true).read(true).open(path)?;
+                file.lock_exclusive()?;
+                let mut contents = String::new();
+                std::io::Read::read_to_string(&mut file, &mut contents)?;
+                if !contents.lines().any(|line| line == "/.cas/cas-worker-*") {
+                    file.write_all(b"\n/.cas/cas-worker-*\n")?;
+                }
+                Ok(())
+            };
+            ensure_excluded().map_err(|e| Error::pty(format!("Failed to exclude worker brief files: {e}")))?;
+        }
         let mut file = tempfile::Builder::new()
             .prefix("cas-worker-")
             .tempfile_in(&brief_dir)
@@ -3478,6 +3499,10 @@ mod tests {
 
         let project = tempfile::tempdir().unwrap();
         let worktree = project.path().canonicalize().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .current_dir(&worktree).status().unwrap().success());
+        std::fs::create_dir(worktree.join(".cas")).unwrap();
+        std::fs::write(worktree.join(".cas/user-state"), "keep visible").unwrap();
 
         for (command, args, backend) in [
             (
@@ -3586,6 +3611,11 @@ mod tests {
             assert!(path.starts_with(worktree.join(".cas")),
                 "{backend} brief must stay inside its ignored worktree .cas directory for external_directory=deny: {}", path.display());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+            let status = std::process::Command::new("git")
+                .args(["-c", "core.excludesFile=/dev/null", "status", "--porcelain", "--untracked-files=all"])
+                .current_dir(&worktree).output().unwrap();
+            assert!(status.status.success());
+            assert_eq!(status.stdout, b"?? .cas/user-state\n", "brief exclusion must preserve unrelated state");
             drop(pty);
             assert!(!path.exists(), "worker teardown must remove the brief");
         }

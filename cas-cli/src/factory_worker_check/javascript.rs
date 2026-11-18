@@ -1908,7 +1908,10 @@ mod tests {
         for wrapper in ["runIf(true)", "skipIf(false)"] {
             let (suite, case) = ("legal", "consent");
             let source = format!("describe.{wrapper}('{suite}', () => {{ test('{case}', () => {{}}); }});");
-            assert_eq!(source_tests(file, &source, &[(1, 1)]).unwrap(), [id(file, &format!("{suite} {case}"))]);
+            let selected = source_tests(file, &source, &[(1, 1)]).unwrap();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].path, file);
+            assert_eq!(selected[0].name.split(' ').collect::<Vec<_>>(), [suite, case]);
         }
         let unknown = "const suite = true ? describe : unknown; suite('legal', () => { test('consent', () => {}); });";
         assert!(source_tests(file, unknown, &[(1, 1)]).is_err());

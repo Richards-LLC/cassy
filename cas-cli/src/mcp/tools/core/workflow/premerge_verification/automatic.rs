@@ -27,8 +27,8 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     let inputs = serde_json::json!({
         "task": task, "parent": parent, "dispatch": dispatch,
         "inherited_supervisor_call": inherited,
-        "review_context": {"qa": {"mode": core.load_config().qa().mode},
-            "supervisor_calls": supervisor_calls},
+        "qa": {"mode": core.load_config().qa().mode},
+        "supervisor_calls": supervisor_calls,
     });
     let mut input = serde_json::to_string(&inputs).map_err(|e| e.to_string())?;
     // GH #2047: history grows on every repair round. Keep every source byte,
@@ -953,7 +953,7 @@ mod tests {
             let input = prompt(&core, &task, &dispatch).unwrap();
             let context = input.lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .find_map(|value| value.get("review_context").cloned())
+                .find(|value| value.get("qa").is_some())
                 .unwrap_or(serde_json::Value::Null);
             assert_eq!(context["qa"]["mode"], serde_json::to_value(mode).unwrap());
             // GH #2047: repair history must not exceed the harness's 1 MiB input
@@ -970,7 +970,7 @@ mod tests {
             let full: serde_json::Value = serde_json::from_slice(&std::fs::read(pointer).unwrap()).unwrap();
             assert_eq!(full["task"], serde_json::to_value(&large).unwrap());
             assert_eq!(full["dispatch"], serde_json::to_value(&dispatch).unwrap());
-            assert_eq!(full["review_context"]["qa"]["mode"], serde_json::to_value(mode).unwrap());
+            assert_eq!(full["qa"]["mode"], serde_json::to_value(mode).unwrap());
         }
     }
 

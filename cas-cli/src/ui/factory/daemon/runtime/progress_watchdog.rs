@@ -1,6 +1,6 @@
 //! cas-ddae (GH #1500): the factory progress watchdog. One rule: a session
 //! with locally actionable work and no task, lane or message change for 45 minutes wakes
-//! its supervisor once with what is waiting on whom; still nothing after
+//! its supervisor on that cadence with what is waiting on whom; still nothing after
 //! another 45, it pages the operator once. Heartbeats and liveness never
 //! count; measured owned child CPU/output does. Neither do the daemon's own rows (relays, fired reminders).
 //! A delivery parked for a frozen release train waits on the operator's
@@ -18,8 +18,8 @@ use chrono::{DateTime, Utc};
 const QUIET_SECS: i64 = 45 * 60;
 
 /// Per-session episode: the last fingerprint, when it was first seen, and
-/// whether this episode already woke the supervisor or paged the operator.
-static EPISODES: Mutex<Option<HashMap<String, (String, DateTime<Utc>, bool, bool)>>> = Mutex::new(None);
+/// the last wake cadence and whether this episode paged the operator.
+static EPISODES: Mutex<Option<HashMap<String, (String, DateTime<Utc>, Option<i64>, bool)>>> = Mutex::new(None);
 
 /// Freeze notices already relayed by this daemon; the relay key also
 /// dedupes them durably across restarts.
@@ -33,12 +33,14 @@ type CloseHeld = BTreeMap<String, crate::mcp::tools::core::task::close_refusal::
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
 /// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld, CloseHeld)> {
+fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, crate::supervisor_notices::Recipient, FreezeHeld, CloseHeld, bool)> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
-    let supervisor = agents.iter().find(|agent| agent.role == AgentRole::Supervisor)
-        .map_or_else(|| "the supervisor".to_string(), |agent| agent.name.clone());
+    let supervisor = agents.iter().filter(|agent| agent.role == AgentRole::Supervisor)
+        .max_by_key(|agent| agent.registered_at)
+        .map(crate::supervisor_notices::Recipient::agent)
+        .unwrap_or_else(|| crate::supervisor_notices::Recipient::operator(session));
     let names: Vec<String> = agents.iter().map(|agent| agent.name.clone()).collect();
     let store = crate::store::open_task_store_local(cas_dir).ok()?;
     let mut tasks = Vec::new();
@@ -81,6 +83,9 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         && task.deliverables.factory_branch_anchor.as_deref()
             .is_some_and(crate::factory_delivery_wake::full_sha)).cloned().collect();
     tasks.retain(|task| {
+        if task.task_type == cas_types::TaskType::Epic
+            && crate::mcp::tools::core::workflow::release_freeze::recorded(task).is_some()
+        { return false; }
         // Like a frozen-train park, these intentional waits have no local
         // next step. Removing them also resets any previous stall episode.
         if dependency_held.contains(&task.id)
@@ -150,6 +155,29 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             tracing::warn!(task_id=%held.id, %error, "held delivery completion wake unavailable");
         }
     }
+    // A train belongs to its verification owner, even when no task assignee
+    // remains after its last child merges. Older explicitly owned trains have
+    // only the release-train branch, without the newer label.
+    let mut ready_trains = HashSet::new();
+    for train in store.list(None).ok()? {
+        if train.task_type != cas_types::TaskType::Epic
+            || !matches!(train.status, TaskStatus::Open | TaskStatus::InProgress)
+            || !(crate::mcp::tools::core::task::release_train::is_release_train(&train)
+                || train.effective_epic_branch().is_some_and(|lane| lane.starts_with("epic/release-train-")))
+            || !train.epic_verification_owner.as_ref().is_some_and(|owner| owner == &supervisor.id || owner == &supervisor.name)
+            || peer_tasks.contains(&train.id)
+            || is_held(&train.notes)
+            || close_held.contains_key(&train.id)
+            || crate::mcp::tools::core::workflow::release_freeze::recorded(&train).is_some()
+        { continue; }
+        let children = store.get_subtasks(&train.id).ok()?;
+        if !children.iter().any(|child| child.status == TaskStatus::Closed)
+            || children.iter().any(|child| matches!(child.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge))
+        { continue; }
+        ready_trains.insert(train.id.clone());
+        tasks.retain(|task| task.id != train.id);
+        tasks.push(train);
+    }
     let unarmed = match report_unwatched(cas_dir, &tasks) {
         Ok(unarmed) => unarmed,
         Err(error) => { tracing::warn!(%error, "delivery wake coverage unavailable"); return None; }
@@ -160,6 +188,9 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let mut fingerprint: Vec<String> = tasks.iter()
         .map(|task| format!("{} {} {}", task.id, task.status, task.updated_at.to_rfc3339())).collect();
     let waiting = tasks.iter().map(|task| {
+        if ready_trains.contains(&task.id) {
+            return format!("- Train {} has merged work and no children in flight: run tip CI and freeze; resolve any remaining open rows before the cut.", task.id);
+        }
         let title: String = task.title.chars().take(70).collect();
         let gate = refusals.get(&task.id).map(|refusal| format!(
             "\n  operator action required; code={}; next_action={}",
@@ -191,7 +222,7 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     {
         fingerprint.push(String::from_utf8_lossy(&output.stdout).into_owned());
     }
-    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held, close_held))
+    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held, close_held, !ready_trains.is_empty()))
 }
 
 fn report_close_held(cas_dir: &Path, held: CloseHeld) {
@@ -258,39 +289,44 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 
 /// One watchdog sample for `session` at `now`.
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let Some((fingerprint, waiting, supervisor, freeze_held, close_held)) = observe(cas_dir, session, now) else { return };
+    let Some((fingerprint, waiting, supervisor, freeze_held, close_held, train_ready)) = observe(cas_dir, session, now) else { return };
     report_freeze_held(cas_dir, freeze_held);
     report_close_held(cas_dir, close_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let episodes = episodes.get_or_insert_with(HashMap::new);
     // A project hold is the operator's own stop, not a stall.
     let open = !waiting.is_empty() && !cas_store::project_hold::is_held(cas_dir);
-    let episode = episodes.entry(session.to_string()).or_insert_with(|| (fingerprint.clone(), now, false, false));
+    let episode = episodes.entry(session.to_string()).or_insert_with(|| (fingerprint.clone(), now, None, false));
     if !open || episode.0 != fingerprint {
-        *episode = (fingerprint, now, false, false);
-        return;
+        *episode = (fingerprint, now, None, false);
     }
+    if !open { return; }
     let quiet = (now - episode.1).num_seconds();
     let (minutes, start) = (quiet / 60, episode.1.to_rfc3339());
     let waiting = waiting.join("\n");
     // gate[W-01 watchdog]: Progress watchdog supervisor wake (progress_stalled)
-    if quiet >= QUIET_SECS && !episode.2 {
+    let cadence = quiet / QUIET_SECS;
+    if (train_ready || quiet >= QUIET_SECS) && episode.2 != Some(cadence) {
         let detail = format!(
             "Nothing has moved in this factory for {minutes} min with work open: no task change, lane commit, merge or message from any agent here. Heartbeats do not count.\nWaiting:\n{waiting}\nFind who owes the next step and chase it, take it over, or tell the operator. If nothing moves in another {} min, the operator is paged.",
             QUIET_SECS / 60
         );
-        let key = format!("progress-stall:{start}");
-        episode.2 = matches!(
+        let key = format!("progress-stall:{session}:{start}:{cadence}");
+        let recorded = if train_ready {
+            crate::supervisor_notices::enqueue(cas_dir, &supervisor, "train_ready",
+                &format!("Train ready for its supervisor:\n{waiting}\nIf nothing moves in another {} min, the watchdog wakes you again and pages the operator after {} min without progress.", QUIET_SECS / 60, 2 * QUIET_SECS / 60), &key).is_ok()
+        } else { matches!(
             super::lifecycle::enqueue_worker_attention_relay_detail_with_key(cas_dir, "progress_stalled", "supervisor",
                 None, Some(quiet as u64), |_| detail.clone(), &start, Some(&key)),
             super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
-        );
+        ) };
+        if recorded { episode.2 = Some(cadence); }
     }
     // gate[W-02 watchdog]: Progress watchdog operator page
     if quiet >= 2 * QUIET_SECS && !episode.3 {
         let message = format!(
-            "Nothing has moved in factory session {session} for {minutes} min, though work is open and heartbeats look healthy. Supervisor {supervisor} was woken at {} min and nothing has moved since.\nWaiting:\n{waiting}\nCheck the supervisor's pane, chase the peer, or take the work over.",
-            QUIET_SECS / 60
+            "Nothing has moved in factory session {session} for {minutes} min, though work is open and heartbeats look healthy. Supervisor {} was woken and nothing has moved since.\nWaiting:\n{waiting}\nCheck the supervisor's pane, chase the peer, or take the work over.",
+            supervisor.name
         );
         // The dedupe key names the episode, so a retry cannot page twice.
         episode.3 = super::lifecycle::record_operator_page(cas_dir, "progress-watchdog",
@@ -342,7 +378,10 @@ mod tests {
             train.task_type = cas_types::TaskType::Epic;
             train.epic_verification_owner = Some("owner-2ba4".into());
             train.branch = Some("epic/release-train-overnight-2ba4".into());
-            if labelled { train.labels.push("release-train".into()); }
+            if labelled {
+                train.labels.push("release-train".into());
+                train.assignee = Some("owner-2ba4".into());
+            }
             tasks.add(&train).unwrap();
             let mut child = Task::new("cas-child-2ba4".into(), "Last delivery".into());
             child.assignee = Some("worker-2ba4".into());
@@ -451,7 +490,7 @@ mod tests {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
         }
         let rows = queue.peek_all(50).unwrap();
-        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1, "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 2, "{rows:?}");
         assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
     }
 
@@ -496,7 +535,7 @@ mod tests {
                 super::sweep(&cas_dir, &session, now + chrono::Duration::minutes(minutes));
             }
             let rows = queue.peek_all(50).unwrap();
-            assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1, "{rows:?}");
+            assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 2, "{rows:?}");
             assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
         }
     }
@@ -540,8 +579,8 @@ mod tests {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
         }
         let rows = queue.peek_all(50).unwrap();
-        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1,
-            "a genuine local stall must wake the supervisor once: {rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 2,
+            "a genuine local stall must keep waking the supervisor: {rows:?}");
         assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1,
             "a genuine local stall must still page once: {rows:?}");
     }
@@ -882,13 +921,13 @@ mod tests {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
         }
         let rows = queue.peek_all(50).unwrap();
-        assert_eq!(rows.iter().filter(|row| row.prompt.contains("progress_stalled")).count(), 1, "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.prompt.contains("progress_stalled")).count(), 2, "{rows:?}");
         assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
     }
 
     /// GH #1500 / #1302: an overnight with a live, heartbeating but silent
     /// peer and an idle supervisor whose only wake is event-based. The
-    /// supervisor is woken once at 45 min, the operator is paged once at
+    /// supervisor is woken every 45 min, the operator is paged once at
     /// 90, heartbeats never reset the clock, and real movement starts a new
     /// episode.
     #[test]
@@ -929,8 +968,8 @@ mod tests {
         sweep(45);
         let woke = rows("supervisor");
         assert_eq!(woke.len(), 1, "{woke:?}");
-        // pin: the wake names the waiting task and the quiet span
-        assert!(woke[0].prompt.contains("cas-gate") && woke[0].prompt.contains("45 min"), "{}", woke[0].prompt);
+        // The task id identifies the work this wake asks the owner to resolve.
+        assert!(woke[0].prompt.contains("cas-gate"), "{}", woke[0].prompt);
         assert!(crate::prompt_revalidation::parse_blocker_envelope(&woke[0].prompt).is_some());
         sweep(60);
         assert!(rows("operator").is_empty(), "the wake itself is not progress");

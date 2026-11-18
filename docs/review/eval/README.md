@@ -86,6 +86,25 @@ batch. Requests are restricted to each case's explicit scope files. The Python
 boundary suite is a precondition for each batch. A baseline-only stage
 uses `--axes baseline` and requires no commit bridge.
 
+## Hosts without namespace support
+
+On Linux the runner probes bubblewrap before invoking a model. A failed probe
+preserves `telemetry.json` with `namespace_sandbox_unavailable` and spends no
+model run. Keep that attempt and use a new output directory with
+`--source-input-only` for an independent `run` replay. This mode keeps the
+read-only sandbox, disables shell tools and integrations, and supplies the
+case's pinned base/head scope files and diff on stdin. Add `--source-path
+relative/dependency.rs` for each extra text dependency the review needs.
+Sources come from Git objects, including additions/deletions, never the working
+tree or later repair commits. Binary source files cannot use this text mode.
+
+`source-input.json`, the exact prompt, raw model output and a source digest stay
+with the result. The model must return findings with null commits, using only
+the supplied input; an emitted tool event invalidates the report. Missing
+dependencies remain missing evidence. This mode makes no fixes, does not run
+a commit bridge, and grants no CAS verification authority. Registered replays
+and cross-checks retain their existing transport.
+
 ## Independent grading
 
 Do not score by keyword matching a report to the seed. A curator inspects each

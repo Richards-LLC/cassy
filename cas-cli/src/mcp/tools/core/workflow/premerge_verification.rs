@@ -1107,7 +1107,7 @@ impl CasCore {
         } else { None };
         let action = match rejection {
             Some(_) => "Hold this unpublished delivery for the supervisor. Automatic repair is unavailable: findings are behavioural or incomplete, the worker is unavailable, or the repair round is exhausted. Unrelated deliveries may continue.",
-            None if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed.",
+            None if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; an unchanged candidate reuses this verdict. Changed delivery code or review context requires a new review. No worker close retry is needed.",
             _ => "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue.",
         };
         crate::supervisor_notices::enqueue_with_context(

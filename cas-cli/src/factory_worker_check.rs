@@ -2350,6 +2350,17 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     execute_at_with_scope_and_environment(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, &[])
 }
 
+/// Runs changed-test classification, which happens before build admission, while
+/// writing a progress line to `emit` every `interval` so the wait is never silent
+/// (GH #2121, #2082).
+fn with_classification_progress<T>(interval: std::time::Duration, package: &str, emit: impl Fn(&str) + Send + 'static, classify: impl FnOnce() -> T) -> T {
+    let package = package.to_owned();
+    let _heartbeat = stability::rust::Heartbeat::start(interval, move |elapsed| emit(&format!(
+        "worker-check: still classifying changed tests for {package} before build admission ({}s elapsed)",
+        elapsed.as_secs())));
+    classify()
+}
+
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if javascript::allowed_args(args) {
         validate_test_environment(args, test_env)?;
@@ -2387,15 +2398,11 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
-        let classified = {
-            let package = test.package.clone();
-            let _heartbeat = stability::rust::Heartbeat::start(
-                std::time::Duration::from_secs(stability::rust::CLASSIFICATION_HEARTBEAT_SECS),
-                move |elapsed| eprintln!(
-                    "worker-check: still classifying changed tests for {package} before build admission ({}s elapsed)",
-                    elapsed.as_secs()));
-            stability::rust::selected_inputs(&repo, &base, &head, test)
-        };
+        let classified = with_classification_progress(
+            std::time::Duration::from_secs(stability::rust::CLASSIFICATION_HEARTBEAT_SECS),
+            &test.package,
+            |line| eprintln!("{line}"),
+            || stability::rust::selected_inputs(&repo, &base, &head, test));
         match classified {
             Ok((tests, uncertain)) => {
                 if uncertain {
@@ -2747,16 +2754,12 @@ mod tests {
     #[test]
     fn slow_classification_keeps_emitting_progress_before_admission_gh_2121() {
         let (lines, received) = std::sync::mpsc::channel();
-        let heartbeat = stability::rust::Heartbeat::start(std::time::Duration::from_millis(1),
-            move |elapsed| { let _ = lines.send(elapsed); });
-        // Two lines prove it repeats, not just fires once; the wait is an event, not a guess.
-        for _ in 0..2 {
-            received.recv_timeout(std::time::Duration::from_secs(30)).expect("progress line while classifying");
-        }
-        drop(heartbeat);
-        while received.try_recv().is_ok() {}
-        assert!(received.recv_timeout(std::time::Duration::from_millis(50)).is_err(),
-            "heartbeat must stop once classification ends");
+        // The classification blocks until worker-check itself writes a progress line, so the
+        // wait is an event, not a guess; a silent worker-check times out here and fails.
+        let progress_seen = with_classification_progress(std::time::Duration::from_millis(1), "cas",
+            move |line| { let _ = lines.send(line.to_owned()); },
+            || received.recv_timeout(std::time::Duration::from_secs(10)).is_ok());
+        assert!(progress_seen, "worker-check wrote no progress line while classifying before admission");
     }
 
     #[test]

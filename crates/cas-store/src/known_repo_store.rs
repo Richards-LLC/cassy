@@ -220,7 +220,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT path, first_seen_at, last_touched_at, touch_count \
-             FROM known_repos ORDER BY last_touched_at DESC",
+             FROM known_repos ORDER BY last_touched_at ASC",
         )?;
         let rows = stmt
             .query_map([], Self::row_to_known_repo)?

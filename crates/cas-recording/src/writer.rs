@@ -243,7 +243,7 @@ impl RecordingWriter {
     /// Returns true if `keyframe_interval_ms` has passed since the last keyframe.
     pub fn should_generate_keyframe(&self) -> bool {
         let current_ms = self.current_timestamp_ms();
-        current_ms - self.last_keyframe_ms > self.keyframe_interval_ms
+        current_ms - self.last_keyframe_ms >= self.keyframe_interval_ms
     }
 
     /// Close the recording and finalize the file.

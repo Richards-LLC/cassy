@@ -1906,8 +1906,9 @@ mod tests {
         assert_eq!(proof.consecutive_passes, 5);
 
         for wrapper in ["runIf(true)", "skipIf(false)"] {
-            let source = format!("describe.{wrapper}('legal', () => {{ test('consent', () => {{}}); }});");
-            assert_eq!(source_tests(file, &source, &[(1, 1)]).unwrap(), [id(file, "legal consent")]);
+            let (suite, case) = ("legal", "consent");
+            let source = format!("describe.{wrapper}('{suite}', () => {{ test('{case}', () => {{}}); }});");
+            assert_eq!(source_tests(file, &source, &[(1, 1)]).unwrap(), [id(file, &format!("{suite} {case}"))]);
         }
         let unknown = "const suite = true ? describe : unknown; suite('legal', () => { test('consent', () => {}); });";
         assert!(source_tests(file, unknown, &[(1, 1)]).is_err());

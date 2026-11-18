@@ -1057,6 +1057,18 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn frozen_train_context_resolves_explicit_lane_from_local_alias_cas_5529() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let (temp, root, mut train, _, tracking) = fixture();
+        train.labels.push(format!("release-train-frozen:{}:{}", chrono::Utc::now().timestamp(), tracking.commit));
+        open_task_store(&root).unwrap().update(&train).unwrap();
+        git(temp.path(), &["checkout", "-b", "sync-8b79"]).unwrap();
+        let _cwd = env.enter_dir(temp.path());
+        context(&ContextArgs { branch: train.branch.clone(), version: None }, &root).unwrap();
+        assert_eq!(git(temp.path(), &["branch", "--show-current"]).unwrap(), "sync-8b79");
+    }
+
+    #[test]
     fn release_inventory_contract_roundtrip() {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let (temp, root, train, _, args) = fixture();

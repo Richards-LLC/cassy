@@ -144,6 +144,7 @@ fn ownership_walk_tokenizes_each_hunk_line_once_cas_0e29e() {
     let presence = line_content_presence(&repo, &parent, &delivery, "HEAD", "owned.rs").unwrap();
     assert!(presence.is_some());
     let tokenized = TOKENIZED_LINES.with(std::cell::Cell::get);
+    eprintln!("TOKENIZATION lines={LINES} operations={tokenized}");
     assert!(tokenized > 0, "the ownership walk must run");
     assert!(tokenized <= 2 * LINES, "tokenized {tokenized} lines for one {LINES}-line hunk");
 }

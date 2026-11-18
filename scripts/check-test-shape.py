@@ -748,8 +748,8 @@ def rust_assertion_diagnostics(source):
 
 
 def rust_runtime_inputs(source):
-    """Git command arguments and Result/Option expect messages are inputs,
-    not assertions about the returned text. Keep surrounding assertions in scope.
+    """Git arguments, expect diagnostics and mock error fields are inputs.
+    Keep surrounding assertions in scope.
     """
     ts = tokens(source)
     ps = pairs(ts)
@@ -760,6 +760,14 @@ def rust_runtime_inputs(source):
             token.value == 'expect' and i > 0 and ts[i - 1].value == '.'
         ):
             yield ts[i + 1].end, ts[ps[i + 1]].start
+        elif token.value == 'set_body_json' and i > 0 and ts[i - 1].value == '.':
+            close = ps[i + 1]
+            for key, colon in zip(ts[i + 2:close], ts[i + 3:close]):
+                if key.string and key.value == '"error"' and colon.value == ':':
+                    # GH #2102: only the exact protocol key's own line, inside
+                    # the mock response input call; never exempt other lines.
+                    line_end = source.find('\n', key.end)
+                    yield key.end, min(ts[close].start, line_end if line_end >= 0 else len(source))
 
 
 def js_assertion_diagnostics(source, path):

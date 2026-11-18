@@ -1,3 +1,3 @@
 ## Core Concepts
 
-Test-shape lint distinguishes scenario comparisons from source-text pins. Mock API response inputs can use a selector named `source`; explicit assertions and text searches retain their checks, and bare equality requires a file-read operation before it counts as a text pin.
+Test-shape lint recognizes mock API error response inputs even when a scenario selector is named `source`. A narrow exemption covers literals on the exact `"error":` protocol key's line inside `.set_body_json(...)`; the general source-text and prose-pin detector retains its existing behavior, including shell source comparisons.

@@ -951,7 +951,7 @@ mod tests {
             // limit. Keep the full source available rather than dropping criteria.
             let mut large = task.clone();
             large.notes = "history 🦀\n".repeat(120_000);
-            large.acceptance_criteria = Some("Keep the caller's result exactly.".into());
+            large.acceptance_criteria = "Keep the caller's result exactly.".into();
             let input = prompt(&core, &large, &dispatch).unwrap();
             assert!(input.len() < 524_288, "prompt bytes: {}", input.len());
             let pointer = input.lines()

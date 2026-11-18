@@ -2444,7 +2444,7 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     assert_eq!(git(repo, &["rev-parse", "main"]), merged);
     assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
     let review = || Parameters(serde_json::from_value(serde_json::json!({
-        "task_id": TASK, "status": "approved", "summary": "Reviewed integrated PR delivery"
+        "task_id": TASK, "dispatch_id": null, "status": "approved", "summary": "Reviewed integrated PR delivery"
     })).unwrap());
     // A source that is merely parked cannot take this post-integration path.
     git(repo, &["update-ref", "refs/heads/main", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);

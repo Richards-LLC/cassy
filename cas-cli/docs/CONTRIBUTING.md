@@ -1546,8 +1546,9 @@ approval and requires a fresh dispatch.
 
 A parked delivery integrated through an outside PR may have no Cassy review
 cycle. Containment and green CI never supply that review. A live registered
-supervisor can use `verification action=add task_id=<id> status=approved|rejected
-summary="<review evidence>"` directly: Cassy verifies the declared target still
+supervisor can use `verification action=add task_id=<id> dispatch_id=null
+status=approved|rejected summary="<review evidence>"` directly. Null requests authenticated dispatch
+inference; Cassy verifies the declared target still
 contains the immutable delivery and binds the verdict to that integrated tree,
 including any PR follow-up commits. An unmerged delivery still needs the normal
 candidate, and an existing dispatch retains its authority. Ordinary task notes

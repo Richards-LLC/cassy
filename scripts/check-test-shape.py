@@ -128,7 +128,14 @@ def python_literal_value(node):
 
 def machine_id_receiver(expression):
     # Exact typed projections are machine data; do not guess commands from prose.
+    # DOM `data-*` attributes (`el.dataset.retrievalState`) carry machine
+    # state for scripts and selectors; they are never rendered copy. The
+    # whole `expect(...)` subject must be one member/call chain ending in the
+    # projection: `||`, `??`, a ternary, `+`, a template or a wrapping call
+    # around it fails closed.
     return (re.search(r'\.(?:code|error_code|rule_id)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
+            or re.search(r'\bexpect(?:\.soft)?\(\s*[A-Za-z_$][\w$]*(?:\([^()]*\))?(?:\.[A-Za-z_$][\w$]*(?:\([^()]*\))?)*?'
+                         r'\.dataset\.[A-Za-z_$][\w$]*\s*\)\s*(?:\.not)?\.to\w+\(\s*$', expression) is not None
             or re.fullmatch(r'\s*(?:assert_(?:eq|ne)!\(\s*)?'
                             r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.(?:command|redirect_command)(?:\(\))?'
                             r'\s*,?\s*', expression) is not None)
@@ -1070,10 +1077,17 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
                 args = ts[i+2:ps[i+1]]
                 # Resolve simple local path bindings, rather than flag every
                 # unrelated read in a function which happens to create a .rs.
-                names = {x.value for x in args if not x.string}
+                # Only the argument's root bindings carry a path: method and
+                # field names (`repo.path().join(..)`) are not bindings, and
+                # a binding resolves in the innermost enclosing test function.
+                names = {x.value for k, x in enumerate(args)
+                         if not x.string and re.fullmatch(r'[A-Za-z_]\w*', x.value)
+                         and (k == 0 or args[k - 1].value not in ('.', '::'))
+                         and (k + 1 == len(args) or args[k + 1].value not in ('(', '!', '::'))}
                 direct = any(x.string and '.rs' in x.value for x in args)
+                innermost = max(left for _, left, right in scopes if left < i < right)
                 for name in names:
-                    for j in range(begin, i):
+                    for j in range(innermost, i):
                         if ts[j].value == 'let' and j+1 < i and ts[j+1].value == name:
                             stop = next((k for k in range(j+2, i) if ts[k].value == ';' and not ts[k].string), i)
                             direct |= any(x.string and '.rs' in x.value for x in ts[j:stop])

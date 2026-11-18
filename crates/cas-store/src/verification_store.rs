@@ -1221,6 +1221,37 @@ fn create_verification_dispatch_bound_in_transaction(
         )));
     }
 
+    // Guard every mint, including receipt-path closes. Exact pending replays
+    // above remain idempotent; a synthetic candidate head is never a source.
+    let has_tasks: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+        [], |row| row.get(0),
+    )?;
+    if has_tasks && let Some(json) = conn.query_row(
+        "SELECT deliverables FROM tasks WHERE id = ?1", params![task_id], |row| row.get::<_, String>(0),
+    ).optional()? {
+        let deliverables: TaskDeliverables = serde_json::from_str(&json)?;
+        if let Some(repair) = &deliverables.premerge_repair
+            && repair.repair_cycle == crate::delivery_cycle::row_counter(&deliverables)
+        {
+            let source = if let Some((receipt_id, transaction_id)) = boundary.receipt().map_err(StoreError::Parse)?.transaction() {
+                // Atomic receipt constructors persist this row first, under
+                // the same write lock. Any refusal rolls the whole intent back.
+                conn.query_row(
+                    "SELECT r.commit_sha FROM worker_completion_receipts r
+                     JOIN worker_delivery_transactions t ON t.receipt_id = r.id
+                     WHERE r.id = ?1 AND t.id = ?2 AND r.task_id = ?3 AND t.task_id = ?3",
+                    params![receipt_id, transaction_id, task_id], |row| row.get::<_, String>(0),
+                ).optional()?
+            } else { deliverables.factory_branch_anchor.clone() };
+            if source.as_deref().is_none_or(|source|
+                !matches!(source.len(), 40 | 64) || !source.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || source.eq_ignore_ascii_case(&repair.rejected_anchor))
+            {
+                return Err(StoreError::PremergeRepairRequiresNewCommit { dispatch_id: repair.dispatch_id.clone() });
+            }
+        }
+    }
     let requested_at = Utc::now();
     let dispatch = VerificationDispatch {
         id: format!("vdispatch-{:032x}", rand::random::<u128>()),
@@ -2523,6 +2554,34 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     reason: &str,
     source_commits: &[String],
 ) -> Result<RequestChangesOutcome> {
+    request_changes_for_parked_delivery_impl(
+        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None,
+    ).map(|outcome| outcome.expect("manual request-changes has no repair budget"))
+}
+
+/// Atomically consume one automatic repair with the existing decline transition.
+/// A concurrent callback, stale dispatch, or corrective rejection cannot reopen twice.
+pub fn auto_return_premerge_rejection(
+    cas_dir: &Path,
+    task_id: &str,
+    owner_id: &str,
+    reason: &str,
+    dispatch_id: &str,
+    rejected_anchor: &str,
+) -> Result<Option<RequestChangesOutcome>> {
+    request_changes_for_parked_delivery_impl(
+        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)),
+    )
+}
+
+fn request_changes_for_parked_delivery_impl(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    source_commits: &[String],
+    automatic_repair: Option<(&str, &str)>,
+) -> Result<Option<RequestChangesOutcome>> {
     let reason = reason.trim();
     if reason.is_empty() {
         return Err(StoreError::Parse(
@@ -2597,6 +2656,39 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
         })?;
     let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
         .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    if let Some((dispatch_id, anchor)) = automatic_repair {
+        let current = crate::delivery_cycle::row_counter(&deliverables);
+        if !dispatch.as_ref().is_some_and(|row|
+            row.id == dispatch_id && row.owner_agent_id == supervisor_agent_id
+                && row.state == VerificationDispatchState::Resolved)
+            || deliverables.premerge_repair.as_ref().is_some_and(|receipt|
+                receipt.dispatch_id == dispatch_id || receipt.repair_cycle == current)
+            || !matches!(status.as_str(), "awaiting_merge" | "blocked")
+        {
+            return Ok(None);
+        }
+        // A receipt-path verdict projects Blocked before this continuation.
+        // Only its exact failed transaction can return that state; an external
+        // hold or a stale receipt must remain held. Its immutable source is
+        // authoritative even when the task has no parked anchor.
+        let source = if let Some((receipt_id, transaction_id)) = dispatch.as_ref()
+            .expect("current resolved dispatch checked above").receipt().map_err(StoreError::Parse)?.transaction()
+        {
+            if !delivery.as_ref().is_some_and(|(id, receipt, state)|
+                id == transaction_id && receipt == receipt_id && *state == WorkerDeliveryState::VerificationFailed)
+            { return Ok(None); }
+            tx.query_row("SELECT commit_sha FROM worker_completion_receipts WHERE id = ?1 AND task_id = ?2",
+                params![receipt_id, task_id], |row| row.get::<_, String>(0)).optional()?
+        } else if status == TaskStatus::AwaitingMerge.to_string() {
+            deliverables.factory_branch_anchor.clone()
+        } else { None };
+        if source.as_deref() != Some(anchor) { return Ok(None); }
+        let rejected: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM verifications WHERE dispatch_id = ?1 AND status = 'rejected')",
+            params![dispatch_id], |row| row.get(0),
+        )?;
+        if !rejected { return Ok(None); }
+    }
     // Typed grants come only from the supervisor adapter, never review prose.
     for source in source_commits {
         if !matches!(source.len(), 40 | 64) || !source.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -2691,7 +2783,8 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     if let Some((transaction_id, _, state)) = delivery.as_ref()
         && matches!(
             state,
-            WorkerDeliveryState::AwaitingVerification
+            WorkerDeliveryState::VerificationFailed
+                | WorkerDeliveryState::AwaitingVerification
                 | WorkerDeliveryState::AwaitingMerge
                 | WorkerDeliveryState::MergeAuthorized
                 | WorkerDeliveryState::CloseReady
@@ -2738,6 +2831,12 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     deliverables.delivery_cycle = crate::delivery_cycle::end_delivery_cycle_with_conn(
         &tx, task_id, deliverables.delivery_cycle, now,
     )?;
+    if let Some((dispatch_id, rejected_anchor)) = automatic_repair {
+        deliverables.premerge_repair = Some(cas_types::PremergeRepair {
+            dispatch_id: dispatch_id.into(), rejected_anchor: rejected_anchor.into(),
+            repair_cycle: deliverables.delivery_cycle,
+        });
+    }
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,
@@ -2766,12 +2865,12 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     );
     record_event_with_conn(&tx, &event)?;
     tx.commit()?;
-    Ok(RequestChangesOutcome {
+    Ok(Some(RequestChangesOutcome {
         boundary,
         delivery_transaction_id: delivery.map(|(id, _, _)| id),
         dispatch_id: dispatch.map(|dispatch| dispatch.id),
         branch_handling,
-    })
+    }))
 }
 
 fn invalidate_verification_dispatch_for_new_cycle_with_conn(
@@ -3959,6 +4058,71 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = SqliteVerificationStore::open(dir.path()).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn automatic_premerge_repair_is_atomic_and_dispatch_bound_cas_ed08() {
+        let dir = TempDir::new().unwrap();
+        let tasks = SqliteTaskStore::open(dir.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("repair".into(), "Repair".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        tasks.add(&task).unwrap();
+        let dispatch = create_verification_dispatch(dir.path(), &task.id, "worker", "owner",
+            Utc::now() + Duration::minutes(10)).unwrap();
+        let mut verdict = Verification::new("rejected".into(), task.id.clone());
+        verdict.status = VerificationStatus::Rejected;
+        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        add_system_verification(dir.path(), &verdict).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
+        resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "owner", None, true).unwrap();
+        let grant = |owner: &str, id: &str, anchor: &str| auto_return_premerge_rejection(
+            dir.path(), &task.id, owner, "evidence repair", id, anchor).unwrap();
+        for (owner, id, anchor) in [("foreign", dispatch.id.as_str(), "a".repeat(40)),
+            ("owner", "superseded", "a".repeat(40)), ("owner", dispatch.id.as_str(), "b".repeat(40))] {
+            assert!(grant(owner, id, &anchor).is_none());
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let jobs: Vec<_> = (0..2).map(|_| {
+            let barrier = barrier.clone();
+            let root = dir.path().to_path_buf();
+            let task_id = task.id.clone();
+            let dispatch_id = dispatch.id.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                auto_return_premerge_rejection(&root, &task_id, "owner", "evidence repair",
+                    &dispatch_id, &"a".repeat(40)).unwrap().is_some()
+            })
+        }).collect();
+        assert_eq!(jobs.into_iter().map(|job| job.join().unwrap()).filter(|granted| *granted).count(), 1);
+        let mut returned = tasks.get(&task.id).unwrap();
+        let receipt = returned.deliverables.premerge_repair.clone().unwrap();
+        assert_eq!(returned.status, TaskStatus::Open);
+        assert_eq!(returned.assignee, task.assignee);
+        assert_eq!(receipt.repair_cycle, returned.deliverables.delivery_cycle);
+        assert_eq!(get_verification_dispatch(dir.path(), &dispatch.id).unwrap().state, VerificationDispatchState::Invalidated);
+        assert!(grant("owner", &dispatch.id, &"a".repeat(40)).is_none());
+        // A new corrected dispatch still has the same consumed budget.
+        returned.status = TaskStatus::AwaitingMerge;
+        returned.deliverables.factory_branch_anchor = Some("b".repeat(40));
+        tasks.update(&returned).unwrap();
+        let next = create_verification_dispatch(dir.path(), &task.id, "worker", "owner",
+            Utc::now() + Duration::minutes(10)).unwrap();
+        verdict.id = "next".into();
+        verdict.dispatch_id = Some(next.id.clone());
+        add_system_verification(dir.path(), &verdict).unwrap();
+        resolve_verification_dispatch_with_conn(&conn, &next.id, "owner", None, true).unwrap();
+        assert!(grant("owner", &next.id, &"b".repeat(40)).is_none());
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.premerge_repair, Some(receipt));
+        // Explicit supervisor request-changes creates a new manual work cycle.
+        request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap();
+        let current = tasks.get(&task.id).unwrap();
+        assert!(current.deliverables.delivery_cycle > current.deliverables.premerge_repair.unwrap().repair_cycle);
     }
 
     #[test]

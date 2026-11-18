@@ -1891,6 +1891,7 @@ fn walk_start(
 
 /// The answer from a walked delivery's owner states (`walk_owners`),
 /// following renames of the path.
+// gate-audit[allow_partial]: selector Selects measured line-presence matching; receipt authority remains with the caller's existing gate.
 fn walk_finish(
     repo: &Path,
     delivery: &str,

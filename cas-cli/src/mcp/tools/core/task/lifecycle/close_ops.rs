@@ -26673,6 +26673,29 @@ pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
         })
 }
 
+/// Release-generated outputs cannot establish that a delivery's source was
+/// reverted (cas-895d3). Folded fragments retain their existing blob proof.
+pub(crate) fn release_generated_output(repo: &std::path::Path, path: &str) -> bool {
+    matches!(path, ".claude/CODEMAP.md" | "docs/PRODUCT_OVERVIEW.md" | "docs/qa/journeys.yaml"
+        | "CHANGELOG.md" | REFERENCE_HISTORY_LEDGER)
+        || regenerable_build_artifact(repo, path)
+}
+
+/// Generated-only losses still need real delivery evidence. Reuse the same
+/// task-owned ranges as the content walk; a sync import or a zero-net red
+/// control cannot supply that source evidence.
+pub(crate) fn release_delivery_has_source(
+    repo: &std::path::Path, base: &str, anchor: &str, task_id: &str,
+) -> bool {
+    let Some(ranges) = task_attribution::first_parent_delivery_ranges(repo, base, anchor, anchor, task_id) else { return false };
+    let Some(net) = delivery_git::text(repo, &["diff", "--name-only", "--no-renames", "-z", base, anchor, "--"]) else { return false };
+    let net: std::collections::HashSet<_> = net.split('\0').collect();
+    ranges.into_iter().filter_map(|(_, paths, _)| paths).flatten().any(|path| {
+        net.contains(path.as_str()) && !path.starts_with("changelog.d/")
+            && !release_generated_output(repo, &path)
+    })
+}
+
 /// GH #2026: for an anchor already on the release commit, the line walk also
 /// reads later edits as drops: a sibling's merge resolution rewriting the
 /// delivered lines, a rebuilt bundle, or the task's own sync merge resolving
@@ -26697,6 +26720,7 @@ pub(crate) fn release_dropped_path_reverted(
     };
     let exists = |rev: &str| git(&["cat-file", "-e", &format!("{rev}:{path}")])
         .is_some_and(|output| output.status.success());
+    if release_generated_output(repo, path) { return false; }
     let net_changes = git(&["diff", "--quiet", "--no-renames", base, anchor, "--", path])
         .is_some_and(|output| output.status.code() == Some(1));
     if !net_changes || (exists(anchor) && !exists(target)) {

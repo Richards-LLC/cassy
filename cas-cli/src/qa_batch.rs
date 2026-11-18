@@ -1093,7 +1093,13 @@ pub(crate) fn release_delivery_effect(
         // GH #2026: on-target ancestry plus a measured range lets later edits
         // classify as evolution; only a real revert holds the member.
         DeliveryContentPresence::Dropped { paths } if shipped == anchor && base.is_some_and(|base|
-            !paths.iter().any(|path| close_ops::release_dropped_path_reverted(repo, base, anchor, target, path))) => Ok(()),
+            !paths.iter().any(|path| close_ops::release_dropped_path_reverted(repo, base, anchor, target, path))) => {
+                if paths.iter().all(|path| close_ops::release_generated_output(repo, path))
+                    && !base.is_some_and(|base| close_ops::release_delivery_has_source(repo, base, anchor, task_id))
+                {
+                    Err(ReleaseInventoryCode::UnprovenContent)
+                } else { Ok(()) }
+            },
         DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
         DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
     }

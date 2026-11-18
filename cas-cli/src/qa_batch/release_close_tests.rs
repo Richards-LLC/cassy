@@ -29,7 +29,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
     let mut foreign = None;
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-only"] {
         if id == "cas-undone" {
             std::fs::write(repo.join("shared.rs"), "fn shared() { baseline() }\n").unwrap();
             git(&["add", "shared.rs"]);
@@ -38,15 +38,17 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         let base = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-qb", id]);
         let source = format!("{id}.rs");
-        std::fs::write(repo.join(&source), "fn delivered() {}\n").unwrap();
-        git(&["add", &source]);
-        git(&["commit", "-qm", "delivery source"]);
+        if id != "cas-doc-only" {
+            std::fs::write(repo.join(&source), "fn delivered() {}\n").unwrap();
+            git(&["add", &source]);
+            git(&["commit", "-qm", "delivery source"]);
+        }
         let first = git(&["rev-parse", "HEAD"]);
         if id == "cas-undone" {
             std::fs::write(repo.join("shared.rs"), "fn shared() { delivered() }\n").unwrap();
             git(&["commit", "-qam", "deliver shared change"]);
         }
-        if id == "cas-doc-evolved" {
+        if matches!(id, "cas-doc-evolved" | "cas-doc-only") {
             std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"),
                 "# Product\n\n## Core Concepts\n\nShipped marmoset.\n").unwrap();
             git(&["add", "docs/PRODUCT_OVERVIEW.md"]);
@@ -108,14 +110,16 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         }
         // The delivery's final commit alone cannot describe its net effect.
         let doc = format!("{id}.md");
-        std::fs::write(repo.join(&doc), "Delivery guide\n").unwrap();
-        git(&["add", &doc]);
-        git(&["commit", "-qm", "delivery guide"]);
+        if id != "cas-doc-only" {
+            std::fs::write(repo.join(&doc), "Delivery guide\n").unwrap();
+            git(&["add", &doc]);
+            git(&["commit", "-qm", "delivery guide"]);
+        }
         let anchor = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "main"]);
         git(&["merge", "--no-ff", "-qm", "merge delivery", id]);
         let merge = git(&["rev-parse", "HEAD"]);
-        if id == "cas-doc-evolved" {
+        if matches!(id, "cas-doc-evolved" | "cas-doc-only") {
             // v4.28 cas-d725: an unrelated revert touched the generated
             // overview before release prep rewrote the delivered prose.
             let overview = repo.join("docs/PRODUCT_OVERVIEW.md");
@@ -123,7 +127,8 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
                 "# Product\n\n## Core Concepts\n\nShipped marmoset.\n\nSibling experiment.\n").unwrap();
             git(&["commit", "-qam", "unrelated sibling experiment"]);
             git(&["revert", "--no-edit", "HEAD"]);
-            git(&["checkout", "-qb", "docs-sibling", &base]);
+            let sibling = format!("{id}-sibling");
+            git(&["checkout", "-qb", &sibling, &base]);
             std::fs::write(&overview,
                 "# Product\n\n## Core Concepts\n\nSibling ostrich.\n").unwrap();
             git(&["commit", "-qam", "sibling overview"]);
@@ -135,7 +140,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             git(&["add", "docs/PRODUCT_OVERVIEW.md"]);
             git(&["commit", "-qm", "sync train into docs sibling"]);
             git(&["checkout", "-q", "main"]);
-            git(&["merge", "--no-ff", "-qm", "merge docs sibling", "docs-sibling"]);
+            git(&["merge", "--no-ff", "-qm", "merge docs sibling", &sibling]);
         } else if id == "cas-reverted" {
             git(&["revert", "-m", "1", "--no-edit", &merge]);
         } else if id == "cas-partial" {
@@ -233,10 +238,13 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == id));
     }
+    assert_eq!(tasks.get("cas-doc-only").unwrap().status, TaskStatus::AwaitingMerge);
+    assert!(matches!(result.members.get("cas-doc-only"), Some(CassyMergeClose::Held(reason))
+        if reason == "RELEASE_CONTENT_UNPROVEN"), "{:?}", result.members.get("cas-doc-only"));
     for id in ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{id}: {:?}", result.members.get(id));
     }
-    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved"] {
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-only"] {
         let task = tasks.get(id).unwrap();
         assert_eq!(release_tag_ships_delivery(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),

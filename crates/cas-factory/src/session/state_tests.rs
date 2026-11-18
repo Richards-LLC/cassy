@@ -162,9 +162,8 @@ fn test_session_summary_set_epic() {
 #[test]
 fn test_session_summary_touch() {
     let mut summary = SessionSummary::default();
+    summary.last_activity = chrono::Utc::now() - chrono::Duration::days(1);
     let initial = summary.last_activity;
-
-    std::thread::sleep(std::time::Duration::from_millis(10));
     summary.touch();
 
     assert!(summary.last_activity > initial);

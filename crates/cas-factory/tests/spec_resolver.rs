@@ -7,7 +7,7 @@ use std::io::Write as _;
 
 use cas_factory::routing::{CapabilitySnapshot, resolve_lane};
 use cas_factory::{
-    ConfigSources, resolve_specs, resolve_supervisor_spec, worker_slot_cli_configured,
+    ConfigSources, SpecResolverError, resolve_specs, resolve_supervisor_spec, worker_slot_cli_configured,
     worker_slot_effort_configured,
 };
 use cas_mux::{Effort, SupervisorCli, WorkerSpec};
@@ -597,12 +597,7 @@ cli = "gpt"
         },
     );
 
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("gpt"),
-        "error should name the bad value; got: {msg}"
-    );
+    assert!(matches!(result, Err(SpecResolverError::InvalidCli(value)) if value == "gpt"));
 }
 
 #[test]
@@ -623,12 +618,7 @@ effort = "extreme"
         },
     );
 
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("extreme"),
-        "error should name the bad value; got: {msg}"
-    );
+    assert!(matches!(result, Err(SpecResolverError::InvalidEffort(value, _)) if value == "extreme"));
 }
 
 #[test]

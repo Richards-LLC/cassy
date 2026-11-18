@@ -2989,7 +2989,7 @@ impl Pty {
             Ok(Some(status)) => Some(self.exit_event_from_status(status)),
             Ok(None) => {
                 self.exit_status_pending = true;
-                Some(PtyEvent::Exited(None))
+                None
             }
             Err(error) => {
                 tracing::debug!(error = %error, "pty child wait status unavailable");

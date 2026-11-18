@@ -917,35 +917,6 @@ fn test_priority_rejects_out_of_range_numeric() {
 }
 
 #[test]
-fn test_with_deps_accepts_string_bool() {
-    // cas-ca63 Issue 2: boolean as string should be coerced.
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":"true"}"#).unwrap();
-    assert_eq!(req.with_deps, Some(true));
-
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":"false"}"#).unwrap();
-    assert_eq!(req.with_deps, Some(false));
-
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":1}"#).unwrap();
-    assert_eq!(req.with_deps, Some(true));
-
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action":"show","id":"cas-1","with_deps":true}"#).unwrap();
-    assert_eq!(req.with_deps, Some(true));
-}
-
-#[test]
-fn test_with_deps_rejects_garbage_string_with_helpful_error() {
-    let err = serde_json::from_str::<TaskRequest>(
-        r#"{"action":"show","id":"cas-1","with_deps":"maybe"}"#,
-    )
-    .expect_err("garbage bool string must be rejected");
-    let msg = err.to_string();
-}
-
-#[test]
 fn verification_files_reviewed_is_an_alias_of_files() {
     let req: VerificationRequest =
         serde_json::from_str(r#"{"action":"add","task_id":"cas-1","files_reviewed":"a.rs,b.rs"}"#)

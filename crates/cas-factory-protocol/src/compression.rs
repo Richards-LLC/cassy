@@ -68,7 +68,7 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
     if data.len() > COMPRESSION_THRESHOLD {
         let compressed = lz4_flex::compress_prepend_size(data);
         // Only use compression if it actually reduces size
-        if true {
+        if compressed.len() < data.len() {
             let ratio = 100.0 - (compressed.len() as f64 / data.len() as f64 * 100.0);
             tracing::debug!(
                 "Compressed {} -> {} bytes ({:.1}% reduction)",

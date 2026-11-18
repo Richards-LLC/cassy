@@ -1076,6 +1076,7 @@ mod tests {
             ("J5", format!("{imports}{inline}"), format!("{imports}{}", inline.replace("  const removed = 0;\n", "")), true, false),
             ("J6", kept.replace("  appendFileSync", "  const removed = 0;\n  appendFileSync"), kept, false, true),
         ];
+        let mut failures = Vec::new();
         for (row, before, after, identified, uncertain) in cases {
             let root = tempfile::tempdir().unwrap();
             let repo = root.path().join("worktrees/worker");
@@ -1102,8 +1103,12 @@ mod tests {
             let head = git(&["rev-parse", "HEAD"]);
             let paths = vec![path.to_string()];
             let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, Some(&[(base, head.clone())])).unwrap();
-            assert_eq!(tests, if identified { vec![stability::Identity::exact(path, "kept")] } else { vec![] }, "{row}");
-            assert_eq!(scopes, if uncertain { vec![widened::Scope::File(path.into())] } else { vec![] }, "{row}");
+            let expected_tests = if identified { vec![stability::Identity::exact(path, "kept")] } else { vec![] };
+            let expected_scopes = if uncertain { vec![widened::Scope::File(path.into())] } else { vec![] };
+            if tests != expected_tests || scopes != expected_scopes {
+                failures.push((row, tests, scopes));
+                continue;
+            }
             let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
             assert_eq!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), !identified && !uncertain, "{row}");
             if identified || uncertain {
@@ -1112,6 +1117,7 @@ mod tests {
             }
             assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), "{row}");
         }
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     /// Unknown names widen once through the real runner, then the park consumer
@@ -1177,6 +1183,7 @@ mod tests {
     #[test]
     fn mixed_rust_inputs_keep_identified_stability_beside_widening_cas_31eb() {
         use crate::factory_worker_check::{self, stability, widened, PassingTests};
+        let mut failures = Vec::new();
         for (row, known, unknown, selector) in [
             ("R1", Some("src/lib.rs"), None, "fixture"),
             ("R2", Some("tests/native.rs"), None, "fixture"),
@@ -1210,8 +1217,11 @@ mod tests {
             let expected = known.map(|path| stability::Identity::exact(path, "known")).into_iter().collect::<Vec<_>>();
             let expected_scope = widened::Scope::Crate("fixture".into());
             let (tests, scopes) = stability::requirements(repo.path(), &head, "main", &paths, Some(&[(base, head.clone())])).unwrap();
-            assert_eq!(tests, expected, "{row}");
-            assert_eq!(scopes, if unknown.is_some() { vec![expected_scope.clone()] } else { vec![] }, "{row}");
+            let expected_scopes = if unknown.is_some() { vec![expected_scope.clone()] } else { vec![] };
+            if tests != expected || scopes != expected_scopes {
+                failures.push((row, tests, scopes));
+                continue;
+            }
             factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, selector, "test(known)");
             let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
             assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
@@ -1232,6 +1242,7 @@ mod tests {
             }
             assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
         }
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     fn changelog_fixture() -> tempfile::TempDir {

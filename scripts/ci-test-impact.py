@@ -394,6 +394,20 @@ def lane_split(root, selection):
                 parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
         if parts:
             own.append("(package(cas) and (" + " or ".join(parts) + "))")
+    # Existing whole-tree refusal audits belong before the ring for production
+    # Rust changes, even when their module has no import edge to the edit.
+    # Test fixtures cannot introduce a shipped refusal and keep their scope.
+    if any(path.endswith(".rs") and "/tests/" not in path for path in paths):
+        audit = "(package(cas) and binary(cas) and test(gates::registry_tests::))"
+        own.append(audit)
+        selected = f"({selected}) or ({audit})" if selected else audit
+        if not build:
+            build = ["-p", "cas", "--lib"]
+        elif "--workspace" not in build:
+            if not any(build[index:index + 2] == ["-p", "cas"] for index in range(len(build))):
+                build.extend(["-p", "cas"])
+            if "--test" in build and "--lib" not in build:
+                build.append("--lib")
     own = " or ".join(own) or None
     return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
 

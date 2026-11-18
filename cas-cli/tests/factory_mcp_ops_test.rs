@@ -1850,14 +1850,14 @@ async fn spawn_respects_project_and_machine_worker_caps_cas_08db_in_isolated_chi
     assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_REQUEST);
     assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
 
-    for index in 3..8 {
-        env.register_worker_with_metadata(&format!("local-{index}"), HashMap::new());
-    }
+    let added_workers: Vec<_> = (3..8).map(|index| {
+        env.register_worker_with_metadata(&format!("local-{index}"), HashMap::new())
+    }).collect();
     let refused = spawn(1).await.expect_err("project 8/8 must refuse with machine only 15/20");
     assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_REQUEST);
     assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
-    for index in 3..8 {
-        let mut worker = env.agent_store().get(&format!("local-{index}")).unwrap();
+    for id in added_workers {
+        let mut worker = env.agent_store().get(&id).unwrap();
         worker.status = AgentStatus::Shutdown;
         env.agent_store().update(&worker).unwrap();
     }

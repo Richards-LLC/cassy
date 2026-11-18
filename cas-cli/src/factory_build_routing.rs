@@ -641,7 +641,9 @@ mod tests {
         let server = MockServer::start().await;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_BUILD_GUARD", "off");
-        let (root, mut sender) = failed_route_fixture(&server, env.home()).await;
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (root, mut sender) = failed_route_fixture(&server, &project).await;
         server.reset().await;
         let mut full = peer("best", 1, 17.64, 0);
         let capacity = full["metadata"][CAPACITY_META].as_str().unwrap();

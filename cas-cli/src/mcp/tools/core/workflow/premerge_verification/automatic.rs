@@ -947,6 +947,21 @@ mod tests {
                 .find(|value| value.get("qa").is_some())
                 .unwrap_or(serde_json::Value::Null);
             assert_eq!(context["qa"]["mode"], serde_json::to_value(mode).unwrap());
+            // GH #2047: repair history must not exceed the harness's 1 MiB input
+            // limit. Keep the full source available rather than dropping criteria.
+            let mut large = task.clone();
+            large.notes = "history 🦀\n".repeat(120_000);
+            large.acceptance_criteria = Some("Keep the caller's result exactly.".into());
+            let input = prompt(&core, &large, &dispatch).unwrap();
+            assert!(input.len() < 524_288, "prompt bytes: {}", input.len());
+            let pointer = input.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find_map(|value| value["review_input_file"].as_str().map(str::to_owned))
+                .expect("oversized input stays available in a bound file");
+            let full: serde_json::Value = serde_json::from_slice(&std::fs::read(pointer).unwrap()).unwrap();
+            assert_eq!(full["task"], serde_json::to_value(&large).unwrap());
+            assert_eq!(full["dispatch"], serde_json::to_value(&dispatch).unwrap());
+            assert_eq!(full["review_context"]["qa"]["mode"], serde_json::to_value(mode).unwrap());
         }
     }
 

@@ -485,19 +485,16 @@ fn test_bm25_concurrent_searches() {
         let query = queries[thread_id % queries.len()].to_string();
 
         let handle = thread::spawn(move || {
-            let mut total_results = 0;
             for _ in 0..searches_per_thread {
                 let results = index_clone.search(&query, 10).unwrap();
-                total_results += results.len();
+                assert!(!results.is_empty());
             }
-            total_results
         });
         handles.push(handle);
     }
 
-    let mut total = 0;
     for handle in handles {
-        total += handle.join().expect("Thread panicked");
+        handle.join().expect("Thread panicked");
     }
 
     let elapsed = start.elapsed();
@@ -508,7 +505,6 @@ fn test_bm25_concurrent_searches() {
         elapsed
     );
 
-    assert!(total > 0, "Should find results");
 }
 
 /// Test: Update document (re-index with same ID)

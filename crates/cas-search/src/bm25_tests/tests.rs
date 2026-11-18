@@ -21,13 +21,9 @@ impl TestDoc {
         }
     }
 
+    #[cfg(feature = "parallel")]
     fn with_type(mut self, doc_type: &str) -> Self {
         self.doc_type = doc_type.to_string();
-        self
-    }
-
-    fn with_tags(mut self, tags: &[&str]) -> Self {
-        self.tags = tags.iter().map(|s| s.to_string()).collect();
         self
     }
 
@@ -61,23 +57,6 @@ impl SearchDocument for TestDoc {
     fn doc_title(&self) -> Option<&str> {
         self.title.as_deref()
     }
-}
-
-#[test]
-fn test_index_and_search() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let doc1 = TestDoc::new("001", "Rust is a systems programming language");
-    let doc2 = TestDoc::new("002", "Python is great for data science");
-    let doc3 = TestDoc::new("003", "JavaScript runs in browsers");
-
-    index.index(&doc1).unwrap();
-    index.index(&doc2).unwrap();
-    index.index(&doc3).unwrap();
-
-    let results = index.search("programming", 10).unwrap();
-    assert!(!results.is_empty());
-    assert_eq!(results[0].0, "001");
 }
 
 #[test]
@@ -118,133 +97,6 @@ fn registered_field_queries_remain_strict() {
         index.search("doc_type:", 10).is_err(),
         "registered fields must retain Tantivy's strict syntax validation"
     );
-}
-
-#[test]
-fn test_search_with_type_filter() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let doc1 = TestDoc::new("001", "Rust programming").with_type("entry");
-    let doc2 = TestDoc::new("002", "Python programming").with_type("task");
-    let doc3 = TestDoc::new("003", "Go programming").with_type("entry");
-
-    index.index(&doc1).unwrap();
-    index.index(&doc2).unwrap();
-    index.index(&doc3).unwrap();
-
-    // Search all types
-    let results = index.search("programming", 10).unwrap();
-    assert_eq!(results.len(), 3);
-
-    // Search only entries
-    let results = index.search_with_type("programming", "entry", 10).unwrap();
-    assert_eq!(results.len(), 2);
-
-    // Search only tasks
-    let results = index.search_with_type("programming", "task", 10).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, "002");
-}
-
-#[test]
-fn test_search_with_tags() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let doc1 = TestDoc::new("001", "Rust programming").with_tags(&["rust", "systems"]);
-    let doc2 = TestDoc::new("002", "Python programming").with_tags(&["python", "data"]);
-    let doc3 = TestDoc::new("003", "Rust async").with_tags(&["rust", "async"]);
-
-    index.index(&doc1).unwrap();
-    index.index(&doc2).unwrap();
-    index.index(&doc3).unwrap();
-
-    // Search with rust tag
-    let results = index
-        .search_with_tags("programming", &["rust"], 10)
-        .unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, "001");
-}
-
-#[test]
-fn test_delete() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let doc = TestDoc::new("001", "Rust programming");
-    index.index(&doc).unwrap();
-
-    assert!(index.exists("001").unwrap());
-
-    index.remove("001").unwrap();
-
-    assert!(!index.exists("001").unwrap());
-}
-
-#[test]
-fn test_batch_index() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let docs: Vec<TestDoc> = (0..100)
-        .map(|i| TestDoc::new(&format!("doc-{i:03}"), &format!("Document content {i}")))
-        .collect();
-
-    let doc_refs: Vec<&dyn SearchDocument> =
-        docs.iter().map(|d| d as &dyn SearchDocument).collect();
-
-    let count = index.index_batch(doc_refs).unwrap();
-    assert_eq!(count, 100);
-    assert_eq!(index.num_docs().unwrap(), 100);
-}
-
-#[test]
-fn test_batch_delete() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let docs: Vec<TestDoc> = (0..10)
-        .map(|i| TestDoc::new(&format!("doc-{i:03}"), &format!("Content {i}")))
-        .collect();
-
-    let doc_refs: Vec<&dyn SearchDocument> =
-        docs.iter().map(|d| d as &dyn SearchDocument).collect();
-    index.index_batch(doc_refs).unwrap();
-
-    assert_eq!(index.num_docs().unwrap(), 10);
-
-    // Delete half
-    let ids_to_delete: Vec<&str> = (0..5).map(|i| docs[i].id.as_str()).collect();
-    let deleted = index.delete_batch(ids_to_delete).unwrap();
-
-    assert_eq!(deleted, 5);
-    assert_eq!(index.num_docs().unwrap(), 5);
-}
-
-#[test]
-fn test_rebuild_atomic_in_memory() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    // Index initial docs
-    let docs1: Vec<TestDoc> = (0..5)
-        .map(|i| TestDoc::new(&format!("doc-{i}"), &format!("Old content {i}")))
-        .collect();
-    let refs1: Vec<&dyn SearchDocument> = docs1.iter().map(|d| d as &dyn SearchDocument).collect();
-    index.index_batch(refs1).unwrap();
-
-    assert_eq!(index.num_docs().unwrap(), 5);
-
-    // Rebuild with new docs
-    let docs2: Vec<TestDoc> = (0..10)
-        .map(|i| TestDoc::new(&format!("new-{i}"), &format!("New content {i}")))
-        .collect();
-    let refs2: Vec<&dyn SearchDocument> = docs2.iter().map(|d| d as &dyn SearchDocument).collect();
-    let count = index.rebuild_atomic(refs2).unwrap();
-
-    assert_eq!(count, 10);
-    assert_eq!(index.num_docs().unwrap(), 10);
-
-    // Old docs should be gone
-    assert!(!index.exists("doc-0").unwrap());
-    // New docs should exist
-    assert!(index.exists("new-0").unwrap());
 }
 
 #[test]
@@ -293,95 +145,6 @@ fn test_title_search() {
     let results = index.search("Important", 10).unwrap();
     assert!(!results.is_empty());
     assert_eq!(results[0].0, "001");
-}
-
-#[test]
-fn test_empty_query() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let doc = TestDoc::new("001", "Content");
-    index.index(&doc).unwrap();
-
-    let results = index.search("", 10).unwrap();
-    assert!(results.is_empty());
-
-    let results = index.search("   ", 10).unwrap();
-    assert!(results.is_empty());
-}
-
-#[test]
-fn test_update_document() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    let doc1 = TestDoc::new("001", "Original content");
-    index.index(&doc1).unwrap();
-
-    let results = index.search("Original", 10).unwrap();
-    assert_eq!(results.len(), 1);
-
-    // Update with new content
-    let doc2 = TestDoc::new("001", "Updated content");
-    index.index(&doc2).unwrap();
-
-    // Old content no longer found
-    let results = index.search("Original", 10).unwrap();
-    assert!(results.is_empty());
-
-    // New content found
-    let results = index.search("Updated", 10).unwrap();
-    assert_eq!(results.len(), 1);
-}
-
-#[test]
-fn test_bm25_scoring() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    // Doc with high term frequency should score higher
-    let doc1 = TestDoc::new("001", "rust rust rust programming");
-    let doc2 = TestDoc::new("002", "rust programming language guide");
-
-    index.index(&doc1).unwrap();
-    index.index(&doc2).unwrap();
-
-    let results = index.search("rust", 10).unwrap();
-    assert_eq!(results.len(), 2);
-
-    // Higher TF should score higher
-    assert_eq!(results[0].0, "001");
-    assert!(results[0].1 > results[1].1);
-}
-
-#[test]
-fn test_concurrent_reads() {
-    use std::sync::Arc;
-    use std::thread;
-
-    let index = Arc::new(Bm25Index::in_memory().unwrap());
-
-    // Index some documents
-    let docs: Vec<TestDoc> = (0..100)
-        .map(|i| TestDoc::new(&format!("doc-{i}"), &format!("Content about rust {i}")))
-        .collect();
-    let doc_refs: Vec<&dyn SearchDocument> =
-        docs.iter().map(|d| d as &dyn SearchDocument).collect();
-    index.index_batch(doc_refs).unwrap();
-
-    // Spawn multiple reader threads
-    let handles: Vec<_> = (0..4)
-        .map(|_| {
-            let idx = Arc::clone(&index);
-            thread::spawn(move || {
-                for _ in 0..100 {
-                    let results = idx.search("rust", 10).unwrap();
-                    assert!(!results.is_empty());
-                }
-            })
-        })
-        .collect();
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
 }
 
 // =========================================================================

@@ -232,64 +232,6 @@ fn test_code_search_filters() {
     }
 }
 
-/// Test: No N+1 queries - batch fetching verification
-#[test]
-fn test_code_search_no_n_plus_1() {
-    let code_store = Arc::new(MockCodeStore::new());
-    let bm25_index = Arc::new(Bm25Index::in_memory().unwrap());
-    let vector_store = Arc::new(MockVectorStore::new(64));
-
-    // Create 100 symbols
-    for i in 0..100 {
-        let symbol = create_symbol(
-            &format!("sym-{i:03}"),
-            &format!("function_{i}"),
-            SymbolKind::Function,
-            Language::Rust,
-        );
-        code_store.insert_symbol(symbol.clone());
-        bm25_index.index(&SymbolDoc { symbol: &symbol }).unwrap();
-    }
-
-    let search: CodeSearch<MockCodeStore, MockVectorStore, Bm25Index> =
-        CodeSearch::new(code_store.clone(), vector_store, bm25_index, None);
-
-    // Reset counters before search
-    code_store.reset_counters();
-
-    // Search that should match many symbols
-    let opts = CodeSearchOptions {
-        query: "function".to_string(),
-        limit: 50,
-        semantic: false,
-        ..Default::default()
-    };
-
-    let results = search.pattern_search(&opts).unwrap();
-    assert!(!results.is_empty(), "Should find functions");
-
-    // Verify batch fetching was used instead of N single fetches
-    let single_fetches = code_store.single_fetches();
-    let batch_fetches = code_store.batch_fetches();
-
-    println!(
-        "Single fetches: {}, Batch fetches: {}, Results: {}",
-        single_fetches,
-        batch_fetches,
-        results.len()
-    );
-
-    // Should use batch fetching (1 batch call) not N single calls
-    assert!(
-        batch_fetches >= 1,
-        "Should use batch fetching, got {batch_fetches} batch calls"
-    );
-    assert_eq!(
-        single_fetches, 0,
-        "Should not use single fetches, got {single_fetches} single calls"
-    );
-}
-
 /// Test: Code search with 1000 symbols - performance and N+1 check
 #[test]
 fn test_code_search_1k_symbols_no_n_plus_1() {

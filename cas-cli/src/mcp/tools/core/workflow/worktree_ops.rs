@@ -9419,7 +9419,6 @@ mod cas_6b42_peer_delivery_tests {
         });
 
         // This machine's ref was left at T1 by the earlier merge attempt.
-        git(&repo, &["fetch", "-q", "origin", &format!("{branch}~1:refs/heads/{branch}")]);
         let stale = git(&repo, &["rev-parse", branch]);
         assert_ne!(stale, reparked);
         let resolved = core.started_task_merge_source(&repo, Some(&task), branch)

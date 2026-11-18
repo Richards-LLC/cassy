@@ -1905,12 +1905,35 @@ mod tests {
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, &[]).unwrap();
         assert_eq!(proof.consecutive_passes, 5);
 
+        for wrapper in ["runIf(true)", "skipIf(false)"] {
+            let source = format!("describe.{wrapper}('legal', () => {{ test('consent', () => {{}}); }});");
+            assert_eq!(source_tests(file, &source, &[(1, 1)]).unwrap(), [id(file, "legal consent")]);
+        }
+        let unknown = "const suite = true ? describe : unknown; suite('legal', () => { test('consent', () => {}); });";
+        assert!(source_tests(file, unknown, &[(1, 1)]).is_err());
+
         // Branches of different kinds cannot name a runtime identity.
         std::fs::write(repo.path().join(file), source("", prelude).replace("describe.skip)(", "test)(")).unwrap();
         git(&["commit", "--quiet", "-am", "mixed"]);
         let mixed = git(&["rev-parse", "HEAD"]);
         let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()], None).unwrap_err().to_string();
         assert!(refusal.contains("G-61"), "{refusal}");
+    }
+
+    #[test]
+    fn inactive_prerequisite_skip_does_not_require_passing_evidence_gh2046() {
+        let file = "legal.test.ts";
+        let source = "describe('Signup legal consent', () => {\n\
+            if (!databaseUrl) { test.skip('requires disposable DB', () => {}); return; }\n\
+            test('stores consent', () => {});\n});";
+        let selected = source_tests(file, source, &[(1, 4)]).unwrap();
+        assert_eq!(selected, [id(file, "Signup legal consent stores consent")]);
+        let report = serde_json::json!({"success":true,"testResults":[{"name":file,"status":"passed",
+            "assertionResults":[{"fullName":"Signup legal consent stores consent","status":"passed"}]}]});
+        validate_report("jest", Path::new("/project"), &report, &selected, 1).unwrap();
+        let skipped = serde_json::json!({"success":true,"testResults":[{"name":file,"status":"passed",
+            "assertionResults":[{"fullName":"Signup legal consent stores consent","status":"pending"}]}]});
+        assert!(validate_report("jest", Path::new("/project"), &skipped, &selected, 1).is_err());
     }
 
     /// pulse-card auth.test.ts (GH #2052): `importOriginal<typeof import('#imports')>()`

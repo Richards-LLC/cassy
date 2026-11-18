@@ -5627,6 +5627,14 @@ JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
             execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
             assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 5, "{runner}");
             assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none(), "input is child-only");
+            let head = fixture_head(&repo);
+            let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);
+            let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap().next().unwrap().unwrap();
+            let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt.path()).unwrap()).unwrap();
+            let row = &receipt["test"]["stability"]["tests"][0];
+            assert_eq!(row["path"], file);
+            assert_eq!(row["name"], "db-fixture");
+            assert_eq!(row["reason"], "changed-test");
         }
     }
 

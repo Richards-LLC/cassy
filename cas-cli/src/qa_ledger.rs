@@ -763,6 +763,18 @@ mod tests {
         std::fs::write(dir.path().join("capture.txt"), "usage").unwrap();
         std::fs::write(&path, &base).unwrap();
         assert!(check(&path, 1).ok);
+        let absolute = dir.path().join("capture.txt");
+        std::fs::write(path, base.replace("capture.txt", absolute.to_str().unwrap())).unwrap();
+        assert!(check(path, 1).ok);
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path, base.replace("capture.txt", outside.path().to_str().unwrap())).unwrap();
+        assert!(check(path, 1).diagnostics.iter().any(|d| d.code == "capture"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("escape.txt")).unwrap();
+            std::fs::write(path, base.replace("capture.txt", dir.path().join("escape.txt").to_str().unwrap())).unwrap();
+            assert!(check(path, 1).diagnostics.iter().any(|d| d.code == "capture"));
+        }
         // cas-f0c5: init copies the task title into scope; quoted verdict text is not a count.
         let quoted = "# QA evidence: cas-c6e3\nscope: CI flake gate prints 'FAIL: 0 flaky test(s)' on a real failure\nsurface: PASS: 3 rows\n";
         std::fs::write(&path, format!("{quoted}{base}")).unwrap();

@@ -244,3 +244,57 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn init_uses_callers_worktree_registry_and_head_gh1975() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("primary");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(at)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/form.rs"), "pub fn form() {}\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "primary"]);
+        let root = crate::store::init_cas_dir(&repo).unwrap();
+        let checkout = dir.path().join("worker");
+        git(&repo, &["worktree", "add", "-q", "-b", "factory/fixture", checkout.to_str().unwrap()]);
+        std::fs::create_dir_all(checkout.join("docs/qa")).unwrap();
+        std::fs::write(checkout.join(crate::qa_registry::DEFAULT_PATH),
+            "version: 1\nupdated: '2026-11-17'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: HUB-J9\n    name: Worktree form\n    status: live\n    entry: {url: /form, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/form.rs']\n    invariants: [INV]\n").unwrap();
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "-qm", "worker registry"]);
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+        env.set_current_dir(checkout.join("src"));
+        let mut config = crate::config::Config::default();
+        let artifacts = dir.path().join("artifacts");
+        config.set("factory.artifacts_root", artifacts.to_str().unwrap()).unwrap();
+        config.save(&root).unwrap();
+        let task = cas_types::Task::new("cas-worktree-ledger".into(), "Review src/form.rs".into());
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.init().unwrap();
+        store.create(&task).unwrap();
+        let args = LedgerArgs { command: LedgerCommand::Init { task: task.id.clone(), covers: Vec::new(), release_scope: None } };
+        execute(&args, &Cli::parse_from(["cas"]), Some(&root)).unwrap();
+        let path = crate::config::resolved_factory_artifact_paths(&root, config.factory().artifacts_root.as_deref())
+            .project_root.join(&task.id).join("LEDGER.md");
+        let body = std::fs::read_to_string(path).unwrap();
+        assert_eq!(body.lines().find_map(|line| line.strip_prefix("build: ")), Some(head.as_str()));
+        assert_eq!(crate::qa_ledger::parse(&body, 1).rows[0].id, "HUB-J9");
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&checkout, &["symbolic-ref", "--short", "HEAD"]), "factory/fixture");
+    }
+}

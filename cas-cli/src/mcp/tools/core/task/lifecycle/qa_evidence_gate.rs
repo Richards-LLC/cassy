@@ -895,6 +895,20 @@ mod tests {
         std::fs::write(task_dir.join("LEDGER.md"), "malformed evidence").unwrap();
         let _ = ledger_preflight(&root, &task, true)
                 .unwrap_err();
+        let ledger = task_dir.join("LEDGER.md");
+        for (owner, covers, accepted) in [
+            (task.id.as_str(), Vec::new(), true),
+            ("cas-other", Vec::new(), false),
+            ("cas-other", vec![task.id.clone()], true),
+        ] {
+            let mut author = task.clone();
+            author.id = owner.into();
+            let body = crate::qa_ledger::scaffold_with_coverage(&author, &[], "fixture-build", &covers)
+                .replacen(&format!("# QA evidence: {owner}"), &format!("# QA evidence: {owner} — frozen sign-in release review"), 1);
+            std::fs::write(&ledger, body).unwrap();
+            assert_eq!(crate::cli::qa_ledger::check(&ledger, Some(&task)).ok, accepted, "CLI {owner}");
+            assert_eq!(ledger_preflight(&root, &task, true).is_ok(), accepted, "close {owner}");
+        }
     }
 
     #[test]

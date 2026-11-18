@@ -1951,6 +1951,8 @@ mod tests {
         // Candidate commit-tree must use explicit fixture identity, never the
         // host's platform-dependent author/email auto-detection.
         run(repo, &["config", "user.useConfigOnly", "true"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
         env.set("CAS_ROOT", &root);
         env.set("CAS_AGENT_ROLE", "supervisor");

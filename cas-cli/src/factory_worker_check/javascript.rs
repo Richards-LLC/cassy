@@ -2231,16 +2231,17 @@ process.exit(ok ? 0 : 1);
         let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
         assert_eq!(tests, [id(spec, "pool drains")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
         let config = "apps/backend/test/jest-inbox-tools.integration.config.js";
-        assert_eq!(prescribed.len(), 1);
-        assert!(prescribed[0].contains(&format!("-- jest --config {config} {spec}`")), "{prescribed:?}");
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
         assert_eq!(super::super::stability::missing(&passing(), &tests), tests);
 
-        // Worker-check without `--config` discovers the owner; with the printed one it runs the same.
+        // Worker-check discovers the owning config and counts the spec's tests five times.
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
+        // The prescribed rerun names that config, and running it as printed passes the same way.
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        assert_eq!(prescribed.len(), 1);
+        assert!(prescribed[0].contains(&format!("-- jest --config {config} {spec}`")), "{prescribed:?}");
         let args: Vec<String> = ["jest", "--config", config, spec].map(String::from).into();
         let invocation = invocation(&args).expect("the prescribed command is a capped runner");
         let explicit = repo.path().join(invocation.config.as_deref().unwrap());

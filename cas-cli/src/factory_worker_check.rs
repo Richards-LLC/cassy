@@ -2745,6 +2745,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slow_classification_keeps_emitting_progress_before_admission_gh_2121() {
+        let (lines, received) = std::sync::mpsc::channel();
+        let heartbeat = stability::rust::Heartbeat::start(std::time::Duration::from_millis(1),
+            move |elapsed| { let _ = lines.send(elapsed); });
+        // Two lines prove it repeats, not just fires once; the wait is an event, not a guess.
+        for _ in 0..2 {
+            received.recv_timeout(std::time::Duration::from_secs(30)).expect("progress line while classifying");
+        }
+        drop(heartbeat);
+        while received.try_recv().is_ok() {}
+        assert!(received.recv_timeout(std::time::Duration::from_millis(50)).is_err(),
+            "heartbeat must stop once classification ends");
+    }
+
+    #[test]
     fn missing_supervisor_test_request_names_its_path() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("request.json");

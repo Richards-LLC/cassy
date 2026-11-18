@@ -9591,6 +9591,8 @@ mod cas_1184d_merge_identity_tests {
         let repo = tempfile::tempdir().unwrap();
         let path = repo.path();
         git(path, &["init", "-qb", "staging"]);
+        git(path, &["config", "user.name", "Cassy Test"]);
+        git(path, &["config", "user.email", "cas-test@example.invalid"]);
         std::fs::write(path.join(".gitignore"), ".cas/\n").unwrap();
         std::fs::write(path.join("shared.md"), "base\n").unwrap();
         git(path, &["add", "."]);

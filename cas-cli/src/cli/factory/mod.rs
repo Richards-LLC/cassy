@@ -820,7 +820,7 @@ pub enum FactoryCommands {
     /// Internal capped runner installed by the worker PreToolUse guard.
     #[command(
         hide = true,
-        after_help = "Examples:\n  cas factory worker-check --cas-root \"$CAS_ROOT\" -- nextest run -p <crate> --lib -E 'test(<name>)'\n  cas factory worker-check --cas-root \"$CAS_ROOT\" -- jest path/to/file.test.ts\n\nJavaScript runners: vitest, jest or playwright, then repository-relative test files."
+        after_help = "Examples:\n  cas factory worker-check --cas-root \"$CAS_ROOT\" -- lane-impact\n  cas factory worker-check --cas-root \"$CAS_ROOT\" -- nextest run -p <crate> --lib -E 'test(<name>)'\n  cas factory worker-check --cas-root \"$CAS_ROOT\" -- jest path/to/file.test.ts\n\nJavaScript runners: vitest, jest or playwright, then repository-relative test files."
     )]
     WorkerCheck {
         #[arg(long)]

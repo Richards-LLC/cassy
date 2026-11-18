@@ -2824,6 +2824,15 @@ runs as `worker-check --detach` in its own session, since Codex `exec_command`
 kills the shell's process group, including any `&` job, when the shell exits
 (cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
 
+`cas factory worker-check --cas-root "$CAS_ROOT" -- lane-impact` is the broad
+form of the targeted check: it runs `scripts/ci-test-impact.py lane --phase plan`
+for the diff from the target merge-base, then one capped nextest pass over lane
+CI's own tests followed by its ring (a whole-workspace plan leaves the ring to
+the train's full set, so only its own tests run). It records a test receipt for
+each changed Rust crate, so park sees what lane CI will run. Failure history is
+CI-only and absent locally; a plan with nothing to run locally is reported, not
+passed. Named-test checks remain available.
+
 The existing focused-proof park gate also requires five consecutive passes for
 the delivery's new or changed test functions, including test-only deliveries. The capped Rust
 runner repeats only owned functions in its requested selection; unchanged tests

@@ -5579,7 +5579,7 @@ JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
             argv.push(file.into());
             let cli = crate::cli::Cli::parse_from(argv);
             let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("fixture factory command"); };
-            let crate::cli::factory::FactoryCommands::WorkerCheck { cargo_args, test_env, .. } = factory.command else { panic!("fixture worker check"); };
+            let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cargo_args, test_env, .. }) = factory.command else { panic!("fixture worker check"); };
             validate_test_environment(&cargo_args, &test_env).unwrap();
             execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
             assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 5, "{runner}");

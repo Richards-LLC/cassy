@@ -132,6 +132,53 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             with self.subTest(path=path, source=source):
                 self.assertEqual(bool(shape.message_assertions(source, path)), rejected)
 
+    def test_dependency_selection_fixture_markers_cas_5bb6(self):
+        source = '''test('selection', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'module-'));
+  await copyFile(join(repoRoot, 'scripts/visual-qa.mjs'), join(dir, 'visual-qa.mjs'));
+  for (const [name, marker] of [['node_modules/playwright', 'local'], ['selected', 'explicit']]) {
+    const pkg = join(dir, name);
+    await writeFile(join(pkg, 'index.js'), `export const marker = ${JSON.stringify(marker)};`);
+  }
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import { resolvePlaywright } from ${JSON.stringify(pathToFileURL(join(dir, 'visual-qa.mjs')).href)}; console.log((await resolvePlaywright()).playwright.marker);`], {
+    encoding: 'utf8', env: { ...process.env, PLAYWRIGHT_MODULE: join(dir, 'selected') },
+  });
+  assert.equal(child.stdout.trim(), 'explicit');
+});'''
+        prose = source.replace('explicit', 'Please try later')
+        cases = [
+            (source, False),
+            (source.replace('assert.equal', 'assert.strictEqual'), False),
+            (source.replace("child.stdout.trim(), 'explicit'", "'explicit', child.stdout.trim()"), False),
+            (source.replace('explicit', 'fixture.v1:selected-package'), False),
+            (source.replace('explicit', 'explicit!'), True),
+            ("assert.equal(child.stdout.trim(), 'explicit');", False),
+            (source.replace("'explicit');", "'explicit' /* marker */);"), True),
+            (source.replace("'explicit');", "'explicit', diagnostic);"), False),
+            (source.replace("'explicit');", "'Please' + ' try later');"), True),
+            (source.replace("'explicit');", "'Please'.concat(' try later'));"), True),
+            (source.replace("'explicit');", "'Please' /* marker */ + ' try later');"), True),
+            (source.replace("'explicit');", "'Please' /* first */ + ' try later' /* last */);"), True),
+            (source.replace("'explicit');", "'Please' /* first */ .concat(' try later') /* last */);"), True),
+            (source.replace("'explicit');", "'explicit' // marker\n);"), True),
+            (source.replace('marker', 'identity').replace('explicit', 'selected package'), True),
+            (prose, True),
+            (prose.replace('  assert.equal', '  child.stdout = runProduct().message;\n  assert.equal'), True),
+            (prose.replace('  const child', "  await writeFile(join(dir, 'selected', 'index.js'), productModuleSource);\n  const child"), True),
+            (prose.replace('marker', 'message').replace(
+                "import { resolvePlaywright } from ${JSON.stringify(pathToFileURL(join(dir, 'visual-qa.mjs')).href)}; console.log((await resolvePlaywright()).playwright.message);",
+                "import { product } from './product.mjs'; console.log(product.message);"), True),
+            (source.replace('child.stdout.trim()', 'child.stderr.trim()'), True),
+            (source.replace("assert.equal(child.stdout.trim(), 'explicit')", "assert.ok(child.stdout.includes('explicit'))"), True),
+        ]
+        for code, rejected in cases:
+            lines = {i for i, line in enumerate(code.splitlines(), 1) if 'assert.' in line}
+            for changed in [None, lines]:
+                with self.subTest(code=code, changed=changed):
+                    hits = (shape.message_assertions(code, 'selection.test.mjs', changed)
+                            + shape.lint_text_pins(code, 'selection.test.mjs', changed_lines=changed))
+                    self.assertEqual(bool(hits), rejected, hits)
+
     def test_cli_parser_payload_round_trip_cas_5442(self):
         source = '''#[test]
 fn cli_round_trip() {

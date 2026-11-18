@@ -611,7 +611,7 @@ mod tests {
     async fn test_async_wait_for_condition() {
         let mut runner = AsyncPtyRunner::new();
         runner
-            .spawn("sh", &["-c", "echo 'line1'; sleep 0.1; echo 'line2'"])
+            .spawn("sh", &["-c", "printf 'line1\\nline2\\n'"])
             .await
             .expect("spawn failed");
 

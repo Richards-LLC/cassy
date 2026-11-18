@@ -408,16 +408,24 @@ mod tests {
             std::fs::create_dir_all(p).unwrap();
         }
 
-        for (path, timestamp) in [
-            (&a, "2000-01-01T00:00:00Z"),
-            (&b, "2000-01-03T00:00:00Z"),
-            (&c, "2000-01-02T00:00:00Z"),
+        store.upsert(&a).unwrap();
+        store.upsert(&b).unwrap();
+        store.upsert(&c).unwrap();
+
+        for (path, date) in [
+            (&a, "2020-01-01T00:00:00Z"),
+            (&c, "2020-01-02T00:00:00Z"),
+            (&b, "2020-01-03T00:00:00Z"),
         ] {
-            store.upsert(path).unwrap();
-            store.conn.lock().unwrap().execute(
-                "UPDATE known_repos SET last_touched_at = ? WHERE path = ?",
-                params![timestamp, path.canonicalize().unwrap().to_string_lossy().as_ref()],
-            ).unwrap();
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE known_repos SET last_touched_at = ?1 WHERE path = ?2",
+                    params![date, path.canonicalize().unwrap().to_str().unwrap()],
+                )
+                .unwrap();
         }
 
         let list = store.list().unwrap();

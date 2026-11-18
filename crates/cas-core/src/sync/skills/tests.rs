@@ -45,18 +45,9 @@ fn create_test_skill(name: &str, enabled: bool) -> Skill {
 /// every consumer expects text. The shared serializer quotes it, so this
 /// asserts the value a parser actually yields rather than the raw bytes the
 /// old escaper happened to write.
-fn assert_frontmatter_string(content: &str, key: &str, expected: &str) {
-    let frontmatter = content
-        .split("---")
-        .nth(1)
-        .unwrap_or_else(|| panic!("no frontmatter in:\n{content}"));
-    let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter)
-        .unwrap_or_else(|e| panic!("frontmatter is not valid YAML: {e}\n{frontmatter}"));
-    assert_eq!(
-        parsed.get(key).and_then(|v| v.as_str()),
-        Some(expected),
-        "{key} must read back as the string {expected:?}:\n{frontmatter}"
-    );
+fn frontmatter(content: &str) -> serde_yaml::Value {
+    let yaml = content.split("---").nth(1).expect("frontmatter");
+    serde_yaml::from_str(yaml).expect("valid generated YAML")
 }
 
 #[test]
@@ -68,27 +59,6 @@ fn test_is_enabled() {
 
     assert!(syncer.is_enabled(&enabled));
     assert!(!syncer.is_enabled(&disabled));
-}
-
-#[test]
-fn test_sync_skill() {
-    let temp = TempDir::new().unwrap();
-    let target = temp.path().join(".claude/skills");
-    let syncer = SkillSyncer::new(target.clone());
-
-    let skill = create_test_skill("test-skill", true);
-
-    // Sync the skill
-    assert!(syncer.sync_skill(&skill).unwrap());
-
-    // Check directory and file were created
-    let skill_dir = target.join("cas-test-skill");
-    assert!(skill_dir.exists());
-    assert!(skill_dir.join("SKILL.md").exists());
-
-    let content = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-    assert!(content.contains("name: cas-test-skill"));
-    assert!(content.contains("Test skill: test-skill"));
 }
 
 #[test]
@@ -134,22 +104,6 @@ fn test_sanitize_name() {
 }
 
 #[test]
-fn test_sync_invokable_skill() {
-    let temp = TempDir::new().unwrap();
-    let target = temp.path().join(".claude/skills");
-    let syncer = SkillSyncer::new(target.clone());
-
-    let mut skill = create_test_skill("my-task", true);
-    skill.invokable = true;
-    skill.argument_hint = "[title]".to_string();
-
-    syncer.sync_skill(&skill).unwrap();
-
-    let content = fs::read_to_string(target.join("cas-my-task/SKILL.md")).unwrap();
-    assert_frontmatter_string(&content, "argument-hint", "[title]");
-}
-
-#[test]
 fn test_sync_passive_skill_no_argument_hint() {
     let temp = TempDir::new().unwrap();
     let target = temp.path().join(".claude/skills");
@@ -161,75 +115,9 @@ fn test_sync_passive_skill_no_argument_hint() {
     syncer.sync_skill(&skill).unwrap();
 
     let content = fs::read_to_string(target.join("cas-passive-skill/SKILL.md")).unwrap();
-    assert!(!content.contains("argument-hint"));
-    // Non-invokable skills should have user-invocable: false
-    assert!(content.contains("user-invocable: false"));
-}
-
-#[test]
-fn test_sync_invokable_skill_no_user_invocable_false() {
-    let temp = TempDir::new().unwrap();
-    let target = temp.path().join(".claude/skills");
-    let syncer = SkillSyncer::new(target.clone());
-
-    let mut skill = create_test_skill("invokable-skill", true);
-    skill.invokable = true;
-    skill.argument_hint = "[query]".to_string();
-
-    syncer.sync_skill(&skill).unwrap();
-
-    let content = fs::read_to_string(target.join("cas-invokable-skill/SKILL.md")).unwrap();
-    // Invokable skills should NOT have user-invocable: false
-    assert!(!content.contains("user-invocable: false"));
-    assert_frontmatter_string(&content, "argument-hint", "[query]");
-}
-
-#[test]
-fn test_sync_skill_with_context_fork() {
-    let temp = TempDir::new().unwrap();
-    let target = temp.path().join(".claude/skills");
-    let syncer = SkillSyncer::new(target.clone());
-
-    let mut skill = create_test_skill("forked-skill", true);
-    skill.context_mode = Some("fork".to_string());
-
-    syncer.sync_skill(&skill).unwrap();
-
-    let content = fs::read_to_string(target.join("cas-forked-skill/SKILL.md")).unwrap();
-    assert!(content.contains("context: fork"));
-}
-
-#[test]
-fn test_sync_skill_with_agent_type() {
-    let temp = TempDir::new().unwrap();
-    let target = temp.path().join(".claude/skills");
-    let syncer = SkillSyncer::new(target.clone());
-
-    let mut skill = create_test_skill("agent-skill", true);
-    skill.agent_type = Some("code-reviewer".to_string());
-
-    syncer.sync_skill(&skill).unwrap();
-
-    let content = fs::read_to_string(target.join("cas-agent-skill/SKILL.md")).unwrap();
-    assert!(content.contains("agent: code-reviewer"));
-}
-
-#[test]
-fn test_sync_skill_with_allowed_tools() {
-    let temp = TempDir::new().unwrap();
-    let target = temp.path().join(".claude/skills");
-    let syncer = SkillSyncer::new(target.clone());
-
-    let mut skill = create_test_skill("restricted-skill", true);
-    skill.allowed_tools = vec!["Read".to_string(), "Grep".to_string(), "Glob".to_string()];
-
-    syncer.sync_skill(&skill).unwrap();
-
-    let content = fs::read_to_string(target.join("cas-restricted-skill/SKILL.md")).unwrap();
-    assert!(content.contains("allowed-tools:"));
-    assert!(content.contains("  - Read"));
-    assert!(content.contains("  - Grep"));
-    assert!(content.contains("  - Glob"));
+    let parsed = frontmatter(&content);
+    assert!(parsed.get("argument-hint").is_none());
+    assert_eq!(parsed["user-invocable"].as_bool(), Some(false));
 }
 
 /// Regression test for cas-e2e2: cas-core sync path was silently dropping
@@ -250,12 +138,8 @@ fn test_sync_skill_with_disallowed_tools() {
     syncer.sync_skill(&skill).unwrap();
 
     let content = fs::read_to_string(target.join("cas-restricted-skill/SKILL.md")).unwrap();
-    assert!(
-        content.contains("disallowed-tools:"),
-        "SKILL.md must emit disallowed-tools frontmatter — content:\n{content}"
-    );
-    assert!(content.contains("  - Write"), "Must list Write");
-    assert!(content.contains("  - Edit"), "Must list Edit");
+    let parsed = frontmatter(&content);
+    assert_eq!(parsed["disallowed-tools"], serde_yaml::to_value(&skill.disallowed_tools).unwrap());
 }
 
 #[test]
@@ -271,19 +155,17 @@ fn test_sync_skill_with_all_frontmatter_fields() {
     skill.agent_type = Some("Explore".to_string());
     skill.allowed_tools = vec!["Read".to_string(), "Bash".to_string()];
 
-    syncer.sync_skill(&skill).unwrap();
+    assert!(syncer.sync_skill(&skill).unwrap());
 
     let content = fs::read_to_string(target.join("cas-full-skill/SKILL.md")).unwrap();
-    // Should have all frontmatter fields
-    assert!(content.contains("name: cas-full-skill"));
-    assert_frontmatter_string(&content, "argument-hint", "[file]");
-    assert!(content.contains("context: fork"));
-    assert!(content.contains("agent: Explore"));
-    assert!(content.contains("allowed-tools:"));
-    assert!(content.contains("  - Read"));
-    assert!(content.contains("  - Bash"));
-    // Should NOT have user-invocable: false since it IS invokable
-    assert!(!content.contains("user-invocable: false"));
+    let parsed = frontmatter(&content);
+    assert_eq!(parsed["name"].as_str(), Some("cas-full-skill"));
+    assert_eq!(parsed["description"].as_str(), Some(skill.description.as_str()));
+    assert_eq!(parsed["argument-hint"].as_str(), Some(skill.argument_hint.as_str()));
+    assert_eq!(parsed["context"].as_str(), skill.context_mode.as_deref());
+    assert_eq!(parsed["agent"].as_str(), skill.agent_type.as_deref());
+    assert_eq!(parsed["allowed-tools"], serde_yaml::to_value(&skill.allowed_tools).unwrap());
+    assert!(parsed.get("user-invocable").is_none_or(|value| value.as_bool() == Some(true)));
 }
 
 #[test]
@@ -335,25 +217,14 @@ fn test_sync_skill_with_hooks() {
     syncer.sync_skill(&skill).unwrap();
 
     let content = fs::read_to_string(target.join("cas-hooked-skill/SKILL.md")).unwrap();
-    assert!(content.contains("hooks:"), "Missing hooks section");
-    assert!(
-        content.contains("PostToolUse:"),
-        "Missing PostToolUse section"
-    );
-    assert!(
-        content.contains("matcher: Write|Edit") || content.contains("matcher: \"Write|Edit\""),
-        "Missing matcher - content:\n{content}"
-    );
-    assert!(
-        content.contains("command: cas hook PostToolUse"),
-        "Missing command"
-    );
-    assert!(content.contains("timeout: 5000"), "Missing timeout");
-    assert!(content.contains("Stop:"), "Missing Stop section");
-    assert!(
-        content.contains("command: cas hook Stop"),
-        "Missing Stop command"
-    );
+    let parsed = frontmatter(&content);
+    let expected = serde_json::json!({
+        "PostToolUse": [{"matcher": "Write|Edit", "hooks": [{
+            "type": "command", "command": "cas hook PostToolUse", "timeout": 5000
+        }]}],
+        "Stop": [{"hooks": [{"type": "command", "command": "cas hook Stop"}]}]
+    });
+    assert_eq!(parsed["hooks"], serde_yaml::to_value(expected).unwrap());
 }
 
 /// cas-d731. The same end-to-end claim for the MCP server's writer: this is

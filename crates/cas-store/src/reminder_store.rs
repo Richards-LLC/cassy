@@ -1524,6 +1524,7 @@ mod tests {
             )
             .unwrap();
 
+
         let expired = store.expire_stale().unwrap();
         assert_eq!(expired, 1);
 

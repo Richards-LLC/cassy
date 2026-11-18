@@ -36,7 +36,7 @@ fn test_entry_search_document() {
 
 #[test]
 fn test_entry_embedding_text() {
-    let entry = Entry {
+    let mut entry = Entry {
         id: "test".to_string(),
         content: "Content here".to_string(),
         title: Some("Title".to_string()),
@@ -46,6 +46,9 @@ fn test_entry_embedding_text() {
     let text = entry.doc_embedding_text();
     assert!(text.contains("Title"));
     assert!(text.contains("Content here"));
+
+    entry.title = None;
+    assert_eq!(entry.doc_embedding_text(), entry.content);
 }
 
 // =========================================================================
@@ -126,6 +129,9 @@ fn test_rule_search_document() {
     assert_eq!(rule.doc_content(), "Always validate input parameters");
     assert_eq!(rule.doc_type(), "rule");
     assert_eq!(rule.doc_tags(), vec!["security", "validation"]);
+
+    assert!(rule.doc_title().is_none());
+    assert_eq!(rule.doc_embedding_text(), rule.content);
 
     let metadata = rule.doc_metadata();
     assert_eq!(metadata.get("status"), Some(&"Proven".to_string()));

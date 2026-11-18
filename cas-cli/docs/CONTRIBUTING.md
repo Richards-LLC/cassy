@@ -1544,6 +1544,18 @@ such a retry. Replaying the same supervisor verdict repairs the recovery notice
 without adding another verdict. Changed repository proof still invalidates the
 approval and requires a fresh dispatch.
 
+A parked delivery integrated through an outside PR may have no Cassy review
+cycle. Containment and green CI never supply that review. A live registered
+supervisor can use `verification action=add task_id=<id> dispatch_id=null
+status=approved|rejected summary="<review evidence>"` directly. Null requests authenticated dispatch
+inference; Cassy verifies the declared target still
+contains the immutable delivery and binds the verdict to that integrated tree,
+including any PR follow-up commits. An unmerged delivery still needs the normal
+candidate, and an existing dispatch retains its authority. Ordinary task notes
+cannot approve either path. After approval, retry ordinary close; other close
+and QA gates remain in force. G-70 also names the explicit, audited historical
+close override when that is the supervisor's chosen recovery.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside
@@ -2838,6 +2850,10 @@ test file, or to the nearest JavaScript package/Rust crate for a source input.
 That wider set runs once and records a separate widened receipt at the tested
 commit. Park consumes it without executing tests; identified changed tests still
 owe five consecutive passes. Caller Jest name filters cannot narrow this proof.
+If a broader Rust selection fails, prior valid stability can survive for owned
+tests with a positive passing result in every attempted run. Failed or unrun
+tests lose that evidence, and changed inputs still require fresh proof. This
+restores stability only; the failed selection receives no passing crate receipt.
 Stability uses the same receipt carry-forward as crate proof: documentation or
 changelog commits preserve it when no test/build inputs change. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
@@ -5242,6 +5258,31 @@ with independent, supervisor-direct or unknown historical provenance. The check
 stage totals retain their release-time window; the dated review rows show the
 complete retained history of those deliveries. Wakes are also grouped by the
 authenticated queue notice kind. A missing stamp remains unknown.
+
+Release friction sensors are also present in text and JSON (`sensors`). Online
+reports paginate Actions runs/jobs plus failed-job annotations/logs, retaining
+confirmed hosted runner communication losses and exit-143 shutdown evidence by
+job and runner labels. Failed/cancelled conclusions alone are not runner losses.
+GitHub captures are retained in `.cas/ledger-sensors/`; `--offline` reuses a
+matching capture and names missing inputs. Capture time and covered interval
+remain visible. Actions and project issue repositories resolve separately.
+Daily issue counts use UTC days, exclude pull requests, count opens and the
+retained `closed_at` snapshot, and divide agent-labelled/signed opens by all
+opens. Reopened issues have no retained closure timestamp; these snapshots do
+not reconstruct every historical close/reopen event.
+
+Park-to-train-merge cohorts use first parks in `[start, end)`, earliest canonical
+park notes refined by authenticated lifecycle relay timestamps, and the first
+subsequent `epic/*` merge observation (including merges after the cohort end).
+Reparks count once. Median is the usual midpoint; p90 is nearest rank
+`ceil(0.9*n)`. Unmatched parks remain right-censored at capture. This is the
+original baseline definition, distinct from commit-to-main latency. The local
+retained store is the coverage boundary; missing remote history is not inferred.
+`--park-visibility-minutes N` (default ten) measures cross-machine observation
+delay without affecting gates. New park and sync notes retain origin, owner and
+observer machines/timestamps; older rows without these facts remain unknown.
+No retained owner observation by capture is censored, not proof of loss.
+
 
 `cas ledger backfill` reuses the existing verdict and native-turn readers.
 Immutable legacy rows receive detail companions; aggregation suppresses their

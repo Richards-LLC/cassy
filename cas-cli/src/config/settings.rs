@@ -1016,8 +1016,9 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
-    /// Machine-wide live worker cap used by local admission and peer routing.
-    /// Unset inherits `~/.cas/config.toml`, then 8; read it via `max_workers()`.
+    /// In project config, caps this project's live workers. The same user-level
+    /// key in `~/.cas/config.toml` caps all workers on the machine (default 8).
+    /// Admission reads both layers from Config; `max_workers()` is the config view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_workers: Option<usize>,
 
@@ -1209,7 +1210,7 @@ pub struct FactoryConfig {
 }
 
 impl FactoryConfig {
-    /// Effective machine-wide live worker cap.
+    /// Effective value for config reads, inheriting user defaults when unset.
     pub fn max_workers(&self) -> usize {
         self.max_workers.unwrap_or_else(default_max_workers)
     }

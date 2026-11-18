@@ -282,12 +282,14 @@ mod tests {
     fn test_wait_stable() {
         let mut runner = PtyRunner::new();
         runner
-            .spawn("echo", &["stable output"])
+            .spawn("sh", &["-c", "echo 'stable output'; read -r release"])
             .expect("spawn failed");
 
+        runner.wait_for_text("stable output").expect("output ready");
         let config = WaitConfig::with_timeout_ms(1000).stable_duration(Duration::from_millis(100));
-        let result = wait_stable(&mut runner, &config);
-        assert!(result.is_ok());
+        let output = wait_stable(&mut runner, &config).expect("stable output");
+        assert!(output.contains("stable output"));
+        assert!(runner.is_running(), "stability must not depend on child exit");
     }
 
     #[test]

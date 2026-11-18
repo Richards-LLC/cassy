@@ -135,11 +135,12 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
     def test_dependency_selection_fixture_markers_cas_5bb6(self):
         source = '''test('selection', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'module-'));
+  await copyFile(join(repoRoot, 'scripts/visual-qa.mjs'), join(dir, 'visual-qa.mjs'));
   for (const [name, marker] of [['node_modules/playwright', 'local'], ['selected', 'explicit']]) {
     const pkg = join(dir, name);
     await writeFile(join(pkg, 'index.js'), `export const marker = ${JSON.stringify(marker)};`);
   }
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import { resolvePlaywright } from './visual-qa.mjs'; console.log((await resolvePlaywright()).playwright.marker);`], {
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import { resolvePlaywright } from ${JSON.stringify(pathToFileURL(join(dir, 'visual-qa.mjs')).href)}; console.log((await resolvePlaywright()).playwright.marker);`], {
     encoding: 'utf8', env: { ...process.env, PLAYWRIGHT_MODULE: join(dir, 'selected') },
   });
   assert.equal(child.stdout.trim(), 'explicit');
@@ -149,6 +150,14 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             (source.replace('assert.equal', 'assert.strictEqual'), False),
             (source.replace("child.stdout.trim(), 'explicit'", "'explicit', child.stdout.trim()"), False),
             (source.replace('marker', 'identity').replace('explicit', 'selected package'), False),
+            (source.replace('marker', 'message').replace(
+                "import { resolvePlaywright } from ${JSON.stringify(pathToFileURL(join(dir, 'visual-qa.mjs')).href)}; console.log((await resolvePlaywright()).playwright.message);",
+                "import { product } from './product.mjs'; console.log(product.message);"), True),
+            (source.replace("pathToFileURL(join(dir, 'visual-qa.mjs'))", "pathToFileURL(join(other, 'visual-qa.mjs'))"), True),
+            (source.replace("PLAYWRIGHT_MODULE: join(dir, 'selected')", "PLAYWRIGHT_MODULE: join(other, 'selected')"), True),
+            (source.replace("PLAYWRIGHT_MODULE: join(dir, 'selected')", "PLAYWRIGHT_MODULE: join(dir, 'unrelated')"), True),
+            (source.replace("'scripts/visual-qa.mjs'", "'scripts/product.mjs'"), True),
+            (source.replace("join(pkg, 'index.js')", "join(other, 'index.js')"), True),
             (source.replace("'explicit');", "'unrelated');"), True),
             (source.replace('child.stdout.trim()', 'child.stderr.trim()'), True),
             (source.replace("assert.equal(child.stdout.trim(), 'explicit')", "assert.ok(child.stdout.includes('explicit'))"), True),

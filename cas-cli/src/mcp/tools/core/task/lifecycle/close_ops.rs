@@ -9761,7 +9761,7 @@ impl CasCore {
                         && let Some(paths) =
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
                     {
-                        gate_refusals.extend(receipt_scope::park_refusals(
+                        let mut receipt_refusals = receipt_scope::park_refusals(
                             &self.cas_root,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                             &task,
@@ -9771,14 +9771,43 @@ impl CasCore {
                             task_attribution::range_bounds(
                                 &close_project_root, &resolved_parent_branch, window, Some(tip),
                             ).as_deref(),
-                        ));
+                        );
+                        // GH #2041: authority and reason were validated at entry.
+                        // Waive only stability, retaining crate/content obligations.
+                        let before = receipt_refusals.len();
+                        if supervisor_override {
+                            receipt_refusals.retain(|refusal| {
+                                !refusal.starts_with("CHANGED_TEST_STABILITY_REQUIRED:")
+                                    && !refusal.starts_with("CHANGED_TEST_DISCOVERY_FAILED:")
+                            });
+                        }
+                        if receipt_refusals.len() != before {
+                            accepted_override_codes.push("G-61");
+                            parking.notes.push_str(&format!(
+                                "\n\nDECISION: authenticated supervisor waived park test stability [G-61] at {tip}. Reason: {}",
+                                req.reason.as_deref().unwrap_or_default().trim(),
+                            ));
+                        }
+                        gate_refusals.extend(receipt_refusals);
                     }
-                    // cas-e571: a build routed from another machine ships
-                    // its evidence to that machine's reviewer before parking.
-                    if gate_refusals.is_empty()
-                        && let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(&self.cas_root, &task)
-                    {
-                        gate_refusals.push(refusal);
+                    // Publish ordinary local proof too, without adding a gate.
+                    // Routed builds retain their existing strict publication rule.
+                    let mut publication_warning = String::new();
+                    if gate_refusals.is_empty() {
+                        let mut evidence_task = task.clone();
+                        evidence_task.deliverables.parked_close_reason = req.reason.clone();
+                        if let Err(warning) = crate::artifacts::proof::publish_routed_evidence(
+                            &self.cas_root, &evidence_task,
+                            worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                        ) {
+                            if crate::factory_build_routing::routed_from(&task)
+                                .is_some_and(|source| source != cas_types::Agent::get_or_generate_machine_id())
+                            { gate_refusals.push(warning); }
+                            else {
+                                publication_warning = format!("\nWARNING (non-blocking): {warning}");
+                                let _ = task_store.append_note(&task.id, &warning);
+                            }
+                        }
                     }
                     if !gate_refusals.is_empty() {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
@@ -9880,7 +9909,7 @@ impl CasCore {
                     } else {
                         msg
                     };
-                    let msg = format!("{msg}{impact_warning}");
+                    let msg = format!("{msg}{impact_warning}{publication_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,
@@ -9894,6 +9923,8 @@ impl CasCore {
                     let artifacts_root = self.load_config().factory().artifacts_root;
                     let msg = gate_text::upkeep_receipt(&self.cas_root,
                         artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
+                    let msg = accepted_override_codes.iter().fold(msg, |message, code|
+                        crate::gates::override_tag(code, message));
                     return Ok(Self::tool_error(msg));
                 }
             }
@@ -10605,13 +10636,10 @@ impl CasCore {
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))
                         {
-                            let delivery_branch = task.deliverables.parked_branch.as_deref()
-                                .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
-                                .or(task.assignee.as_deref()).unwrap_or("<delivery branch>");
                             return Ok(Self::tool_error(crate::gates::tag("G-70", format!(
-                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. Supervisor recovery: {}factory action=worktree_merge id={} task_id={} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {}task action=request_changes id={} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Repeating close cannot create a post-merge approval.",
-                                task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), delivery_branch, task.id,
-                                crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
+                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. For a historical delivery already integrated, a live registered supervisor audits its ancestry and content, then uses `{}task action=close id={} commit_receipt={} supervisor_override=true reason=\"Reviewed the integrated historical delivery and missing pre-merge approval\"`. This records a recovery decision; it does not create a pre-merge approval. An already-contained worktree_merge cannot supply the missing verdict. Request changes only when a code correction is needed, then review that correction before publication.",
+                                task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), task.id,
+                                task.deliverables.factory_branch_anchor.as_deref().unwrap_or("<integrated-delivery-sha>")
                             ))));
                         }
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
@@ -30700,7 +30728,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "release-inventory-target", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "methodology-cleared", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "release-inventory-target", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -30780,6 +30808,7 @@ mod merge_state_gate_tests {
             task.deliverables.factory_branch_anchor = Some(source.clone());
             task.deliverables.parked_branch = Some("factory/worker".into());
             task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-192b0-fixture".into(), target_branch: "main".into() });
+            if row == "methodology-cleared" { task.execution_note = Some("no-code".into()); }
             tasks.add(&task).unwrap();
             if matches!(row, "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
@@ -30840,7 +30869,7 @@ mod merge_state_gate_tests {
                 tasks.update(&task).unwrap();
             }
             assert_ne!(landed, candidate.proof.head_commit);
-            if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
+            if matches!(row, "queue-landed" | "methodology-cleared" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             if row == "queue-target-progress" {
@@ -30895,6 +30924,18 @@ mod merge_state_gate_tests {
                 assert!(git_commit_is_ancestor(p, &source, "origin/main"));
                 assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "origin/main"));
             }
+            if row == "methodology-cleared" {
+                use crate::mcp::CasService;
+                env.set("CAS_AGENT_ROLE", "supervisor");
+                CasService::new(core.clone(), None).task(Parameters(serde_json::from_value(serde_json::json!({
+                    "action": "update", "id": task.id, "proof_scope_fix": true, "execution_note": "",
+                    "reason": "Correct the methodology label on the unchanged merged delivery",
+                })).unwrap())).await.unwrap();
+                task = tasks.get(&task.id).unwrap();
+                assert!(task.execution_note.is_none());
+                assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
+                    cas_types::VerificationDispatchState::Resolved);
+            }
             // Probe the same containment guard as well as full close, so a
             // prior content gate cannot conceal a permissive partial-patch rule.
             match verified_delivery::current(&root, &task) {
@@ -30907,7 +30948,7 @@ mod merge_state_gate_tests {
                     }
                     assert_eq!(
                         reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "containment guard: {row}",
+                        matches!(row, "queue-landed" | "methodology-cleared" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "containment guard: {row}",
                     );
                 },
                 _ => panic!("missing task-bound review: {row}"),
@@ -30984,7 +31025,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "methodology-cleared" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }
@@ -38511,6 +38552,29 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             }
             other => panic!("a byte-identical delivered path is not dropped: {other:?}"),
         }
+    }
+
+    /// GH #1989: path history cannot report a loss when the authored final
+    /// snapshot is byte-identical on the target, even after a dropping merge.
+    #[test]
+    fn byte_identical_target_restoration_is_present_gh1989() {
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        std::fs::write(repo.join("own.ts"), "export const delivered = 1;\n").unwrap();
+        git(repo, &["add", "own.ts"]);
+        git(repo, &["commit", "-qm", "fix(cas-test1): delivered snapshot"]);
+        let anchor = rev_parse_local(repo, "HEAD");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", "-s", "ours", "factory/worker", "-m", "integrate without content"]);
+        std::fs::write(repo.join("own.ts"), "export const delivered = 1;\n").unwrap();
+        git(repo, &["add", "own.ts"]);
+        git(repo, &["commit", "-qm", "chore: restore final snapshot"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        assert_eq!(tree_path_blob(repo, &anchor, "own.ts"), tree_path_blob(repo, "main", "own.ts"));
+        assert!(matches!(run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", repo),
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)));
     }
 
     /// cas-f38ca: byte identity alone never clears a delivery the task itself

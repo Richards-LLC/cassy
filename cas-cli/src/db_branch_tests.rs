@@ -7,6 +7,7 @@ struct StubNeon {
     branches: Mutex<Vec<NeonBranchInfo>>,
     created: Mutex<Vec<(String, String)>>,
     deleted: Mutex<Vec<String>>,
+    connection: Option<String>,
     fail_connection: bool,
     fail_delete: bool,
 }
@@ -61,7 +62,7 @@ impl NeonBranchApi for StubNeon {
         if self.fail_connection {
             Err(format!("upstream said no for {CONNECTION}"))
         } else {
-            Ok(CONNECTION.to_string())
+            Ok(self.connection.clone().unwrap_or_else(|| CONNECTION.to_string()))
         }
     }
     async fn delete_branch(&self, _project_id: &str, branch_id: &str) -> Result<(), String> {
@@ -232,7 +233,8 @@ fn project_binding_reads_the_generated_skill_file() {
 #[tokio::test]
 async fn provision_writes_a_private_git_excluded_env_file_and_records_the_branch() {
     let (_tmp, cas_root, worktree) = setup();
-    let api = neon();
+    const SHELL_CONNECTION: &str = "postgresql://owner:s3cret'raw$raw@ep-x.neon.tech/neondb?sslmode=require&channel_binding=require";
+    let api = StubNeon { connection: Some(SHELL_CONNECTION.into()), ..neon() };
     let now = Utc::now();
     let record = provision(
         &api,
@@ -257,10 +259,16 @@ async fn provision_writes_a_private_git_excluded_env_file_and_records_the_branch
     let env = worktree.join(ENV_FILE);
     assert_eq!(record.env_file, env);
     let body = std::fs::read_to_string(&env).unwrap();
-    assert!(
-        body.contains(&format!("DATABASE_URL={CONNECTION}\n")),
-        "{body}"
-    );
+    // Both dotenv consumers and a sourced shell must use the disposable
+    // branch, including projects whose datasource reads DIRECT_URL.
+    let values = dotenvy::from_read_iter(body.as_bytes())
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>().unwrap();
+    assert_eq!(values.get("DATABASE_URL").map(String::as_str), Some(SHELL_CONNECTION));
+    assert_eq!(values.get("DIRECT_URL").map(String::as_str), Some(SHELL_CONNECTION));
+    let sourced = std::process::Command::new("sh")
+        .args(["-c", ". \"$1\"; test \"$DATABASE_URL\" = \"$2\" && test \"$DIRECT_URL\" = \"$2\"", "sh"])
+        .arg(&env).arg(SHELL_CONNECTION).status().unwrap();
+    assert!(sourced.success());
     assert!(
         body.contains(&format!("CAS_DB_BRANCH_ID={}\n", record.branch_id)),
         "{body}"

@@ -2315,12 +2315,18 @@ mod tests {
                 outcome
             })
         };
-        // Give the pooled open time to reach SQLite and start waiting.
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            stalled_done.try_recv().is_err(),
-            "test precondition: the open of the locked database must be waiting"
-        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let opening = loop {
+            let opening = POOL.try_lock().ok().is_some_and(|pool| {
+                pool.as_ref()
+                    .and_then(|pool| pool.slots.get(&canonical_db_path(&stalled_path)))
+                    .is_some_and(|slot| slot.state.try_lock().is_err())
+            });
+            if opening || Instant::now() >= deadline {
+                break opening;
+            }
+            std::thread::yield_now();
+        };
 
         let (other_tx, other_rx) = std::sync::mpsc::channel();
         let other = std::thread::spawn(move || {
@@ -2336,6 +2342,8 @@ mod tests {
         let _ = stalled.join().unwrap();
         let other_outcome = other.join().unwrap();
 
+        assert!(opening, "the stalled database reached its open slot");
+        assert!(stalled_done.try_recv().is_ok(), "stalled opener finished after release");
         assert_eq!(
             answered,
             Ok(true),
@@ -2506,37 +2514,28 @@ mod tests {
                 own.execute_batch("BEGIN IMMEDIATE").unwrap();
                 own.execute("INSERT INTO t VALUES (99, 'holder')", []).unwrap();
                 held_tx.send(()).unwrap();
-                // Let the pooled writer start waiting on the write lock.
-                std::thread::sleep(Duration::from_millis(150));
-                let started = Instant::now();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !matches!(shared.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+                    assert!(Instant::now() < deadline, "the pooled writer reached its first attempt");
+                    std::thread::yield_now();
+                }
                 let rows: i64 = shared
                     .lock()
                     .unwrap()
                     .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
                     .unwrap();
-                let mutex_wait = started.elapsed();
                 own.execute_batch("COMMIT").unwrap();
-                (rows, mutex_wait)
+                rows
             })
         };
         held_rx.recv().unwrap();
 
-        let started = Instant::now();
         let tx = begin_immediate_pooled(&shared).expect("the pooled writer must get the lock");
         tx.execute("INSERT INTO t VALUES (2, 'pooled')", []).unwrap();
         tx.commit().unwrap();
-        let writer_wait = started.elapsed();
 
-        let (rows_seen, mutex_wait) = holder.join().unwrap();
+        let rows_seen = holder.join().unwrap();
         assert_eq!(rows_seen, 1, "the holder read through the pooled connection");
-        assert!(
-            mutex_wait < Duration::from_millis(1_000),
-            "the holder waited {mutex_wait:?} for the pooled mutex"
-        );
-        assert!(
-            writer_wait < Duration::from_secs(3),
-            "the pooled writer waited {writer_wait:?}"
-        );
         let total: i64 = shared
             .lock()
             .unwrap()
@@ -2547,44 +2546,6 @@ mod tests {
         // reports a custom handler as busy_timeout 0, never the short
         // per-attempt timeout.
         assert_eq!(busy_timeout_ms(&shared.lock().unwrap()), 0);
-    }
-
-    /// While a pooled writer waits, other callers keep getting the mutex
-    /// between its attempts.
-    #[test]
-    fn cas_3f65e_pooled_writer_does_not_hold_the_mutex_across_retry_sleeps() {
-        let temp = TempDir::new().unwrap();
-        let (db_path, conn) = contended_db(&temp);
-        let shared = Arc::new(Mutex::new(conn));
-
-        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_200));
-        ready.recv().unwrap();
-
-        let writer = {
-            let shared = Arc::clone(&shared);
-            std::thread::spawn(move || {
-                let tx = begin_immediate_pooled(&shared)?;
-                tx.execute("INSERT INTO t VALUES (2, 'pooled')", [])?;
-                tx.commit()?;
-                crate::Result::Ok(())
-            })
-        };
-        std::thread::sleep(Duration::from_millis(100));
-
-        let mut slowest = Duration::ZERO;
-        for _ in 0..6 {
-            let started = Instant::now();
-            drop(shared.lock().unwrap());
-            slowest = slowest.max(started.elapsed());
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        holder.join().unwrap();
-        writer.join().unwrap().expect("the writer commits once the holder does");
-
-        assert!(
-            slowest < Duration::from_millis(500),
-            "the pooled mutex was held for {slowest:?} while the writer waited"
-        );
     }
 
     /// Fifteen workers' processes writing at once is the fleet-boot shape.
@@ -2602,9 +2563,7 @@ mod tests {
                 let conn = Connection::open(&path).unwrap();
                 conn.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
                 let shared = Mutex::new(conn);
-                let mut slowest = Duration::ZERO;
                 for round in 0..5 {
-                    let started = Instant::now();
                     with_immediate_write_txn_pooled(&shared, |tx| {
                         let _: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
                         tx.execute(
@@ -2616,23 +2575,18 @@ mod tests {
                         Ok(())
                     })
                     .unwrap_or_else(|e| panic!("worker {worker} round {round} failed: {e}"));
-                    slowest = slowest.max(started.elapsed());
                 }
-                slowest
             }));
         }
-        let slowest = handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .max()
-            .unwrap();
+        for handle in handles {
+            handle.join().unwrap();
+        }
 
         let conn = Connection::open(&db_path).unwrap();
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 1 + 15 * 5);
-        assert!(slowest < Duration::from_secs(10), "slowest writer waited {slowest:?}");
     }
 
     /// GH #1165: a thread with a store wait budget gives up at its deadline

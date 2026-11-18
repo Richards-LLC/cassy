@@ -635,7 +635,10 @@ mod tests {
             .unwrap();
 
         let file_path = writer.file_path().clone();
-        writer.close().await.unwrap();
+        let stats = writer.close().await.unwrap();
+        assert!(file_path.exists());
+        assert_eq!(stats.total_events, 0);
+        assert_eq!(stats.keyframe_count, 0);
 
         let reader = RecordingReader::open(&file_path).unwrap();
 

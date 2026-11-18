@@ -408,18 +408,24 @@ mod tests {
             std::fs::create_dir_all(p).unwrap();
         }
 
-        store.upsert(&a).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        store.upsert(&b).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        store.upsert(&c).unwrap();
+        for (path, timestamp) in [
+            (&a, "2000-01-01T00:00:00Z"),
+            (&b, "2000-01-03T00:00:00Z"),
+            (&c, "2000-01-02T00:00:00Z"),
+        ] {
+            store.upsert(path).unwrap();
+            store.conn.lock().unwrap().execute(
+                "UPDATE known_repos SET last_touched_at = ? WHERE path = ?",
+                params![timestamp, path.canonicalize().unwrap().to_string_lossy().as_ref()],
+            ).unwrap();
+        }
 
         let list = store.list().unwrap();
         let names: Vec<_> = list
             .iter()
             .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["c", "b", "a"]);
+        assert_eq!(names, vec!["b", "c", "a"]);
     }
 
     #[test]

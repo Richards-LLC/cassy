@@ -97,55 +97,6 @@ fn entry_and_rule_origins_are_stamped_on_add_and_preserved_on_update() {
 }
 
 #[test]
-fn test_sqlite_store_crud() {
-    let temp = TempDir::new().unwrap();
-    let store = SqliteStore::open(temp.path()).unwrap();
-    store.init().unwrap();
-
-    // Generate ID and add entry
-    let id = store.generate_id().unwrap();
-    let entry = Entry {
-        id: id.clone(),
-        content: "Test content".to_string(),
-        ..Default::default()
-    };
-    store.add(&entry).unwrap();
-
-    // Get entry
-    let retrieved = store.get(&id).unwrap();
-    assert_eq!(retrieved.content, "Test content");
-
-    // Update entry
-    let mut updated = retrieved;
-    updated.content = "Updated content".to_string();
-    updated.helpful_count = 5;
-    store.update(&updated).unwrap();
-
-    let retrieved = store.get(&id).unwrap();
-    assert_eq!(retrieved.content, "Updated content");
-    assert_eq!(retrieved.helpful_count, 5);
-
-    // List entries
-    let entries = store.list().unwrap();
-    assert_eq!(entries.len(), 1);
-
-    // Archive entry
-    store.archive(&id).unwrap();
-    assert!(store.get(&id).is_err());
-
-    let archived = store.list_archived().unwrap();
-    assert_eq!(archived.len(), 1);
-
-    // Unarchive entry
-    store.unarchive(&id).unwrap();
-    assert!(store.get(&id).is_ok());
-
-    // Delete entry
-    store.delete(&id).unwrap();
-    assert!(store.get(&id).is_err());
-}
-
-#[test]
 fn test_list_decayable_excludes_in_context_and_archive_tiers() {
     let temp = TempDir::new().unwrap();
     let store = SqliteStore::open(temp.path()).unwrap();

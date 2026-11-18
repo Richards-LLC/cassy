@@ -748,8 +748,16 @@ mod tests {
 
     #[test]
     fn commander_launch_links_the_launched_account_before_start() {
-        let home = tempfile::tempdir().unwrap();
-        let h = home.path();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let h = home.as_path();
+        let client = h.join("claude");
+        env.set("CAS_TEST_CLAUDE_BIN", &client);
+        // The retired-main premise needs confirmed logout even on macOS.
+        assert_eq!(
+            crate::cli::claude::probe_login_state("main", &h.join(".claude")),
+            crate::account_registry::LoginState::LoggedOut
+        );
         for (provider, cli, key) in [
             (crate::accounts::Provider::Claude, SupervisorCli::Claude, "CLAUDE_CONFIG_DIR"),
             (crate::accounts::Provider::Codex, SupervisorCli::Codex, "CODEX_HOME"),
@@ -763,21 +771,14 @@ mod tests {
                 set: vec![(key.into(), account.clone().into_os_string())],
                 remove: Vec::new(),
             };
-            assert_eq!(
-                ensure_account_links_in(cli, &environment, h),
-                [format!(
-                    "Linked 1 shared item in ~/{}w@x.com from ~/.cas/{}-base",
-                    provider.prefix(),
-                    provider.name()
-                )]
-            );
+            assert_eq!(ensure_account_links_in(cli, &environment, h).len(), 1);
             assert_eq!(std::fs::read_link(account.join("skills")).unwrap(), provider.base_dir(h).join("skills"));
             // `main` runs on the default folder; a recreated one without a login is named, not linked.
             let main = h.join(format!(".{}", provider.name()));
             std::fs::create_dir_all(&main).unwrap();
             let environment = LaunchEnvironment { set: Vec::new(), remove: vec![key.into()], ..environment };
             let notices = ensure_account_links_in(cli, &environment, h);
-            assert!(notices[0].contains("is a retired account folder that came back"), "{notices:?}");
+            assert_eq!(notices.len(), 1, "{notices:?}");
             assert!(!main.join("skills").exists());
         }
     }

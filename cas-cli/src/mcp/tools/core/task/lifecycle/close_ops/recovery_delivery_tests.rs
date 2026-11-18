@@ -2404,6 +2404,9 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     git(&f.worker_path, &["commit", "-qm", "test(cas-other): PR-only follow-up"]);
     let pr_head = git(&f.worker_path, &["rev-parse", "HEAD"]);
     git(repo, &["merge", "--no-ff", BRANCH, "-m", "Merge PR638"]);
+    // The PR follow-up belongs to the integrated PR, not the parked worker
+    // delivery. Keep the worker branch at its actual immutable receipt.
+    git(&f.worker_path, &["reset", "--hard", &f.final_tip]);
     let merged = git(repo, &["rev-parse", "main"]);
     git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
     let mut task = tasks.get(TASK).unwrap();

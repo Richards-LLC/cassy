@@ -5528,6 +5528,67 @@ PY"#);
 
     #[cfg(unix)]
     #[test]
+    fn declared_loopback_database_url_reaches_javascript_children_gh2036() {
+        use clap::Parser;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        env.remove("LEGAL_TEST_DATABASE_URL");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("postgresql://postgres@127.0.0.1:{}/postgres", listener.local_addr().unwrap().port());
+        let input = format!("LEGAL_TEST_DATABASE_URL={url}");
+        for runner in ["node", "jest"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join(".cas");
+            let repo = root.join("worktrees/worker");
+            fixture_commit(&repo);
+            std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+            std::fs::write(repo.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+            std::fs::write(repo.join("package.json"), "{}\n").unwrap();
+            let file = "database.integration.test.mjs";
+            let source = |body: &str| format!(
+                "import {{ test }} from 'node:test';\nimport assert from 'node:assert/strict';\nimport {{ appendFileSync }} from 'node:fs';\ntest('db-fixture', () => {{ {body} }});\n"
+            );
+            std::fs::write(repo.join(file), source("throw new Error('before correction');")).unwrap();
+            fixture_commit_as(&repo, "integration fixture");
+            std::fs::write(repo.join(file), source(&format!(
+                "assert.equal(process.env.LEGAL_TEST_DATABASE_URL, {}); appendFileSync('target/database-runs', '1');",
+                serde_json::to_string(&url).unwrap(),
+            ))).unwrap();
+            fixture_commit_as(&repo, "correct integration fixture");
+            std::fs::create_dir_all(repo.join("target")).unwrap();
+            if runner == "jest" {
+                // Framework boundary: report skipped unless the actual child
+                // receives this fixture input, matching the incident's predicate.
+                std::fs::create_dir_all(repo.join("node_modules/.bin")).unwrap();
+                fake_cargo(&repo.join("node_modules/.bin/jest"), &format!(r#"exec python3 - "$@" <<'JEST_PROBE'
+import json, os, pathlib, sys
+args = sys.argv[1:]
+passed = os.environ.get('LEGAL_TEST_DATABASE_URL') == {}
+if passed:
+    with open('target/database-runs', 'a') as out: out.write('1')
+report = {{'success': True, 'testResults': [{{'name': args[-1], 'status': 'passed',
+    'assertionResults': [{{'fullName': 'db-fixture', 'status': 'passed' if passed else 'pending'}}]}}]}}
+pathlib.Path(args[args.index('--outputFile') + 1]).write_text(json.dumps(report))
+JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
+            }
+            let mut argv = vec!["cas".to_string(), "factory".into(), "worker-check".into(),
+                "--cas-root".into(), root.display().to_string(), "--test-env".into(), input.clone(),
+                "--".into(), runner.into()];
+            if runner == "node" { argv.push("--test".into()); }
+            argv.push(file.into());
+            let cli = crate::cli::Cli::parse_from(argv);
+            let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("fixture factory command"); };
+            let crate::cli::factory::FactoryCommands::WorkerCheck { cargo_args, test_env, .. } = factory.command else { panic!("fixture worker check"); };
+            validate_test_environment(&cargo_args, &test_env).unwrap();
+            execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
+            assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 5, "{runner}");
+            assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none(), "input is child-only");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn isolated_home_prefix_reaches_capped_test_child_gh1694() {
         use clap::Parser;
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);

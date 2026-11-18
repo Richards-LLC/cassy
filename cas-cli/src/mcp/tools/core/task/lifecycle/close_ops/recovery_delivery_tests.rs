@@ -2453,6 +2453,14 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
     git(repo, &["reset", "--hard", &merged]);
     git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    // A prior verdict is substantive review history, not a missing review.
+    let verifications = supervisor.open_verification_store().unwrap();
+    let mut prior = cas_types::Verification::new("ver-prior-review".into(), TASK.into());
+    prior.status = VerificationStatus::Rejected;
+    verifications.add(&prior).unwrap();
+    assert!(supervisor.cas_verification_add(review()).await.is_err());
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    verifications.delete(&prior.id).unwrap();
     let recorded = supervisor.cas_verification_add(review()).await
         .expect("contained delivery must accept an authenticated review");
     assert_ne!(recorded.is_error, Some(true), "{recorded:?}");

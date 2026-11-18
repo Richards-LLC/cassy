@@ -1541,7 +1541,10 @@ impl CasCore {
         // cycle. An authenticated supervisor can review that published target;
         // do not send it back to a merge that has nothing left to publish.
         // Existing cycles retain their own verdict and recovery authority.
-        let contained_proof = if factory_delivery && latest.is_none() {
+        let contained_proof = if factory_delivery && latest.is_none()
+            && self.open_verification_store()?.get_latest_for_task(&task.id)
+                .map_err(|error| refuse(error.to_string()))?.is_none()
+        {
             let (repo, target) = crate::qa_batch::task_context(&self.cas_root, task)
                 .map_err(&refuse)?;
             let git = crate::worktree::GitOperations::new(repo.clone());

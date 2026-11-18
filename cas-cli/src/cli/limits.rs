@@ -17,7 +17,7 @@ use crate::cli::Cli;
 
 // An observation without a known reset cannot establish capacity indefinitely.
 // Known future windows remain useful after an idle session, with their age shown.
-const CLAUDE_SNAPSHOT_MAX_AGE: i64 = 5 * 60;
+pub(crate) const CLAUDE_SNAPSHOT_MAX_AGE: i64 = 5 * 60;
 const CLAUDE_SNAPSHOT_FILE: &str = ".cas-claude-usage.json";
 
 #[derive(Args, Debug, Clone, Default)]

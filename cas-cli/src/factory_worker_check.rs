@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(crate) mod stability;
+pub(crate) mod widened;
 pub(crate) mod javascript;
 
 #[cfg(unix)]
@@ -131,6 +132,8 @@ struct TestReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stability: Option<stability::Proof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    widened: Option<widened::Proof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_log: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
@@ -186,6 +189,9 @@ impl TestReceipt {
         if let Some(proof) = &self.stability {
             note.push_str(&format!(" [stability: {} consecutive passes; changed_tests={}; runner={}; elapsed_ms={}]",
                 proof.consecutive_passes, proof.tests.len(), proof.runner, proof.elapsed_ms));
+        }
+        if let Some(proof) = &self.widened {
+            note.push_str(&format!(" [widened: {:?}; runner={}; passes=1]", proof.scope, proof.runner));
         }
         note
     }
@@ -255,7 +261,9 @@ fn passing_summary_count(log: &str) -> Result<u64> {
     )?;
     let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
     if summaries.len() != 1 {
-        bail!("log must contain exactly one selected nextest summary");
+        // cas-e751: worker-check's producer log also holds the guard phase's
+        // summary; only its "Selected test log" isolates the requested run.
+        bail!("log must contain exactly one selected nextest summary; pass the \"Selected test log\" path worker-check prints, not its full output");
     }
     let run: u64 = summaries[0][1].parse()?;
     let count: u64 = summaries[0][2].parse()?;
@@ -337,6 +345,16 @@ fn targeted_test(args: &[String]) -> Option<TargetedTest> {
         harness,
         filter,
     })
+}
+
+/// The refusal names the shape the caller was attempting: a JavaScript
+/// runner command is never answered with the Cargo-only grammar.
+fn admission_refusal(args: &[String]) -> &'static str {
+    if javascript::names_runner(args) {
+        javascript::SHAPE
+    } else {
+        "Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed"
+    }
 }
 
 pub(crate) fn allowed_args(args: &[String]) -> bool {
@@ -623,6 +641,7 @@ pub(crate) fn record_supervisor_test(
             harness: test.harness,
             count,
             stability,
+            widened: None,
             selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
@@ -1139,6 +1158,7 @@ impl<'a> PassingTests<'a> {
                         harness: synced.harness.clone(),
                         count: synced.count,
                         stability: None,
+                        widened: None,
                         selected_log: None,
                         host_path_opt_out: None,
                         supervisor_recorded: None,
@@ -1325,12 +1345,13 @@ fn read_passing_test_record(
     // Adapter-only stability receipts share ancestry/input validation, but
     // cannot count as a passing Rust crate test.
     let package = match record.packages.as_slice() {
-        [] if test.stability.as_ref().is_some_and(stability::valid) => None,
+        [] if test.stability.as_ref().is_some_and(stability::valid) || test.widened.is_some() => None,
         [package] if package_selector(package).is_some() => Some(package.clone()),
         _ => return None,
     };
     let targeted_test = TargetedTest {
-        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))?,
+        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))
+            .or_else(|| test.widened.as_ref().map(|proof| proof.runner.clone()))?,
         harness: test.harness.clone(),
         filter: test.filter.clone(),
     };
@@ -1766,6 +1787,7 @@ pub(crate) fn record_passing_test_for_tests(
             harness: None,
             count: 1,
             stability: None,
+                        widened: None,
             selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
@@ -2063,12 +2085,37 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
 }
 
 fn validate_test_environment(args: &[String], test_env: &[String]) -> Result<()> {
+    if javascript::allowed_args(args) {
+        if test_env.iter().any(|spec| javascript_test_environment_spec(spec).is_none()) {
+            bail!("JavaScript test inputs require TEST_DATABASE_URL or *_TEST_DATABASE_URL with a password-free loopback PostgreSQL URL and no query or fragment");
+        }
+        return Ok(());
+    }
     if !test_env.is_empty()
         && (targeted_test(args).is_none() || test_env.iter().any(|spec| test_environment_spec(spec).is_none()))
     {
         bail!("Test environment overrides require named targeted tests and allowlisted HOME, Rust home, Git identity/config or CI inputs");
     }
     Ok(())
+}
+
+/// Explicit local fixture inputs for JavaScript children, never runner identity
+/// or provider credentials. Preserve the caller's exact bytes after validation.
+fn javascript_test_environment_spec(spec: &str) -> Option<(&str, &str)> {
+    let (key, value) = spec.split_once('=')?;
+    if !(key == "TEST_DATABASE_URL" || key.ends_with("_TEST_DATABASE_URL"))
+        || !key.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let url = url::Url::parse(value).ok()?;
+    let host = url.host_str()?.trim_matches(['[', ']']);
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (matches!(url.scheme(), "postgres" | "postgresql") && loopback
+        && url.password().is_none() && url.query().is_none() && url.fragment().is_none())
+        .then_some((key, value))
 }
 
 pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
@@ -2094,7 +2141,7 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Optio
 #[cfg(unix)]
 pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if !allowed_args(args) {
-        bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
+        bail!(admission_refusal(args));
     }
     validate_test_environment(args, test_env)?;
     let repo = std::env::current_dir()?;
@@ -2305,10 +2352,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if javascript::allowed_args(args) {
-        if isolated_test_env.is_some() || !test_env.is_empty() {
+        validate_test_environment(args, test_env)?;
+        if isolated_test_env.is_some() {
             bail!("JavaScript stability commands do not accept Rust child environment profiles");
         }
-        return javascript::execute(cas_root, args, cwd);
+        return javascript::execute(cas_root, args, cwd, test_env);
     }
     validate_test_environment(args, test_env)?;
     let test = targeted_test(args);
@@ -2319,7 +2367,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
-        None => check_packages(args).context("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed")?,
+        None => check_packages(args).with_context(|| admission_refusal(args))?,
     };
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
@@ -2336,9 +2384,29 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         validate_harness(&repo, test)?;
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
+    let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
-        stability::rust::selected(&repo, &base, &head, test)?
+        match stability::rust::selected_inputs(&repo, &base, &head, test) {
+            Ok((tests, uncertain)) => {
+                if uncertain {
+                    let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
+                    widened::invalidate(&cas_root, &repo, &head, &scope)?;
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into() });
+                }
+                tests
+            },
+            Err(error) if error.downcast_ref::<stability::rust::MissingTest>().is_some() => {
+                bail!(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}")));
+            }
+            Err(error) => {
+                eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
+                let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
+                widened::invalidate(&cas_root, &repo, &head, &scope)?;
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}") });
+                Vec::new()
+            }
+        }
     } else { Vec::new() };
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
@@ -2515,7 +2583,12 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
     }
-    let mut cargo_args = args.to_vec();
+    let mut cargo_args = if widened_proof.is_some() {
+        // Scope matching uses the crate name; Cargo retains the caller's
+        // version selector so duplicate names still resolve to the right crate.
+        let package = &test.as_ref().expect("widened targeted test").package;
+        vec!["nextest".into(), "run".into(), "-p".into(), package.clone(), "--retries".into(), "0".into()]
+    } else { args.to_vec() };
     if live_headful {
         cargo_args.extend(["--success-output".into(), "immediate".into()]);
     }
@@ -2526,7 +2599,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         cargo_args.insert(4, "--lib".into());
     }
     // Native retries must not turn a failing invocation into stability proof.
-    if !owned_tests.is_empty() {
+    if !owned_tests.is_empty() && widened_proof.is_none() {
         cargo_args.extend(["--retries".into(), "0".into()]);
     }
     command
@@ -2627,6 +2700,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                     consecutive_passes: stability::REQUIRED_PASSES,
                     elapsed_ms: started.elapsed().as_millis(),
                 }),
+                widened: widened_proof,
                 selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,
@@ -2673,16 +2747,26 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         let root = env.home().join("project/.cas");
-        for seeded_failure in [true, false] {
-            let repo = root.join(format!("worktrees/worker-{seeded_failure}"));
+        for (seeded_failure, mixed) in [(true, false), (false, false), (false, true)] {
+            let repo = root.join(format!("worktrees/worker-{seeded_failure}-{mixed}"));
             fixture_commit(&repo);
             std::fs::create_dir_all(repo.join("src")).unwrap();
             std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n").unwrap();
+            let prelude = if mixed { "mod uncertain;\n" } else { "" };
+            if mixed {
+                std::fs::write(repo.join("src/uncertain.rs"), "#[path = \"a.rs\"] mod nested;\n").unwrap();
+                std::fs::write(repo.join("src/a.rs"), "#[test]\nfn opaque() {}\n").unwrap();
+            }
+            std::fs::write(repo.join("src/lib.rs"), format!("{prelude}#[test]\nfn untouched() {{ let raw = 1; let _borrow = &raw; }}\n")).unwrap();
             fixture_commit_as(&repo, "base");
             let base = fixture_head(&repo);
             git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n#[test]\nfn owned_new() {}\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), format!("{prelude}#[test]\nfn untouched() {{ let raw = 1; let _borrow = &raw; }}\n#[test]\nfn owned_new() {{}}\n")).unwrap();
+            if mixed {
+                // Valid Rust escape, outside the JSON string subset the
+                // static module-path adapter can currently classify.
+                std::fs::write(repo.join("src/uncertain.rs"), "#[path = \"\\u{0061}.rs\"] mod nested;\n").unwrap();
+            }
             fixture_commit_as(&repo, "new test");
             env.set_current_dir(&repo);
             let cargo = repo.join("target/fake-cargo");
@@ -2693,11 +2777,13 @@ import sys
 p = Path('target/attempts')
 n = int(p.read_text()) + 1 if p.exists() else 1
 p.write_text(str(n))
-selection = sys.argv[sys.argv.index('-E') + 1]
+selection = sys.argv[sys.argv.index('-E') + 1] if '-E' in sys.argv else 'untouched opaque'
 retries = sys.argv[sys.argv.index('--retries') + 1] if '--retries' in sys.argv else None
 with Path('target/retries').open('a') as output:
     output.write(str(retries) + '\n')
 names = ['owned_new'] + (['untouched'] if 'untouched' in selection else [])
+if 'opaque' in selection:
+    names.append('uncertain::nested::opaque')
 with Path('target/executed').open('a') as output:
     output.write(','.join(names) + '\n')
 if {seeded_failure} and n % 3 == 0:
@@ -2726,7 +2812,8 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
                 let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
                 assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
                 assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
-                assert_eq!(receipt["test"]["count"], 2);
+                assert_eq!(receipt["test"]["count"], if mixed { 3 } else { 2 });
+                assert_eq!(receipt["test"]["widened"].is_object(), mixed);
                 assert_eq!(std::fs::read_to_string(repo.join("target/retries")).unwrap().lines().collect::<Vec<_>>(), vec!["0"; 5]);
                 let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
                 assert_eq!(executed.lines().filter(|line| line.split(',').any(|name| name == "untouched")).count(), 1);
@@ -2738,6 +2825,85 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
                 assert!(execute_at(&root, &overlap, &repo, &cargo).is_err());
                 assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_scope_receipt_table_cas_31eb() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let root = env.home().join("project/.cas");
+        for (row, known, unknown, selector) in [
+            ("R1", Some("src/lib.rs"), None, "fixture"),
+            ("R2", Some("tests/native.rs"), None, "fixture"),
+            ("R3", None, Some("tests/uncertain.rs"), "fixture"),
+            ("R4", Some("src/lib.rs"), Some("src/uncertain.rs"), "fixture"),
+            ("R5", Some("src/lib.rs"), Some("tests/uncertain.rs"), "fixture"),
+            ("R6", None, Some("src/uncertain.rs"), "fixture"),
+            ("R7", None, Some("tests/uncertain.rs"), "fixture@0.1.0"),
+        ] {
+            let repo = root.join(format!("worktrees/{row}"));
+            fixture_commit(&repo);
+            for dir in ["src/fixtures", "tests/fixtures"] { std::fs::create_dir_all(repo.join(dir)).unwrap(); }
+            let mut manifest = "[package]\nname='fixture'\nversion='0.1.0'\nautotests=false\n".to_string();
+            if known == Some("tests/native.rs") { manifest.push_str("[[test]]\nname='native'\npath='tests/native.rs'\n"); }
+            if unknown == Some("tests/uncertain.rs") { manifest.push_str("[[test]]\nname='uncertain'\npath='tests/uncertain.rs'\n"); }
+            std::fs::write(repo.join("Cargo.toml"), manifest).unwrap();
+            let prelude = if unknown == Some("src/uncertain.rs") { "mod uncertain;\n" } else { "" };
+            std::fs::write(repo.join("src/lib.rs"), prelude).unwrap();
+            if let Some(path) = known { std::fs::write(repo.join(path), format!("{prelude}#[test]\nfn known() {{ let before = 0; }}\n")).unwrap(); }
+            if let Some(path) = unknown {
+                std::fs::write(repo.join(path), "#[path = \"fixtures/a.rs\"] mod nested;\n").unwrap();
+                std::fs::write(repo.join(path).parent().unwrap().join("fixtures/a.rs"), "#[test]\nfn opaque() {}\n").unwrap();
+            }
+            fixture_commit_as(&repo, "base");
+            let base = fixture_head(&repo);
+            git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
+            if let Some(path) = known { std::fs::write(repo.join(path), format!("{prelude}#[test]\nfn known() {{}}\n")).unwrap(); }
+            if let Some(path) = unknown { std::fs::write(repo.join(path), "#[path = \"fixtures/\\u{0061}.rs\"] mod nested;\n").unwrap(); }
+            fixture_commit_as(&repo, "delivery");
+            env.set_current_dir(&repo);
+            let cargo = repo.join("target/fake-cargo");
+            std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+            let known_binary = if known == Some("tests/native.rs") { "fixture::native" } else { "fixture" };
+            let unknown_binary = if unknown == Some("tests/uncertain.rs") { "fixture::uncertain" } else { "fixture" };
+            let unknown_name = if unknown == Some("tests/uncertain.rs") { "nested::opaque" } else { "uncertain::nested::opaque" };
+            fake_cargo(&cargo, &format!(r#"python3 - "$@" <<'PY'
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[args.index('-p') + 1] == {selector:?}
+assert args[args.index('--retries') + 1] == '0'
+wide = '-E' not in args
+names = []
+if {has_known} and (wide or 'known' in args[args.index('-E') + 1]):
+    names.append(({known_binary:?}, 'known'))
+if {has_unknown} and wide:
+    names.append(({unknown_binary:?}, {unknown_name:?}))
+with Path('target/executed').open('a') as out:
+    for binary, name in names:
+        out.write(name + '\n')
+for index, (binary, name) in enumerate(names, 1):
+    print(f'        PASS [ 0.01s] ({{index}}/{{len(names)}}) {{binary}} {{name}}')
+print(f'     Summary [ 0.01s] {{len(names)}} tests run: {{len(names)}} passed, 0 skipped')
+PY"#, has_known=if known.is_some() { "True" } else { "False" }, has_unknown=if unknown.is_some() { "True" } else { "False" }));
+            let mut args = vec!["nextest".into(), "run".into(), "-p".into(), selector.into()];
+            if known == Some("tests/native.rs") { args.extend(["--test".into(), "native".into()]); }
+            else { args.push("--lib".into()); }
+            args.extend(["-E".into(), "test(known)".into()]);
+            execute_at(&root, &args, &repo, &cargo).unwrap();
+            let head = fixture_head(&repo);
+            let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &head, &targeted_test(&args).unwrap());
+            let record: CheckReceipt = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let receipt = record.test.unwrap();
+            assert_eq!(receipt.stability.is_some(), known.is_some(), "{row}");
+            if let Some(proof) = receipt.stability { assert_eq!(proof.consecutive_passes, 5, "{row}"); }
+            assert_eq!(receipt.widened.is_some(), unknown.is_some(), "{row}");
+            if let Some(proof) = receipt.widened { assert_eq!(proof.scope, widened::Scope::Crate("fixture".into()), "{row}"); }
+            let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
+            assert_eq!(executed.lines().filter(|name| *name == "known").count(), if known.is_some() { 5 } else { 0 }, "{row}");
+            assert_eq!(executed.lines().filter(|name| name.ends_with("opaque")).count(), usize::from(unknown.is_some()), "{row}");
         }
     }
 
@@ -3263,7 +3429,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         fixture_commit_as(&repo, "delivery");
         let receipt_head = fixture_head(&repo);
         record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
-        let identity = stability::Identity { path: "src/lib.rs".into(), name: "cached".into() };
+        let identity = stability::Identity::exact("src/lib.rs", "cached");
         let selection = TargetedTest { package: "cas".into(), harness: None, filter: "test(cached)".into() };
         let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &receipt_head, &selection);
         let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -4039,6 +4205,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
             for name in ["mcp::socket::tests::create_listener_refuses_a_live_socket",
                 "mcp::socket::tests::create_listener_reclaims_a_stale_socket_file",
                 "hub::idle_sync::tests::store_with_a_live_serve_is_skipped",
+                #[cfg(target_os = "linux")]
                 "factory_candidate_queue::tests::hung_build_kills_detached_children_releases_locks_and_reports_timeout"] {
                 let result = Command::new(std::env::current_exe().unwrap())
                     .args(["--exact", name, "--nocapture"]).env_remove(PROBE).output().unwrap();
@@ -4071,7 +4238,8 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let head = fixture_head(&repo);
         git(&project, &["remote", "add", "origin", project.to_str().unwrap()]).unwrap();
         git(&project, &["update-ref", "refs/remotes/origin/main", &head]).unwrap();
-        let scratch = base.join("rewind");
+        let scratch_dir = tempfile::Builder::new().prefix("cas").tempdir_in("/tmp").unwrap();
+        let scratch = scratch_dir.path().canonicalize().unwrap();
         std::fs::write(
             root.join("config.toml"),
             format!("[factory]\nscratch_root = {:?}\nartifacts_root = {:?}\n", scratch.display().to_string(), base.join("artifacts").display().to_string()),
@@ -5510,6 +5678,115 @@ PY"#);
             shared_repo.join("target/cargo-ran").exists(),
             "admitted Cargo still runs"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_loopback_database_url_reaches_javascript_children_gh2036() {
+        use clap::Parser;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        env.remove("LEGAL_TEST_DATABASE_URL");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("postgresql://postgres@127.0.0.1:{}/postgres", listener.local_addr().unwrap().port());
+        let input = format!("LEGAL_TEST_DATABASE_URL={url}");
+        for local in ["postgresql://localhost/db", "postgres://127.0.0.2/db", "postgresql://[::1]/db"] {
+            assert!(javascript_test_environment_spec(&format!("TEST_DATABASE_URL={local}")).is_some());
+        }
+        for spec in [
+            "TEST_DATABASE_URL=postgresql://db.example.invalid/db",
+            "TEST_DATABASE_URL=postgresql://postgres:private@localhost/db",
+            "TEST_DATABASE_URL=postgresql://localhost/db?host=db.example.invalid",
+            "TEST_DATABASE_URL=postgresql://localhost/db#private",
+            "TEST_DATABASE_URL=https://localhost/db",
+            "DATABASE_URL=postgresql://localhost/db",
+            "CAS_SESSION_ID=other", "PATH=/tmp", "HOME=/tmp",
+        ] {
+            assert!(validate_test_environment(&["node".into(), "--test".into(), "db.test.mjs".into()], &[spec.into()]).is_err());
+        }
+        for runner in ["node", "jest"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join(".cas");
+            let repo = root.join("worktrees/worker");
+            fixture_commit(&repo);
+            std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+            std::fs::write(repo.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+            std::fs::write(repo.join("package.json"), "{}\n").unwrap();
+            let file = "database.integration.test.mjs";
+            let source = |body: &str| format!(
+                "import {{ test }} from 'node:test';\nimport assert from 'node:assert/strict';\nimport {{ appendFileSync }} from 'node:fs';\ntest('db-fixture', () => {{ {body} }});\n"
+            );
+            std::fs::write(repo.join(file), source("throw new Error('before correction');")).unwrap();
+            fixture_commit_as(&repo, "integration fixture");
+            std::fs::write(repo.join(file), source(&format!(
+                "assert.equal(process.env.LEGAL_TEST_DATABASE_URL, {}); appendFileSync('target/database-runs', '1');",
+                serde_json::to_string(&url).unwrap(),
+            ))).unwrap();
+            fixture_commit_as(&repo, "correct integration fixture");
+            std::fs::create_dir_all(repo.join("target")).unwrap();
+            if runner == "jest" {
+                // Framework boundary: report skipped unless the actual child
+                // receives this fixture input, matching the incident's predicate.
+                std::fs::create_dir_all(repo.join("node_modules/.bin")).unwrap();
+                fake_cargo(&repo.join("node_modules/.bin/jest"), &format!(r#"exec python3 - "$@" <<'JEST_PROBE'
+import json, os, pathlib, sys
+args = sys.argv[1:]
+passed = os.environ.get('LEGAL_TEST_DATABASE_URL') == {}
+if passed:
+    with open('target/database-runs', 'a') as out: out.write('1')
+report = {{'success': True, 'testResults': [{{'name': args[-1], 'status': 'passed',
+    'assertionResults': [{{'fullName': 'db-fixture', 'status': 'passed' if passed else 'pending'}}]}}]}}
+pathlib.Path(args[args.index('--outputFile') + 1]).write_text(json.dumps(report))
+JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
+            }
+            let mut argv = vec!["cas".to_string(), "factory".into(), "worker-check".into(),
+                "--cas-root".into(), root.display().to_string(), "--test-env".into(), input.clone(),
+                "--".into(), runner.into()];
+            if runner == "node" { argv.push("--test".into()); }
+            argv.push(file.into());
+            let cli = crate::cli::Cli::parse_from(argv);
+            let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("fixture factory command"); };
+            let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cargo_args, test_env, .. }) = factory.command else { panic!("fixture worker check"); };
+            validate_test_environment(&cargo_args, &test_env).unwrap();
+            let detached = detached_runner_command_with_run(Path::new("cas"), &root, &cargo_args, None, None, &test_env);
+            assert!(detached.get_args().collect::<Vec<_>>().windows(2)
+                .any(|pair| pair == [std::ffi::OsStr::new("--test-env"), std::ffi::OsStr::new(&input)]));
+            execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
+            assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 5, "{runner}");
+            assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none(), "input is child-only");
+            let head = fixture_head(&repo);
+            let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);
+            let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap().next().unwrap().unwrap();
+            let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt.path()).unwrap()).unwrap();
+            let row = &receipt["test"]["stability"]["tests"][0];
+            assert_eq!(row["path"], file);
+            assert_eq!(row["name"], "db-fixture");
+            assert_eq!(row["reason"], "changed-test");
+            if runner == "node" {
+                // Unknown static alias provenance must widen through the real
+                // entry point while retaining the declared child-only fixture.
+                std::fs::write(repo.join(file), format!(
+                    "import {{ describe, test }} from 'node:test';\nimport assert from 'node:assert/strict';\nimport {{ appendFileSync }} from 'node:fs';\n\
+                     const suite = true ? describe : unknown;\nsuite('legal', () => {{ test('db-fixture', () => {{\n\
+                     assert.equal(process.env.LEGAL_TEST_DATABASE_URL, {}); appendFileSync('target/database-runs', '1');\n}}); }});\n",
+                    serde_json::to_string(&url).unwrap(),
+                )).unwrap();
+                fixture_commit_as(&repo, "unknown conditional alias");
+                std::fs::remove_file(repo.join("target/database-runs")).unwrap();
+                execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
+                assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 1);
+                let head = fixture_head(&repo);
+                let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);
+                let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap()
+                    .map(|entry| serde_json::from_slice::<serde_json::Value>(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap())
+                    .find(|receipt| receipt["head"] == head).unwrap();
+                let widened = &receipt["test"]["widened"];
+                assert_eq!(widened["scope"]["File"], file);
+                assert!(widened["reason"].as_str().unwrap().starts_with("widened:"));
+                assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none());
+            }
+        }
     }
 
     #[cfg(unix)]

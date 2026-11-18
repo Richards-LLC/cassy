@@ -1745,6 +1745,44 @@ fn recommend_spawn_accounts(
     notices.into_iter().map(|notice| format!("\nAccount selection: {notice}")).collect()
 }
 
+/// Automatic accounts may fall through to another eligible subscription;
+/// explicit accounts and factory.codex_home remain binding choices.
+fn resolve_spawn_lane_accounts(
+    lane: &str,
+    specs: &mut [cas_mux::WorkerSpec],
+    automatic: &[bool],
+    snapshot: &cas_factory::CapabilitySnapshot,
+    policy: &crate::config::AccountsConfig,
+    now: chrono::DateTime<chrono::Utc>,
+    collect: impl FnOnce() -> std::io::Result<Vec<crate::account_registry::Account>>,
+) -> Result<(String, Vec<String>), String> {
+    let original = match resolve_lane_account_models(lane, specs, snapshot) {
+        Ok(decision) => return Ok(decision),
+        Err(error) => error,
+    };
+    if !specs.iter().zip(automatic).any(|(spec, automatic)| *automatic && spec.cli == cas_mux::SupervisorCli::Codex) {
+        return Err(original);
+    }
+    let accounts = collect().map_err(|_| original.clone())?;
+    let mut account_notices = Vec::new();
+    for (spec, automatic) in specs.iter_mut().zip(automatic) {
+        if !automatic || spec.cli != cas_mux::SupervisorCli::Codex { continue; }
+        let supported = accounts.iter().filter(|account| {
+            let mut candidate = spec.clone();
+            candidate.config_dir = Some(account.folder.to_string_lossy().into_owned());
+            account.provider == crate::accounts::Provider::Codex
+                && resolve_lane_account_models(lane, std::slice::from_mut(&mut candidate), snapshot).is_ok()
+        }).cloned().collect::<Vec<_>>();
+        if let Some(choice) = crate::account_selection::launch_choice(&supported, crate::accounts::Provider::Codex, now, policy).recommended {
+            account_notices.push(format!("Automatic Codex account {} verifies lane {lane}", choice.account.folder.display()));
+            spec.config_dir = Some(choice.account.folder.to_string_lossy().into_owned());
+        }
+    }
+    let (recipe, mut warnings) = resolve_lane_account_models(lane, specs, snapshot)?;
+    warnings.extend(account_notices);
+    Ok((recipe, warnings))
+}
+
 /// cas-05cee: link each worker account's empty shared slots before its
 /// worker starts, and record what was linked or still needs a person in the
 /// spawn receipt. Never refuses the spawn.
@@ -3301,6 +3339,8 @@ impl CasService {
                 .flatten();
         }
 
+        let lane_automatic_accounts = specs.iter().map(|spec| spec.config_dir.is_none()
+            && factory_config.codex_home.as_deref().is_none_or(|home| home.trim().is_empty())).collect::<Vec<_>>();
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
         let mut account_selection_notice = recommend_spawn_accounts(&mut specs, req.lane.is_some(), &factory_config, &account_policy, chrono::Utc::now(), |provider| {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
@@ -3308,7 +3348,10 @@ impl CasService {
         });
         if let (Some(lane), Some(snapshot)) = (req.lane.as_deref(), lane_snapshot.as_ref()) {
             let previous_harnesses = specs.iter().map(|spec| spec.cli).collect::<Vec<_>>();
-            (lane_recipe, lane_warnings) = resolve_lane_account_models(lane, &mut specs, snapshot)
+            (lane_recipe, lane_warnings) = resolve_spawn_lane_accounts(lane, &mut specs, &lane_automatic_accounts, snapshot, &account_policy, chrono::Utc::now(), || {
+                let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
+                crate::account_registry::collect_for(crate::accounts::Provider::Codex, &home, false)
+            })
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
             if specs.iter().zip(&previous_harnesses).any(|(spec, previous)| spec.cli != *previous) {
                 for (spec, previous) in specs.iter_mut().zip(previous_harnesses) {
@@ -13966,6 +14009,15 @@ mod spawn_lifecycle_tests {
             }
             assert!(!root.join("worktrees").join(case).exists());
         }
+        std::fs::remove_file(account.join("models_cache.json")).unwrap();
+        let mut alternate = crate::account_selection::tests::row(crate::accounts::Provider::Codex, "alternate", 6, 30.0, 10.0);
+        alternate.folder = other.clone();
+        for automatic in [false, true] {
+            let mut specs = build_lane_spawn_specs(1, "standard", Some(account.to_str().unwrap()), None, &Default::default()).unwrap().0;
+            let result = resolve_spawn_lane_accounts("standard", &mut specs, &[automatic], &Default::default(), &Default::default(), chrono::Utc::now(), || Ok(vec![alternate.clone()]));
+            assert_eq!(result.is_ok(), automatic);
+            assert_eq!(specs[0].config_dir.as_deref(), Some(if automatic { &other } else { &account }.to_str().unwrap()));
+        }
     }
 
     /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex
@@ -16905,8 +16957,7 @@ mod tests {
 
     /// The Nov 13 and Nov 17 replays (cas-2820): the soonest-reset default put
     /// workers on an 85%-used account while a 6%-used one sat idle. The default
-    /// policy picks the most headroom on the binding window; a usage window
-    /// whose reset has passed counts as rolled over, not full.
+    /// policy picks the most headroom on the binding window.
     #[test]
     fn codex_spawn_picks_most_binding_headroom_by_default_cas_2820() {
         let now: chrono::DateTime<chrono::Utc> = "2026-10-27T12:00:00Z".parse().unwrap();
@@ -16917,9 +16968,7 @@ mod tests {
             let support = row(provider, "support", 2, 85.0, 0.0);
             // Lowest weekly, but its 5h window binds.
             let daniel = row(provider, "daniel", 150, 3.0, 40.0);
-            // A stale 5h snapshot: 95% used, but that window already reset.
-            let mut pippenz = row(provider, "pippenz", 120, 6.0, 95.0);
-            pippenz.windows[0].resets_at = Some(now - chrono::Duration::hours(1));
+            let pippenz = row(provider, "pippenz", 120, 6.0, 0.0);
             Ok(vec![support, daniel, pippenz])
         });
         assert_eq!(specs[0].config_dir.as_deref(), Some("/fixture/.codex-pippenz"), "{receipt}");

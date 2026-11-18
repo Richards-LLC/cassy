@@ -3,7 +3,7 @@
 
 const FINGERPRINT_MARKER: &str = "**Fingerprint**: `";
 
-/// Lowercased words with ids, numbers and hashes collapsed to `#` and gate
+/// Lowercased words with paths, ids, numbers and hashes collapsed to `#` and gate
 /// tags removed, so one refusal reads the same in every report.
 fn normalize_refusal(text: &str) -> String {
     let mut words: Vec<String> = Vec::new();
@@ -12,7 +12,11 @@ fn normalize_refusal(text: &str) -> String {
         if word.is_empty() || crate::gates::find(word).is_some() {
             continue;
         }
-        let word = if word.chars().any(|c| c.is_ascii_digit()) || raw.contains('…') {
+        let word = if word.chars().any(|c| c.is_ascii_digit())
+            || raw.contains('…')
+            || raw.contains('/')
+            || std::path::Path::new(word).extension().is_some()
+        {
             "#".to_string()
         } else {
             word.to_lowercase()
@@ -88,4 +92,40 @@ pub(crate) fn open_task_match(
         !task.is_terminal()
             && fingerprint.matches(&format!("{}\n{}\n{}", task.title, task.description, task.notes))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RefusalFingerprint;
+
+    #[test]
+    fn same_refusal_on_different_files_has_the_same_fingerprint() {
+        let earlier = "CHANGED_TEST_DISCOVERY_FAILED: cannot resolve changed tests in apps/backend/src/items/comment-analytics.service.ts: JavaScript parse error [G-61].";
+        let later = "CHANGED_TEST_DISCOVERY_FAILED: cannot resolve changed tests in apps/backend/src/admin/inbox-tools/inbox-tool-analysis.service.ts: JavaScript parse error [G-61].";
+        let earlier_key = RefusalFingerprint::of(earlier).unwrap();
+        let later_key = RefusalFingerprint::of(later).unwrap();
+
+        assert_eq!(earlier_key, later_key);
+        assert!(later_key.matches(earlier));
+        assert!(earlier_key.matches(later));
+    }
+
+    #[test]
+    fn different_refusal_words_keep_different_fingerprints() {
+        let parse = RefusalFingerprint::of(
+            "CHANGED_TEST_DISCOVERY_FAILED: cannot resolve changed tests in src/first.ts: JavaScript parse error [G-61].",
+        )
+        .unwrap();
+        let missing = "CHANGED_TEST_DISCOVERY_FAILED: cannot resolve changed tests in src/second.ts: test runner missing [G-61].";
+
+        assert_ne!(parse, RefusalFingerprint::of(missing).unwrap());
+        assert!(!parse.matches(missing));
+    }
+
+    #[test]
+    fn path_heavy_headlines_are_not_distinctive() {
+        for path in ["apps/backend/src/items/service", "comment-analytics.service.ts", "`/tmp/service`:"] {
+            assert!(RefusalFingerprint::of(&format!("cannot parse file {path}")).is_none());
+        }
+    }
 }

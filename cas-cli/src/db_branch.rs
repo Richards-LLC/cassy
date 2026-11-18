@@ -533,9 +533,13 @@ pub fn write_env_file(
 ) -> Result<PathBuf, String> {
     ensure_git_excluded(worktree)?;
     let path = worktree.join(ENV_FILE);
+    // POSIX shell quoting also parses as dotenv: keep URL query separators,
+    // dollars and apostrophes literal when the worker sources this file.
+    let connection = format!("'{}'", connection.replace('\'', "'\\''"));
     let body = format!(
         "# Disposable Neon branch for {task_id} (cas-0033). It is deleted when the task closes.\n\
          DATABASE_URL={connection}\n\
+         DIRECT_URL={connection}\n\
          CAS_DB_BRANCH={}\n\
          CAS_DB_BRANCH_ID={}\n",
         branch.name, branch.id

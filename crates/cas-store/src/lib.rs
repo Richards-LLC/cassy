@@ -276,6 +276,7 @@ pub use verification_store::{
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_audit_note,
     request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
+    auto_return_premerge_rejection,
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
     retry_verification_dispatch_after_error_with_conn, recover_errored_verification_dispatch_with_conn,

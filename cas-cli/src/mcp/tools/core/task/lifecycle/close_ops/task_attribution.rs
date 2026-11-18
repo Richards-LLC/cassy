@@ -11,7 +11,7 @@ struct DeliveryRange {
     tip: String,
 }
 
-use crate::git_evidence::git_text;
+use super::delivery_git::text as git_text;
 
 pub(crate) struct StartedDelivery {
     pub branch: String,
@@ -1396,6 +1396,9 @@ pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<
     if !is_safe_git_refname(commit) {
         return None;
     }
+    if let Some(facts) = super::delivery_git::facts(repo, commit) {
+        return (!facts.parents.is_empty()).then_some(!facts.paths.is_empty());
+    }
     let trees = git_text(
         repo,
         &[
@@ -1416,8 +1419,50 @@ pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<
 pub(super) fn first_parent_delivery_content_presence(
     repo: &Path, base: &str, anchor: &str, shipped: &str, target: &str, task_id: &str,
 ) -> Option<DeliveryContentPresence> {
-    if [base, anchor, shipped, target].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
+    if !is_safe_git_refname(target) { return None; }
+    let FirstParentDeliveryPlan { identity, ranges, clean, synced, synced_commits } =
+        first_parent_delivery_plan(repo, base, anchor, shipped, task_id)?;
+    if anchor != shipped {
+        return Some(super::delivery_content_presence_on_target_for_paths(
+            repo, shipped, target, ranges[0].1.as_deref(), false, &[task_id], Some(base),
+        ));
+    }
+    let clean_proof = (!clean.is_empty()).then(|| super::delivery_content_presence_on_target_for_paths(
+        repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
+    ));
+    let synced_proof = if synced_commits.is_empty() { None } else {
+        Some(merge_tip_content_presence_selected(
+            repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
+        )?)
+    };
+    judge_presence(clean_proof, synced_proof, |paths| {
+        paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
+            && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
+    })
+}
+
+/// One immutable plan drives measurement and prewalk enumeration; synced or
+/// foreign paths keep per-commit proof, while own-only paths use the net range.
+struct FirstParentDeliveryPlan {
+    identity: TaskCommitIdentity,
+    ranges: Vec<(String, Option<Vec<String>>, Option<String>)>,
+    clean: Vec<String>,
+    synced: Vec<String>,
+    synced_commits: Vec<String>,
+}
+
+pub(super) fn first_parent_delivery_ranges(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, task_id: &str,
+) -> Option<Vec<(String, Option<Vec<String>>, Option<String>)>> {
+    Some(first_parent_delivery_plan(repo, base, anchor, shipped, task_id)?.ranges)
+}
+
+fn first_parent_delivery_plan(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, task_id: &str,
+) -> Option<FirstParentDeliveryPlan> {
+    if [base, anchor, shipped].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
     let history = git_text(repo, &["rev-list", "--first-parent", "--no-merges", "--reverse", &format!("{base}..{anchor}")])?;
+    super::delivery_git::prime(repo, &history.lines().map(str::to_string).collect::<Vec<_>>());
     let mut identity = TaskCommitIdentity {
         task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
     };
@@ -1425,8 +1470,11 @@ pub(super) fn first_parent_delivery_content_presence(
     for commit in history.lines().filter(|commit| !commit.is_empty()) {
         let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
         let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
-        let paths = git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?;
-        if paths.is_empty() { continue; }
+        let has_content = match super::delivery_git::facts(repo, commit) {
+            Some(facts) => facts.paths.iter().any(|path| path != ".cas" && !path.starts_with(".cas/")),
+            None => !git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?.is_empty(),
+        };
+        if !has_content { continue; }
         if subject_claims_another_task(&message, &identity) { foreign.push(commit.to_string()); }
         else { commits.push(commit.to_string()); }
     }
@@ -1440,9 +1488,9 @@ pub(super) fn first_parent_delivery_content_presence(
     if anchor != shipped {
         // The squash has the exact source snapshot. Limit its comparison to
         // the task's own first-parent paths, excluding target-sync imports.
-        return Some(super::delivery_content_presence_on_target_for_paths(
-            repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
-        ));
+        return Some(FirstParentDeliveryPlan { identity, ranges: vec![
+            (shipped.to_string(), Some(paths), Some(base.to_string())),
+        ], clean: Vec::new(), synced: Vec::new(), synced_commits: Vec::new() });
     }
     // cas-2430: a path only the task's own commits touched is judged by its
     // net base..anchor effect, so a change the task itself reverted or
@@ -1465,18 +1513,12 @@ pub(super) fn first_parent_delivery_content_presence(
         changed_paths(repo, &format!("{commit}^1"), commit)
             .is_some_and(|changed| changed.iter().any(|path| synced.contains(path)))
     }).cloned().collect();
-    let clean_proof = (!clean.is_empty()).then(|| super::delivery_content_presence_on_target_for_paths(
-        repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
-    ));
-    let synced_proof = if synced_commits.is_empty() { None } else {
-        Some(merge_tip_content_presence_selected(
-            repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
-        )?)
-    };
-    judge_presence(clean_proof, synced_proof, |paths| {
-        paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
-            && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
-    })
+    let mut ranges = Vec::new();
+    if !clean.is_empty() {
+        ranges.push((anchor.to_string(), Some(clean.clone()), Some(base.to_string())));
+    }
+    ranges.extend(synced_commits.iter().map(|commit| (commit.clone(), Some(synced.clone()), None)));
+    Some(FirstParentDeliveryPlan { identity, ranges, clean, synced, synced_commits })
 }
 
 /// Join the net proof of the task's own-only paths with the per-commit proof
@@ -1506,6 +1548,10 @@ fn judge_presence(
 }
 
 fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    if let Some(facts) = super::delivery_git::facts(repo, to)
+        && facts.parents.first().is_some_and(|parent| parent == from) {
+        return Some(facts.paths);
+    }
     let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", from, to, "--"])?;
     Some(changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect())
 }
@@ -1682,6 +1728,7 @@ fn merge_tip_content_presence_selected(
         .map(str::to_owned)
         .collect();
 
+    super::delivery_git::prime(repo, &commits);
     // Reverts are negative delivery evidence, never a later task delivery.
     // Apply the exclusion to every selection route, including known receipts.
     // Checkpoints carry the range but supply no positive tree evidence.
@@ -1860,6 +1907,9 @@ fn merge_tip_content_presence_selected(
     }
     // cas-18aa: every commit is measured first, so an earlier draft can be
     // judged against the later task commit that replaced it.
+    if explicit_commits.is_none() {
+        super::prewalk_in_parent_deliveries(repo, &commits, target, merge_tip, &carries_source);
+    }
     let measurements: Vec<_> = commits
         .iter()
         .map(|commit| {

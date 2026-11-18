@@ -494,7 +494,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             body = body[3:-2]
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
             return body  # a literal such as runs-on: ubuntu-latest
-        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
+        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env|runner)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('cancelled()', 'False').replace('success()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
         return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads,
@@ -604,11 +604,12 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
              'Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}',
              'Scoped Validation — Commander journeys ${{ matrix.shard }}/${{ needs.ci-diff.outputs.journey-shard-total }}'},
             'merge admission and the CI watchers read these exact check names')
-        # cas-2e1b: the train's impact selection runs on hosted runners for a
-        # Rust diff, own tests first; ring shards wait for them (fail fast).
+        # Own builds use the trusted local lane slots; ring shards, overrun
+        # reporting and browser jobs retain their hosted placement.
         impact = {name: slim_jobs.pop(name) for name in ('lane-impact', 'lane-impact-overrun', 'lane-impact-ring', 'lane-journeys')}
         self.assertEqual(impact['lane-impact-ring']['needs'], 'lane-impact')
-        self.assertEqual({job['runs-on'] for job in impact.values()}, {'ubuntu-latest'})
+        self.assertEqual(impact['lane-impact']['runs-on'], local)
+        self.assertEqual({job['runs-on'] for name, job in impact.items() if name != 'lane-impact'}, {'ubuntu-latest'})
         for slim, unaffected in itertools.product(('true', ''), ('true', 'false')):
             ctx = {'vars.CAS_LANE_SLIM': slim, 'needs.ci-diff.outputs.rust-unaffected': unaffected}
             self.assertEqual(self.gh_expr(impact['lane-impact']['if'], ctx), slim == 'true' and unaffected == 'false')
@@ -626,6 +627,27 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                     self.assertEqual(runner(off), 'ubuntu-latest')
         for name, job in ci['jobs'].items():
             self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
+
+    def test_lane_own_step_retains_both_streams_without_masking_failure(self):
+        job = policy.load(self.root / '.github/workflows/lane.yml')['jobs']['lane-impact']
+        step = next(step for step in job['steps'] if step.get('id') == 'own')
+        self.assertEqual(step.get('shell'), 'bash')
+        body = step['run']
+        commands = self.root / 'bin'
+        commands.mkdir()
+        producer = commands / 'python3'
+        producer.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"phase":"compile","seconds":7}\'\nprintf \'%s\\n\' \'{"phase":"tests","count":3}\' >&2\nexit "$FIXTURE_EXIT"\n')
+        producer.chmod(0o755)
+        for status in (0, 17):
+            result = self.run_body(body, dict(PATH=str(commands) + os.pathsep + os.environ['PATH'],
+                GITHUB_OUTPUT=str(self.root / 'outputs'), FIXTURE_EXIT=str(status)))
+            self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+            log = self.root / 'target/ci-impact/own-build.log'
+            self.assertEqual(log.read_text().splitlines(),
+                ['{"phase":"compile","seconds":7}', '{"phase":"tests","count":3}'])
+            uploads = [step['with']['path'] for step in job['steps']
+                if step.get('uses') == 'actions/upload-artifact@v4' and step.get('if') == 'always()']
+            self.assertTrue(any(log.is_relative_to(self.root / path) for path in uploads))
 
     # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
     def test_lane_runs_only_selected_commander_journeys_and_names_failures_cas_6a42(self):
@@ -1099,6 +1121,67 @@ else:
             self.assertEqual(process.returncode, 0, output)
         self.assertEqual((fixture / 'rustup/install-count').read_text(), 'install\n')
         self.assertEqual((fixture / 'github-env').read_text().splitlines(), ['RUSTUP_TOOLCHAIN=stable'] * 2)
+
+    def test_self_hosted_setup_bootstraps_pinned_rust_once_without_sccache(self):
+        action = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        steps = action['runs']['steps']
+        setup = next(step for step in steps if step.get('id') == 'self-hosted-rust')
+        for environment in ('self-hosted', 'github-hosted'):
+            context = {'runner.environment': environment, 'env.RUSTC_WRAPPER': 'sccache',
+                       'steps.setup-sccache.outcome': 'success'}
+            self.assertEqual(self.gh_expr(setup['if'], context), environment == 'self-hosted')
+            for step in steps:
+                if step.get('id') == 'setup-sccache' or 'sccache --start-server' in step.get('run', ''):
+                    self.assertEqual(self.gh_expr(step['if'], context), environment != 'self-hosted')
+        self.root.joinpath('rust-toolchain.toml').write_text('[toolchain]\nchannel="1.88.1-fixture"\n')
+        commands = self.root / 'bin'; commands.mkdir()
+        commands.joinpath('python3').symlink_to(sys.executable)
+        commands.joinpath('flock').write_text(f'#!{sys.executable}\nimport fcntl,sys\nfcntl.flock(int(sys.argv[2]),fcntl.LOCK_EX)\n')
+        rustup = self.root / 'rustup-fixture'
+        rustup.write_text(f'''#!{sys.executable}
+import os,sys
+from pathlib import Path
+home=Path(os.environ['RUSTUP_HOME']); args=sys.argv[1:]
+if args[:1]==['run']:
+    sys.exit(0 if (home/'pinned').exists() and (home/'pinned').read_text().strip()==args[1] else 1)
+if args[:2]==['toolchain','install']:
+    (home/'pinned').write_text(args[2]); sys.exit(0)
+sys.exit(1)
+''')
+        cargo = self.root / 'cargo-fixture'; cargo.write_text('#!/bin/sh\nexit 0\n')
+        installer = self.root / 'installer'
+        installer.write_text('''#!/bin/sh
+printf '%s\n' "$*" >> "$INSTALL_CALLS"
+mkdir -p "$CARGO_HOME/bin"
+cp "$FIXTURE_RUSTUP" "$CARGO_HOME/bin/rustup"
+cp "$FIXTURE_CARGO" "$CARGO_HOME/bin/cargo"
+printf '%s\n' "$FIXTURE_PIN" > "$RUSTUP_HOME/pinned"
+''')
+        commands.joinpath('curl').write_text(f'''#!{sys.executable}
+import os,shutil,sys
+shutil.copyfile(os.environ['FIXTURE_INSTALLER'],sys.argv[sys.argv.index('-o')+1])
+''')
+        for executable in [rustup, cargo, *commands.iterdir()]:
+            if not executable.is_symlink():
+                executable.chmod(0o755)
+        temporary = self.root / 'tmp'; temporary.mkdir()
+        env = dict(PATH=str(commands) + ':/usr/bin:/bin', RUNNER_TEMP=str(temporary),
+            CARGO_HOME=str(self.root / 'cargo'), RUSTUP_HOME=str(self.root / 'rustup'),
+            GITHUB_ENV=str(self.root / 'env'), GITHUB_PATH=str(self.root / 'path'),
+            INSTALL_CALLS=str(self.root / 'installs'), FIXTURE_RUSTUP=str(rustup),
+            FIXTURE_CARGO=str(cargo), FIXTURE_INSTALLER=str(installer), FIXTURE_PIN='1.88.1-fixture')
+        for _ in range(2):
+            result = self.run_body(setup['run'], env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = (self.root / 'installs').read_text().splitlines()
+        self.assertEqual(len(calls), 1)
+        self.assertIn('1.88.1-fixture', shlex.split(calls[0]))
+        exported = dict(line.split('=', 1) for line in (self.root / 'env').read_text().splitlines())
+        self.assertEqual(exported['RUSTUP_TOOLCHAIN'], '1.88.1-fixture')
+        self.assertEqual(exported['RUSTC_WRAPPER'], '')
+        self.assertEqual(exported['SCCACHE_GHA_ENABLED'], 'false')
+        self.assertTrue((self.root / 'cargo/bin/cargo').is_file())
+        self.assertEqual((self.root / 'path').read_text().splitlines(), [str(self.root / 'cargo/bin')] * 2)
 
     def test_shared_rustup_helper_rejects_corrupt_registry_and_files(self):
         for state in ['missing-registry', 'missing-files', 'broken-cargo']:

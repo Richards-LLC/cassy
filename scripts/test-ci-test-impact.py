@@ -181,6 +181,18 @@ pub fn run() { nested::launch(); }
         split = impact.lane_split(self.root, self.select('cas-cli/tests/alpha_test.rs'))
         self.assertNotIn(audit, split['own'])
 
+    def test_park_bound_keeps_own_tests_and_direct_importers_only(self):
+        selection = self.select("cas-cli/src/alpha.rs")
+        split = impact.lane_split(self.root, selection)
+        bounded = impact.lane_bounded(selection, split)
+        self.assertIn("binary(alpha_test)", bounded["expression"])
+        self.assertIn(split["own"], bounded["expression"])
+        for left_to_ci in ("beta_test", "opaque_test"):
+            self.assertNotIn(left_to_ci, bounded["expression"])
+            self.assertNotIn(left_to_ci, bounded["build"])
+        self.assertGreater(bounded["left_to_ci"], 0)
+        self.assertIsNone(impact.lane_bounded(dict(selection, mode="workspace"), split))
+
     def test_zero_base_uses_trusted_fallback(self):
         self.select()
         self.assertEqual(impact.plan(self.root, "0" * 40, self.base, None)["mode"], "scoped")

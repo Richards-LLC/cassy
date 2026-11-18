@@ -329,13 +329,15 @@ def plan(root, base, zero, history, delivery=False):
                 expressions.append("(binary(cas) and (" + " or ".join(f"test(={test})" for test in sorted(lib_failed)) + "))")
             for target in sorted({mapping[stem] for stem in selected}):
                 args.extend(["--test", target])
+            filters = {}
             for stem in sorted(selected):
                 target = mapping[stem]
-                expressions.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
+                filters[stem] = f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))"
+            expressions.extend(filters.values())
             if not expressions:
                 return full(result, "no provable affected test target")
             args.extend(["-E", " or ".join(expressions)])
-            result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "reason": dict(sorted(selected.items())), "targets": sorted({mapping[s] for s in selected}), "modules": unit_modules if production or wide or lib_failed else []})
+            result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "reason": dict(sorted(selected.items())), "targets": sorted({mapping[s] for s in selected}), "filters": filters, "modules": unit_modules if production or wide or lib_failed else []})
         contracts, identities = file_contracts(root, contract_paths, crates, mapping, texts) if contract_paths else ([], [])
         result["file_contracts"] = identities
         for contract in contracts:
@@ -420,6 +422,37 @@ def lane_split(root, selection):
                 build.append("--lib")
     own = " or ".join(own) or None
     return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
+
+# Suites whose cause is a direct edit or a direct import of the edited module.
+BOUNDED_REASONS = {"changed-test", "owner", "historical-failure"}
+
+
+def lane_bounded(selection, split):
+    """The slice of the lane selection a worker can afford at park: the own
+    tests plus the integration suites that import the edited module directly.
+    Reverse-import closure, opaque and binary-contract suites, whole-lib and
+    other-crate rings stay with lane CI. Only scoped plans have a bounded set."""
+    if selection["mode"] != "scoped" or not split["own"]:
+        return None
+    parts, kept, left = [], set(), 0
+    for command in selection["commands"]:
+        for stem, reason in (command.get("reason") or {}).items():
+            if reason in BOUNDED_REASONS and stem in command.get("filters", {}):
+                parts.append(command["filters"][stem])
+                kept.add(stem)
+            else:
+                left += 1
+    expression = " or ".join([f"({split['own']})", *parts])
+    build, index = [], 0
+    while index < len(split["build"]):
+        arg = split["build"][index]
+        if arg == "--test" and f"binary({split['build'][index + 1]})" not in expression:
+            index += 2
+            continue
+        build.append(arg)
+        index += 1
+    return {"build": build, "expression": expression, "suites": sorted(kept), "left_to_ci": left}
+
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 def lane_count(root, source, expression):
@@ -756,6 +789,7 @@ def lane(root, args):
         print(f"Lane attribution base: {base or 'none'} ({source})")
         selection["configuration"] = proof_configuration(root)
         split = lane_split(root, selection)
+        split["bounded"] = lane_bounded(selection, split)
         write(out, {"plan": selection, "split": split})
         outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": selection["base_source"]}
         print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")

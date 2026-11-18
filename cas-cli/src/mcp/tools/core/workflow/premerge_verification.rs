@@ -1968,8 +1968,9 @@ mod tests {
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(source);
         core.open_task_store().unwrap().add(&task).unwrap();
-        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
-        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        let held = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap_err();
+        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
+            .unwrap_or_else(|| panic!("candidate never reached dispatch creation: {held:?}"));
         rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
             "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
             rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],

@@ -419,7 +419,8 @@ mod tests {
 
     #[test]
     fn capped_temporary_fixtures_do_not_discover_the_checkout_cas_2085() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.remove("CAS_ROOT");
         let outer = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git").args(["init", "-q"])
             .arg(outer.path()).status().unwrap();

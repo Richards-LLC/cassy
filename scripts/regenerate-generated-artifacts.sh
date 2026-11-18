@@ -87,7 +87,8 @@ regenerate_reference_history() {
     if [ -z "$(git status --porcelain --untracked-files=no -- "${outputs[@]}")" ]; then
       return 0
     fi
-    git add -u -- "${outputs[@]}"
+    git ls-files -z -- "${outputs[@]}" |
+      git add -u --pathspec-from-file=- --pathspec-file-nul
     if [ "$pass" = 1 ]; then
       git commit -q \
         -m "build(builtins): regenerate reference-history from merged history" \

@@ -6028,6 +6028,9 @@ fn factory_write_decision(
             }),
         }
     };
+    let directory_sinks: std::collections::HashSet<_> = shell_effects.directory_sinks.iter()
+        .filter_map(|raw| absolute(raw, &cwd).and_then(|path| resolve_through_links(&path, &aliases)))
+        .filter_map(|path| canonicalize_for_containment(&path)).collect();
     let mut uses = Vec::new();
     let admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
         policy.matching(&resolved, mode, task_ids).map(|root| {
@@ -6176,7 +6179,11 @@ fn factory_write_decision(
         ) else {
             continue;
         };
-        let mode = mode.unwrap_or(if std::fs::symlink_metadata(&resolved).is_ok() {
+        let mode = mode.unwrap_or(if directory_sinks.contains(&resolved) && resolved.is_dir() {
+            // mv/cp/install into an existing directory creates a child; it
+            // does not overwrite or rename the directory itself.
+            WriteMode::Create
+        } else if std::fs::symlink_metadata(&resolved).is_ok() {
             WriteMode::Edit
         } else {
             WriteMode::Create
@@ -9871,6 +9878,14 @@ EOF
         let decide = |command: String| {
             factory_write_decision(&bash_input(&command, &worktree), &None, None, false, Some(worktree.as_path()), &policy, &no_tasks)
         };
+        let trash = home.join(".Trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(worktree.join(".merge_file_fixture"), "merge scratch").unwrap();
+        let trash_policy = root_policy(&trash, &[WriteMode::Create, WriteMode::Edit, WriteMode::Delete], None);
+        for command in ["mv .merge_file_* ~/.Trash/", "mv .merge_file_fixture ~/.Trash/"] {
+            assert!(matches!(factory_write_decision(&bash_input(command, &worktree), &None, None, false,
+                Some(worktree.as_path()), &trash_policy, &no_tasks), FactoryWriteDecision::AllowedByRoot(_)), "{command}");
+        }
         let root = managed.display().to_string();
         for command in [
             format!("rm -rf {root}"),

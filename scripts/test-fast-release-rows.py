@@ -939,7 +939,7 @@ esac
         self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         self.refused_at_park("builtin-projections-src",
                              {"cas-cli/src/builtins/agents/task-verifier.body.md": "Verify the task twice.\n"},
-                             "task-verifier.body.md verbatim")
+                             "builtin-projections-src")
         command(self.repo, "git", "reset", "-q", "--hard", self.base)
         self.write("cas-cli/src/builtins/agents/task-verifier.body.md", "Verify the task twice.\n")
         self.write(".claude/agents/task-verifier.md", frontmatter + "Verify the task twice.\n")
@@ -947,6 +947,14 @@ esac
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS builtin-projections-src", result.stdout)
+
+        # Pure projections are deliberately absent from a fresh clone after
+        # untracking. Their ignored runtime copies are not release authority.
+        command(self.repo, "git", "rm", "-q", ".claude/agents/task-verifier.md")
+        self.write(".gitignore", "/.claude/agents/task-verifier.md\n")
+        self.commit()
+        untracked = self.fast()
+        self.assertEqual(untracked.returncode, 0, untracked.stdout + untracked.stderr)
 
     def test_posted_release_drafts_skip_lint_but_unposted_drafts_do_not(self):
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"

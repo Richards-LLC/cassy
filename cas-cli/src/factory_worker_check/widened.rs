@@ -17,7 +17,7 @@ pub(crate) struct Proof {
 }
 
 pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
-    if javascript::javascript(path) && javascript::test_file(path) { return Scope::File(path.into()); }
+    if javascript::javascript(path) && javascript::test_match(path) { return Scope::File(path.into()); }
     let rust = path.ends_with(".rs");
     let manifest = if rust { "Cargo.toml" } else { "package.json" };
     let mut directory = repo.join(path);

@@ -35,6 +35,18 @@ pub(super) fn test_file(path: &str) -> bool {
         || path.split('/').any(|part| matches!(part, "__tests__" | "tests" | "test" | "e2e"))
 }
 
+/// Files a runner's default matcher runs as tests (GH #2116, #2127): a test
+/// name suffix, or jest's `__tests__` directory; declarations never are.
+/// `test_file` stays the wide net for files that may hold tests. A file only
+/// that net catches is a support module: a `File` run of it finds no tests,
+/// so it widens to its package, whose run covers its consumers.
+pub(super) fn test_match(path: &str) -> bool {
+    let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    !stem.ends_with(".d")
+        && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
+            || path.split('/').any(|part| part == "__tests__"))
+}
+
 /// A scoped JavaScript stability command, however the shell names its runner.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Invocation {

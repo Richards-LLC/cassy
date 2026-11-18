@@ -151,6 +151,7 @@ fn ownership_walk_tokenizes_each_hunk_line_once_cas_0e29e() {
 
 #[test]
 fn repeated_immutable_delivery_proof_avoids_git_spawns_cas_ac43() {
+    use super::super::{DeliveryContentPresence, delivery_content_presence_on_target_for_paths};
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     let repo = env.home().join("memoized-proof");
     std::fs::create_dir(&repo).unwrap();
@@ -169,7 +170,7 @@ fn repeated_immutable_delivery_proof_avoids_git_spawns_cas_ac43() {
     std::fs::write(repo.join("owned.rs"), "fn value() { delivered() }\n").unwrap();
     git(&["commit", "-qam", "fix(cas-ac43): delivery"]);
     let anchor = git(&["rev-parse", "HEAD"]);
-    let proof = |target: &str| super::delivery_content_presence_on_target_for_paths(
+    let proof = |target: &str| delivery_content_presence_on_target_for_paths(
         &repo, &anchor, target, None, false, &["cas-ac43"], Some(&base));
     let trace = repo.join("git.jsonl");
     env.set("GIT_TRACE2_EVENT", &trace);
@@ -186,6 +187,6 @@ fn repeated_immutable_delivery_proof_avoids_git_spawns_cas_ac43() {
     // Advancing the target must not reuse the old answer.
     git(&["revert", "--no-edit", &anchor]);
     let reverted = git(&["rev-parse", "HEAD"]);
-    assert!(matches!(proof(&reverted), SomePresence @ super::DeliveryContentPresence::Dropped { .. }
-        if SomePresence != first));
+    assert!(matches!(proof(&reverted), DeliveryContentPresence::Dropped { .. }));
+    assert_ne!(proof(&reverted), first);
 }

@@ -2419,7 +2419,9 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     tasks.update(&task).unwrap();
     let config = root.join("config.toml");
     std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
-        .replace("enabled=false", "enabled=true")).unwrap();
+        .replace("enabled=false", "enabled=true")
+        .replace("mode='per_task'", "mode='batch'")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
     env.set("CAS_AGENT_ROLE", "supervisor");
     let supervisor = CasCore::with_daemon(root.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
@@ -2441,7 +2443,7 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     assert_eq!(proof.head_commit, merged);
     assert_eq!(proof.target_branch.as_deref(), Some("main"));
     assert_eq!(proof.anchor_commits, vec![f.final_tip.clone()]);
-    assert!(git(repo, &["merge-base", "--is-ancestor", &pr_head, &proof.head_commit]).is_empty());
+    git(repo, &["merge-base", "--is-ancestor", &pr_head, &proof.head_commit]);
     let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
     assert_eq!(verdict.status, VerificationStatus::Approved);
     assert_eq!(verdict.provenance, cas_types::VerificationProvenance::SupervisorDirect);

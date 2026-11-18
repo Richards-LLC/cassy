@@ -10,7 +10,12 @@ process is added.
 
 In batch mode, an implementer's pre-merge close still checks added test skip
 and focus markers, then parks the delivery with evidence deferred. Cassy does
-not automatically dispatch a per-task QA pass. A supervisor can still request
+not automatically dispatch a per-task QA pass. Resolved batch mode owns park
+proof even when target refs are unavailable or the delivery has already landed;
+those states do not require an implementer's per-task bundle. Repeated parks
+with unknown ancestry remain deferred. Known integrated deliveries with recorded
+debt still require the batch receipt before they close, and the final transition
+guard enforces that debt independently of QA mode. A supervisor can still request
 one explicitly with `verification action=qa_request`. A pending or failed explicit
 round still binds: re-parking a changed tip opens the next round. A logged
 waiver ends that per-task obligation; deferred batch evidence is still owed.

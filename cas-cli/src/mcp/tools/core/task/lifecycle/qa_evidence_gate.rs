@@ -5,6 +5,7 @@
 //! A user-facing delivery can then neither park for merge (and so never gets
 //! an independent reviewer spawned, cas-619f) nor finish its post-merge
 //! re-close without valid implementer evidence for the delivered head. The
+//! batch mode defers that evidence to the staging receipt. The
 //! same check refuses any delivery that adds test skip/focus markers without
 //! a `cas-allow-skip:` reason.
 //!
@@ -670,7 +671,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
-    if deferred && integrated != Some(false) && batch_receipt.is_none() && covering_pass.is_none() {
+    // Unknown ancestry does not turn a batch park into a final close. G-83
+    // still enforces recorded debt before any transition to Closed.
+    let batch_ancestry_unknown = batch_mode && integrated.is_none();
+    if deferred && !batch_ancestry_unknown && integrated != Some(false) && batch_receipt.is_none() && covering_pass.is_none() {
         let recorded = rapid.as_ref().is_some_and(|window| {
             crate::rapid_response::record_skip(
                 cas_root, window, &task.id, "batch-qa-receipt", "closed before its batch QA receipt",
@@ -680,9 +684,9 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             return Err(crate::qa_batch::debt_refusal(&task.id));
         }
     }
-    // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
-    let batch_defer =
-        batch_mode && integrated == Some(false) && !matches!(tier, EvidenceTier::None);
+    // Resolved QA mode owns park evidence, including missing target refs and
+    // already-landed deliveries. Neither requires an implementer's task bundle.
+    let batch_defer = batch_mode && !matches!(tier, EvidenceTier::None);
     // Optional citations alone do not upgrade None/Ledger proof requirements.
     // A declared comparison still applies when batch approval replaces a bundle.
     let pair_coverage = if tier != EvidenceTier::Bundle
@@ -906,6 +910,9 @@ mod tests {
                     // Repeated parks still defer uncertain/unmerged targets;
                     // once integrated, the recorded staging receipt remains due.
                     assert_eq!(check().is_ok(), integration != Some(true));
+                } else {
+                    cas_store::defer_qa_batch_evidence(&root, &task.id, &head).unwrap();
+                    assert!(check().is_err());
                 }
             }
         }

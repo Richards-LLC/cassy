@@ -272,25 +272,34 @@ def plan(root, base, zero, history, delivery=False):
                 continue
             production = [p for p in paths if p.startswith("cas-cli/src/")]
             wide = any(p in {"cas-cli/src/lib.rs", "cas-cli/src/main.rs"} or not (root / p).exists() for p in paths) or any("macro_rules!" in (root / p).read_text() for p in production)
-            changed_modules = {p.split("/")[2].removesuffix(".rs") for p in production}
-            changed_modules = closure(changed_modules, modules(root))
+            direct_modules = {p.split("/")[2].removesuffix(".rs") for p in production}
+            changed_modules = closure(direct_modules, modules(root))
             test_paths = [p for p in paths if p.startswith("cas-cli/tests/")]
             shared_test_input = any(not any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for stem in mapping) for p in test_paths)
-            selected = set(mapping) if shared_test_input else set()
+            selected = {stem: "widened:shared-test-input" for stem in mapping} if shared_test_input else {}
             if production:
-                selected.update(subprocess_stems)
+                selected.update({stem: "widened:binary-contract" for stem in subprocess_stems})
             for stem in mapping:
                 text = texts[stem]
                 imports = set(re.findall(r"\bcas::([A-Za-z_][A-Za-z_0-9]*)::", text))
                 opaque = not imports or re.search(r"\b(?:cargo_bin|Command|assert_cmd)\b|\bcas::(?:[A-Z]|\{|\*|[A-Za-z_]\w*\s*(?:;|,|\bas\b))", text)
-                if wide or (production and (opaque or imports & changed_modules)) or any(p.startswith(f"cas-cli/tests/{stem}/") or p == f"cas-cli/tests/{stem}.rs" for p in paths):
-                    selected.add(stem)
+                if any(p.startswith(f"cas-cli/tests/{stem}/") or p == f"cas-cli/tests/{stem}.rs" for p in paths):
+                    selected[stem] = "changed-test"
+                elif wide:
+                    selected[stem] = "widened:module-scope"
+                elif production and imports & direct_modules:
+                    selected[stem] = "owner"
+                elif production and imports & changed_modules:
+                    selected[stem] = "import-consumer"
+                elif production and opaque:
+                    selected.setdefault(stem, "widened:opaque-import")
             # Existing snapshot router remains an independent guarded target.
             # These archive/catalog guards protect embedded sources, not imports.
             if any(p.startswith("cas-cli/src/builtins/") for p in production):
-                selected.update(mapping)
+                for stem in mapping:
+                    selected.setdefault(stem, "widened:embedded-contract")
             if any(p.startswith("cas-cli/tests/") for p in paths):
-                selected.add("builtin_archive_portability_test")
+                selected.setdefault("builtin_archive_portability_test", "widened:archive-contract")
             lib_failed = set()
             for failure in recorded:
                 if failure["package"] == "cas" and failure["binary"] == "cas":
@@ -300,8 +309,9 @@ def plan(root, base, zero, history, delivery=False):
                     matches = {stem for stem, target in mapping.items() if target == failure["binary"]}
                     if not matches:
                         return full(result, "historical binary missing from inventory")
-                    selected.update(matches)
-            selected &= mapping.keys()
+                    for stem in matches:
+                        selected.setdefault(stem, "widened:historical-failure")
+            selected = {stem: cause for stem, cause in selected.items() if stem in mapping}
             args = ["-p", "cas"]
             expressions = []
             if production or wide:
@@ -325,7 +335,7 @@ def plan(root, base, zero, history, delivery=False):
             if not expressions:
                 return full(result, "no provable affected test target")
             args.extend(["-E", " or ".join(expressions)])
-            result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "targets": sorted({mapping[s] for s in selected}), "modules": unit_modules if production or wide or lib_failed else []})
+            result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "reason": dict(sorted(selected.items())), "targets": sorted({mapping[s] for s in selected}), "modules": unit_modules if production or wide or lib_failed else []})
         contracts, identities = file_contracts(root, contract_paths, crates, mapping, texts) if contract_paths else ([], [])
         result["file_contracts"] = identities
         for contract in contracts:

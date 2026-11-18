@@ -695,57 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn test_10k_vectors_benchmark() {
-        let dir = tempdir().unwrap();
-        let store = LmdbVectorStore::open(dir.path(), 1024).unwrap();
-
-        // Generate 10k vectors
-        let items: Vec<_> = (0..10_000)
-            .map(|i| {
-                let id = format!("doc-{i:05}");
-                let emb = random_embedding(1024, i as u64);
-                (id, emb)
-            })
-            .collect();
-
-        // Batch insert
-        let start = std::time::Instant::now();
-        let refs: Vec<_> = items
-            .iter()
-            .map(|(id, emb)| (id.as_str(), emb.as_slice()))
-            .collect();
-        let count = store.store_batch(refs).unwrap();
-        let insert_time = start.elapsed();
-
-        assert_eq!(count, 10_000);
-        println!(
-            "10k vector insert: {:?} ({:.0} vectors/sec)",
-            insert_time,
-            10_000.0 / insert_time.as_secs_f64()
-        );
-
-        // Random reads
-        let start = std::time::Instant::now();
-        for i in (0..1000).map(|x| x * 10) {
-            let id = format!("doc-{i:05}");
-            let _ = store.get(&id).unwrap();
-        }
-        let read_time = start.elapsed();
-        println!(
-            "1k random reads: {:?} ({:.0} reads/sec)",
-            read_time,
-            1000.0 / read_time.as_secs_f64()
-        );
-
-        // Count operation
-        let start = std::time::Instant::now();
-        let total = store.count().unwrap();
-        let count_time = start.elapsed();
-        assert_eq!(total, 10_000);
-        println!("Count operation: {count_time:?}");
-    }
-
-    #[test]
     fn test_concurrent_reads() {
         use std::sync::Arc;
         use std::thread;

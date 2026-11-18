@@ -450,8 +450,10 @@ fn scoped_factory_fixture() -> (Fixture, PathBuf, PathBuf) {
     let cas_root = fx.repo.join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
     let base = fx.task_dir.parent().unwrap().to_path_buf();
+    // GH #2111: omitted mode resolves to batch and defers individual bundles.
+    // These GH #1061 controls exercise per-task bundle paths and validation.
     std::fs::write(cas_root.join("config.toml"), format!(
-        "[factory]\nartifacts_root = {:?}\n[qa]\nuser_facing_paths = [\"web/**\"]\n",
+        "[factory]\nartifacts_root = {:?}\n[qa]\nmode = 'per_task'\nuser_facing_paths = [\"web/**\"]\n",
         base.display().to_string()
     )).unwrap();
     let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, TASK);

@@ -443,10 +443,16 @@ def lane_bounded(selection, split):
             else:
                 left += 1
     expression = " or ".join([f"({split['own']})", *parts])
+    build, index = list(split["build"]), 0
+    if "--workspace" not in build and "--lib" not in build and "--test" not in build:
+        # A whole-package build would compile every harness for a bounded run.
+        targets = set(re.findall(r"\bbinary(?:_id)?\((?:=cas::)?(\w+)\)", expression))
+        build += (["--lib"] if "cas" in targets else []) + [arg for target in sorted(targets - {"cas"}) for arg in ("--test", target)]
+    split = dict(split, build=build)
     build, index = [], 0
     while index < len(split["build"]):
         arg = split["build"][index]
-        if arg == "--test" and f"binary({split['build'][index + 1]})" not in expression:
+        if arg == "--test" and not re.search(rf"binary(?:_id)?\((?:=cas::)?{split['build'][index + 1]}\)", expression):
             index += 2
             continue
         build.append(arg)

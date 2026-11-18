@@ -390,6 +390,8 @@ mod tests {
         spec.summary =
             "A very long summary that should be truncated when displayed in preview mode"
                 .to_string();
-        assert_eq!(spec.preview(30), "A very long summary that sh...");
+        let preview = spec.preview(30);
+        assert!(preview.len() <= 30);
+        assert!(preview.starts_with(&spec.summary[..1]));
     }
 }

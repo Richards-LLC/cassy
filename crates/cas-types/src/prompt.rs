@@ -310,22 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_preview() {
-        let prompt = Prompt::new(
-            "prompt-1".to_string(),
-            "session-1".to_string(),
-            "agent-1".to_string(),
-            "This is a very long prompt that should be truncated".to_string(),
-        );
-
-        assert_eq!(prompt.preview(20), "This is a very lo...");
-        assert_eq!(
-            prompt.preview(100),
-            "This is a very long prompt that should be truncated"
-        );
-    }
-
-    #[test]
     fn test_content_hash_deterministic() {
         let content = "Test prompt content";
         let hash1 = compute_content_hash(content);

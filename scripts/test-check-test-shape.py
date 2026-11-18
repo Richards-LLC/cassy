@@ -416,6 +416,16 @@ def test_workflow_command():
 
     def test_git_inputs_and_expect_diagnostics_cas_26f3(self):
         for rejected, code in [
+            # GH #2102: source selects the mock scenario, not source text.
+            (False, '''#[tokio::test] async fn mock_auth_response() {
+                for source in ["route_unauthorized", "retry_unauthorized"] {
+                    Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                            "error": if source == "route_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
+                        .expect(1).mount(&server).await;
+                }
+            }'''),
+            (True, '#[test] fn t() { let same = read_to_string(path).unwrap() == "Always merge staging first"; }'),
             (False, '#[test] fn t() { assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head); }'),
             (False, '#[test] fn t() { let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id) && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state"); }'),
             (True, '#[test] fn t() { assert_eq!(git(&["show", &format!("refs/heads/{source}")]), "When a test fails, name the responsible boundary and preserve its first result."); }'),

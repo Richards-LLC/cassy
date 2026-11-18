@@ -2364,7 +2364,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         match stability::rust::selected_inputs(&repo, &base, &head, test) {
             Ok((tests, uncertain)) => {
                 if uncertain {
-                    let scope = widened::Scope::Crate(test.package.clone());
+                    let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                     widened::invalidate(&cas_root, &repo, &head, &scope)?;
                     widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
                 }
@@ -2375,7 +2375,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
             }
             Err(error) => {
                 eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
-                let scope = widened::Scope::Crate(test.package.clone());
+                let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                 widened::invalidate(&cas_root, &repo, &head, &scope)?;
                 widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
                 Vec::new()
@@ -2557,8 +2557,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
     }
-    let mut cargo_args = if let Some(proof) = &widened_proof {
-        let widened::Scope::Crate(package) = &proof.scope else { unreachable!() };
+    let mut cargo_args = if widened_proof.is_some() {
+        // Scope matching uses the crate name; Cargo retains the caller's
+        // version selector so duplicate names still resolve to the right crate.
+        let package = &test.as_ref().expect("widened targeted test").package;
         vec!["nextest".into(), "run".into(), "-p".into(), package.clone(), "--retries".into(), "0".into()]
     } else { args.to_vec() };
     if live_headful {

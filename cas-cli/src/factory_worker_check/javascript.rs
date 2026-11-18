@@ -163,7 +163,7 @@ pub(crate) fn changed_tests(
             lines = lines
                 .into_iter()
                 .flat_map(|(start, end)| {
-                    if start == end && diff_deletes_at(&diff, start) {
+                    if start > end {
                         // A pure deletion has no surviving line to blame.
                         return vec![(start, end)];
                     }
@@ -190,7 +190,7 @@ pub(crate) fn changed_tests(
             // The caller widens an unclassifiable source to its package.
             Err(error) => return Err(error),
         };
-        let only_deletions = lines.iter().all(|(start, end)| start == end && diff_deletes_at(&diff, *start));
+        let only_deletions = lines.iter().all(|(start, end)| start > end);
         if test_file && all.is_empty() && !source.trim().is_empty() && !only_deletions {
             bail!(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
@@ -249,17 +249,6 @@ fn authored_lines(
     Ok(lines)
 }
 
-/// Whether the net diff deletes lines just above head line `line`.
-fn diff_deletes_at(diff: &str, line: usize) -> bool {
-    diff.lines().filter(|hunk| hunk.starts_with("@@ ")).any(|hunk| {
-        let mut ranges = hunk.split_whitespace().skip(1);
-        let (Some(old), Some(new)) = (ranges.next(), ranges.next()) else { return false };
-        let count = |range: &str| range.split_once(',').map_or(Some(1), |(_, n)| n.parse::<usize>().ok());
-        let start = new.trim_start_matches('+').split(',').next().and_then(|n| n.parse::<usize>().ok());
-        count(old).is_some_and(|n| n > 0) && count(new) == Some(0) && start == Some(line)
-    })
-}
-
 fn changed_lines(diff: &str) -> Result<Vec<(usize, usize)>> {
     diff.lines()
         .filter(|line| line.starts_with("@@ "))
@@ -273,8 +262,9 @@ fn changed_lines(diff: &str) -> Result<Vec<(usize, usize)>> {
             let (start, count) = range.split_once(',').unwrap_or((range, "1"));
             let start: usize = start.parse()?;
             let count: usize = count.parse()?;
-            // A pure deletion inside a surviving test still changes that test.
-            Ok((start, start + count.saturating_sub(1)))
+            // A deletion is a gap after `start`, not a surviving changed line.
+            // Reversed bounds intersect a containing scope but neither neighbour.
+            Ok(if count == 0 { (start + 1, start) } else { (start, start + count - 1) })
         })
         .collect()
 }
@@ -912,9 +902,10 @@ fn walk(
                 .any(|arg| arg.kind() == "identifier");
         let external_changed = external_callback && {
             let mut cursor = args.walk();
-            let argument = args.named_children(&mut cursor).skip(1).find(|arg| arg.kind() == "identifier").context("test callback")?;
             force || overlaps(node, lines)
-                || callback_scope_changed(tree_root(node), text(argument, source), source, lines)
+                || args.named_children(&mut cursor).skip(1)
+                    .filter(|arg| arg.kind() == "identifier")
+                    .any(|argument| callback_scope_changed(tree_root(node), text(argument, source), source, lines))
                 || control_headers(node, source, aliases).iter().any(|(first, last, _)|
                     lines.iter().any(|(start, end)| start <= last && end >= first))
         };
@@ -2146,7 +2137,7 @@ mod tests {
         assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);
         assert_eq!(
             changed_lines("@@ -7 +7,0 @@\n-x\n@@ -10 +9,2 @@\n+y\n+z").unwrap(),
-            [(7, 7), (9, 10)]
+            [(8, 7), (9, 10)]
         );
         assert!(!allowed_args(&["vitest".into(), "--retry=3".into()]));
         assert!(!allowed_args(&["jest".into(), "../a.test.js".into()]));

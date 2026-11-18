@@ -198,7 +198,8 @@ fn capacity(
         at > now || now.signed_duration_since(at).num_seconds() > crate::cli::limits::CLAUDE_SNAPSHOT_MAX_AGE);
     let window = |name: &str| -> Result<(Option<DateTime<Utc>>, f64), String> {
         let Some(w) = account.windows.iter().find(|w| w.name == name) else {
-            assumed.set(assumed.get() || stale_observation);
+            // An omitted window is unopened, not a cleared stale observation.
+            // Its absence does not invalidate another window's observed usage.
             return Ok((None, 0.0));
         };
         // A past timestamp proves rollover even if the registry cleared its

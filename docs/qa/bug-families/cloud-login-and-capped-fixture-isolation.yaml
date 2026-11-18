@@ -1,0 +1,4 @@
+title: Rejected Cloud credentials recover once while capped fixtures preserve real login files
+tasks: [cas-73d0]
+journeys: [FACTORY-QA-RECEIPT, FACTORY-CLOSE]
+invariants: [FACTORY-ARTIFACT-METADATA]

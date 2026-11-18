@@ -16,6 +16,7 @@
 //! 2. Processing the queue during idle periods (daemon)
 //! 3. Pulling latest changes on MCP server startup
 
+pub(crate) mod auth;
 mod backfill;
 pub mod comments;
 mod config;

@@ -12,6 +12,7 @@
 //! and reaches a supervisor or an authorized same-epic worker. Worker mail
 //! is advisory; it cannot grant operator or assignment authority (cas-604d).
 
+use crate::cloud::auth::CloudRequestExt;
 use std::path::Path;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -1883,7 +1884,7 @@ impl HttpPeerMailbox {
         self.observe(
             request.clone()
                 .timeout(timeout)
-                .send_json(body),
+                .cloud_send_json(body),
         )
     }
 
@@ -1931,7 +1932,7 @@ impl PeerMailbox for HttpPeerMailbox {
             .set("Authorization", &format!("Bearer {}", self.token))
             .query("project", project_id)
             .query("limit", "500")
-            .call();
+            .cloud_call();
         let Ok(listing) = Self::read::<serde_json::Value>("agent list", response) else {
             return std::collections::HashMap::new();
         };
@@ -2076,7 +2077,7 @@ impl PeerMailbox for HttpPeerMailbox {
                 ureq::get(&self.url(&format!("/{id}")))
                     .timeout(MAILBOX_TIMEOUT)
                     .set("Authorization", &format!("Bearer {}", self.token))
-                    .call(),
+                    .cloud_call(),
             ),
         )
     }

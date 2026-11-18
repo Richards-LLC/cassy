@@ -123,9 +123,22 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
-    // Inspect the immutable delivery tree: a retained handoff may be absent
-    // from the latest diff, and the checkout can already have removed it.
-    if std::process::Command::new("git")
+    // Judge the immutable delivery delta as well as caller paths: an earlier
+    // push can introduce a retained checkpoint absent from a later path list.
+    // A project-owned file already present at the base remains inherited.
+    let git = |args: &[&str]| std::process::Command::new("git").args(args)
+        .current_dir(proof_repo).output().ok().filter(|output| output.status.success());
+    let handoff_changed = changed_paths.iter().any(|path| path == "HANDOFF.md") || {
+        let ranges = delivery_ranges.map(<[_]>::to_vec).unwrap_or_else(|| {
+            git(&["merge-base", head, target]).map(|output|
+                vec![(String::from_utf8_lossy(&output.stdout).trim().to_string(), head.to_string())])
+                .unwrap_or_default()
+        });
+        ranges.iter().any(|(base, tip)| git(&["diff", "--name-only", base, tip, "--", "HANDOFF.md"])
+            .is_some_and(|output| !output.stdout.is_empty()))
+    };
+    if handoff_changed
+        && std::process::Command::new("git")
         .args(["ls-tree", "--name-only", head, "--", "HANDOFF.md"])
         .current_dir(proof_repo)
         .output()
@@ -691,6 +704,38 @@ fn read_manifest(path: &Path) -> Option<toml::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherited_root_handoff_is_not_a_delivery_cas_6583() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(repo)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("HANDOFF.md"), "project-owned document\n").unwrap();
+        git(&["add", "."]); git(&["commit", "-qm", "baseline"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("guide.md"), "delivery\n").unwrap();
+        git(&["add", "."]); git(&["commit", "-qm", "delivery"]);
+        let task = Task::new("cas-fixture".into(), "fixture".into());
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        for introduced in [false, true] {
+            if introduced {
+                std::fs::write(repo.join("HANDOFF.md"), "worker checkpoint\n").unwrap();
+                git(&["add", "HANDOFF.md"]); git(&["commit", "-qm", "checkpoint"]);
+            }
+            let head = git(&["rev-parse", "HEAD"]);
+            let changed = if introduced { vec!["HANDOFF.md".into(), "guide.md".into()] } else { vec!["guide.md".into()] };
+            let refusals = park_refusals(&root, repo, &task, &changed, &head, &base, None);
+            assert_eq!(refusals.iter().any(|reason| reason.split_once(':').is_some_and(|(code, _)| code == "ROOT_HANDOFF_COMMITTED")), introduced, "{refusals:?}");
+        }
+    }
 
     /// cas-eac2 (D1): every changed workspace crate, by source or test file,
     /// needs its own receipt. A receipt in a dependent or unrelated crate never

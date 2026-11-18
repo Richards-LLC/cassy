@@ -63,8 +63,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             dependency_held.insert(task.id.clone());
         }
         // An unreadable receipt is uncertainty, never proof of a stall.
-        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
-            refusals.insert(task.id.clone(), refusal);
+        match crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task) {
+            Ok(Some(refusal)) => { refusals.insert(task.id.clone(), refusal); }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "close refusal unreadable; excluding only this task from stall judgement");
+                dependency_held.insert(task.id.clone());
+            }
         }
     }
     // cas-c1fb: historical local assignees do not make a peer's release
@@ -99,6 +104,7 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         // cas-e239: a blocked operator check is not locally actionable.
         // Inspect only the current blocker, never historical operator waits.
         if task.status == TaskStatus::Blocked {
+            if is_held(&task.notes) { return false; }
             use crate::mcp::tools::core::task::block_hold;
             let reason = block_hold::latest_blocker_reason(&task.notes)
                 .or_else(|| block_hold::read(store.as_ref(), &task.id).ok().flatten().map(|hold| hold.reason));
@@ -240,6 +246,8 @@ fn is_held(notes: &str) -> bool {
     for entry in notes.split("\n[") {
         if let Some((_, rest)) = entry.split_once("DECISION") {
             held = rest.trim_start().starts_with("HOLD");
+        } else if entry.contains("🚫 BLOCKER") {
+            held = false;
         }
     }
     held
@@ -321,6 +329,31 @@ fn report_unwatched(cas_dir: &Path, actionable: &[cas_types::Task]) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
+
+    #[test]
+    fn unreadable_refusal_does_not_hide_other_work_cas_6583() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut owner = Agent::new_with_role("owner".into(), "supervisor".into(), AgentRole::Supervisor);
+        owner.factory_session = Some("refusal-isolation".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for id in ["cas-unreadable", "cas-actionable"] {
+            let mut task = Task::new(id.into(), id.into());
+            task.assignee = Some(owner.name.clone());
+            tasks.add(&task).unwrap();
+        }
+        // Replay an already-corrupt persisted row. The normal writer rightly
+        // rejects malformed state before it can reach the watchdog.
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+            "INSERT INTO task_execution_states(task_id,state,updated_at) VALUES (?1,?2,?3)",
+            rusqlite::params!["cas-unreadable", serde_json::json!({"close_refusal": {"invalid": true}}).to_string(), chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+        let (_, waiting, _, _, _) = super::observe(&root, "refusal-isolation", chrono::Utc::now()).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert!(waiting[0].contains("cas-actionable"));
+    }
 
     #[test]
     fn missing_delivery_wake_is_a_one_cycle_defect_cas_f16b() {
@@ -464,7 +497,7 @@ mod tests {
         epic.task_type = cas_types::TaskType::Epic;
         epic.status = TaskStatus::Blocked;
         epic.assignee = Some(supervisor.name.clone());
-        epic.notes = "[2026-11-06 18:00] 🚫 BLOCKER owner: operator; operator-only desktop verification remains.".into();
+        epic.notes = "[2026-11-06 18:00] ✅ DECISION HOLD owner: operator; deferred desktop verification.".into();
         tasks.add(&epic).unwrap();
         let mut child = Task::new("cas-e239-merged".into(), "All release work merged".into());
         child.status = TaskStatus::Closed;
@@ -740,6 +773,7 @@ mod tests {
         // identity still wins when supplied by the gate.
         epic.status = TaskStatus::Closed;
         tasks.update(&epic).unwrap();
+        assert!(!crate::qa_post_release::batch_notice_deliverable(&root, queue.as_ref(), notices[0]).unwrap());
         let mut post_release = Task::new("cas-098dd-post-release".into(), "Post-release observation pending".into());
         post_release.task_type = cas_types::TaskType::Epic;
         post_release.status = TaskStatus::Blocked;

@@ -2075,12 +2075,37 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
 }
 
 fn validate_test_environment(args: &[String], test_env: &[String]) -> Result<()> {
+    if javascript::allowed_args(args) {
+        if test_env.iter().any(|spec| javascript_test_environment_spec(spec).is_none()) {
+            bail!("JavaScript test inputs require TEST_DATABASE_URL or *_TEST_DATABASE_URL with a password-free loopback PostgreSQL URL and no query or fragment");
+        }
+        return Ok(());
+    }
     if !test_env.is_empty()
         && (targeted_test(args).is_none() || test_env.iter().any(|spec| test_environment_spec(spec).is_none()))
     {
         bail!("Test environment overrides require named targeted tests and allowlisted HOME, Rust home, Git identity/config or CI inputs");
     }
     Ok(())
+}
+
+/// Explicit local fixture inputs for JavaScript children, never runner identity
+/// or provider credentials. Preserve the caller's exact bytes after validation.
+fn javascript_test_environment_spec(spec: &str) -> Option<(&str, &str)> {
+    let (key, value) = spec.split_once('=')?;
+    if !(key == "TEST_DATABASE_URL" || key.ends_with("_TEST_DATABASE_URL"))
+        || !key.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let url = url::Url::parse(value).ok()?;
+    let host = url.host_str()?.trim_matches(['[', ']']);
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (matches!(url.scheme(), "postgres" | "postgresql") && loopback
+        && url.password().is_none() && url.query().is_none() && url.fragment().is_none())
+        .then_some((key, value))
 }
 
 pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
@@ -2317,10 +2342,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if javascript::allowed_args(args) {
-        if isolated_test_env.is_some() || !test_env.is_empty() {
+        validate_test_environment(args, test_env)?;
+        if isolated_test_env.is_some() {
             bail!("JavaScript stability commands do not accept Rust child environment profiles");
         }
-        return javascript::execute(cas_root, args, cwd);
+        return javascript::execute(cas_root, args, cwd, test_env);
     }
     validate_test_environment(args, test_env)?;
     let test = targeted_test(args);
@@ -5537,6 +5563,20 @@ PY"#);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("postgresql://postgres@127.0.0.1:{}/postgres", listener.local_addr().unwrap().port());
         let input = format!("LEGAL_TEST_DATABASE_URL={url}");
+        for local in ["postgresql://localhost/db", "postgres://127.0.0.2/db", "postgresql://[::1]/db"] {
+            assert!(javascript_test_environment_spec(&format!("TEST_DATABASE_URL={local}")).is_some());
+        }
+        for spec in [
+            "TEST_DATABASE_URL=postgresql://db.example.invalid/db",
+            "TEST_DATABASE_URL=postgresql://postgres:private@localhost/db",
+            "TEST_DATABASE_URL=postgresql://localhost/db?host=db.example.invalid",
+            "TEST_DATABASE_URL=postgresql://localhost/db#private",
+            "TEST_DATABASE_URL=https://localhost/db",
+            "DATABASE_URL=postgresql://localhost/db",
+            "CAS_SESSION_ID=other", "PATH=/tmp", "HOME=/tmp",
+        ] {
+            assert!(validate_test_environment(&["node".into(), "--test".into(), "db.test.mjs".into()], &[spec.into()]).is_err());
+        }
         for runner in ["node", "jest"] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().join(".cas");
@@ -5581,6 +5621,9 @@ JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
             let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("fixture factory command"); };
             let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cargo_args, test_env, .. }) = factory.command else { panic!("fixture worker check"); };
             validate_test_environment(&cargo_args, &test_env).unwrap();
+            let detached = detached_runner_command_with_run(Path::new("cas"), &root, &cargo_args, None, None, &test_env);
+            assert!(detached.get_args().collect::<Vec<_>>().windows(2)
+                .any(|pair| pair == [std::ffi::OsStr::new("--test-env"), std::ffi::OsStr::new(&input)]));
             execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
             assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 5, "{runner}");
             assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none(), "input is child-only");

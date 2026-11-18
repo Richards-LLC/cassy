@@ -977,7 +977,7 @@ fn walk(
     Ok(())
 }
 
-pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()> {
+pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[String]) -> Result<()> {
     let invocation = invocation(args).context(SHAPE)?;
     let repo = PathBuf::from(super::git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     // Paths are as the shell sees them: relative to the invocation directory.
@@ -1036,7 +1036,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests)?;
+    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, test_env)?;
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -1230,7 +1230,11 @@ fn execute_tests(
     runner: &str,
     runner_config: Option<&Path>,
     tests: &[Identity],
+    test_env: &[String],
 ) -> Result<Proof> {
+    let environment = test_env.iter().map(|spec| {
+        super::javascript_test_environment_spec(spec).context("invalid JavaScript test input")
+    }).collect::<Result<Vec<_>>>()?;
     let start = Instant::now();
     let config = crate::config::Config::load(cas_root)?.factory();
     let high = crate::factory_build_memory::memory_high(
@@ -1267,6 +1271,7 @@ fn execute_tests(
             let report = reports.path().join("discovery.json");
             let mut command = Command::new(&executable);
             command
+                .envs(environment.iter().copied())
                 .current_dir(&package)
                 .env("CI", "1")
                 .arg("test")
@@ -1296,7 +1301,7 @@ fn execute_tests(
         verify_repeats(runner, repo, &selected, |iteration| {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
-            command.current_dir(&package).env("CI", "1");
+            command.current_dir(&package).env("CI", "1").envs(environment.iter().copied());
             let file = repo.join(path);
             match runner {
                 "vitest" => {
@@ -1851,7 +1856,7 @@ mod tests {
         let tests = changed_tests(repo.path(), &base, &head, &invocation.files, None).unwrap();
         assert_eq!(tests, [id(file, "server changed")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &tests).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &tests, &[]).unwrap();
         assert_eq!(
             (proof.runner.as_str(), proof.consecutive_passes),
             ("node", 5)
@@ -1897,7 +1902,7 @@ mod tests {
         let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()], None).unwrap();
         assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, &[]).unwrap();
         assert_eq!(proof.consecutive_passes, 5);
 
         // Branches of different kinds cannot name a runtime identity.

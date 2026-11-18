@@ -846,28 +846,34 @@ Do not detach or background the build, run a manual polling loop, or wait beyond
 // Root projections and bundled resources
 // ---------------------------------------------------------------------------
 
-/// The files checked into the cas-src root are the committed projections that
-/// keep the authoring checkout clean after `cas update`. Skills are deliberately
-/// different: the operator directive makes every project skill a generated,
-/// ignored projection, including database-backed `cas-*` skills with no
-/// embedded source such as `cas-seo-expert`.
+/// Pure agent, rule and skill projections are ignored and may be absent in a
+/// clean checkout. Present agents must match their embedded templates; mixed
+/// project configuration remains tracked and synced.
 #[test]
 fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
     let Some(root) = checkout_root() else {
         return;
     };
 
-    for builtin in BUILTIN_AGENTS {
-        let path = root.join(".claude").join(builtin.path);
-        let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!("missing root Claude projection {}: {error}", path.display())
-        });
-        assert_eq!(
-            actual,
-            builtin.content,
-            "root Claude projection {} diverged from its embedded template",
-            path.display()
-        );
+    for (directory, agents) in [
+        (".claude", BUILTIN_AGENTS),
+        (".codex", cas::builtins::CODEX_BUILTIN_AGENTS),
+        (".grok", cas::builtins::GROK_BUILTIN_AGENTS),
+    ] {
+        for builtin in agents {
+            let path = root.join(directory).join(builtin.path);
+            let actual = match fs::read_to_string(&path) {
+                Ok(actual) => actual,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("cannot read root projection {}: {error}", path.display()),
+            };
+            assert_eq!(
+                actual,
+                builtin.content,
+                "root projection {} diverged from its embedded template",
+                path.display()
+            );
+        }
     }
     // Audit D6: Codex installs no .md agents, so the root projection has none.
     let stray_codex_agents: Vec<String> = fs::read_dir(root.join(".codex").join("agents"))
@@ -883,18 +889,6 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
         stray_codex_agents.is_empty(),
         "root .codex/agents still carries .md agents: {stray_codex_agents:?}"
     );
-    for builtin in cas::builtins::CODEX_BUILTIN_AGENTS {
-        let path = root.join(".codex").join(builtin.path);
-        let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!("missing root Codex projection {}: {error}", path.display())
-        });
-        assert_eq!(
-            actual,
-            builtin.content,
-            "root Codex projection {} diverged from its embedded template",
-            path.display()
-        );
-    }
 
     // Generate the current project-level settings and CLAUDE.md block in an
     // isolated project. Keeping this behavioral avoids duplicating the large
@@ -1024,6 +1018,10 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
         ".gitignore must not re-include a project Claude skill"
     );
     for path in [
+        ".claude/agents/task-verifier.md",
+        ".codex/agents/task-verifier.toml",
+        ".grok/agents/task-verifier.md",
+        ".claude/rules/cas/example.md",
         ".claude/skills/cas/SKILL.md",
         ".claude/skills/cas-servers/SKILL.md",
         ".claude/skills/cas-seo-expert/SKILL.md",
@@ -1035,26 +1033,34 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
             .expect("run git check-ignore");
         assert!(
             check.status.success(),
-            "project skill path {path} is not covered by .gitignore: {}",
+            "project projection {path} is not covered by .gitignore: {}",
             String::from_utf8_lossy(&check.stdout)
         );
     }
-    let tracked_skills = Command::new("git")
+    let tracked_projections = Command::new("git")
         .current_dir(&root)
-        .args(["ls-files", "--", ".claude/skills"])
+        .args([
+            "ls-files",
+            "--",
+            ".claude/skills",
+            ".claude/agents/task-verifier.md",
+            ".codex/agents/task-verifier.toml",
+            ".grok/agents",
+            ".claude/rules/cas",
+        ])
         .output()
-        .expect("list tracked project skills");
+        .expect("list tracked project projections");
     assert!(
-        tracked_skills.status.success(),
+        tracked_projections.status.success(),
         "git ls-files failed: {}",
-        String::from_utf8_lossy(&tracked_skills.stderr)
+        String::from_utf8_lossy(&tracked_projections.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&tracked_skills.stdout)
+        String::from_utf8_lossy(&tracked_projections.stdout)
             .trim()
             .is_empty(),
-        "Cassy project skills must not remain tracked: {}",
-        String::from_utf8_lossy(&tracked_skills.stdout)
+        "Cassy pure projections must not remain tracked: {}",
+        String::from_utf8_lossy(&tracked_projections.stdout)
     );
 }
 

@@ -118,7 +118,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 .zip(repo_context::git_layout(&repo).ok())
                 .is_some_and(|((_, caller_common), (_, target_common))| caller_common == target_common);
             let repo = if same_repo {
-                PathBuf::from(crate::qa_impact::io::git(&caller, &["rev-parse", "--show-toplevel"])?).canonicalize()?
+                PathBuf::from(crate::qa_impact::io::git(&caller, &["rev-parse", "--show-toplevel"])?.trim()).canonicalize()?
             } else { repo };
             let config = crate::config::Config::load(cas_root)?;
             let impact = crate::qa_impact::predicted(&repo, &config.qa(), &task)?;
@@ -303,5 +303,29 @@ mod tests {
         assert_eq!(crate::qa_ledger::parse(&body, 1).rows[0].id, "HUB-J9");
         assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), head);
         assert_eq!(git(&checkout, &["symbolic-ref", "--short", "HEAD"]), "factory/fixture");
+
+        let foreign = dir.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        git(&foreign, &["init", "-q", "-b", "main"]);
+        std::fs::write(foreign.join("foreign.txt"), "unrelated caller\n").unwrap();
+        git(&foreign, &["add", "."]);
+        git(&foreign, &["commit", "-qm", "foreign"]);
+        env.set_current_dir(&foreign);
+        let primary_head = git(&repo, &["rev-parse", "HEAD"]);
+        for (id, source, expected) in [
+            ("cas-foreign-caller", None, primary_head.as_str()),
+            ("cas-recorded-source", Some("factory/fixture"), head.as_str()),
+        ] {
+            let mut other = task.clone();
+            other.id = id.into();
+            other.deliverables.parked_branch = source.map(str::to_string);
+            store.create_atomic(&other, &[], None, None).unwrap();
+            let args = LedgerArgs { command: LedgerCommand::Init { task: id.into(), covers: Vec::new(), release_scope: None } };
+            execute(&args, &Cli::parse_from(["cas"]), Some(&root)).unwrap();
+            let path = crate::config::resolved_factory_artifact_paths(&root, config.factory().artifacts_root.as_deref())
+                .project_root.join(id).join("LEDGER.md");
+            let body = std::fs::read_to_string(path).unwrap();
+            assert_eq!(body.lines().find_map(|line| line.strip_prefix("build: ")), Some(expected));
+        }
     }
 }

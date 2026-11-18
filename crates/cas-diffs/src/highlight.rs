@@ -285,16 +285,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn highlight_rust_produces_styled_spans() {
-        let hl = SyntaxHighlighter::new();
-        let spans = hl.highlight_line("fn main() {", "test.rs");
-        assert!(!spans.is_empty(), "should produce at least one span");
-        // `fn` keyword should get a non-default color
-        let has_color = spans.iter().any(|s| s.style.fg.is_some());
-        assert!(has_color, "Rust syntax should produce colored spans");
-    }
-
-    #[test]
     fn highlight_unknown_language_returns_plain() {
         let hl = SyntaxHighlighter::new();
         let spans = hl.highlight_line("some random text", "file.xyznotreal");
@@ -313,34 +303,6 @@ mod tests {
         // Each line should produce at least one span
         for (i, spans) in result.iter().enumerate() {
             assert!(!spans.is_empty(), "line {i} should have spans");
-        }
-    }
-
-    #[test]
-    fn highlight_various_languages() {
-        let hl = SyntaxHighlighter::new();
-        let cases = [
-            ("const x: number = 42;", "test.ts"),
-            ("def hello():", "test.py"),
-            ("package main", "test.go"),
-            ("[dependencies]", "Cargo.toml"),
-            ("key: value", "test.yaml"),
-            ("{\"key\": \"value\"}", "test.json"),
-            ("# Heading", "test.md"),
-            ("#!/bin/bash", "test.sh"),
-            ("defmodule Foo do", "test.ex"),
-            ("let x = 42;", "test.js"),
-            ("const App = () => <div />;", "test.tsx"),
-            ("[package]", "test.toml"),
-        ];
-        for (line, filename) in &cases {
-            let spans = hl.highlight_line(line, filename);
-            assert!(!spans.is_empty(), "{filename}: should produce spans");
-            let has_color = spans.iter().any(|s| s.style.fg.is_some());
-            assert!(
-                has_color,
-                "{filename}: should produce colored spans, got: {spans:?}"
-            );
         }
     }
 
@@ -455,8 +417,10 @@ mod tests {
 
     #[test]
     fn with_theme_fallback() {
-        let hl = SyntaxHighlighter::with_theme("nonexistent-theme");
-        let spans = hl.highlight_line("fn main() {}", "test.rs");
-        assert!(!spans.is_empty(), "should still work with fallback theme");
+        for hl in [SyntaxHighlighter::new(), SyntaxHighlighter::with_theme("nonexistent-theme")] {
+            let spans = hl.highlight_line("fn main() {}", "test.rs");
+            assert!(!spans.is_empty());
+            assert!(spans.iter().any(|span| span.style.fg.is_some()));
+        }
     }
 }

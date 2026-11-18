@@ -107,8 +107,9 @@ pub(crate) fn reset_note(
 
 pub(crate) fn parked_note(at: DateTime<Utc>, reason: &str) -> String {
     format!(
-        "[{}] {PARKED} {reason}. {PARKED_STATE} worker lease released until supervisor merge completes.",
-        at.format("%Y-%m-%d %H:%M")
+        "[{}] {PARKED} {reason}. {PARKED_STATE} worker lease released until supervisor merge completes. [CAS_PARK origin_machine={} parked_at={}]",
+        at.format("%Y-%m-%d %H:%M"),
+        Agent::get_or_generate_machine_id(), at.to_rfc3339(),
     )
 }
 

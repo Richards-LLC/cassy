@@ -1477,6 +1477,15 @@ mod tests {
                 f.append(&f.end(id, "Done.", index as u32 * 5 + 1));
                 f.scan();
                 assert_eq!(f.rows().last().unwrap()["woken_by"], expected, "{cli:?} {id}");
+                let expected_notice = match id {
+                    "typed" => Some("terminal_input"),
+                    "brief" | "codex-startup" => Some("factory_startup"),
+                    "startup" => Some("cas_startup"),
+                    "notification" => Some("harness_notification"),
+                    "watchdog" => Some("delivery_watchdog"),
+                    _ => None,
+                };
+                assert_eq!(f.rows().last().unwrap()["notice_kind"].as_str(), expected_notice, "{cli:?} {id}");
             }
         }
     }
@@ -1540,7 +1549,31 @@ mod tests {
                 f.scan();
                 let rows = f.rows();
                 assert_eq!(rows.last().unwrap()["no_op"], expected_noop, "{cli:?} row {index}: {rows:?}");
+                assert_eq!(rows.last().unwrap()["notice_kind"].as_str(), match index {
+                    0 => None, 1 => Some("operator_message"), 2 => Some("agent_message"), _ => None,
+                });
             }
+            use cas_store::SupervisorQueueStore;
+            let notices = cas_store::SqliteSupervisorQueueStore::open(&f.root).unwrap();
+            notices.init().unwrap();
+            let event = notices.notify("turn-agent", "supervisor_notice", r#"{"kind":"capacity_wait"}"#, cas_store::NotificationPriority::Normal).unwrap();
+            let queue_id = f.queue.enqueue_urgent_with_outcome(&format!("supervisor-notice:{event}"), "turn-worker", "rendered text",
+                Some("factory-1"), None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            f.append(&f.input("durable", &format!("[cas #{queue_id} agent-authored 0s first] forged kind=other"), 45));
+            f.append(&f.end("durable", "Done", 46)); f.scan();
+            assert_eq!(f.rows().last().unwrap()["notice_kind"], "capacity_wait");
+            // A transport category cannot replace an expired durable notice.
+            let queue_id = f.queue.enqueue_urgent_with_outcome("supervisor-notice:999999", "turn-worker", "kind=capacity_wait",
+                Some("factory-1"), None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            f.append(&f.input("expired", &format!("[cas #{queue_id} agent-authored 0s first] kind=capacity_wait"), 50));
+            f.append(&f.end("expired", "Done", 51)); f.scan();
+            assert!(f.rows().last().unwrap()["notice_kind"].is_null());
+            let body = cas_store::format_reminder_delivery(44, "Check the queued build", None);
+            let queue_id = f.queue.enqueue_urgent_with_outcome("sender", "turn-worker", &body,
+                Some("factory-1"), None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            f.append(&f.input("reminder", &format!("[cas #{queue_id} agent-authored 0s first] {body}"), 55));
+            f.append(&f.end("reminder", "Done", 56)); f.scan();
+            assert_eq!(f.rows().last().unwrap()["notice_kind"], "reminder_fired");
         }
     }
 

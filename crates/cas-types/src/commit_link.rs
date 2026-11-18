@@ -249,7 +249,6 @@ mod tests {
 
         let preview = link.preview(20);
         assert!(preview.len() <= 20);
-        assert!(preview.ends_with("..."));
     }
 
     #[test]

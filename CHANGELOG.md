@@ -7,6 +7,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.37.0] - 2026-11-18
+
+### Fixed — Factory capacity
+
+- **Apply worker caps to the correct scope** — A project's worker cap now counts only workers in that project; the user-level cap still counts every live worker on the machine. A project at three of eight workers can staff another worker when the machine is at ten of twenty. Refusals and status show each applicable limit, and peer capacity respects both.
+
+### Fixed — Factory supervision
+
+- **Wake supervisors for ready trains and stalled work** — Owned release trains stay actionable after their last child merges, including older trains with an explicit owner and release-train branch. The watchdog repeats its wake on the stall cadence and records the promised operator page while preserving freezes and ownership boundaries.
+- **Deliver candidate completion notices to idle supervisors** — Candidate preparation success and failure notices now wake an idle supervisor instead of waiting for another turn or inbox poll.
+
+### Fixed — Factory
+
+- **Keep passing changed-test proof** — A failed broader Rust selection preserves valid five-pass stability for owned tests that completed successfully. Failed or unrun tests still lose proof, changed inputs require fresh evidence, and the broader failure remains a failure.
+
+### Added — Quality ledger
+
+- **Measured release friction** — Release reports classify native wakes by authenticated notice type, collect hosted runner communication/shutdown losses and daily project issue opens/closes with agent-filed share, and measure first park to train merge using the original baseline cohort and percentiles. Cross-machine park visibility shows its deadline, late observations and missing evidence. Offline reports replay retained GitHub captures; unavailable inputs stay explicit. These are measurements and introduce no gates.
+
+### Changed — Test guidance
+
+- **Keep the strongest contract coverage** — Test authoring now ties each test to a real contract and plausible bug, favors consolidation, and rejects guessed timing bounds. Test audits include approved deletion campaigns with subsystem slices, surviving coverage and risk ledgers.
+
+### Fixed — Developer tooling
+
+- **Dependency-selection fixture markers** — Test-shape accepts single marker tokens in exact Node stdout comparisons. Multiword prose remains checked even when dependency fixtures are present or overwritten.
+
+### Fixed — Task recovery
+
+- **Review already integrated deliveries** — A registered supervisor can record a verdict for an unreviewed PR delivery already in its target, without circular merge instructions. Containment alone still grants no approval.
+
 ## [4.36.0] - 2026-11-18
 
 ### Fixed — Test evidence

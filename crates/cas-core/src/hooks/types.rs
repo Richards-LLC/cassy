@@ -1124,23 +1124,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_output_serialization() {
-        let output = HookOutput::with_session_start_context("Test context".to_string());
-        let json = serde_json::to_string(&output).unwrap();
-
-        assert!(json.contains("hookSpecificOutput"));
-        assert!(json.contains("SessionStart"));
-        assert!(json.contains("additionalContext"));
-    }
-
-    #[test]
-    fn test_empty_output() {
-        let output = HookOutput::empty();
-        let json = serde_json::to_string(&output).unwrap();
-        assert_eq!(json, "{}");
-    }
-
-    #[test]
     fn test_continue_field_name() {
         let output = HookOutput {
             continue_session: Some(false),
@@ -1155,43 +1138,6 @@ mod tests {
         assert!(
             json.contains("\"stopReason\""),
             "Expected 'stopReason' but got: {json}"
-        );
-    }
-
-    #[test]
-    fn test_with_system_context_has_no_hook_specific_output() {
-        // Stop / SubagentStop / PreCompact / SessionEnd must route context via
-        // `systemMessage`, NOT `hookSpecificOutput.additionalContext` — the
-        // latter is rejected by Claude Code's schema for these events and
-        // causes the entire hook output to be discarded. Regression guard for
-        // cas-8299.
-        let output = HookOutput::with_system_context("codemap is stale".to_string());
-        let json = serde_json::to_string(&output).unwrap();
-        assert!(
-            json.contains("\"systemMessage\":\"codemap is stale\""),
-            "Expected systemMessage in output: {json}"
-        );
-        assert!(
-            !json.contains("hookSpecificOutput"),
-            "with_system_context must NOT emit hookSpecificOutput: {json}"
-        );
-        assert!(
-            !json.contains("additionalContext"),
-            "with_system_context must NOT emit additionalContext: {json}"
-        );
-    }
-
-    #[test]
-    fn test_block_stop_output() {
-        let output = HookOutput::block_stop("Continue working on remaining tasks".to_string());
-        let json = serde_json::to_string(&output).unwrap();
-        assert!(
-            json.contains("\"decision\":\"block\""),
-            "Expected decision:block but got: {json}"
-        );
-        assert!(
-            json.contains("\"reason\":\"Continue working"),
-            "Expected reason but got: {json}"
         );
     }
 

@@ -178,26 +178,30 @@ fn failure_backs_off_until_its_next_attempt_and_success_clears_it() {
     assert_eq!(record.detail.as_deref(), Some("exit 1: boom"));
     assert_eq!(record.consecutive_failures, 1);
     let next = record.next_attempt_after.expect("a failure schedules a backoff");
-    assert_eq!(next, t0 + chrono::Duration::from_std(config.backoff(1)).unwrap());
+    assert_eq!(next, t0 + chrono::Duration::seconds(600));
 
     let early = sweep(&config, &[repo.clone()], &failing, &state, next - chrono::Duration::seconds(1));
     assert_eq!(early.backing_off, vec![repo.clone()]);
     assert_eq!(failing.calls().len(), 1, "no retry inside the backoff window");
 
+    let mut next = next;
+    // Exercise doubling and saturation through the persisted sweep outcome.
+    for (previous_failures, seconds) in [(1, 1200), (39, 21_600)] {
+        let mut persisted = IdleSyncState::load(&state).unwrap();
+        persisted.stores.values_mut().next().unwrap().consecutive_failures = previous_failures;
+        persisted.save(&state).unwrap();
+        sweep(&config, &[repo.clone()], &failing, &state, next);
+        let record = IdleSyncState::load(&state).unwrap().record(&repo).cloned().unwrap();
+        assert_eq!(record.consecutive_failures, previous_failures + 1);
+        assert_eq!(record.next_attempt_after, Some(next + chrono::Duration::seconds(seconds)));
+        next = record.next_attempt_after.unwrap();
+    }
     let healthy = FakeRunner::default();
     sweep(&config, &[repo.clone()], &healthy, &state, next);
     let record = IdleSyncState::load(&state).unwrap().record(&repo).cloned().unwrap();
     assert_eq!(record.outcome, SweepOutcome::Synced);
     assert_eq!(record.consecutive_failures, 0);
     assert_eq!(record.next_attempt_after, None);
-}
-
-#[test]
-fn backoff_doubles_and_is_capped() {
-    let config = IdleSyncConfig::default();
-    assert_eq!(config.backoff(1), Duration::from_secs(600));
-    assert_eq!(config.backoff(2), Duration::from_secs(1200));
-    assert_eq!(config.backoff(40), config.backoff_max);
 }
 
 #[cfg(unix)]
@@ -289,27 +293,34 @@ mod process_runner {
         let dir = tempfile::tempdir().unwrap();
         let repo = linked_repo(dir.path(), "alpha");
         let binary = script(dir.path(), "sleep 30");
-        let started = Instant::now();
         assert_eq!(
             run(&binary, &repo, Duration::from_millis(500)),
             RunResult::TimedOut
         );
-        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
     fn cancelling_kills_the_child_and_records_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let repo = linked_repo(dir.path(), "alpha");
-        let binary = script(dir.path(), "sleep 30");
+        let ready = repo.join(".cas/ready");
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(ready.as_os_str().as_bytes()).unwrap();
+        // SAFETY: this FIFO is a fresh path inside the test's private directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let ready = std::fs::OpenOptions::new().read(true).write(true).open(&ready).unwrap();
+        let binary = script(dir.path(), r#"printf ready > "$CAS_ROOT/ready"; exec sleep 30"#);
         let state = dir.path().join(STATE_FILE);
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
         let stopper = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            let mut event = libc::pollfd { fd: ready.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: the owned FIFO descriptor stays live for this bounded poll.
+            let observed = unsafe { libc::poll(&mut event, 1, 5_000) } == 1;
             flag.store(true, Ordering::SeqCst);
+            observed && event.revents & libc::POLLIN != 0
         });
-        let started = Instant::now();
 
         let report = run_sweep(
             &IdleSyncConfig::default(),
@@ -321,9 +332,8 @@ mod process_runner {
         )
         .unwrap();
 
-        stopper.join().unwrap();
+        assert!(stopper.join().unwrap(), "the child must signal readiness before cancellation");
         assert!(report.cancelled);
-        assert!(started.elapsed() < Duration::from_secs(10));
         assert!(IdleSyncState::load(&state).unwrap().record(&repo).is_none());
     }
 }

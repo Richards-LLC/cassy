@@ -2388,3 +2388,91 @@ async fn supervisor_stability_exception_reaches_park_gh2041() {
     assert!(crate::factory_worker_check::PassingTests::new(&repo.join(".cas"), &f.worker_path, &tip)
         .packages().is_empty());
 }
+
+/// pulse-card PR638: a worker anchor and a foreign test follow-up are already
+/// integrated, but neither merge CI nor a supervisor's note is a review verdict.
+#[tokio::test]
+async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "service.py", false);
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let base = git(repo, &["rev-parse", "main"]);
+    std::fs::write(f.worker_path.join("followup.test.py"), "assert True\n").unwrap();
+    git(&f.worker_path, &["add", "followup.test.py"]);
+    git(&f.worker_path, &["commit", "-qm", "test(cas-other): PR-only follow-up"]);
+    let pr_head = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(repo, &["merge", "--no-ff", BRANCH, "-m", "Merge PR638"]);
+    // The PR follow-up belongs to the integrated PR, not the parked worker
+    // delivery. Keep the worker branch at its actual immutable receipt.
+    git(&f.worker_path, &["reset", "--hard", &f.final_tip]);
+    let merged = git(repo, &["rev-parse", "main"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
+    task.deliverables.parked_branch = Some(BRANCH.into());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(), base_sha: base,
+    });
+    task.deliverables.delivery_pr_number = Some(638);
+    task.notes = "no changelog: disposable recovery fixture; supervisor read the diff".into();
+    tasks.update(&task).unwrap();
+    let config = root.join("config.toml");
+    std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+        .replace("enabled=false", "enabled=true")
+        .replace("mode='per_task'", "mode='batch'")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(root.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let request = || Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Recover integrated PR delivery".into()),
+        commit_receipt: Some(f.final_tip.clone()), supervisor_override: None,
+        no_delivery: None, stranded_branch_override: None, search_manifest: None,
+    });
+    let held = text(supervisor.cas_task_close(request()).await.unwrap());
+    assert!(crate::gates::codes_in(&held).contains(&"G-70"), "{held}");
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    let contained = supervisor.worktree_merge(
+        BRANCH, false, Some(TASK), true, Some(false), false, None,
+    ).await.unwrap();
+    assert_ne!(contained.is_error, Some(true), "{contained:?}");
+    assert_eq!(git(repo, &["rev-parse", "main"]), merged);
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    let review = || Parameters(serde_json::from_value(serde_json::json!({
+        "task_id": TASK, "dispatch_id": null, "status": "approved", "summary": "Reviewed integrated PR delivery"
+    })).unwrap());
+    // A source that is merely parked cannot take this post-integration path.
+    git(repo, &["update-ref", "refs/heads/main", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+    assert!(supervisor.cas_verification_add(review()).await.is_err());
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    git(repo, &["reset", "--hard", &merged]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    // A prior verdict is substantive review history, not a missing review.
+    let verifications = supervisor.open_verification_store().unwrap();
+    let mut prior = cas_types::Verification::new("ver-prior-review".into(), TASK.into());
+    prior.status = VerificationStatus::Rejected;
+    verifications.add(&prior).unwrap();
+    assert!(supervisor.cas_verification_add(review()).await.is_err());
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    verifications.delete(&prior.id).unwrap();
+    let recorded = supervisor.cas_verification_add(review()).await
+        .expect("contained delivery must accept an authenticated review");
+    assert_ne!(recorded.is_error, Some(true), "{recorded:?}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().unwrap();
+    let proof = dispatch.repository.as_ref().unwrap();
+    assert_eq!(proof.head_commit, merged);
+    assert_eq!(proof.target_branch.as_deref(), Some("main"));
+    assert_eq!(proof.anchor_commits, vec![f.final_tip.clone()]);
+    git(repo, &["merge-base", "--is-ancestor", &pr_head, &proof.head_commit]);
+    let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+    assert_eq!(verdict.status, VerificationStatus::Approved);
+    assert_eq!(verdict.provenance, cas_types::VerificationProvenance::SupervisorDirect);
+    let closed = text(supervisor.cas_task_close(request()).await.unwrap());
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
+}

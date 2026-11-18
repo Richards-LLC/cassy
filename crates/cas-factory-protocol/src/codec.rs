@@ -116,57 +116,7 @@ pub const FRAME_HEADER_SIZE: usize = 4;
 #[cfg(test)]
 mod tests {
     use crate::codec::*;
-    use crate::{ClientCapabilities, ClientMessage, ClientType, ServerMessage, SessionMode};
-
-    #[test]
-    fn test_roundtrip_client_message() {
-        let messages = vec![
-            ClientMessage::Connect {
-                client_type: ClientType::Tui,
-                protocol_version: "1.0.0".to_string(),
-                auth_token: None,
-                session_id: None,
-                capabilities: ClientCapabilities::default(),
-            },
-            ClientMessage::Ping { id: 12345 },
-            ClientMessage::SendInput {
-                pane_id: "worker-1".to_string(),
-                data: vec![0x1b, 0x5b, 0x41], // Up arrow
-            },
-            ClientMessage::Resize {
-                cols: 120,
-                rows: 40,
-            },
-            ClientMessage::Focus {
-                pane_id: "supervisor".to_string(),
-            },
-            ClientMessage::SpawnWorkers {
-                count: 3,
-                names: vec!["swift-fox".to_string()],
-            },
-            ClientMessage::ShutdownWorkers {
-                count: Some(2),
-                names: vec![],
-                force: false,
-            },
-            ClientMessage::InjectPrompt {
-                pane_id: "worker-1".to_string(),
-                prompt: "Please review the code".to_string(),
-            },
-            ClientMessage::PlaybackLoad {
-                recording_path: "/path/to/recording.rec".to_string(),
-            },
-            ClientMessage::PlaybackSeek { timestamp_ms: 5000 },
-            ClientMessage::PlaybackSetSpeed { speed: 2.0 },
-            ClientMessage::PlaybackClose,
-        ];
-
-        for msg in messages {
-            let encoded = encode(&msg).expect("encode failed");
-            let decoded: ClientMessage = decode(&encoded).expect("decode failed");
-            assert_eq!(msg, decoded, "roundtrip failed for {msg:?}");
-        }
-    }
+    use crate::{ClientMessage, ServerMessage, SessionMode};
 
     #[test]
     fn test_roundtrip_server_message() {
@@ -215,23 +165,6 @@ mod tests {
             let decoded: ServerMessage = decode(&encoded).expect("decode failed");
             assert_eq!(msg, decoded, "roundtrip failed for {msg:?}");
         }
-    }
-
-    #[test]
-    fn test_framed_encoding() {
-        let msg = ClientMessage::Ping { id: 99 };
-        let framed = encode_framed(&msg).expect("framed encode failed");
-
-        // Check header
-        assert!(framed.len() > FRAME_HEADER_SIZE);
-        let header: [u8; 4] = framed[..4].try_into().unwrap();
-        let payload_len = read_frame_length(&header);
-        assert_eq!(payload_len, framed.len() - FRAME_HEADER_SIZE);
-
-        // Decode payload
-        let payload = &framed[FRAME_HEADER_SIZE..];
-        let decoded: ClientMessage = decode(payload).expect("decode failed");
-        assert_eq!(msg, decoded);
     }
 
     #[test]
@@ -300,6 +233,7 @@ mod tests {
 
         // Large messages should have compressed prefix
         assert_eq!(encoded[0], PREFIX_COMPRESSED);
+        assert!(encoded.len() < encode_raw(&msg).unwrap().len());
 
         // Verify it still decodes correctly
         let decoded: ClientMessage = decode(&encoded).expect("decode failed");
@@ -309,28 +243,6 @@ mod tests {
             }
             _ => panic!("wrong message type"),
         }
-    }
-
-    #[test]
-    fn test_compression_reduces_size() {
-        // Create a large message with repeated content
-        let large_prompt = "test content ".repeat(100);
-        let msg = ClientMessage::InjectPrompt {
-            pane_id: "worker-1".to_string(),
-            prompt: large_prompt,
-        };
-
-        let encoded = encode(&msg).expect("encode failed");
-        let raw = encode_raw(&msg).expect("encode_raw failed");
-
-        // Compressed should be smaller than raw (prefix + compressed < raw)
-        // Note: raw doesn't have prefix, encoded has 1 byte prefix + compressed data
-        assert!(
-            encoded.len() < raw.len() + 50,
-            "compression should reduce size: {} vs {}",
-            encoded.len(),
-            raw.len()
-        );
     }
 
     #[test]

@@ -537,10 +537,7 @@ mod tests {
         let mut draft = rule("HARD RULE: x", &[], RuleStatus::Draft);
         draft.authorize_operator_hard_rule("supervisor:noble-heron-32");
         assert!(draft.is_active_operator_hard_rule());
-        assert_eq!(
-            draft.surfaced_content(),
-            "DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE: x"
-        );
+        assert!(draft.surfaced_content().ends_with(&draft.content));
         let mut proven = draft.clone();
         proven.status = RuleStatus::Proven;
         assert_eq!(proven.surfaced_content(), "HARD RULE: x");

@@ -323,6 +323,58 @@ mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
 
     #[test]
+    fn final_child_merge_keeps_owned_train_waking_and_paging_cas_2ba4() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for labelled in [false, true] {
+            let session = format!("last-child-2ba4-{labelled}");
+            env.set("CAS_FACTORY_SESSION", &session);
+            let project = env.home().join(&session);
+            std::fs::create_dir_all(&project).unwrap();
+            let root = crate::store::init_cas_dir(&project).unwrap();
+            let agents = crate::store::open_agent_store(&root).unwrap();
+            for (id, role) in [("owner-2ba4", AgentRole::Supervisor), ("worker-2ba4", AgentRole::Worker)] {
+                let mut agent = Agent::new_with_role(id.into(), id.into(), role);
+                agent.factory_session = Some(session.clone());
+                agents.register(&agent).unwrap();
+            }
+            let tasks = crate::store::open_task_store_local(&root).unwrap();
+            let mut train = Task::new("cas-train-2ba4".into(), "Overnight train".into());
+            train.task_type = cas_types::TaskType::Epic;
+            train.epic_verification_owner = Some("owner-2ba4".into());
+            train.branch = Some("epic/release-train-overnight-2ba4".into());
+            if labelled { train.labels.push("release-train".into()); }
+            tasks.add(&train).unwrap();
+            let mut child = Task::new("cas-child-2ba4".into(), "Last delivery".into());
+            child.assignee = Some("worker-2ba4".into());
+            child.status = TaskStatus::AwaitingMerge;
+            tasks.add(&child).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(child.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+            let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+            let now = chrono::Utc::now();
+            let sweep = |minutes| super::sweep(&root, &session, now + chrono::Duration::minutes(minutes));
+            sweep(0);
+            sweep(45);
+            child.status = TaskStatus::Closed;
+            tasks.update(&child).unwrap();
+            for minutes in [50, 95, 140, 141] { sweep(minutes); }
+            let rows = queue.peek_all(50).unwrap();
+            let ready: Vec<_> = rows.iter().filter(|row| row.prompt.contains("kind=\"train_ready\"")).collect();
+            assert_eq!(ready.len(), 3, "{rows:?}");
+            assert!(ready.iter().all(|row| row.target == "owner-2ba4" && row.prompt.contains(&train.id)));
+            assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1);
+            // A recorded freeze or a foreign owner ends local chasing.
+            train.labels.push(format!("release-train-frozen:{}:{}", now.timestamp(), "a".repeat(40)));
+            tasks.update(&train).unwrap();
+            sweep(185);
+            train.labels.retain(|label| !label.starts_with("release-train-frozen:"));
+            train.epic_verification_owner = Some("peer-owner".into());
+            tasks.update(&train).unwrap();
+            sweep(230);
+            assert_eq!(queue.peek_all(50).unwrap().len(), rows.len());
+        }
+    }
+
+    #[test]
     fn missing_delivery_wake_is_a_one_cycle_defect_cas_f16b() {
         const SESSION: &str = "unarmed-delivery-f16b";
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -888,14 +940,14 @@ mod tests {
         assert_eq!(paged.len(), 1, "one page per episode: {paged:?}");
         // pin: the page names the waiting task and the woken supervisor
         assert!(paged[0].prompt.contains("cas-gate") && paged[0].prompt.contains("supervisor"), "{}", paged[0].prompt);
-        assert_eq!(rows("supervisor").len(), 1, "one wake per episode");
+        assert_eq!(rows("supervisor").len(), 3, "one wake per sampled stall cadence");
 
         // The peer finally answers, which is not this session's progress;
         // the supervisor then acts, which starts a new episode.
         queue.enqueue_with_session("lively-cheetah-57", "supervisor", "approved", "peer-session").unwrap();
         queue.enqueue_with_session("supervisor", "busy-otter", "merging now", SESSION).unwrap();
         sweep(7 * 60 + 1);
-        sweep(7 * 60 + 45);
-        assert_eq!(rows("supervisor").len(), 2, "movement starts a new episode");
+        sweep(7 * 60 + 46);
+        assert_eq!(rows("supervisor").len(), 4, "movement starts a new episode");
     }
 }

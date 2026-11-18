@@ -289,6 +289,35 @@ fn enqueue(daemon: &FactoryDaemon, source: &str, body: &str, origin: cas_store::
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn candidate_completion_reaches_idle_supervisor_without_another_event_cas_2ba4() {
+    if !fixture_child("candidate_completion_reaches_idle_supervisor_without_another_event_cas_2ba4") { return; }
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+    daemon.teams = None;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let agent = crate::store::open_agent_store(&cas).unwrap().get("single-sup").unwrap();
+    let detail = "resume-merge-2108";
+    crate::supervisor_notices::enqueue(&cas, &crate::supervisor_notices::Recipient::agent(&agent),
+        "premerge_candidate_ready", detail, "overnight-2108").unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    let id = queue.peek_all(10).unwrap().into_iter().find(|row| row.summary.as_deref() == Some("premerge_candidate_ready")).unwrap().id;
+    let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+    conn.execute("UPDATE prompt_queue SET created_at=?1 WHERE id=?2", rusqlite::params![
+        (chrono::Utc::now() - chrono::Duration::seconds(2733)).to_rfc3339(), id,
+    ]).unwrap();
+    let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            settle_injected_writes(&mut daemon).await;
+            if std::fs::read_to_string(root.path().join("input")).unwrap().contains(detail) { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    assert!(delivered.is_ok(), "{:?}", queue.message_delivery_report(id).unwrap());
+    assert!(queue.queued_prompt(id).unwrap().unwrap().transport_delivered_at.is_some());
+}
+
 fn event(daemon: &FactoryDaemon, body: &str) -> i64 {
     enqueue(daemon, "lifecycle-wake:ci-red-run:factory/test:abc", body, cas_store::QueueOrigin::Daemon)
 }

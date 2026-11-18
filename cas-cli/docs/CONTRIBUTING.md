@@ -2850,6 +2850,10 @@ test file, or to the nearest JavaScript package/Rust crate for a source input.
 That wider set runs once and records a separate widened receipt at the tested
 commit. Park consumes it without executing tests; identified changed tests still
 owe five consecutive passes. Caller Jest name filters cannot narrow this proof.
+If a broader Rust selection fails, prior valid stability can survive for owned
+tests with a positive passing result in every attempted run. Failed or unrun
+tests lose that evidence, and changed inputs still require fresh proof. This
+restores stability only; the failed selection receives no passing crate receipt.
 Stability uses the same receipt carry-forward as crate proof: documentation or
 changelog commits preserve it when no test/build inputs change. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability

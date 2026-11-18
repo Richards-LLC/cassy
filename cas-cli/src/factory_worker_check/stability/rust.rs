@@ -68,7 +68,7 @@ impl Inventory<'_> {
                     let name = if prefix.is_empty() { name.into() } else { format!("{prefix}::{name}") };
                     let begin = attrs.iter().map(|(start, _)| *start).min().unwrap_or(node.start_byte());
                     self.tests.push(Test {
-                        identity: Identity { path: path.into(), name }, package: package.into(),
+                        identity: Identity::exact(path, name), package: package.into(),
                         harness: harness.map(str::to_owned), source: source[begin..node.end_byte()].into(),
                         parameterized: attrs.iter().any(|(_, attr)| !attr.contains("test]") && attribute.is_match(attr)
                             && !attr.contains("::test")),
@@ -195,8 +195,14 @@ pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> 
         && prior.get(&(test.identity.clone(), test.package.clone(), test.harness.clone())) != Some(&test.source)).collect())
 }
 
-pub(crate) fn live(repo: &Path, head: &str, paths: &[String]) -> Result<BTreeSet<Identity>> {
-    Ok(inventory(repo, head, paths)?.into_iter().map(|test| test.identity).collect())
+/// The one changed-test model (cas-e751): Rust tests whose source differs
+/// between `base` (the merge-base with the target) and `head`. Park's
+/// stability requirement and the capped runner's repeat set both read it,
+/// so a delivery edit the target later superseded is owed by neither.
+pub(crate) fn net_changed(repo: &Path, base: &str, head: &str) -> Result<Vec<Test>> {
+    let paths = git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", base, head, "--"])
+        .context("STABILITY_DIFF_READ")?;
+    changed(repo, base, head, &paths)
 }
 
 pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
@@ -207,10 +213,8 @@ pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
 }
 
 pub(crate) fn selected(repo: &Path, base: &str, head: &str, test: &TargetedTest) -> Result<Vec<Test>> {
-    let paths = git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", base, head, "--"])
-        .context("STABILITY_DIFF_READ")?;
     let (package, _) = package_selector(&test.package).context("test package")?;
-    Ok(changed(repo, base, head, &paths)?.into_iter().filter(|own| own.package == package
+    Ok(net_changed(repo, base, head)?.into_iter().filter(|own| own.package == package
         && own.harness == test.harness && filter_matches(&test.filter, &own.identity.name)).collect())
 }
 

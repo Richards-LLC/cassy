@@ -725,6 +725,11 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub delivery_cycle: u32,
 
+    /// One automatic non-behavioural repair, carried across its corrective
+    /// delivery cycle and Cloud sync. Manual request-changes starts a new budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premerge_repair: Option<PremergeRepair>,
+
     /// cas-a844: the `factory/<assignee>` branch name recorded alongside
     /// `factory_branch_anchor` at commit time, with MERGE REQUIRED parking as
     /// a fallback. `factory_branch_anchor` is only useful if you already know
@@ -784,6 +789,14 @@ pub struct TaskDeliverables {
     /// task row, so a close on another machine can count them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_receipts: Vec<PortableTestReceipt>,
+}
+
+/// Dispatch-bound automatic repair authority, never inferred from note text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PremergeRepair {
+    pub dispatch_id: String,
+    pub rejected_anchor: String,
+    pub repair_cycle: u32,
 }
 
 /// An approved pre-merge verdict carried on its task (cas-c8ae).
@@ -892,6 +905,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     delivery_cycle: u32,
     #[serde(default)]
+    premerge_repair: Option<PremergeRepair>,
+    #[serde(default)]
     parked_branch: Option<String>,
     #[serde(default)]
     handoff_branches: Vec<String>,
@@ -939,6 +954,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
             delivery_cycle: value.delivery_cycle,
+            premerge_repair: value.premerge_repair,
             parked_branch: value.parked_branch,
             handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,
@@ -1396,6 +1412,7 @@ impl TaskDeliverables {
             && self.authorized_merge_sources.is_empty()
             && self.historical_factory_branch_anchors.is_empty()
             && self.declined_factory_branch_anchors.is_none()
+            && self.premerge_repair.is_none()
             && self.parked_branch.is_none()
             && !self.merge_conflicted
             && self.green_merge_commit.is_none()
@@ -2135,6 +2152,17 @@ mod tests {
         deliverables.factory_branch_anchor = Some("  ".to_string());
         deliverables.retain_factory_branch_anchor_as_history();
         assert_eq!(deliverables.historical_factory_branch_anchors.len(), 1);
+    }
+
+    #[test]
+    fn premerge_repair_survives_task_wire_round_trip_cas_ed08() {
+        let mut task = Task::new("repair".into(), "Repair".into());
+        task.deliverables.premerge_repair = Some(PremergeRepair {
+            dispatch_id: "vd-rejected".into(), rejected_anchor: "a".repeat(40), repair_cycle: 2,
+        });
+        let decoded: Task = serde_json::from_value(serde_json::to_value(&task).unwrap()).unwrap();
+        assert_eq!(decoded.deliverables.premerge_repair, task.deliverables.premerge_repair);
+        assert!(serde_json::from_str::<TaskDeliverables>("{}").unwrap().premerge_repair.is_none());
     }
 
     #[test]

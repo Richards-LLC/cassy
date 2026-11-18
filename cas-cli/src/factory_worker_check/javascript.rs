@@ -29,22 +29,67 @@ fn javascript(path: &str) -> bool {
     )
 }
 
-/// The runner and its test files: `vitest|jest|playwright <files>`, or
-/// `node --test <files>` for Node's built-in runner (cas-a4c3).
-fn runner_files(args: &[String]) -> Option<(&str, &[String])> {
-    let (runner, files) = match args {
-        [node, flag, files @ ..] if node == "node" && flag == "--test" => ("node", files),
-        [runner, files @ ..] if matches!(runner.as_str(), "vitest" | "jest" | "playwright") => {
-            (runner.as_str(), files)
-        }
+/// A scoped JavaScript stability command, however the shell names its runner.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Invocation {
+    pub(super) runner: &'static str,
+    /// The runner's `--config` file, relative to the invocation directory.
+    pub(super) config: Option<String>,
+    /// Test files relative to the invocation directory.
+    pub(super) files: Vec<String>,
+}
+
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>` or `node --test <test files>`";
+
+/// Package-manager prefixes and runner subcommands are spelling; the only
+/// runner option is a config file. Retries, filters and other flags stay
+/// refused: the stability run owns them.
+pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let args = match args.as_slice() {
+        ["pnpm" | "yarn" | "npm", "exec", rest @ ..] => rest,
+        ["npx" | "bunx" | "pnpx" | "pnpm" | "yarn", rest @ ..] => rest,
+        rest => rest,
+    };
+    let (runner, rest) = match args {
+        ["vitest", "run", rest @ ..] | ["vitest", rest @ ..] => ("vitest", rest),
+        ["jest", rest @ ..] => ("jest", rest),
+        ["playwright", "test", rest @ ..] | ["playwright", rest @ ..] => ("playwright", rest),
+        // Node's built-in runner (cas-a4c3) takes no config file.
+        ["node", "--test", rest @ ..] => ("node", rest),
         _ => return None,
     };
-    (!files.is_empty() && files.iter().all(|path| safe_path(path) && javascript(path)))
-        .then_some((runner, files))
+    let mut config = None;
+    let mut files = Vec::new();
+    let mut rest = rest.iter();
+    while let Some(arg) = rest.next() {
+        let value = match *arg {
+            "--config" | "-c" => Some(*rest.next()?),
+            "--runInBand" | "-i" if runner == "jest" => continue,
+            other => other.strip_prefix("--config="),
+        };
+        if let Some(value) = value {
+            if config.is_some() || runner == "node" || !safe_path(value) {
+                return None;
+            }
+            config = Some(value.to_string());
+        } else if safe_path(arg) && javascript(arg) {
+            files.push(arg.to_string());
+        } else {
+            return None;
+        }
+    }
+    (!files.is_empty()).then_some(Invocation { runner, config, files })
 }
 
 pub(super) fn allowed_args(args: &[String]) -> bool {
-    runner_files(args).is_some()
+    invocation(args).is_some()
+}
+
+/// Whether a refused command was meant as a JavaScript stability run.
+pub(super) fn names_runner(args: &[String]) -> bool {
+    args.iter().take(3).any(|arg| matches!(arg.as_str(), "vitest" | "jest" | "playwright"))
+        || args.windows(2).any(|pair| pair[0] == "node" && pair[1] == "--test")
 }
 
 /// A `node --test` reporter emitting the Vitest/Jest JSON shape that
@@ -70,12 +115,16 @@ const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
 "#;
 
 /// Only hunks intersecting a test function (or its suite title) select it.
-/// Dynamic titles cannot safely become a runtime selector and fail closed.
+/// `base` is the scoped proof base and only the delivered `head` is parsed:
+/// intermediate commits never count. `owned`, when known, keeps only head
+/// lines blamed on the task's own commits. A base revision that does not
+/// parse has no prior tests to compare. Dynamic titles fail closed.
 pub(crate) fn changed_tests(
     repo: &Path,
     base: &str,
     head: &str,
     paths: &[String],
+    owned: Option<&BTreeSet<String>>,
 ) -> Result<Vec<Identity>> {
     let mut selected = BTreeSet::new();
     for path in paths.iter().filter(|path| javascript(path)) {
@@ -85,15 +134,6 @@ pub(crate) fn changed_tests(
         if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() {
             continue;
         }
-        let output = Command::new("git")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .current_dir(repo)
-            .args(["show", &format!("{head}:{path}")])
-            .output()?;
-        if !output.status.success() {
-            bail!("cannot read {head}:{path}");
-        }
-        let source = String::from_utf8(output.stdout)?;
         let diff = super::git(
             repo,
             &[
@@ -107,20 +147,33 @@ pub(crate) fn changed_tests(
                 path,
             ],
         )?;
+        let mut lines = changed_lines(&diff)?;
+        if let Some(owned) = owned {
+            let authored = authored_lines(repo, base, head, path, owned)?;
+            lines = lines
+                .into_iter()
+                .flat_map(|(start, end)| {
+                    if start == end && diff_deletes_at(&diff, start) {
+                        // A pure deletion has no surviving line to blame.
+                        return vec![(start, end)];
+                    }
+                    (start..=end)
+                        .filter(|line| authored.contains(line))
+                        .map(|line| (line, line))
+                        .collect()
+                })
+                .collect();
+        }
         // A restored file has no delivered test change. Do not require
         // runtime identities for callbacks merely present in its final tree.
-        if diff.is_empty() { continue; }
-        let old = Command::new("git")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .current_dir(repo)
-            .args(["show", &format!("{base}:{path}")])
-            .output()?;
-        let old = if old.status.success() {
-            String::from_utf8(old.stdout)?
-        } else {
-            String::new()
-        };
-        let all = parsed_tests(path, &source, &[(1, usize::MAX)], false)?;
+        if lines.is_empty() {
+            continue;
+        }
+        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
+        let old = show(repo, base, path)?
+            .map(String::from_utf8)
+            .transpose()?
+            .unwrap_or_default();
         let stem = Path::new(path)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -128,15 +181,26 @@ pub(crate) fn changed_tests(
         let test_file = stem.ends_with(".test")
             || stem.ends_with(".spec")
             || path.split('/').any(|part| part == "__tests__");
-        if test_file && all.is_empty() && !source.trim().is_empty() && !diff.is_empty() {
+        let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
+            Ok(all) => all,
+            // GH #2054: a source file the parser cannot read declares no
+            // tests; only a test file's parse error refuses (cas-6aa9).
+            Err(_) if !test_file => continue,
+            Err(error) => return Err(error),
+        };
+        if test_file && all.is_empty() && !source.trim().is_empty() {
             bail!(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
             );
         }
-        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)?
+        // The unchanged base can hold a construct the parser cannot read; only
+        // the delivered tip must parse (cas-6aa9). No base inventory means
+        // every changed test is new.
+        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)
+            .unwrap_or_default()
             .into_iter()
             .collect();
-        for (identity, body) in parsed_tests(path, &source, &changed_lines(&diff)?, true)? {
+        for (identity, body) in parsed_tests(path, &source, &lines, true)? {
             // Hunk lines may contain several calls. Repeating an unchanged
             // neighbour would violate the delivery-only selection contract.
             if previous.get(&identity) != Some(&body) {
@@ -145,6 +209,52 @@ pub(crate) fn changed_tests(
         }
     }
     Ok(selected.into_iter().collect())
+}
+
+fn show(repo: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .current_dir(repo)
+        .args(["show", &format!("{revision}:{path}")])
+        .output()?;
+    Ok(output.status.success().then_some(output.stdout))
+}
+
+/// Head lines whose blame, bounded at the proof base, is a task commit.
+fn authored_lines(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    path: &str,
+    owned: &BTreeSet<String>,
+) -> Result<BTreeSet<usize>> {
+    let blame = super::git(
+        repo,
+        &["blame", "--porcelain", &format!("{base}..{head}"), "--", path],
+    )?;
+    let mut lines = BTreeSet::new();
+    for header in blame.lines().filter(|line| !line.starts_with('\t')) {
+        let mut fields = header.split(' ');
+        if let (Some(commit), Some(_), Some(line)) = (fields.next(), fields.next(), fields.next())
+            && commit.len() >= 40
+            && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && owned.contains(commit)
+        {
+            lines.insert(line.parse()?);
+        }
+    }
+    Ok(lines)
+}
+
+/// Whether the net diff deletes lines just above head line `line`.
+fn diff_deletes_at(diff: &str, line: usize) -> bool {
+    diff.lines().filter(|hunk| hunk.starts_with("@@ ")).any(|hunk| {
+        let mut ranges = hunk.split_whitespace().skip(1);
+        let (Some(old), Some(new)) = (ranges.next(), ranges.next()) else { return false };
+        let count = |range: &str| range.split_once(',').map_or(Some(1), |(_, n)| n.parse::<usize>().ok());
+        let start = new.trim_start_matches('+').split(',').next().and_then(|n| n.parse::<usize>().ok());
+        count(old).is_some_and(|n| n > 0) && count(new) == Some(0) && start == Some(line)
+    })
 }
 
 fn changed_lines(diff: &str) -> Result<Vec<(usize, usize)>> {
@@ -192,13 +302,55 @@ fn title(node: Node<'_>, source: &str) -> Option<String> {
     Some(contents.to_string())
 }
 
+/// `(suite, supported, parameterized)` for a test registration call.
+/// `it.each(table)(title, fn)` and its tagged-template form register one
+/// runtime test per row; their title is a placeholder template.
 fn declaration(
     node: Node<'_>,
     source: &str,
     aliases: &BTreeMap<String, String>,
-) -> Option<(bool, bool)> {
-    let function = node.child_by_field_name("function")?;
-    let name = text(function, source);
+) -> Option<(bool, bool, bool)> {
+    let mut function = node.child_by_field_name("function")?;
+    let mut parameterized = false;
+    if function.kind() == "call_expression"
+        && let Some(inner) = function.child_by_field_name("function")
+        && inner.kind() == "member_expression"
+        && text(inner, source).ends_with(".each")
+    {
+        function = inner;
+        parameterized = true;
+    }
+    let (suite, supported) = callee(function, source, aliases, parameterized)?;
+    Some((suite, supported, parameterized))
+}
+
+/// cas-6a3c: `(cond ? describe : describe.skip)(…)` declares a suite when both
+/// branches declare the same kind; jest names its tests with that title.
+fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>, parameterized: bool) -> Option<(bool, bool)> {
+    match function.kind() {
+        "parenthesized_expression" => callee(function.named_child(0)?, source, aliases, parameterized),
+        "ternary_expression" => {
+            let (suite, supported) = callee(function.child_by_field_name("consequence")?, source, aliases, parameterized)?;
+            let (other, also) = callee(function.child_by_field_name("alternative")?, source, aliases, parameterized)?;
+            (suite == other).then_some((suite, supported && also))
+        }
+        _ => {
+            let name = text(function, source);
+            named_declaration(if parameterized { name.strip_suffix(".each")? } else { name }, aliases)
+        }
+    }
+}
+
+/// A conditional callee that names the test API yet resolves to no single kind.
+fn unresolved_callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
+    matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
+        && callee(function, source, aliases, false).is_none()
+        && text(function, source)
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .any(|word| matches!(word, "test" | "it" | "describe") || aliases.contains_key(word))
+}
+
+fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(bool, bool)> {
     let parts: Vec<_> = name.split('.').collect();
     let raw_root = name
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -281,6 +433,7 @@ fn parsed_tests(
         &[],
         false,
         false,
+        false,
         strict,
         &aliases,
         &mut tests,
@@ -308,12 +461,88 @@ fn source_tree(path: &str, source: &str) -> Result<tree_sitter::Tree> {
     };
     parser.set_language(&language.into())?;
     let tree = parser
-        .parse(source, None)
-        .context("JavaScript test parse")?;
-    if tree.root_node().has_error() {
-        bail!("cannot resolve changed tests in {path}: JavaScript parse error");
+        .parse(mask_type_imports(source).as_ref(), None)
+        .with_context(|| format!("JavaScript test parse of {path}"))?;
+    if let Some(node) = first_parse_error(tree.root_node()) {
+        let at = node.start_position();
+        return Err(ParseError {
+            path: path.to_string(),
+            line: at.row + 1,
+            column: at.column + 1,
+            missing: node.is_missing(),
+            near: source
+                .get(node.start_byte()..node.end_byte())
+                .unwrap_or_default()
+                .split('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect(),
+        }
+        .into());
     }
     Ok(tree)
+}
+
+/// A file the capped runner cannot parse, located for the person fixing it (cas-6aa9).
+#[derive(Debug)]
+pub(crate) struct ParseError {
+    path: String,
+    line: usize,
+    column: usize,
+    missing: bool,
+    near: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ParseError { path, line, column, near, .. } = self;
+        let kind = if self.missing { "missing token" } else { "unparsed" };
+        write!(f, "cannot resolve changed tests in {path}: JavaScript parse error at {path}:{line}:{column} ({kind} `{near}`); rewrite that construct or move it out of the test file")
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// The outermost unparsed or missing node, in source order.
+fn first_parse_error(node: Node<'_>) -> Option<Node<'_>> {
+    if node.is_error() || node.is_missing() {
+        return Some(node);
+    }
+    if !node.has_error() {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find_map(first_parse_error)
+}
+
+/// cas-6aa9: tree-sitter-typescript 0.23.2, the newest release, cannot parse
+/// two valid type-argument forms: `import(…)` as a call's type argument
+/// (`f<typeof import('m')>()`, pulse-card auth.test.ts:28) and type arguments
+/// on a tagged template (`prisma.$queryRaw<Row[]>`…``, GH #2054). Blank the
+/// first to an identifier and the second to spaces of the same byte length,
+/// so every offset, line and test title is unchanged.
+fn mask_type_imports(source: &str) -> std::borrow::Cow<'_, str> {
+    static TYPE_IMPORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"<\s*(?:typeof\s+)?(import\s*\(\s*(?:'[^'\n]*'|"[^"\n]*")\s*\))"#).unwrap()
+    });
+    static TEMPLATE_TYPE_ARGUMENTS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"[\w$](<[^<>`;=()\n]*(?:<[^<>`;=()\n]*>[^<>`;=()\n]*)*>)\s*`").unwrap()
+    });
+    let imports = TYPE_IMPORT.replace_all(source, |caps: &regex::Captures<'_>| {
+        let (whole, query) = (&caps[0], caps.get(1).unwrap());
+        let start = query.start() - caps.get(0).unwrap().start();
+        format!("{}{}", &whole[..start], "_".repeat(query.len()))
+    });
+    if !TEMPLATE_TYPE_ARGUMENTS.is_match(&imports) {
+        return imports;
+    }
+    std::borrow::Cow::Owned(TEMPLATE_TYPE_ARGUMENTS.replace_all(&imports, |caps: &regex::Captures<'_>| {
+        let (whole, arguments) = (&caps[0], caps.get(1).unwrap());
+        let start = arguments.start() - caps.get(0).unwrap().start();
+        format!("{}{}{}", &whole[..start], " ".repeat(arguments.len()), &whole[start + arguments.len()..])
+    }).into_owned())
 }
 
 fn declared_identities<'a>(
@@ -458,7 +687,7 @@ fn control_headers<'a>(
             }
             "if_statement" => scope.child_by_field_name("consequence"),
             "call_expression"
-                if declaration(scope, source, aliases).is_some_and(|(suite, _)| suite) =>
+                if declaration(scope, source, aliases).is_some_and(|(suite, _, _)| suite) =>
             {
                 scope.child_by_field_name("arguments").and_then(|args| {
                     let mut cursor = args.walk();
@@ -489,7 +718,7 @@ fn declared_sites(path: &str, source: &str) -> Result<Vec<DeclaredSite>> {
     ) -> Result<()> {
         if node.kind() == "call_expression"
             && declaration(node, source, aliases)
-                .is_some_and(|(suite, supported)| !suite && supported)
+                .is_some_and(|(suite, supported, _)| !suite && supported)
             && let Some((_, names)) = declared_identities(node, source)?
         {
             sites.push(DeclaredSite {
@@ -523,6 +752,15 @@ fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String,
         {
             aliases.insert(text(alias, source).to_string(), name.to_string());
         }
+    }
+    // `const suite = cond ? describe : describe.skip;` aliases a conditional callee.
+    if node.kind() == "variable_declarator"
+        && let (Some(name), Some(value)) = (node.child_by_field_name("name"), node.child_by_field_name("value"))
+        && name.kind() == "identifier"
+        && matches!(value.kind(), "parenthesized_expression" | "ternary_expression")
+        && let Some((suite, true)) = callee(value, source, aliases, false)
+    {
+        aliases.insert(text(name, source).to_string(), if suite { "describe" } else { "test" }.to_string());
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -582,6 +820,8 @@ fn reject_retry_configuration(
 }
 
 // gate-audit[force]: Suite-header changes include descendant tests in the selected proof; this broadens test coverage and never bypasses a refusal.
+// gate-audit[strict]: selector Chooses the changed-scope pass that raises G-61 for an unresolvable callee or title; the non-strict inventory pass never selects tests for proof.
+// gate-audit[unresolved]: selector Inherited title-resolution state; it only makes a changed test fail closed and never accepts a refused identity.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     node: Node<'_>,
@@ -590,14 +830,30 @@ fn walk(
     lines: &[(usize, usize)],
     suites: &[String],
     unresolved: bool,
+    templated: bool,
     force: bool,
     strict: bool,
     aliases: &BTreeMap<String, String>,
     tests: &mut Vec<(Identity, String)>,
 ) -> Result<()> {
-    if node.kind() == "call_expression"
-        && let Some((suite, supported)) = declaration(node, source, aliases)
+    if strict
+        && node.kind() == "call_expression"
+        && (force || overlaps(node, lines))
+        && let Some(function) = node.child_by_field_name("function")
+        && unresolved_callee(function, source, aliases)
     {
+        bail!(crate::gates::tag(
+            "G-61",
+            format!(
+                "cannot resolve the test callee at {path}:{}: both branches of a conditional must be the same describe/test kind; use them directly",
+                node.start_position().row + 1
+            )
+        ));
+    }
+    if node.kind() == "call_expression"
+        && let Some((suite, supported, each)) = declaration(node, source, aliases)
+    {
+        let templated = templated || each;
         let args = node
             .child_by_field_name("arguments")
             .context("test arguments")?;
@@ -638,13 +894,7 @@ fn walk(
                     headers.iter().map(|(_, _, text)| text).collect::<Vec<_>>(),
                 ))?;
                 for name in names {
-                    tests.push((
-                        Identity {
-                            path: path.to_string(),
-                            name,
-                        },
-                        fingerprint.clone(),
-                    ));
+                    tests.push((Identity::exact(path, name), fingerprint.clone()));
                 }
             }
             return Ok(());
@@ -681,6 +931,7 @@ fn walk(
                     lines,
                     &nested,
                     unresolved,
+                    templated,
                     force || header_changed,
                     strict,
                     aliases,
@@ -707,6 +958,7 @@ fn walk(
                     Identity {
                         path: path.to_string(),
                         name: names.join(" "),
+                        parameterized: templated,
                     },
                     text(node, source).to_string(),
                 ));
@@ -718,19 +970,39 @@ fn walk(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         walk(
-            child, source, path, lines, suites, unresolved, force, strict, aliases, tests,
+            child, source, path, lines, suites, unresolved, templated, force, strict, aliases,
+            tests,
         )?;
     }
     Ok(())
 }
 
 pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()> {
-    let Some((runner, files)) = runner_files(args) else {
-        bail!(
-            "expected vitest|jest|playwright or node --test, followed by repository-relative test files"
-        );
-    };
+    let invocation = invocation(args).context(SHAPE)?;
     let repo = PathBuf::from(super::git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
+    // Paths are as the shell sees them: relative to the invocation directory.
+    let cwd = cwd.canonicalize()?;
+    let relative = |path: &str| -> Result<String> {
+        cwd.join(path)
+            .strip_prefix(&repo)
+            .ok()
+            .and_then(Path::to_str)
+            .filter(|path| safe_path(path))
+            .map(str::to_owned)
+            .with_context(|| format!("{path} is outside the repository"))
+    };
+    let files = invocation.files.iter().map(|file| relative(file)).collect::<Result<Vec<_>>>()?;
+    let runner_config = invocation
+        .config
+        .as_deref()
+        .map(|config| {
+            let config = repo.join(relative(config)?);
+            if !config.is_file() {
+                bail!("{} config not found: {}", invocation.runner, config.display());
+            }
+            Ok(config)
+        })
+        .transpose()?;
     let cas_root = cas_root.canonicalize()?;
     if !repo.starts_with(cas_root.join("worktrees"))
         && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo)
@@ -741,7 +1013,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
     let head = super::clean_head(&repo)?;
     let config = crate::config::Config::load(cas_root)?.factory();
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
-    let tests = changed_tests(&repo, &base, &head, files)?;
+    let tests = changed_tests(&repo, &base, &head, &files, None)?;
     if tests.is_empty() {
         bail!(crate::gates::tag(
             "G-61",
@@ -764,7 +1036,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    let proof = execute_tests(cas_root, &repo, &head, runner, &tests)?;
+    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests)?;
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -914,6 +1186,10 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     if source.contains("@jest/globals") {
         return Some("jest");
     }
+    // GH #2055: a node:test file beside a Jest config is Node's own runner.
+    if source.contains("'node:test'") || source.contains("\"node:test\"") {
+        return Some("node --test");
+    }
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
         let mut runners = local_runners(&current);
@@ -952,6 +1228,7 @@ fn execute_tests(
     repo: &Path,
     head: &str,
     runner: &str,
+    runner_config: Option<&Path>,
     tests: &[Identity],
 ) -> Result<Proof> {
     let start = Instant::now();
@@ -961,14 +1238,18 @@ fn execute_tests(
         config.max_concurrent_builders,
         &std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
     );
-    let mut by_file: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut by_file: BTreeMap<&str, Vec<&Identity>> = BTreeMap::new();
     for test in tests {
-        by_file.entry(&test.path).or_default().push(&test.name);
+        by_file.entry(&test.path).or_default().push(test);
     }
     let reports = tempfile::tempdir()?;
-    for (path, names) in by_file {
-        let (package, config) = runner_root(repo, path, runner)?;
-        let config: Vec<std::ffi::OsString> = config
+    for (path, selected) in by_file {
+        // One config path: the caller's own `--config` wins over the
+        // discovered runner config (cas-1468); never pass both.
+        let (package, discovered) = runner_root(repo, path, runner)?;
+        let config: Vec<std::ffi::OsString> = runner_config
+            .map(Path::to_path_buf)
+            .or(discovered)
             .into_iter()
             .flat_map(|config| ["--config".into(), config.into_os_string()])
             .collect();
@@ -1001,9 +1282,9 @@ fn execute_tests(
             )?;
             validate_declared_discovery(repo, &report, path, &sites)?;
         }
-        let pattern = names
+        let pattern = selected
             .iter()
-            .map(|name| format!("(?:{})", regex::escape(name)))
+            .map(|test| format!("(?:{})", test.name_pattern()))
             .collect::<Vec<_>>()
             .join("|");
         let pattern = if runner == "playwright" {
@@ -1011,13 +1292,7 @@ fn execute_tests(
         } else {
             format!("^(?:{pattern})$")
         };
-        let selected: Vec<_> = names
-            .iter()
-            .map(|name| Identity {
-                path: path.to_string(),
-                name: (*name).to_string(),
-            })
-            .collect();
+        let selected: Vec<_> = selected.into_iter().cloned().collect();
         verify_repeats(runner, repo, &selected, |iteration| {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
@@ -1377,10 +1652,7 @@ fn validate_report(
                     .get("fullName")
                     .and_then(Value::as_str)
                     .context("test fullName missing")?;
-                let id = Identity {
-                    path: path.clone(),
-                    name: name.to_string(),
-                };
+                let id = Identity::exact(path.clone(), name);
                 match test.get("status").and_then(Value::as_str) {
                     Some("passed") => {
                         if test
@@ -1400,7 +1672,8 @@ fn validate_report(
                         }
                         *results.entry(id).or_default() += 1;
                     }
-                    Some("pending" | "skipped" | "todo" | "disabled") if !tests.contains(&id) => {}
+                    Some("pending" | "skipped" | "todo" | "disabled")
+                        if !tests.iter().any(|test| test.selects(&id)) => {}
                     _ => bail!("{runner} stability failed: {} :: {}", id.path, id.name),
                 }
             }
@@ -1412,8 +1685,10 @@ fn validate_report(
             bail!("{runner} stability report was unsuccessful");
         }
     }
+    // A template identity is proved when every row it selected passed.
     for test in tests {
-        if results.get(test) != Some(&repeats) {
+        let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
+        if rows.peek().is_none() || rows.any(|(_, count)| *count != repeats) {
             bail!(
                 "{runner} stability requires {repeats} passing results: {} :: {}",
                 test.path,
@@ -1421,7 +1696,7 @@ fn validate_report(
             );
         }
     }
-    if results.keys().any(|test| !tests.contains(test)) {
+    if results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
     Ok(())
@@ -1479,10 +1754,10 @@ fn playwright_results(
                     .and_then(Value::as_str)
                     .context("spec file")?,
             );
-            let id = Identity {
-                path: report_path(repo, file.to_str().context("spec path encoding")?)?,
-                name: full.join(" "),
-            };
+            let id = Identity::exact(
+                report_path(repo, file.to_str().context("spec path encoding")?)?,
+                full.join(" "),
+            );
             for test in spec
                 .get("tests")
                 .and_then(Value::as_array)
@@ -1526,10 +1801,7 @@ mod tests {
     use serde_json::json;
 
     fn id(path: &str, name: &str) -> Identity {
-        Identity {
-            path: path.into(),
-            name: name.into(),
-        }
+        Identity::exact(path, name)
     }
 
     /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`
@@ -1575,15 +1847,120 @@ mod tests {
         git(&["commit", "--quiet", "-am", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
         let args: Vec<String> = ["node", "--test", file].map(String::from).into();
-        let (runner, files) = runner_files(&args).expect("node --test is a capped runner");
-        let tests = changed_tests(repo.path(), &base, &head, files).unwrap();
+        let invocation = invocation(&args).expect("node --test is a capped runner");
+        let tests = changed_tests(repo.path(), &base, &head, &invocation.files, None).unwrap();
         assert_eq!(tests, [id(file, "server changed")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, runner, &tests).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &tests).unwrap();
         assert_eq!(
             (proof.runner.as_str(), proof.consecutive_passes),
             ("node", 5)
         );
+    }
+
+    /// pulse-card cas-1bf9d (GH #2036): `(url ? describe : describe.skip)(…)`
+    /// lost its suite title, so the anchored name pattern filtered the changed
+    /// case out and the capped run reported it skipped. A conditional or an
+    /// alias of one keeps the title; a mixed one is refused by name.
+    #[test]
+    fn conditional_describe_keeps_its_title_in_the_capped_identity_cas_6a3c() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let file = "legal.integration.test.mjs";
+        let source = |body: &str, prelude: &str| format!(
+            "import {{ describe, test }} from 'node:test';\nconst url = 'postgresql://127.0.0.1/db';\n{prelude}\n\
+             (url ? describe : describe.skip)('legal', () => {{\n  test('keeps consent', () => {{ {body} }});\n}});\n\
+             suite('aliased', () => {{\n  test('keeps consent', () => {{ {body} }});\n}});\n"
+        );
+        let prelude = "const suite = url ? describe : describe.skip;";
+        std::fs::write(repo.path().join(file), source("throw 0;", prelude)).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(file), source("", prelude)).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()], None).unwrap();
+        assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests).unwrap();
+        assert_eq!(proof.consecutive_passes, 5);
+
+        // Branches of different kinds cannot name a runtime identity.
+        std::fs::write(repo.path().join(file), source("", prelude).replace("describe.skip)(", "test)(")).unwrap();
+        git(&["commit", "--quiet", "-am", "mixed"]);
+        let mixed = git(&["rev-parse", "HEAD"]);
+        let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()], None).unwrap_err().to_string();
+        assert!(refusal.contains("G-61"), "{refusal}");
+    }
+
+    /// pulse-card auth.test.ts (GH #2052): `importOriginal<typeof import('#imports')>()`
+    /// is valid TypeScript that tree-sitter-typescript 0.23.2 cannot parse, so
+    /// the capped run refused the whole file. It now resolves its changed test;
+    /// a real parse error names its path:line:column.
+    #[test]
+    fn typescript_type_import_argument_parses_and_parse_errors_name_their_location_cas_6aa9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let file = "auth.test.ts";
+        // Both constructs pulse-card bisected: GH #2052 and GH #2054.
+        let source = |body: &str| format!(
+            "vi.mock('#imports', async importOriginal => ({{\n  ...(await importOriginal<typeof import('#imports')>()),\n}}));\n\
+             describe('auth', () => {{\n  test('signs out', async () => {{ {body} await prisma.$queryRaw<CrossPostCommenter[]>`SELECT 1`; }});\n}});\n"
+        );
+        std::fs::write(repo.path().join(file), source("expect(1).toBe(1);")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        std::fs::write(repo.path().join(file), source("expect(2).toBe(2);")).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()], None).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
+
+        // A broken tip is refused at its location; a broken base is not.
+        std::fs::write(repo.path().join(file), source("const value = ;")).unwrap();
+        git(&["commit", "--quiet", "-am", "broken"]);
+        let refusal = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()], None).unwrap_err();
+        let located = refusal.downcast_ref::<ParseError>().expect("a located parse refusal");
+        assert_eq!((located.path.as_str(), located.line), (file, 5));
+        std::fs::write(repo.path().join(file), source("expect(3).toBe(3);")).unwrap();
+        git(&["commit", "--quiet", "-am", "repaired"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()], None).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
+
+        // GH #2054: an unparseable source file in the delivery holds no tests.
+        let service = "comment-analytics.service.ts";
+        std::fs::write(repo.path().join(service), "export const total = ;\n").unwrap();
+        std::fs::write(repo.path().join(file), source("expect(4).toBe(4);")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "service"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[service.to_string(), file.to_string()], None).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
@@ -1637,6 +2014,14 @@ mod tests {
 
         assert_eq!(runner_hint(repo.path(), "web/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "api/a.test.ts"), Some("jest"));
+        // GH #2055 (cas-6aa9): a node:test file in a Jest package uses Node's runner.
+        std::fs::write(
+            repo.path().join("api/app-boot.test.cjs"),
+            "const { test } = require('node:test');\ntest('boots', () => {});\n",
+        )
+        .unwrap();
+        assert_eq!(runner_hint(repo.path(), "api/app-boot.test.cjs"), Some("node --test"));
+        assert_eq!(invocation(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|invocation| invocation.runner), Some("node"));
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
 
@@ -1677,7 +2062,6 @@ mod tests {
         for source in [
             "test(title, () => {});",
             "describe(title, () => { test('child', () => {}); });",
-            "test.each([1, 2])('row %i', () => {});",
             "test('case_id', callback);",
             "describe('suite_id', declareTests);",
         ] {
@@ -1686,12 +2070,43 @@ mod tests {
                 "{source}"
             );
         }
+        // GH #1977/#1978: an `.each` table registers one runtime test per row.
+        let rows = "describe.each(['x'])('suite %s', () => {\n  it.each([1, 2])('row %i', () => {});\n});";
+        let template = Identity { parameterized: true, ..id("a.test.ts", "suite %s row %i") };
+        assert_eq!(source_tests("a.test.ts", rows, &[(2, 2)]).unwrap(), [template.clone()]);
+        let runtime = [id("a.test.ts", "suite x row 2"), id("a.test.ts", "suite x other 2")];
+        assert_eq!(runtime.map(|row| template.selects(&row)), [true, false]);
+        // GH #1973: a TypeScript generic over an import type parses.
+        let generic = "vi.mock('vue-i18n', async importOriginal => ({\n  ...(await importOriginal<typeof import('vue-i18n')>()),\n}));\nit('a', () => { expect(1).toBe(1); });";
+        assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);
         assert_eq!(
             changed_lines("@@ -7 +7,0 @@\n-x\n@@ -10 +9,2 @@\n+y\n+z").unwrap(),
             [(7, 7), (9, 10)]
         );
         assert!(!allowed_args(&["vitest".into(), "--retry=3".into()]));
         assert!(!allowed_args(&["jest".into(), "../a.test.js".into()]));
+        // GH #1985, #1992, #1973, #1978, #1998: the shapes worker discipline and
+        // package scripts use, plus a package-local jest config.
+        let parse = |command: &str| {
+            invocation(&command.split(' ').map(String::from).collect::<Vec<_>>())
+        };
+        let file = || vec!["src/a.spec.ts".to_string()];
+        for (command, runner, config) in [
+            ("npx vitest run src/a.spec.ts", "vitest", None),
+            ("pnpm exec vitest run src/a.spec.ts", "vitest", None),
+            ("npx jest src/a.spec.ts --runInBand", "jest", None),
+            ("pnpm exec jest --config jest.conversations.config.js --runInBand src/a.spec.ts", "jest", Some("jest.conversations.config.js")),
+            ("yarn playwright test -c e2e/playwright.config.ts src/a.spec.ts", "playwright", Some("e2e/playwright.config.ts")),
+        ] {
+            assert_eq!(
+                parse(command),
+                Some(Invocation { runner, config: config.map(String::from), files: file() }),
+                "{command}"
+            );
+        }
+        for command in ["npx jest -t name src/a.spec.ts", "vitest run --retry 2 src/a.spec.ts", "jest --config ../x.js src/a.spec.ts"] {
+            assert_eq!(parse(command), None, "{command}");
+        }
         let aliased = "import { test as check } from 'vitest'; check('case_id', () => {});";
         assert_eq!(
             source_tests("a.test.ts", aliased, &[(1, 1)]).unwrap(),
@@ -1746,7 +2161,7 @@ mod tests {
         git(&["commit", "--quiet", "-m", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
         assert_eq!(
-            changed_tests(repo.path(), &base, &head, &["a.test.ts".into()]).unwrap(),
+            changed_tests(repo.path(), &base, &head, &["a.test.ts".into()], None).unwrap(),
             [id("a.test.ts", "case_2")]
         );
         std::fs::write(repo.path().join("a.test.ts"), "declareTests();").unwrap();
@@ -1757,7 +2172,8 @@ mod tests {
                 repo.path(),
                 &head,
                 &git(&["rev-parse", "HEAD"]),
-                &["a.test.ts".into()]
+                &["a.test.ts".into()],
+                None
             )
             .is_err()
         );
@@ -1843,7 +2259,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ),
         ];
         assert_eq!(
-            changed_tests(repo.path(), &base, &head, &[path.into()]).unwrap(),
+            changed_tests(repo.path(), &base, &head, &[path.into()], None).unwrap(),
             expected
         );
         for invalid in [
@@ -1880,7 +2296,8 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
                     repo.path(),
                     &base,
                     &git(&["rev-parse", "HEAD"]),
-                    &[path.into()]
+                    &[path.into()],
+                    None
                 )
                 .unwrap(),
                 expected
@@ -1958,6 +2375,64 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         );
     }
 
+    /// GH #1977, #2000, #1971: park asks only for tests the task's own
+    /// commits changed in the delivered tree.
+    #[test]
+    fn park_requires_only_tests_the_delivery_changed_at_its_tip() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let spec = "a.spec.ts";
+        let commit = |source: &str, message: &str| {
+            std::fs::write(repo.path().join(spec), source).unwrap();
+            git(&["add", spec]);
+            git(&["commit", "--quiet", "-m", message]);
+            git(&["rev-parse", "HEAD"])
+        };
+        let file = |table: &str, own: &str, foreign: &str| format!(
+            "it.each([{table}])('row %s', () => {{}});\nit('own', () => {{ {own} }});\nit('foreign', () => {{ {foreign} }});\n"
+        );
+        git(&["init", "--quiet", "-b", "main"]);
+        let base = commit(&file("1", "", ""), "base");
+        git(&["checkout", "--quiet", "-b", "lane"]);
+        // #1977: an edited table row, then restored, is not in the net delivery.
+        let edited = commit(&file("1, 2", "", ""), "cas-1 edit row");
+        // #1971: another author's commit on the lane changes its own test.
+        let foreign = commit(&file("1, 2", "", "foreign();"), "foreign PR work");
+        // #2000: the target edits its table; the lane merges the target.
+        git(&["checkout", "--quiet", "main"]);
+        commit(&file("3", "", ""), "target edits its table");
+        git(&["checkout", "--quiet", "lane"]);
+        // The table conflicts; the merge resolves to the target's row.
+        let _ = Command::new("git")
+            .current_dir(repo.path())
+            .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+            .args(["merge", "--quiet", "--no-ff", "--no-commit", "main"])
+            .output()
+            .unwrap();
+        std::fs::write(repo.path().join(spec), file("3", "", "foreign();")).unwrap();
+        git(&["add", spec]);
+        git(&["commit", "--quiet", "-m", "merge main"]);
+        let merge = git(&["rev-parse", "HEAD"]);
+        let head = commit(&file("3", "own();", "foreign();"), "cas-1 own test");
+        let ranges = [(base, edited), (merge, head.clone())];
+        let required = crate::factory_worker_check::stability::required(
+            repo.path(), &head, "main", &[spec.into()], Some(&ranges),
+        )
+        .unwrap();
+        assert_eq!(required, [id(spec, "own")], "foreign commit {foreign}");
+    }
+
     #[test]
     fn javascript_reports_require_every_selected_test_and_reject_failure_or_extra_execution() {
         let repo = Path::new("/project");
@@ -1978,6 +2453,14 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             let mut retried = passing.clone();
             retried["testResults"][0]["assertionResults"][0]["invocations"] = json!(2);
             assert!(validate_report(runner, repo, &retried, &selected, 1).is_err());
+            // GH #1978: a template is proved when every row it selects passes.
+            let template = [Identity { parameterized: true, ..id("a.test.js", "row %s") }];
+            let rows = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed", "assertionResults":[
+                {"fullName":"row a","status":"passed"}, {"fullName":"row b","status":"passed"}]}]});
+            validate_report(runner, repo, &rows, &template, 1).unwrap();
+            let mut failed_row = rows.clone();
+            failed_row["testResults"][0]["assertionResults"][1]["status"] = json!("failed");
+            assert!(validate_report(runner, repo, &failed_row, &template, 1).is_err());
         }
     }
 
@@ -2072,7 +2555,11 @@ for (const width of [390, 1280]) {
         git(&["commit", "--quiet", "-am", "share callback and declare identities"]);
         let head = git(&["rev-parse", "HEAD"]);
         let paths = [path.to_string()];
-        let ranges = [(base, historical_head)];
+        // A real park records the delivery range up to the parked tip; a
+        // range that stops short of head is not a state park produces. The
+        // historical commit stays inside the range, so its edit is owned.
+        let _ = historical_head;
+        let ranges = [(base.clone(), head.clone())];
         let required = crate::factory_worker_check::stability::required(
             repo.path(), &head, "main", &paths, Some(&ranges),
         )
@@ -2094,7 +2581,7 @@ for (const width of [390, 1280]) {
         let missing_head = git(&["rev-parse", "HEAD"]);
         assert!(
             crate::factory_worker_check::stability::required(
-                repo.path(), &missing_head, "main", &paths, Some(&ranges),
+                repo.path(), &missing_head, "main", &paths, Some(&[(base, missing_head.clone())]),
             )
             .is_err(),
             "park must continue to refuse shared callbacks without declared identities"

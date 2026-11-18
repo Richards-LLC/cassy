@@ -76,7 +76,7 @@ Nothing reaches a client or a channel without the operator's explicit go.
 
 ## Boundaries
 
-`cas-html-reports` owns analyses, audits and decision briefs.
+`cas-client-report` owns client findings and recommendations; `cas-html-reports` owns internal analyses, audits and decision briefs.
 `cas-release-report` owns version releases, `cas-release-notes` owns merge
 announcements and `cas-sow-delivery-report` owns statement-of-work
 deliveries. This skill does not grant permission to post.

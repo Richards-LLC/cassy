@@ -3024,6 +3024,7 @@ async fn proxy_socket(
     // authenticated submitter's correlation id so only that socket receives
     // its private response.
     let mut pending_message_refs = PendingRefs::new();
+    let mut read_audit = ReadAudit::default();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -3073,7 +3074,7 @@ async fn proxy_socket(
                     if let Some((client_ref, kind)) = &client_ref {
                         pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
-                    if let Err(failure) = handle_client_message(&connector, &session, &auth, text.as_bytes()).await {
+                    if let Err(failure) = handle_client_message(&connector, &session, &auth, text.as_bytes(), &mut read_audit).await {
                         if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
@@ -3094,7 +3095,7 @@ async fn proxy_socket(
                     if let Some((client_ref, kind)) = &client_ref {
                         pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
-                    if let Err(failure) = handle_client_message(&connector, &session, &auth, &bytes).await {
+                    if let Err(failure) = handle_client_message(&connector, &session, &auth, &bytes, &mut read_audit).await {
                         if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
@@ -3156,11 +3157,56 @@ enum ClientPermissionRequired {
     PaneInput,
 }
 
+/// Keep the first allowed read as authorization evidence, then summarize the
+/// stream once this socket closes. Denials, sends and mutations remain individual.
+#[derive(Default)]
+struct ReadAudit {
+    auth: Option<(AuthStore, AuthContext)>,
+    sessions: std::collections::BTreeMap<String, (u64, u64)>,
+}
+
+impl ReadAudit {
+    fn record(
+        &mut self,
+        store: &AuthStore,
+        context: &AuthContext,
+        session: &str,
+        bytes: usize,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        let counts = self.sessions.entry(session.to_owned()).or_default();
+        if counts.0 == 0 {
+            store.audit(Some(context), "allowed", "websocket_read", Some(Scope::PaneRead), Some(session), now)?;
+        }
+        self.auth.get_or_insert_with(|| (store.clone(), context.clone()));
+        counts.0 += 1;
+        counts.1 += bytes as u64;
+        Ok(())
+    }
+}
+
+impl Drop for ReadAudit {
+    fn drop(&mut self) {
+        let Some((store, context)) = &self.auth else { return };
+        for (session, (frames, bytes)) in &self.sessions {
+            if *frames == 0 { continue; }
+            let detail = serde_json::json!({"frames": frames, "bytes": bytes}).to_string();
+            if let Err(error) = store.audit_operation(
+                context, "allowed", "websocket_read_summary", Scope::PaneRead, session,
+                Some(detail), chrono::Utc::now(),
+            ) {
+                tracing::warn!(session, %error, "read stream summary audit not written");
+            }
+        }
+    }
+}
+
 async fn handle_client_message(
     connector: &DaemonConnector,
     session: &str,
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
+    read_audit: &mut ReadAudit,
 ) -> anyhow::Result<()> {
     let (store, context) = auth.as_ref().ok_or(ClientPermissionRequired::Pairing)?;
     let now = chrono::Utc::now();
@@ -3280,18 +3326,11 @@ async fn handle_client_message(
         }
         return Err(error);
     }
-    store.audit(
-        Some(context),
-        "allowed",
-        if read_message {
-            "websocket_read"
-        } else {
-            "websocket_mutation"
-        },
-        Some(scope),
-        Some(session),
-        now,
-    )
+    if read_message {
+        read_audit.record(store, context, session, bytes.len(), now)
+    } else {
+        store.audit(Some(context), "allowed", "websocket_mutation", Some(scope), Some(session), now)
+    }
 }
 
 /// The attribution a hub-authenticated Commander send carries downstream
@@ -4289,6 +4328,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     // Scoped to this authenticated machine socket; paired devices cannot see
     // one another's MessageQueued acknowledgments.
     let mut pending_message_refs = PendingRefs::new();
+    let mut read_audit = ReadAudit::default();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -4427,7 +4467,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     if let Some((client_ref, kind)) = &client_ref {
                         pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
-                    if let Err(failure) = handle_client_message(&state.connector, &session, &auth, &bytes).await {
+                    if let Err(failure) = handle_client_message(&state.connector, &session, &auth, &bytes, &mut read_audit).await {
                         if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
@@ -5166,6 +5206,68 @@ mod upstream_unavailable_tests {
     use crate::hub::SessionMultiplexer;
 
     #[tokio::test]
+    async fn pane_read_stream_keeps_first_authorization_without_per_frame_audit_cas_89fa() {
+        let temp = crate::test_support::private_hub_tempdir();
+        let root = temp.path().join("hub");
+        let auth = AuthStore::open(&root, "audit-machine").unwrap();
+        let now = chrono::Utc::now();
+        let scopes = [Scope::PaneRead, Scope::PaneInput].into_iter().collect();
+        let invite = auth.mint_pairing("https://controller.example", scopes, now).unwrap();
+        let credential = auth.exchange_pairing(PairingExchange::test_fixture(
+            invite.token, "audit-machine", "https://controller.example", invite.scopes.clone(),
+        ), now).unwrap();
+        let mut context = AuthContext::test_fixture(&credential.device_id, "https://controller.example", invite.scopes);
+        context.credential_id = credential.credential_id;
+        context.request_id = "read-stream-request".into();
+        let session = "audit-stream-89fa";
+        auth.acquire_lease(&context, session, now).unwrap();
+        let trusted = Some((auth, context));
+        let mut read_audit = ReadAudit::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready, connected) = tokio::sync::oneshot::channel();
+        let (observed, delivered) = tokio::sync::oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ready.send(()).unwrap();
+            for _ in 0..102 {
+                let message = socket.next().await.unwrap().unwrap();
+                serde_json::from_slice::<ClientMessage>(&message.into_data()).unwrap();
+            }
+            observed.send(()).unwrap();
+            futures_util::future::pending::<()>().await;
+        });
+        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+        let _viewer = connector.attach(session, port, std::iter::empty::<String>(), None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), connected).await.unwrap().unwrap();
+        let bytes = serde_json::to_vec(&ClientMessage::RequestPaneKeyframe { pane_id: "supervisor".into() }).unwrap();
+        for _ in 0..100 {
+            handle_client_message(&connector, session, &trusted, &bytes, &mut read_audit).await.unwrap();
+        }
+        let input = serde_json::to_vec(&ClientMessage::Input { pane_id: "supervisor".into(), data: b"x".to_vec() }).unwrap();
+        for _ in 0..2 {
+            handle_client_message(&connector, session, &trusted, &input, &mut read_audit).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), delivered).await.unwrap().unwrap();
+        drop(read_audit);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(root.join("audit.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.iter().filter(|row| row["action"] == "websocket_read").count(), 1);
+        let mutations: Vec<_> = rows.iter().filter(|row| row["action"] == "websocket_mutation").collect();
+        assert_eq!(mutations.len(), 2);
+        assert!(mutations.iter().all(|row| row["request_id"] == "read-stream-request"));
+        let summaries: Vec<_> = rows.iter().filter(|row| row["action"] == "websocket_read_summary").collect();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0]["request_id"], "read-stream-request");
+        assert_eq!(summaries[0]["target_session"], session);
+        let totals: serde_json::Value = serde_json::from_str(summaries[0]["detail"].as_str().unwrap()).unwrap();
+        assert_eq!(totals["frames"], 100);
+        assert_eq!(totals["bytes"], bytes.len() * 100);
+        upstream.abort();
+    }
+
+    #[tokio::test]
     async fn send_refusal_preserves_pairing_scope_and_lease_causes_cas_5e60() {
         for (cause, scopes, expected_code, required_scope) in [
             ("revoked", vec![Scope::MessageSend], "pairing_required", None),
@@ -5195,7 +5297,7 @@ mod upstream_unavailable_tests {
                 auth.revoke_device(&context.device_id, now).unwrap();
             }
             let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
-            let failure = handle_client_message(&connector, "factory-a", &Some((auth, context)), &serde_json::to_vec(&frame).unwrap())
+            let failure = handle_client_message(&connector, "factory-a", &Some((auth, context)), &serde_json::to_vec(&frame).unwrap(), &mut ReadAudit::default())
                 .await.expect_err("refusal must happen before the daemon boundary");
             assert!(!is_upstream_unavailable(&failure), "{cause}: {failure:#}");
             let legacy = legacy_send_error(&failure, Some("refused-send"));
@@ -5233,19 +5335,19 @@ mod upstream_unavailable_tests {
         let command = |name: &str, confirmed: bool| serde_json::to_vec(&serde_json::json!({
             "SupervisorCommand": {"command": name, "confirmed": confirmed, "client_ref": "cmd-test"}
         })).unwrap();
-        let no_lease = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        let no_lease = handle_client_message(&connector, "command-session", &trusted, &command("compact", false), &mut ReadAudit::default()).await.unwrap_err();
         assert!(!is_upstream_unavailable(&no_lease), "a command without control reached the daemon boundary");
         let cancel = serde_json::to_vec(&serde_json::json!({"SupervisorCommandCancel":{"client_ref":"cmd-test"}})).unwrap();
-        let no_lease = handle_client_message(&connector, "command-session", &trusted, &cancel).await.unwrap_err();
+        let no_lease = handle_client_message(&connector, "command-session", &trusted, &cancel, &mut ReadAudit::default()).await.unwrap_err();
         assert!(!is_upstream_unavailable(&no_lease));
         auth.acquire_lease(&context, "command-session", now).unwrap();
-        let allowed_cancel = handle_client_message(&connector, "command-session", &trusted, &cancel).await.unwrap_err();
+        let allowed_cancel = handle_client_message(&connector, "command-session", &trusted, &cancel, &mut ReadAudit::default()).await.unwrap_err();
         assert!(is_upstream_unavailable(&allowed_cancel));
-        let unconfirmed = handle_client_message(&connector, "command-session", &trusted, &command("clear", false)).await.unwrap_err();
+        let unconfirmed = handle_client_message(&connector, "command-session", &trusted, &command("clear", false), &mut ReadAudit::default()).await.unwrap_err();
         assert!(unconfirmed.to_string().contains("confirmation"));
-        let arbitrary = handle_client_message(&connector, "command-session", &trusted, &command("/compact; whoami", true)).await.unwrap_err();
+        let arbitrary = handle_client_message(&connector, "command-session", &trusted, &command("/compact; whoami", true), &mut ReadAudit::default()).await.unwrap_err();
         assert!(!is_upstream_unavailable(&arbitrary));
-        let allowed = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        let allowed = handle_client_message(&connector, "command-session", &trusted, &command("compact", false), &mut ReadAudit::default()).await.unwrap_err();
         assert!(is_upstream_unavailable(&allowed), "allowlisted leased command did not reach the connector: {allowed:#}");
 
         let mut pending = PendingRefs::new();
@@ -5317,7 +5419,7 @@ mod upstream_unavailable_tests {
             "factory-a",
             &Some((auth.clone(), phone.clone())),
             &bytes,
-        )
+         &mut ReadAudit::default())
         .await
         .expect_err("no daemon upstream can take the message");
         assert!(is_upstream_unavailable(&failure), "{failure:#}");
@@ -5347,7 +5449,7 @@ mod upstream_unavailable_tests {
             "factory-a",
             &Some((auth.clone(), phone)),
             &input,
-        )
+         &mut ReadAudit::default())
         .await
         .expect_err("message:send and a lease do not grant pane:input");
         assert!(!is_upstream_unavailable(&refused));

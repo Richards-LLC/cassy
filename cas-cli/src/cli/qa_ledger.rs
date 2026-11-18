@@ -39,7 +39,7 @@ enum LedgerCommand {
 }
 
 pub(crate) fn check(path: &Path, task: Option<&cas_types::Task>) -> crate::qa_ledger::Report {
-    crate::qa_ledger::check(path, task.map(crate::qa_ledger::minimum_rows).unwrap_or(1))
+    task.map_or_else(|| crate::qa_ledger::check(path, 1), |task| crate::qa_ledger::check_for_task(path, task))
 }
 
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
@@ -113,6 +113,13 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 None => close_ops::resolve_close_gate_repo_root(cas_root)
                     .map_err(|e| anyhow::anyhow!(e))?,
             };
+            let caller = std::env::current_dir()?;
+            let same_repo = repo_context::git_layout(&caller).ok()
+                .zip(repo_context::git_layout(&repo).ok())
+                .is_some_and(|((_, caller_common), (_, target_common))| caller_common == target_common);
+            let repo = if same_repo {
+                PathBuf::from(crate::qa_impact::io::git(&caller, &["rev-parse", "--show-toplevel"])?).canonicalize()?
+            } else { repo };
             let config = crate::config::Config::load(cas_root)?;
             let impact = crate::qa_impact::predicted(&repo, &config.qa(), &task)?;
             let journeys = impact

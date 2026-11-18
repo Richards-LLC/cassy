@@ -268,18 +268,7 @@ pub(crate) fn ledger_preflight(
     {
         return Ok(());
     }
-    if let Some(owner) = std::fs::read_to_string(&ledger)
-        .ok()
-        .and_then(|body| crate::qa_ledger::foreign_owner(&body, &task.id))
-    {
-        return Err(format!(
-            "QA LEDGER REJECTED before verification dispatch:\n{} is a canonical ledger for {owner}, not {}.\nRun cas qa ledger init --task {}",
-            ledger.display(),
-            task.id,
-            task.id
-        ));
-    }
-    let report = crate::qa_ledger::check(&ledger, crate::qa_ledger::minimum_rows(task));
+    let report = crate::qa_ledger::check_for_task(&ledger, task);
     if report.ok {
         Ok(())
     } else {

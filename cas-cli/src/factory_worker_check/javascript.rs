@@ -328,6 +328,12 @@ fn declaration(
 /// branches declare the same kind; jest names its tests with that title.
 fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>, parameterized: bool) -> Option<(bool, bool)> {
     match function.kind() {
+        "call_expression" => {
+            let inner = function.child_by_field_name("function")?;
+            let property = inner.child_by_field_name("property")?;
+            matches!(text(property, source), "skipIf" | "runIf")
+                .then(|| callee(inner, source, aliases, parameterized)).flatten()
+        }
         "parenthesized_expression" => callee(function.named_child(0)?, source, aliases, parameterized),
         "ternary_expression" => {
             let (suite, supported) = callee(function.child_by_field_name("consequence")?, source, aliases, parameterized)?;
@@ -343,7 +349,9 @@ fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>, 
 
 /// A conditional callee that names the test API yet resolves to no single kind.
 fn unresolved_callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
-    matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
+    (matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
+        || text(function, source).split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .any(|word| aliases.get(word).is_some_and(|api| api == UNRESOLVED_API)))
         && callee(function, source, aliases, false).is_none()
         && text(function, source)
             .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -378,6 +386,8 @@ fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(
                     | "fails"
                     | "fail"
                     | "fixme"
+                    | "skipIf"
+                    | "runIf"
             )
         })
     {
@@ -742,6 +752,8 @@ fn declared_sites(path: &str, source: &str) -> Result<Vec<DeclaredSite>> {
     Ok(sites)
 }
 
+const UNRESOLVED_API: &str = "unresolved-test-api";
+
 fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String, String>) {
     if node.kind() == "import_specifier"
         && let Some(name) = node.child_by_field_name("name")
@@ -758,9 +770,13 @@ fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String,
         && let (Some(name), Some(value)) = (node.child_by_field_name("name"), node.child_by_field_name("value"))
         && name.kind() == "identifier"
         && matches!(value.kind(), "parenthesized_expression" | "ternary_expression")
-        && let Some((suite, true)) = callee(value, source, aliases, false)
     {
-        aliases.insert(text(name, source).to_string(), if suite { "describe" } else { "test" }.to_string());
+        let api = match callee(value, source, aliases, false) {
+            Some((suite, true)) => Some(if suite { "describe" } else { "test" }),
+            _ if unresolved_callee(value, source, aliases) => Some(UNRESOLVED_API),
+            _ => None,
+        };
+        if let Some(api) = api { aliases.insert(text(name, source).to_string(), api.to_string()); }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -819,6 +835,21 @@ fn reject_retry_configuration(
     Ok(())
 }
 
+/// Explicit disabled registrations do not promise a passing runtime result.
+/// Conditional skipIf/runIf and mixed conditional aliases still owe real proof.
+fn skipped_registration(function: Node<'_>, source: &str) -> bool {
+    match function.kind() {
+        "member_expression" => {
+            function.child_by_field_name("property").is_some_and(|property|
+                matches!(text(property, source), "skip" | "todo" | "fixme"))
+                || function.child_by_field_name("object").is_some_and(|object| skipped_registration(object, source))
+        }
+        "call_expression" => function.child_by_field_name("function").is_some_and(|callee| skipped_registration(callee, source)),
+        "parenthesized_expression" => function.named_child(0).is_some_and(|inner| skipped_registration(inner, source)),
+        _ => false,
+    }
+}
+
 // gate-audit[force]: Suite-header changes include descendant tests in the selected proof; this broadens test coverage and never bypasses a refusal.
 // gate-audit[strict]: selector Chooses the changed-scope pass that raises G-61 for an unresolvable callee or title; the non-strict inventory pass never selects tests for proof.
 // gate-audit[unresolved]: selector Inherited title-resolution state; it only makes a changed test fail closed and never accepts a refused identity.
@@ -853,6 +884,9 @@ fn walk(
     if node.kind() == "call_expression"
         && let Some((suite, supported, each)) = declaration(node, source, aliases)
     {
+        if node.child_by_field_name("function").is_some_and(|function| skipped_registration(function, source)) {
+            return Ok(());
+        }
         let templated = templated || each;
         let args = node
             .child_by_field_name("arguments")

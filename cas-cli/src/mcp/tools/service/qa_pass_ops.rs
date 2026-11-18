@@ -632,10 +632,17 @@ impl CasService {
             // not filed again.
             // cas-7823, cas-5edc: so is one whose wrong output an open issue
             // or task records; it gets the evidence and a +1.
-            if let Some(existing) =
-                crate::qa_pass::tracked_follow_up(issue, delivery_id, |id| store.get(id).is_ok())
-                    .or_else(|| matched(issue).ok().flatten())
-            {
+            let existing = match crate::qa_pass::tracked_follow_up(issue, delivery_id, |id| store.get(id).is_ok()) {
+                Some(id) => Some(id),
+                None => match matched(issue) {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        failed.push(format!("{} ({error})", issue.problem));
+                        continue;
+                    }
+                },
+            };
+            if let Some(existing) = existing {
                 // A matched GitHub issue is named, not linked: it is no task.
                 if store.get(&existing).is_ok() {
                     let related =

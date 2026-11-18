@@ -66,9 +66,20 @@ impl Identity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Proof {
     pub runner: String,
+    #[serde(serialize_with = "serialize_changed_tests")]
     pub tests: Vec<Identity>,
     pub consecutive_passes: u32,
     pub elapsed_ms: u128,
+}
+
+fn serialize_changed_tests<S: serde::Serializer>(tests: &[Identity], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Row<'a> {
+        #[serde(flatten)]
+        identity: &'a Identity,
+        reason: &'static str,
+    }
+    serializer.collect_seq(tests.iter().map(|identity| Row { identity, reason: "changed-test" }))
 }
 
 pub(super) fn valid(proof: &Proof) -> bool {

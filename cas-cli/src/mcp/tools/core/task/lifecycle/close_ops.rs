@@ -14,6 +14,7 @@ pub(crate) mod task_attribution;
 pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;
+mod delivery_git;
 mod snapshot_approval;
 mod rule_references;
 mod rebased_delivery;
@@ -15188,6 +15189,33 @@ fn without_promoted_changelog_fragments(
     paths: Vec<String>,
     owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
+    type Key = (std::path::PathBuf, String, String, Vec<String>, Vec<String>);
+    type Value = (Option<String>, Vec<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Value>>> = std::sync::OnceLock::new();
+    let immutable = delivery_git::oid(anchor) && delivery_git::oid(parent_branch);
+    let key = (repo_path.to_path_buf(), anchor.to_string(), parent_branch.to_string(), paths.clone(),
+        owners.iter().map(|owner| owner.to_string()).collect());
+    let cache = CACHE.get_or_init(Default::default);
+    if immutable && let Some(value) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return value;
+    }
+    let value = without_promoted_changelog_fragments_uncached(repo_path, anchor, parent_branch, paths, owners);
+    // A positive promotion is backed by immutable Git objects. A failure may
+    // be a transient read/deadline error, so leave it retryable.
+    if immutable && value.0.is_some() && let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 4096 { cache.clear(); }
+        cache.insert(key, value.clone());
+    }
+    value
+}
+
+fn without_promoted_changelog_fragments_uncached(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: Vec<String>,
+    owners: &[&str],
+) -> (Option<String>, Vec<String>) {
     let owned = |path: &str| {
         path.strip_prefix("changelog.d/")
             .and_then(|name| name.strip_suffix(".md"))
@@ -15295,6 +15323,29 @@ fn without_promoted_changelog_fragments(
 /// deleting release and the current target; a path or release subject alone
 /// cannot excuse a deletion.
 fn without_promoted_doc_fragments(
+    repo: &std::path::Path, anchor: &str, target: &str, paths: Vec<String>, owners: &[&str],
+) -> (Option<String>, Vec<String>) {
+    type Key = (std::path::PathBuf, String, String, Vec<String>, Vec<String>);
+    type Value = (Option<String>, Vec<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Value>>> = std::sync::OnceLock::new();
+    let immutable = delivery_git::oid(anchor) && delivery_git::oid(target);
+    let key = (repo.to_path_buf(), anchor.to_string(), target.to_string(), paths.clone(),
+        owners.iter().map(|owner| owner.to_string()).collect());
+    let cache = CACHE.get_or_init(Default::default);
+    if immutable && let Some(value) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return value;
+    }
+    let value = without_promoted_doc_fragments_uncached(repo, anchor, target, paths, owners);
+    // A positive promotion is backed by immutable Git objects. A failure may
+    // be a transient read/deadline error, so leave it retryable.
+    if immutable && value.0.is_some() && let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 4096 { cache.clear(); }
+        cache.insert(key, value.clone());
+    }
+    value
+}
+
+fn without_promoted_doc_fragments_uncached(
     repo: &std::path::Path, anchor: &str, target: &str, paths: Vec<String>, owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
     fn sections(text: &str) -> std::collections::BTreeMap<String, Vec<String>> {
@@ -26706,6 +26757,7 @@ fn delivery_content_presence_on_target_for_paths(
 /// cas-0e29e: the first-parent range and delivered paths one
 /// `delivery_content_presence_on_target_for_paths` call walks, each path from
 /// `parent` to `target` (all resolved commits).
+#[derive(Clone)]
 struct DeliveryLineRange {
     parent: String,
     delivery: String,
@@ -26714,6 +26766,31 @@ struct DeliveryLineRange {
 }
 
 fn delivery_line_range(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    selected_paths: Option<&[String]>,
+    base: Option<&str>,
+) -> Result<DeliveryLineRange, DeliveryContentPresence> {
+    type Key = (std::path::PathBuf, String, String, Option<Vec<String>>, Option<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, DeliveryLineRange>>> = std::sync::OnceLock::new();
+    let immutable = delivery_git::oid(delivery_commit) && delivery_git::oid(target_ref)
+        && base.is_none_or(delivery_git::oid);
+    let key = (repo_path.to_path_buf(), delivery_commit.to_string(), target_ref.to_string(),
+        selected_paths.map(<[String]>::to_vec), base.map(str::to_string));
+    let cache = CACHE.get_or_init(Default::default);
+    if immutable && let Some(range) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return Ok(range);
+    }
+    let range = delivery_line_range_uncached(repo_path, delivery_commit, target_ref, selected_paths, base)?;
+    if immutable && let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 4096 { cache.clear(); }
+        cache.insert(key, range.clone());
+    }
+    Ok(range)
+}
+
+fn delivery_line_range_uncached(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     target_ref: &str,

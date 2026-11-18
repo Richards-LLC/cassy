@@ -1249,7 +1249,7 @@ const WALK_CACHE_LIMIT: usize = 4096;
 const WALK_ANSWER_LIMIT: usize = 1 << 16;
 
 fn commit_of(repo: &Path, reference: &str) -> Option<String> {
-    super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"))
+    super::delivery_git::commit(repo, reference)
 }
 
 /// Forget every memoized walk answer and parallel-edit proof, so a test

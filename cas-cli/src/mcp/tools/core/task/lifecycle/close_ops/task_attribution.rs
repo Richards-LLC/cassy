@@ -11,7 +11,7 @@ struct DeliveryRange {
     tip: String,
 }
 
-use crate::git_evidence::git_text;
+use super::delivery_git::text as git_text;
 
 pub(crate) struct StartedDelivery {
     pub branch: String,
@@ -1396,6 +1396,9 @@ pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<
     if !is_safe_git_refname(commit) {
         return None;
     }
+    if let Some(facts) = super::delivery_git::facts(repo, commit) {
+        return (!facts.parents.is_empty()).then_some(!facts.paths.is_empty());
+    }
     let trees = git_text(
         repo,
         &[
@@ -1459,6 +1462,7 @@ fn first_parent_delivery_plan(
 ) -> Option<FirstParentDeliveryPlan> {
     if [base, anchor, shipped].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
     let history = git_text(repo, &["rev-list", "--first-parent", "--no-merges", "--reverse", &format!("{base}..{anchor}")])?;
+    super::delivery_git::prime(repo, &history.lines().map(str::to_string).collect::<Vec<_>>());
     let mut identity = TaskCommitIdentity {
         task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
     };
@@ -1466,8 +1470,11 @@ fn first_parent_delivery_plan(
     for commit in history.lines().filter(|commit| !commit.is_empty()) {
         let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
         let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
-        let paths = git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?;
-        if paths.is_empty() { continue; }
+        let has_content = match super::delivery_git::facts(repo, commit) {
+            Some(facts) => facts.paths.iter().any(|path| path != ".cas" && !path.starts_with(".cas/")),
+            None => !git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?.is_empty(),
+        };
+        if !has_content { continue; }
         if subject_claims_another_task(&message, &identity) { foreign.push(commit.to_string()); }
         else { commits.push(commit.to_string()); }
     }
@@ -1541,6 +1548,10 @@ fn judge_presence(
 }
 
 fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    if let Some(facts) = super::delivery_git::facts(repo, to)
+        && facts.parents.first().is_some_and(|parent| parent == from) {
+        return Some(facts.paths);
+    }
     let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", from, to, "--"])?;
     Some(changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect())
 }
@@ -1717,6 +1728,7 @@ fn merge_tip_content_presence_selected(
         .map(str::to_owned)
         .collect();
 
+    super::delivery_git::prime(repo, &commits);
     // Reverts are negative delivery evidence, never a later task delivery.
     // Apply the exclusion to every selection route, including known receipts.
     // Checkpoints carry the range but supply no positive tree evidence.

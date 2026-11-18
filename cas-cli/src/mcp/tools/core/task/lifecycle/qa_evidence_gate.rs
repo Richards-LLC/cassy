@@ -865,6 +865,52 @@ mod tests {
         assert!(adversarial_probe_refusal("cas-x", &ledger, &guard).is_none());
     }
 
+    /// GH #2111: pulse-card sets origins/registry, so qa.mode resolves to
+    /// batch. Target ancestry cannot transfer implementer proof to per-task QA.
+    #[test]
+    fn pulse_card_batch_mode_owns_park_evidence_without_a_task_bundle() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for (mode, expected) in [("", crate::config::QaMode::Batch), ("mode='per_task'\n", crate::config::QaMode::PerTask)] {
+            for integration in [None, Some(false), Some(true)] {
+                let temp = tempfile::tempdir().unwrap();
+                let repo = temp.path();
+                env.set_current_dir(repo);
+                git(repo, &["init", "-q", "-b", "main"]);
+                let base = commit_file(repo, "README.md", "base\n");
+                git(repo, &["switch", "-q", "-c", "factory/worker"]);
+                let path = "apps/frontend/app/src/components/auth/InspectionBanner.vue";
+                let head = commit_file(repo, path, "<template>fixed</template>\n");
+                if integration == Some(true) { git(repo, &["branch", "-f", "main", &head]); }
+                let target = if integration.is_none() { "missing-target" } else { "main" };
+                let root = crate::store::init_cas_dir(repo).unwrap();
+                // Exact QA stanza from pulse-card; only the per-task control adds mode.
+                std::fs::write(root.join("config.toml"), format!(
+                    "[qa]\n{mode}deployed_origins=['https://getpulsecard.com']\n[qa.registry]\nenforce='enforce'\n"
+                )).unwrap();
+                assert_eq!(crate::config::Config::load(&root).unwrap().qa().mode, expected);
+                assert_eq!(crate::qa_batch::integration_state(repo, &head, target), integration);
+                let mut task = Task::new("cas-72c6-replay".into(), "Inspection banner fix".into());
+                task.assignee = Some("worker".into());
+                task.deliverables.factory_branch_anchor = Some(head.clone());
+                crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+                let changed = [path.to_string()];
+                let check = || qa_evidence_close_gate_for_paths(
+                    &root, &task, repo, target, Some(&head), Some(&changed), Some(&base),
+                );
+                let result = check();
+                assert_eq!(result.is_ok(), expected == crate::config::QaMode::Batch,
+                    "mode={expected}, integration={integration:?}: {result:?}");
+                assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
+                    expected == crate::config::QaMode::Batch);
+                if expected == crate::config::QaMode::Batch {
+                    // Repeated parks still defer uncertain/unmerged targets;
+                    // once integrated, the recorded staging receipt remains due.
+                    assert_eq!(check().is_ok(), integration != Some(true));
+                }
+            }
+        }
+    }
+
     #[test]
     fn ledger_preflight_preserves_batch_evidence_ownership() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

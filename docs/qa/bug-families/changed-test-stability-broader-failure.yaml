@@ -1,0 +1,4 @@
+title: Broader selection failures preserve valid passing changed-test stability
+tasks: [cas-3a252]
+invariants: [FACTORY-SELECTED-TEST-LOG]
+journeys: [FACTORY-CLOSE]

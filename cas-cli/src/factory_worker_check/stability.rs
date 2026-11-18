@@ -120,6 +120,18 @@ pub(crate) fn missing(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Ide
     tests.iter().filter(|test| !covered.contains(*test)).cloned().collect()
 }
 
+/// Snapshot only evidence the normal park consumer accepts at this tip.
+/// Admission still invalidates it before launching a possibly failing child.
+pub(super) fn prior(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Proof> {
+    if tests.is_empty() { return Vec::new(); }
+    passing.records().iter().filter_map(|(_, _, test)| test.stability.as_ref())
+        .filter(|proof| proof.runner == "nextest" && valid(proof))
+        .cloned().filter_map(|mut proof| {
+            proof.tests.retain(|test| tests.contains(test));
+            (!proof.tests.is_empty()).then_some(proof)
+        }).collect()
+}
+
 /// Tests this delivery changed. Rust keeps its per-range ownership adapter,
 /// intersected with the same surviving net changes the capped runner repeats. JavaScript
 /// reads only the delivered head over the net diff from the scoped proof base

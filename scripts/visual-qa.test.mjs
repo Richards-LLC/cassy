@@ -18,7 +18,7 @@ test('explicit Playwright selection wins over a locally installed package', asyn
   for (const script of ['scripts/visual-qa.mjs', 'cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs']) {
     const dir = await mkdtemp(join(tmpdir(), 'visual-qa-module-'));
     await copyFile(join(repoRoot, script), join(dir, 'visual-qa.mjs'));
-    for (const [name, marker] of [['node_modules/playwright', 11], ['selected', 73]]) {
+    for (const [name, marker] of [['node_modules/playwright', 'local'], ['selected', 'explicit']]) {
       const pkg = join(dir, name);
       await mkdir(pkg, { recursive: true });
       await writeFile(join(pkg, 'package.json'), JSON.stringify({ type: 'module', main: 'index.js', version: '1.65.0' }));
@@ -28,7 +28,7 @@ test('explicit Playwright selection wins over a locally installed package', asyn
       encoding: 'utf8', env: { ...process.env, PLAYWRIGHT_MODULE: join(dir, 'selected') },
     });
     assert.equal(child.status, 0, child.stderr);
-    assert.equal(Number(child.stdout.trim()), 73);
+    assert.equal(child.stdout.trim(), 'explicit');
   }
 });
 

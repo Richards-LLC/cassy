@@ -1,6 +1,0 @@
-title: A conditional or aliased describe keeps its suite title in the capped JavaScript identity, so the changed case runs instead of being filtered out as skipped
-statement: '`(cond ? describe : describe.skip)(title, fn)` and `const suite = cond ? describe : describe.skip` resolve as suites, so the anchored runner name pattern matches the full runtime name; a conditional whose branches are different kinds is refused with G-61 instead of silently skipping.'
-fixed_by: [cas-6a3c]
-tasks: [cas-6a3c]
-journeys: [FACTORY-CLOSE]
-invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]

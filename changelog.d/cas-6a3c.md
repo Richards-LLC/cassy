@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **Capped JavaScript checks run tests inside a conditional describe** — Was: a spec written as `(url ? describe : describe.skip)('suite', …)`, the usual opt-in for a database-backed integration test, lost its suite title in the capped runner's test identity. The runner's exact-name filter then matched nothing, jest reported every case skipped, and the delivery could not park, even with the database URL set. Now: a conditional describe, or a variable aliasing one, keeps its title, so the changed cases run and earn their five passes. A conditional whose branches mix describe and test is refused by name (G-61) instead of being silently skipped.

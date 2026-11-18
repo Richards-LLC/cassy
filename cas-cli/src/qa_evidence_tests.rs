@@ -450,8 +450,10 @@ fn scoped_factory_fixture() -> (Fixture, PathBuf, PathBuf) {
     let cas_root = fx.repo.join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
     let base = fx.task_dir.parent().unwrap().to_path_buf();
+    // GH #2111: omitted mode resolves to batch and defers individual bundles.
+    // These GH #1061 controls exercise per-task bundle paths and validation.
     std::fs::write(cas_root.join("config.toml"), format!(
-        "[factory]\nartifacts_root = {:?}\n[qa]\nuser_facing_paths = [\"web/**\"]\n",
+        "[factory]\nartifacts_root = {:?}\n[qa]\nmode = 'per_task'\nuser_facing_paths = [\"web/**\"]\n",
         base.display().to_string()
     )).unwrap();
     let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, TASK);
@@ -485,7 +487,7 @@ fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String
 /// after PreToolUse has switched new writes to the project namespace.
 #[test]
 fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
-    let mut env = crate::test_support::TestEnvGuard::new();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.set("CAS_AGENT_ROLE", "worker");
     let (fx, cas_root, legacy) = scoped_factory_fixture();
     let bundle = fx.task_dir.join("qa/bundle.json");
@@ -509,7 +511,7 @@ fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
 
 #[test]
 fn missing_bundle_refusal_requests_hook_writable_path_gh_1061() {
-    let mut env = crate::test_support::TestEnvGuard::new();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.set("CAS_AGENT_ROLE", "worker");
     let (fx, cas_root, legacy) = scoped_factory_fixture();
     let bundle = fx.task_dir.join("qa/bundle.json");
@@ -528,7 +530,7 @@ fn missing_bundle_refusal_requests_hook_writable_path_gh_1061() {
 
 #[test]
 fn citation_migration_preserves_validation_boundaries_gh_1061() {
-    let mut env = crate::test_support::TestEnvGuard::new();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.set("CAS_AGENT_ROLE", "worker");
     let (fx, cas_root, legacy) = scoped_factory_fixture();
     let bundle = fx.write_bundle(|_| {});

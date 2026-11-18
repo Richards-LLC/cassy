@@ -1948,6 +1948,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         run(repo, &["init", "-q", "-b", "epic/train"]);
+        // Candidate commit-tree must use explicit fixture identity, never the
+        // host's platform-dependent author/email auto-detection.
+        run(repo, &["config", "user.useConfigOnly", "true"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
         env.set("CAS_ROOT", &root);
         env.set("CAS_AGENT_ROLE", "supervisor");

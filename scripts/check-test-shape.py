@@ -384,8 +384,9 @@ def javascript_bindings(source):
 def javascript_fixture_output(source, path, start, context, value):
     """Exact stdout of a child printing a supplied dependency export is data.
 
-    Follow the tuple fixture, its written export and the child's projection in
-    the enclosing callback. Merely mentioning a marker cannot exempt copy.
+    Recognize resolvePlaywright's selection contract: the copied consumer and
+    PLAYWRIGHT_MODULE must point into the same disposable fixture tree. An
+    arbitrary module printing a same-named property has no such provenance.
     """
     assertion = re.fullmatch(r'assert\.(?:equal|strictEqual)\(\s*(\w+)\.stdout(?:\.trim\(\))?\s*,\s*', context)
     if not assertion:
@@ -417,38 +418,75 @@ def javascript_fixture_output(source, path, start, context, value):
         return False
     call = code.index('(', binding)
     args = [(left, right, body) for left, right, body in literals if call < left < closes.get(call, call)]
-    programs = [args[i + 1][2] for i, arg in enumerate(args[:-1]) if arg[2] == '-e']
+    programs = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg[2] == '-e']
     if len(programs) != 1:
         return False
-    program = list(programs[0])
-    for left, right, _ in text_literals(programs[0], path):
-        program[left:right] = ' ' * (right - left)
-    program = re.sub(r'//[^\n]*|/\*.*?\*/', '', ''.join(program), flags=re.S)
-    identifier = r'[A-Za-z_$][\w$]*'
-    printed = re.search(r'\bconsole\.log\(\s*(?:\(await\s+' + identifier + r'\(\)\)|' + identifier
-                        + r')(?:\.' + identifier + r')*\.(' + identifier + r')\s*\);?\s*$', program)
+    printed = re.fullmatch(
+        r'\s*import\s*\{\s*resolvePlaywright\s*\}\s*from\s*\$\{JSON\.stringify\(pathToFileURL\(join\((\w+),\s*('
+        + JS_LITERAL + r')\)\)\.href\)\};\s*console\.log\(\(await\s+resolvePlaywright\(\)\)\.playwright\.(\w+)\);?\s*',
+        programs[0][2])
     if not printed:
+        return False
+    root, consumer, field = printed.groups()
+    def text(literal):
+        return re.sub(r'\\(.)', r'\1', literal[1:-1])
+    temporary = r'\bconst\s+' + root + r'\s*=\s*await\s+mkdtemp\(join\(tmpdir\(\),\s*' + JS_LITERAL + r'\)\);'
+    if not any(code[m.start():].startswith('const') for m in re.compile(temporary).finditer(source, begin, binding)):
+        return False
+    selected = re.fullmatch(
+        r'\s*\]\s*,\s*\{\s*encoding\s*:\s*[\'"]utf8[\'"]\s*,\s*env\s*:\s*\{\s*\.\.\.process\.env\s*,\s*'
+        r'PLAYWRIGHT_MODULE\s*:\s*join\(' + root + r',\s*(' + JS_LITERAL + r')\)\s*\},?\s*\}\s*',
+        source[programs[0][1]:closes[call]])
+    if not selected:
+        return False
+    known_consumers = {'scripts/visual-qa.mjs', 'cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs'}
+    copied = False
+    copy = r'\bcopyFile\(join\(repoRoot,\s*(' + JS_LITERAL + r'|\w+)\),\s*join\(' + root + r',\s*(' + JS_LITERAL + r')\)\)'
+    for match in re.finditer(copy, source[begin:binding]):
+        at = begin + match.start()
+        if not code[at:].startswith('copyFile') or text(match[2]) != text(consumer):
+            continue
+        if match[1][0] in '\'"`':
+            copied |= text(match[1]) in known_consumers
+            continue
+        # The real reproduction copies each of the two shipped consumers.
+        loop = r'\bfor\s*\(\s*const\s+' + re.escape(match[1]) + r'\s+of\s*(\[)'
+        for outer in re.finditer(loop, code[begin:at]):
+            array = begin + outer.start(1)
+            body = code.find('{', closes.get(array, at), at)
+            if body < 0 or closes.get(body, 0) < binding:
+                continue
+            paths = [text(source[left:right]) for left, right, _ in literals if array < left < closes[array]]
+            copied |= bool(paths) and set(paths) <= known_consumers
+    if not copied:
         return False
     for left, right, body in literals:
         if not begin < left < binding:
             continue
-        export = re.fullmatch(r'export\s+const\s+' + re.escape(printed[1])
+        export = re.fullmatch(r'export\s+const\s+' + re.escape(field)
                               + r'\s*=\s*\$\{JSON\.stringify\((\w+)\)\};?', body)
         if not export:
             continue
         writers = [m.end() - 1 for m in re.finditer(r'\bwriteFile\s*\(', code[begin:left])]
-        if not any(begin + opening < left < right <= closes.get(begin + opening, 0) for opening in writers):
+        writers = [begin + opening for opening in writers
+                   if left < right <= closes.get(begin + opening, 0)]
+        package = next((m[1] for opening in writers if (m := re.fullmatch(
+            r'\(join\((\w+),\s*[\'"]index\.js[\'"]\),\s*', source[opening:left]))), None)
+        if package is None:
             continue
-        loop = r'\bfor\s*\(\s*const\s*\[\s*\w+\s*,\s*' + re.escape(export[1]) + r'\s*\]\s+of\s*(\[)'
+        loop = r'\bfor\s*\(\s*const\s*\[\s*(\w+)\s*,\s*' + re.escape(export[1]) + r'\s*\]\s+of\s*(\[)'
         for match in re.finditer(loop, code[begin:left]):
-            array = begin + match.start(1)
+            array = begin + match.start(2)
             loop_body = code.find('{', closes.get(array, left), left)
             if loop_body < 0 or closes.get(loop_body, 0) < right:
                 continue
+            joined = r'\bconst\s+' + package + r'\s*=\s*join\(\s*' + root + r'\s*,\s*' + match[1] + r'\s*\);'
+            if not re.search(joined, code[loop_body:left]):
+                continue
             rows = source[array:closes[array] + 1]
-            for row in re.finditer(r'\[\s*' + JS_LITERAL + r'\s*,\s*(' + JS_LITERAL + r')\s*\]', rows):
+            for row in re.finditer(r'\[\s*(' + JS_LITERAL + r')\s*,\s*(' + JS_LITERAL + r')\s*\]', rows):
                 if (code[array + row.start()] == '[' and code[array + row.end() - 1] == ']'
-                        and re.sub(r'\\(.)', r'\1', row[1][1:-1]) == value):
+                        and text(row[1]) == text(selected[1]) and text(row[2]) == value):
                     return True
     return False
 

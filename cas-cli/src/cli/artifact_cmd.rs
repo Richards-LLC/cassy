@@ -310,16 +310,17 @@ fn metadata_result<T>(result: anyhow::Result<T>, json: bool) -> anyhow::Result<T
 }
 
 fn execute_list(args: &ListArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {
-    let store = SqliteArtifactStore::open(cas_root).context("opening the artifact store")?;
-    let artifacts = store.list_for_task(&args.task)?;
+    let listing = crate::artifacts::proof::list_task_metadata(cas_root, &args.task)?;
+    let artifacts = &listing.artifacts;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&artifacts)?);
+        println!("{}", serde_json::to_string_pretty(&listing)?);
         return Ok(());
     }
+    println!("[WARN] Partial artifact inventory: local records and synced publication references; Cloud inventory not checked.");
+    for warning in &listing.warnings { println!("     {warning}"); }
     if artifacts.is_empty() {
-        println!("[OK] no artifacts published for {}", args.task);
-        println!("  -> cas artifact publish --task {} <path>", args.task);
+        println!("No locally known records for {}; sync this receiver or fetch a known artifact ID.", args.task);
         return Ok(());
     }
     println!("[OK] {} artifact(s) for {}", artifacts.len(), args.task);
@@ -329,7 +330,7 @@ fn execute_list(args: &ListArgs, cas_root: &Path, json: bool) -> anyhow::Result<
         .max()
         .unwrap_or(0)
         .min(40);
-    for artifact in &artifacts {
+    for artifact in artifacts {
         println!(
             "     {:<width$}  {:>9}  {:<9}  {}",
             truncate(&artifact.name, width),

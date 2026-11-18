@@ -201,19 +201,19 @@ impl CasCore {
         Parameters(req): Parameters<ArtifactRequest>,
     ) -> Result<CallToolResult, McpError> {
         let task_id = required(&req.task_id, "artifact list requires 'task_id'")?;
-        let store = self.open_artifact_store()?;
-        let artifacts = store.list_for_task(&task_id).map_err(internal)?;
-
-        if artifacts.is_empty() {
-            return Ok(Self::success(format!(
-                "No artifacts published for {task_id}"
-            )));
+        let listing = crate::artifacts::proof::list_task_metadata(&self.cas_root, &task_id)
+            .map_err(metadata_error)?;
+        let mut out = format!("Partial artifact inventory for {task_id} ({})\nLocal records and synced publication references; Cloud inventory not checked.\n\n", listing.artifacts.len());
+        if listing.artifacts.is_empty() {
+            out.push_str("No locally known records. Sync this receiver or fetch a known artifact ID.\n");
         }
-        let mut out = format!("Artifacts for {task_id} ({})\n\n", artifacts.len());
-        for artifact in &artifacts {
+        for artifact in &listing.artifacts {
             out.push_str(&format!("- {}\n", render_artifact_line(artifact)));
         }
-        Ok(Self::success(out))
+        for warning in &listing.warnings { out.push_str(&format!("Warning: {warning}\n")); }
+        let mut result = Self::success(out);
+        result.structured_content = Some(serde_json::to_value(&listing).map_err(internal)?);
+        Ok(result)
     }
 }
 

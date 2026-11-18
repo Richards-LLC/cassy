@@ -762,12 +762,20 @@ def rust_runtime_inputs(source):
             yield ts[i + 1].end, ts[ps[i + 1]].start
         elif token.value == 'set_body_json' and i > 0 and ts[i - 1].value == '.':
             close = ps[i + 1]
-            for key, colon in zip(ts[i + 2:close], ts[i + 3:close]):
-                if key.string and key.value == '"error"' and colon.value == ':':
-                    # GH #2102: only the exact protocol key's own line, inside
-                    # the mock response input call; never exempt other lines.
-                    line_end = source.find('\n', key.end)
-                    yield key.end, min(ts[close].start, line_end if line_end >= 0 else len(source))
+            for k in range(i + 2, close - 1):
+                if not (ts[k].string and ts[k].value == '"error"' and ts[k + 1].value == ':'
+                        and not ts[k + 1].string):
+                    continue
+                # GH #2102: exempt only literals that are themselves a value
+                # (`: "x"`, `{ "x" }` then `,` or `}`) on the key's own line;
+                # a literal inside a call such as `.contains("x")` stays in scope.
+                line_end = source.find('\n', ts[k].end)
+                for j in range(k + 2, close):
+                    if ts[j].start >= (line_end if line_end >= 0 else len(source)):
+                        break
+                    if (ts[j].string and ts[j - 1].value in (':', '{') and not ts[j - 1].string
+                            and ts[j + 1].value in (',', '}') and not ts[j + 1].string):
+                        yield ts[j].start, ts[j].end
 
 
 def js_assertion_diagnostics(source, path):

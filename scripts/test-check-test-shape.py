@@ -429,6 +429,7 @@ def test_workflow_command():
             (True, 'tests/test_skill.sh', 'source=$(cat skill.md); [[ $source == "Always merge staging first" ]]'),
             (True, 'tests/probe.rs', mock.replace('set_body_json', 'set_body_json_copy')),
             (True, 'tests/probe.rs', mock.replace('"error": if', '"error":\n if')),
+            (True, 'tests/probe.rs', mock.replace('source == "route_unauthorized"', 'source.contains("Always merge staging first")')),
             (True, 'tests/probe.rs', '#[test] fn t() { let same = read_to_string(path).unwrap() == "Always merge staging first"; }'),
             (False, 'tests/probe.rs', '#[test] fn t() { assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head); }'),
             (False, 'tests/probe.rs', '#[test] fn t() { let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id) && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state"); }'),

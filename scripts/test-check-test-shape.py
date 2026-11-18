@@ -433,6 +433,8 @@ def test_workflow_command():
             (True, 'tests/probe.rs', read.replace('source == "route_unauthorized"', 'source.contains("Always merge staging first")')),
             (True, 'tests/probe.rs', read.replace('source == "route_unauthorized"', 'source.contains(if staging { "Always merge staging first" } else { "Always merge main first" })')),
             (True, 'tests/probe.rs', read.replace('source == "route_unauthorized"', 'source == if staging { "Always merge staging first" } else { "Always merge main first" }')),
+            (True, 'tests/probe.rs', mock + '\n' + read.replace('source == "route_unauthorized"', 'source.contains("Always merge staging first")').replace('let source = std::fs::read_to_string("skill.md").unwrap();', 'let (source, _) = (std::fs::read_to_string("skill.md").unwrap(), 401);')),
+            (True, 'tests/probe.rs', mock.replace('source == "route_unauthorized"', 'source.contains("Always merge staging first")').replace('{\n                    Mock', '{\n                    let (source, _) = (std::fs::read_to_string("skill.md").unwrap(), 401);\n                    Mock', 1)),
             (True, 'tests/probe.rs', '#[test] fn t() { let same = read_to_string(path).unwrap() == "Always merge staging first"; }'),
             (False, 'tests/probe.rs', '#[test] fn t() { assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head); }'),
             (False, 'tests/probe.rs', '#[test] fn t() { let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id) && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state"); }'),

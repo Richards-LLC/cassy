@@ -762,28 +762,47 @@ def rust_runtime_inputs(source):
             yield ts[i + 1].end, ts[ps[i + 1]].start
 
 
-def rust_literal_loop_names(source):
-    """Names bound only by `for NAME in ["lit", ..]` and nowhere else: scenario
-    selectors that hold literal data, never file text (GH #2102)."""
+def rust_literal_loop_bodies(source):
+    """(name, start, end) for each `for NAME in ["lit", ..] { body }`: a scenario
+    selector holding literal data, valid only inside its own body (GH #2102).
+    A body that rebinds NAME in a `let` pattern or closure pipes is skipped."""
     ts = tokens(source)
     ps = pairs(ts)
-    loops, other = set(), set()
+    spans = []
     for i, token in enumerate(ts):
         if token.string or not re.fullmatch(r'[A-Za-z_]\w*', token.value):
             continue
-        before = ts[i - 1].value if i and not ts[i - 1].string else ''
-        after = ts[i + 1].value if i + 1 < len(ts) and not ts[i + 1].string else ''
-        if before == 'for' and after == 'in' and i + 2 in ps and ts[i + 2].value == '[':
-            items = ts[i + 3:ps[i + 2]]
-            if items and items[-1].value == ',' and not items[-1].string:
-                items = items[:-1]
-            if (len(items) % 2 == 1 and all(t.string for t in items[0::2])
-                    and all(t.value == ',' and not t.string for t in items[1::2])):
-                loops.add(token.value)
-                continue
-        if before in ('let', 'mut', 'ref', 'for', '|') or after in (':', '|'):
-            other.add(token.value)
-    return loops - other
+        if not (i and ts[i - 1].value == 'for' and not ts[i - 1].string and i + 3 < len(ts)
+                and ts[i + 1].value == 'in' and ts[i + 2].value == '[' and i + 2 in ps):
+            continue
+        close = ps[i + 2]
+        items = ts[i + 3:close]
+        if items and items[-1].value == ',' and not items[-1].string:
+            items = items[:-1]
+        if not (len(items) % 2 == 1 and all(t.string for t in items[0::2])
+                and all(t.value == ',' and not t.string for t in items[1::2])):
+            continue
+        if close + 1 >= len(ts) or ts[close + 1].value != '{' or close + 1 not in ps:
+            continue
+        begin, end = close + 1, ps[close + 1]
+        rebound, pattern, pipes, j = False, False, False, begin + 1
+        while j < end:
+            t = ts[j]
+            if not t.string and t.value == 'let':
+                pattern = True
+            elif not t.string and t.value in ('=', ';'):
+                pattern = False
+            elif not t.string and t.value == '|':
+                if j + 1 < end and ts[j + 1].value == '|' and ts[j + 1].start == t.end:
+                    j += 1  # `||` is an operator or an empty closure.
+                else:
+                    pipes = not pipes
+            elif not t.string and t.value == token.value and (pattern or pipes):
+                rebound = True
+            j += 1
+        if not rebound:
+            spans.append((token.value, ts[begin].start, ts[end].end))
+    return spans
 
 
 def js_assertion_diagnostics(source, path):
@@ -930,7 +949,7 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
     diagnostics = (list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs'
                    else list(js_assertion_diagnostics(source, path)) if Path(path).suffix in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs') else [])
     inputs = list(rust_runtime_inputs(source)) if Path(path).suffix == '.rs' else []
-    literal_loops = rust_literal_loop_names(source) if Path(path).suffix == '.rs' else set()
+    loop_bodies = rust_literal_loop_bodies(source) if Path(path).suffix == '.rs' else []
     if Path(path).suffix in ('.py', '.pyi'):
         inputs = list(python_runtime_inputs(source))
     for start, end, body in literals:
@@ -960,7 +979,7 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
             right = min(literal_end, line_end) - line_start
             context_chars[left:right] = ' ' * (right - left)
         context = ''.join(context_chars)
-        for name in literal_loops:
+        for name in {n for n, left, right in loop_bodies if left <= start < right}:
             context = re.sub(r'(?<![\w.])' + re.escape(name) + r'(?!\w)', lambda m: ' ' * len(m[0]), context)
         if is_exact_text_pin(body, context):
             hits.append((changed_literal_lines[0] if changed_literal_lines else start_line, 'exact-text pin'))

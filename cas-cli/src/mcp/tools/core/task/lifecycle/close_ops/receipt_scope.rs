@@ -1060,6 +1060,46 @@ mod tests {
         }
     }
 
+    /// cas-69a0 (#2114): a queued successor keeps its older start base. After
+    /// the predecessor lands and the successor rebases, park and the capped
+    /// runner must name the same changed tests, and a rerun of one test must
+    /// not withdraw the credit of its siblings (#2129).
+    #[test]
+    fn close_and_worker_check_share_the_rebased_baseline_cas_69a0() {
+        use crate::factory_worker_check::{PassingTests, diff_base, javascript, stability::{self, Identity, Proof}};
+        let repo = changelog_fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let path = "owned.test.js";
+        let case = |name: &str| format!("test('{name}', () => {{}});\n");
+        std::fs::write(repo.path().join(path), case("untouched")).unwrap();
+        let start = commit_changelog_fixture(repo.path(), "base");
+        git(&["update-ref", "refs/heads/main", &start]);
+        std::fs::write(repo.path().join(path), case("untouched") + &case("brand")).unwrap();
+        let predecessor = commit_changelog_fixture(repo.path(), "predecessor lands");
+        git(&["update-ref", "refs/remotes/origin/main", &predecessor]);
+        std::fs::write(repo.path().join(path), case("untouched") + &case("brand") + &case("other")).unwrap();
+        let head = commit_changelog_fixture(repo.path(), "successor, rebased");
+
+        let paths = vec![path.to_string()];
+        let close = stability::required(repo.path(), &head, "main", &paths, Some(&[(start, head.clone())])).unwrap();
+        let base = diff_base(repo.path(), Some("main")).unwrap();
+        let runner = javascript::changed_tests(repo.path(), &base, &head, &paths, None).unwrap();
+        let other = Identity::exact(path, "other");
+        assert_eq!(close, vec![other.clone()]);
+        assert_eq!(runner, close);
+
+        let root = tempfile::tempdir().unwrap();
+        let sibling = Identity::exact(path, "sibling");
+        let proof = |tests: Vec<Identity>| Proof { runner: "vitest".into(), tests, consecutive_passes: 5, elapsed_ms: 0 };
+        stability::record(root.path(), repo.path(), &head, proof(vec![other.clone(), sibling.clone()])).unwrap();
+        stability::invalidate(root.path(), repo.path(), &head, std::slice::from_ref(&other)).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert_eq!(stability::missing(&passing, &[other, sibling]), vec![Identity::exact(path, "other")]);
+    }
+
     /// cas-769b at 5ddb6860: the delivery edited a test, the target rewrote
     /// it, and the sync resolved to the target side. Park walked the delivery
     /// range and still owed that test 5x while the runner, reading the net

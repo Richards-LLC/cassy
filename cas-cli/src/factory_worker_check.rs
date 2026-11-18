@@ -2334,7 +2334,7 @@ fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Re
     diff_base(repo, target.as_deref())
 }
 
-fn diff_base(repo: &Path, target: Option<&str>) -> Result<String> {
+pub(crate) fn diff_base(repo: &Path, target: Option<&str>) -> Result<String> {
     if let Some(target) = target {
         let remote = format!("refs/remotes/origin/{target}");
         return git(repo, &["merge-base", &remote, "HEAD"])

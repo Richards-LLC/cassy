@@ -608,6 +608,7 @@ pub fn create_worker_delivery_with_dispatch(
         receipt.id.clone(),
         worker_delivery_transaction_id(&receipt.id),
     );
+    let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
     let dispatch = crate::verification_store::create_verification_dispatch_bound_with_conn(
         &tx,
         &receipt.task_id,
@@ -617,7 +618,6 @@ pub fn create_worker_delivery_with_dispatch(
         deadline_at,
         false,
     )?;
-    let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
     tx.commit()?;
     Ok((transaction, dispatch))
 }
@@ -719,6 +719,7 @@ fn create_worker_delivery_with_dispatch_for_lease_bound(
         worker_delivery_transaction_id(&receipt.id),
     );
     boundary.repository = repository.cloned();
+    let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
     let dispatch = crate::verification_store::create_verification_dispatch_bound_with_conn(
         &tx,
         &receipt.task_id,
@@ -728,7 +729,6 @@ fn create_worker_delivery_with_dispatch_for_lease_bound(
         deadline_at,
         false,
     )?;
-    let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
     tx.commit()?;
     Ok((transaction, dispatch))
 }

@@ -115,6 +115,15 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             ('example.test.mjs', 'assert.equal(error.message, "please try later");', True),
             ('example.test.mjs', 'assert.throws(run, /please try later/);', True),
             ('example.test.ts', 'expect(error.code).toBe("scope_denied");', False),
+            # GH #1679: a data-* attribute is machine state; rendered text is not.
+            ('work-picture.test.ts', 'expect(detail(1).dataset.retrievalState).toBe("offline");', False),
+            ('work-picture.test.ts', 'expect(detail(1).textContent).toBe("offline");', True),
+            # cff5836b review: the subject is exactly one dataset projection.
+            ('work-picture.test.ts', 'expect(detail(1).textContent || detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(detail(1).textContent ?? detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(ok ? detail(1).textContent : detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(detail(1).textContent + detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(detail(1).textContent && detail(1).dataset.retrievalState).toBe("offline");', True),
             ('src/example.rs', '#[test] fn check() { for phrase in ["please try later", "run it again"] { assert!(error.contains(phrase)); } }', True),
             ('test_example.py', 'def test_x():\n    for phrase in ("please try later",):\n        self.assertIn(phrase, result.stderr)', True),
             ('example.test.ts', 'for (const phrase of ["please try later"]) { expect(error.message).toContain(phrase); }', True),
@@ -215,6 +224,11 @@ fn cli_round_trip() {
 
     def test_source_read_and_position_check(self):
         self.assertTrue(self.hits('#[test] fn t() { let p = root.join("lib.rs"); let s = fs::read_to_string(&p).unwrap(); assert!(s.find("a") < s.find("b")); }'))
+        # GH #1934: a method name is not a binding, and an earlier test's
+        # `.rs` binding does not taint a later test's explicit Markdown read.
+        module = '#[cfg(test)] mod tests {\n#[test] fn a() { let path = "src/lib.rs"; run(path); }\n#[test] fn b() { let s = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();\n assert_eq!(entries(&s).len(), 1); }\n}'
+        self.assertFalse(self.hits(module))
+        self.assertTrue(self.hits(module.replace('join("CHANGELOG.md")', 'join(path)').replace('fn b() {', 'fn b() { let path = "src/lib.rs";')))
 
     def test_fixture_source_mutation_cas_81b7(self):
         # cas-28c5 at 094294333a: editing compiled inputs of a disposable repo
@@ -270,6 +284,48 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         self.assertFalse(self.hits('#[tokio::test]\n// pin: compatibility\nasync fn t() { assert_eq!(LIMIT, 3); }'))
 
     def test_non_rust_text_is_clean(self):
+        # Refusal regressions: a test path beside wording never launders it.
+        # The runtime-identity exemption is removed (cas-769b); these are the
+        # bypasses its reviews reproduced.
+        wording = 'Always merge staging first'
+        reads = {'src/a_tests.rs': 'let workflow = include_str!("../workflow.md"); ',
+                 'test_shape.py': 'workflow = Path("w.md").read_text()\n',
+                 'x.test.ts': 'const workflow = readFileSync("w.md", "utf8"); '}
+        for path, consumer in [
+            ('src/a_tests.rs', 'assert!(source.contains(&String::from("W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow.lines().next(), Some("W"));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, concat!("a.test.ts", "W"));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, [id("a.test.ts", "W")].join(""));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, id("a.test.ts", "W").to_string());'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, id("a.test.ts", "W").name);'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, format!("{:?}", id("a.test.ts", "W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, String::from(id("a.test.ts", "W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, render(id("a.test.ts", "W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, String::new() + id("a.test.ts", "W"));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, Array("a.test.ts", "W")\n    .join(""));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, [id("a.test.ts", "W"), id("b.test.ts", "x")][0].name);'),
+            ('test_shape.py', 'assert workflow == str(Identity("test_a.py", "W"))'),
+            ('test_shape.py', 'assert workflow == " ".join(Identity("test_a.py", "W"))'),
+            ('test_shape.py', 'assert workflow == "%s" % (Identity("test_a.py", "W"),)'),
+            ('test_shape.py', 'assert workflow == format(Identity("test_a.py", "W"))'),
+            ('test_shape.py', 'assert workflow == f"{Identity(\'test_a.py\', \'W\')}"'),
+            ('test_shape.py', 'assert workflow == "" + Identity("test_a.py", "W")'),
+            ('x.test.ts', 'expect(workflow).toEqual(Array("a.test.ts", "W").join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual(Array.from(id("a.test.ts", "W")).join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual([...id("a.test.ts", "W")].join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual(id("a.test.ts", "W").toString());'),
+            ('x.test.ts', 'expect(workflow).toEqual(String(id("a.test.ts", "W")));'),
+            ('x.test.ts', 'expect(workflow).toEqual(`${id("a.test.ts", "W")}`);'),
+            ('x.test.ts', 'expect(workflow).toEqual("" + id("a.test.ts", "W"));'),
+            ('x.test.ts', 'expect(workflow).toEqual(id("a.test.ts", "W")?.join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual(JSON.stringify(id("a.test.ts", "W")));'),
+            ('x.test.ts', 'expect(workflow).toEqual(Array("a.test.ts", "W")[1]);'),
+            ('x.test.ts', 'expect(workflow).toEqual([Array("a.test.ts", "W"),\n].join(""));'),
+            ('x.test.ts', 'expect(workflow).toContain(id("a.test.ts", "W"));'),
+            ('x.test.ts', 'expect(workflow.split("\\n")).toEqual(Array("a.test.ts", "W"));'),
+        ]:
+            with self.subTest(path=path, consumer=consumer):
+                self.assertTrue(shape.lint_text_pins(reads[path] + consumer.replace('W', wording), path))
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
         self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
         self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))

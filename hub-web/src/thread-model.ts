@@ -474,9 +474,11 @@ export function messageBlocks(message: string): MessageBlock[] {
 /** Cell tone: pass/ok reads green, flake/warn amber, fail/error crit. */
 export function cellTone(cell: string): "pass" | "flake" | "fail" | undefined {
   const value = cell.trim().toLowerCase();
-  if (/^(pass|passed|ok|green|✓)$/.test(value)) return "pass";
+  if (/[❌✗]/.test(value)) return "fail";
+  const outcome = value.replace(/\b(?:0(?:\.0+)?|none|no|not|zero)\s+(?:fail(?:ed|ures?)?|errors?|red)\b/g, "");
+  if (/\b(fail|failed|failures?|errors?|red)\b/.test(outcome)) return "fail";
   if (/\b(flake|flaky|warn|warning|skipped)\b/.test(value)) return "flake";
-  if (/\b(fail|failed|error|red)\b/.test(value)) return "fail";
+  if (/[✅✓]/.test(value) || /^(pass|passed|ok|green)$/.test(value) || /\b[1-9]\d*\s+(passed|green)\b/.test(value)) return "pass";
   return undefined;
 }
 

@@ -1,7 +1,16 @@
 import { expect, it } from "vitest";
-import { qualityView, type LedgerRelease } from "./quality-model";
+import { qualityView, trendOf, type LedgerRelease } from "./quality-model";
 
 const turns = (wakes: number, noOp: number, input: number) => ({ wakes, no_op_wakes: noOp, input_tokens: input, output_tokens: 0 });
+
+it("keeps zero-rate improvements finite and preserves zero baselines", () => {
+  const improved = trendOf(0, 1)!;
+  expect(improved.ratio).toBe(0);
+  expect(improved.word).toBe("better");
+  expect(Number.isFinite(Number.parseFloat(improved.change))).toBe(true);
+  expect(trendOf(0, 0)?.word).toBe("no change");
+  expect(trendOf(1, 0)?.word).toBe("new");
+});
 function release(name: string, from: string, to: string | null, fields: Partial<LedgerRelease>): LedgerRelease {
   return { release: name, published: to !== null, from, to, turns: turns(0, 0, 0), interventions_total: 0, interventions: {}, checks: {}, escapes: [], friction: [], ...fields };
 }

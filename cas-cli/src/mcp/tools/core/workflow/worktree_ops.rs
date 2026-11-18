@@ -9396,6 +9396,7 @@ mod cas_6b42_peer_delivery_tests {
         git(&publisher, &["push", "-q", "origin", branch]);
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"cas-src\"\n").unwrap();
         env.set("CAS_ROOT", &cas_dir);
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
         agents.register(&cas_types::Agent::new_with_role(

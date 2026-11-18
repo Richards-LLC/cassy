@@ -2243,6 +2243,37 @@ mod tests {
         );
     }
 
+    /// GH #2058 (and #2066, #2117, #2122): an integration spec that only a
+    /// sibling Jest config selects ran under the default `.spec.ts` config and
+    /// found no tests, so no stability proof could ever be earned.
+    #[test]
+    fn jest_spec_runs_under_the_config_that_selects_it_gh_2058() {
+        let repo = tempfile::tempdir().unwrap();
+        let test = repo.path().join("apps/backend/test");
+        std::fs::create_dir_all(&test).unwrap();
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        std::fs::write(repo.path().join("apps/backend/package.json"), "{}").unwrap();
+        std::fs::write(repo.path().join("apps/backend/jest.config.js"), "module.exports = { testRegex: '.*\\.spec\\.ts$' };").unwrap();
+        std::fs::write(test.join("jest-inbox-tools.integration.config.js"),
+            "module.exports = { rootDir: '.', testRegex: '.*\\.integration\\.ts$' };").unwrap();
+        let (integration, unit) = ("apps/backend/test/inbox-analysis-pool.integration.ts", "apps/backend/src/pool.spec.ts");
+        std::fs::create_dir_all(repo.path().join("apps/backend/src")).unwrap();
+        for spec in [integration, unit] {
+            std::fs::write(repo.path().join(spec), "it('runs', () => {});").unwrap();
+        }
+
+        assert_eq!(
+            runner_root(repo.path(), integration, "jest").unwrap(),
+            (test.clone(), Some(test.join("jest-inbox-tools.integration.config.js")))
+        );
+        // A spec the default config selects keeps the default config.
+        let backend = repo.path().join("apps/backend");
+        assert_eq!(
+            runner_root(repo.path(), unit, "jest").unwrap(),
+            (backend.clone(), Some(backend.join("jest.config.js")))
+        );
+    }
+
     /// A config-free global test resolves its runner from package metadata;
     /// with no evidence the refusal offers each valid form, never a shell
     /// metacharacter alternative.

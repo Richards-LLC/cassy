@@ -2434,9 +2434,24 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     assert!(crate::gates::codes_in(&held).contains(&"G-70"), "{held}");
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
     assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
-    let recorded = supervisor.cas_verification_add(Parameters(serde_json::from_value(
-        serde_json::json!({"task_id": TASK, "status": "approved", "summary": "Reviewed integrated PR delivery"})
-    ).unwrap())).await.expect("contained delivery must accept an authenticated review");
+    let contained = supervisor.worktree_merge(
+        BRANCH, false, Some(TASK), true, Some(false), false, None,
+    ).await.unwrap();
+    assert_ne!(contained.is_error, Some(true), "{contained:?}");
+    assert_eq!(git(repo, &["rev-parse", "main"]), merged);
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    let review = || Parameters(serde_json::from_value(serde_json::json!({
+        "task_id": TASK, "status": "approved", "summary": "Reviewed integrated PR delivery"
+    })).unwrap());
+    // A source that is merely parked cannot take this post-integration path.
+    git(repo, &["update-ref", "refs/heads/main", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+    assert!(supervisor.cas_verification_add(review()).await.is_err());
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    git(repo, &["reset", "--hard", &merged]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    let recorded = supervisor.cas_verification_add(review()).await
+        .expect("contained delivery must accept an authenticated review");
     assert_ne!(recorded.is_error, Some(true), "{recorded:?}");
     let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().unwrap();
     let proof = dispatch.repository.as_ref().unwrap();

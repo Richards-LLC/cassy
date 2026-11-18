@@ -1537,7 +1537,32 @@ impl CasCore {
             && task.execution_note.as_deref() != Some("no-code")
             && (task.deliverables.factory_branch_start.is_some()
                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")));
-        if candidate.is_some() || factory_delivery {
+        // A PR may have integrated a parked delivery without any Cassy review
+        // cycle. An authenticated supervisor can review that published target;
+        // do not send it back to a merge that has nothing left to publish.
+        // Existing cycles retain their own verdict and recovery authority.
+        let contained_proof = if factory_delivery && latest.is_none() {
+            let (repo, target) = crate::qa_batch::task_context(&self.cas_root, task)
+                .map_err(&refuse)?;
+            let git = crate::worktree::GitOperations::new(repo.clone());
+            let anchor = task.deliverables.factory_branch_anchor.as_deref()
+                .and_then(|anchor| git.resolve_commit(anchor));
+            match anchor {
+                Some(anchor) => {
+                    let proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
+                        &repo, &target, vec![anchor.clone()],
+                    ).map_err(&refuse)?;
+                    if git.is_ancestor(&anchor, &proof.head_commit) {
+                        self.guard_direct_update_close_merge_state(
+                            self.open_task_store()?.as_ref(), task, None,
+                        ).map_err(|error| refuse(error.to_string()))?;
+                        Some(proof)
+                    } else { None }
+                }
+                None => None,
+            }
+        } else { None };
+        if candidate.is_some() || (factory_delivery && contained_proof.is_none()) {
             cas_store::timeout_verification_dispatch(&self.cas_root, &task.id, chrono::Utc::now())
                 .map_err(|error| refuse(error.to_string()))?;
             return cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
@@ -1562,9 +1587,12 @@ impl CasCore {
             .map(|context| context.repo_root.as_path())
             .or_else(|| self.cas_root.parent())
             .ok_or_else(|| refuse("repository root unavailable".into()))?;
-        let proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_parked_delivery_proof(
-            root, task, context.as_ref().map(|context| context.target_branch.as_str()),
-        ).map_err(&refuse)?;
+        let proof = match contained_proof {
+            Some(proof) => proof,
+            None => crate::mcp::tools::core::task::lifecycle::repository_proof::capture_parked_delivery_proof(
+                root, task, context.as_ref().map(|context| context.target_branch.as_str()),
+            ).map_err(&refuse)?,
+        };
         let boundary = match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
             .map_err(|error| refuse(error.to_string()))?
         {

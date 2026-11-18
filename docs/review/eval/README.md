@@ -93,8 +93,7 @@ preserves `telemetry.json` with `namespace_sandbox_unavailable` and spends no
 model run. Keep that attempt and use a new output directory with
 `--source-input-only` for an independent `run` replay. This mode keeps the
 read-only sandbox, disables shell tools and integrations, and supplies the
-case's pinned base/head scope files and diff on stdin. Add `--source-path
-relative/dependency.rs` for each extra text dependency the review needs.
+case's pinned base/head scope files and diff on stdin.
 Sources come from Git objects, including additions/deletions, never the working
 tree or later repair commits. Binary source files cannot use this text mode.
 

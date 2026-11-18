@@ -263,9 +263,9 @@ def sandbox_preflight():
         return {'error': str(exc)}
 
 
-def pinned_source_input(checkout, case, extra_paths=()):
+def pinned_source_input(checkout, case):
     """Read pinned Git objects, never the working tree or later repair commits."""
-    paths = sorted(set(case['scope']) | set(extra_paths))
+    paths = sorted(set(case['scope']))
     files = {}
     for path in paths:
         versions = {}
@@ -406,7 +406,7 @@ def validate_report(report, case, axis, checkout):
     return commits
 
 
-def review(case, axis, sources, out, timeout, fix_transport='native', source_input=False, source_paths=()):
+def review(case, axis, sources, out, timeout, fix_transport='native', source_input=False):
     directory = out / case['id'] / axis
     if (directory / 'result.json').exists():
         return json.loads((directory / 'result.json').read_text())
@@ -414,7 +414,7 @@ def review(case, axis, sources, out, timeout, fix_transport='native', source_inp
     text = prompt(case, axis, sources, fix_transport)
     public = context(case, axis, sources)
     if source_input:
-        bundle = pinned_source_input(checkout, case, source_paths)
+        bundle = pinned_source_input(checkout, case)
         write(directory/'source-input.json', bundle)
         text += ('\nSource-input-only replay: use only the pinned JSON below. Do not call tools, '
                  'inspect the filesystem, or make commits. Earlier fix instructions do not apply; '
@@ -611,8 +611,6 @@ def main():
                         help='Bridge mechanically commits reviewer-selected files, preserving sandbox limits')
     parser.add_argument('--source-input-only', action='store_true',
                         help='Read-only independent replay with pinned sources on stdin and shell tools disabled')
-    parser.add_argument('--source-path', action='append', default=[],
-                        help='Additional pinned dependency file for source-input-only replay; repeat as needed')
     parser.add_argument('--labels', type=Path)
     parser.add_argument('--registered-adapter', type=Path,
                         help='Registered supervisor/children executable; JSON stdin, evidence JSON stdout')
@@ -656,7 +654,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
         action = review if args.operation == 'run' else cross_check
         futures = {executor.submit(action, case, axis, sources, out, args.timeout,
-                     *([args.fix_transport, args.source_input_only, args.source_path] if args.operation == 'run' else [])): (case['id'], axis)
+                     *([args.fix_transport, args.source_input_only] if args.operation == 'run' else [])): (case['id'], axis)
                    for case, axis in operations}
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]

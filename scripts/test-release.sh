@@ -297,7 +297,7 @@ contained_prefix_delivery_beats_abandoned_suffix_attempt() {
     printf '### Fixed — Fixture\n\n- **Delivery** — contained fix.\n' >"$fixture/changelog.d/cas-2090.md"
     git -C "$fixture" add delivery.txt changelog.d
     git -C "$fixture" commit --quiet -m 'fix(cas-2090): contained second attempt'
-    (cd "$fixture" && python3 scripts/release_changelog.py verify-deliveries "$base") >"$tmp/prefix-owner.json" 2>"$tmp/prefix-owner.err" || return 1
+    (cd "$fixture" && python3 scripts/release_changelog.py verify-deliveries "$base" --report "$tmp/prefix-owner.json") >"$tmp/prefix-owner.out" 2>"$tmp/prefix-owner.err" || return 1
     jq -e '.included_task_ids | index("cas-2090") != null' "$tmp/prefix-owner.json" >/dev/null || return 1
     # Prefix ownership retains the same explicit red marker as suffix ownership.
     git -C "$fixture" commit --quiet --allow-empty -m 'test(cas-209a red): regression without a fix'

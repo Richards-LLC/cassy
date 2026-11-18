@@ -227,20 +227,23 @@ def verify_deliveries(base_ref, notes=None):
     tasks.update(match[1] for subject in git('log', f'{base_ref}..HEAD', '--no-merges',
                                             '--format=%s').splitlines()
                  if (match := owner(subject)))
-    deliveries, red = {}, set()
+    deliveries, prefix_deliveries, red = {}, {}, set()
     for line in (git('log', '--all', '--no-merges', '--format=%H%x09%s').splitlines() if tasks else []):
         commit, _, subject = line.partition('\t')
         if match := owner(subject):
             if match[2]:
                 red.add(commit)
             else:
-                deliveries.setdefault(match[1], []).append(commit)
+                claims = deliveries if suffix_owner.search(subject) else prefix_deliveries
+                claims.setdefault(match[1], []).append(commit)
     contained = set(git('rev-list', 'HEAD').splitlines())
     missing = []
     for task in sorted(tasks):
         # Older deliveries identify themselves by adding their own fragment.
         commits = deliveries.get(task) or git('log', '--all', '--no-merges',
             '--diff-filter=A', '--format=%H', '--', f'changelog.d/{task}.md').splitlines()
+        # Prefix owners add proof without hiding historical fragment-owned fixes.
+        commits += prefix_deliveries.get(task, [])
         commits = [commit for commit in commits if commit not in red]
         if contained.intersection(commits):
             continue

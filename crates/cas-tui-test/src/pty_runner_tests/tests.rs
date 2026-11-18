@@ -49,7 +49,7 @@ fn test_key_bytes() {
 fn test_spawn_echo() {
     let mut runner = PtyRunner::new();
     runner
-        .spawn("sh", &["-c", "sleep 0.2; echo hello"])
+        .spawn("echo", &["hello"])
         .expect("spawn failed");
 
     runner

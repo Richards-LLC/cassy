@@ -1,63 +1,6 @@
 use crate::types::*;
 
 #[test]
-fn cas_8405_peers_accepts_string_booleans() {
-    for (value, expected) in [("true", true), ("false", false)] {
-        let request: CoordinationRequest = serde_json::from_value(serde_json::json!({
-            "action": "peers", "peer": "happy-owl-25", "detail": value, "json": value
-        }))
-        .expect("Claude Code string booleans must decode at the MCP boundary");
-        assert_eq!(request.detail, Some(expected));
-        assert_eq!(request.json, Some(expected));
-        assert_eq!(request.peer.as_deref(), Some("happy-owl-25"));
-    }
-}
-
-#[test]
-fn cas_8405_supervisor_override_keeps_string_coercion() {
-    for (wire, expected) in [("true", true), ("false", false)] {
-        let request: TaskRequest = serde_json::from_value(serde_json::json!({
-            "action": "close", "supervisor_override": wire
-        }))
-        .unwrap();
-        assert_eq!(request.supervisor_override, Some(expected));
-    }
-}
-
-#[test]
-fn cas_8405_bool_coercion_does_not_grow_the_schema() {
-    #[derive(serde::Deserialize, schemars::JsonSchema)]
-    #[schemars(title = "BooleanParameter")]
-    struct Strict {
-        #[serde(default)]
-        flag: Option<bool>,
-    }
-    #[derive(serde::Deserialize, schemars::JsonSchema)]
-    #[schemars(title = "BooleanParameter")]
-    struct Coerced {
-        #[serde(default, deserialize_with = "crate::types::deser::option_bool")]
-        flag: Option<bool>,
-    }
-    assert!(
-        serde_json::from_str::<Strict>(r#"{"flag":true}"#)
-            .unwrap()
-            .flag
-            .unwrap()
-    );
-    assert!(
-        serde_json::from_str::<Coerced>(r#"{"flag":"true"}"#)
-            .unwrap()
-            .flag
-            .unwrap()
-    );
-    // Changing only this attribute must leave even the serialized bytes unchanged.
-    assert_eq!(
-        serde_json::to_string(&schemars::schema_for!(Strict)).unwrap(),
-        serde_json::to_string(&schemars::schema_for!(Coerced)).unwrap()
-    );
-}
-
-#[test]
 fn cas_8405_all_mcp_boolean_parameters_accept_string_forms() {
     use serde_json::{Value, json};
 

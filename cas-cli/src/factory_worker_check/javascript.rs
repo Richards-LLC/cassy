@@ -2245,7 +2245,6 @@ mod tests {
         );
         for source in [
             "test(title, () => {});",
-            "describe(title, () => { test('child', () => {}); });",
             "test('case_id', callback);",
             "describe('suite_id', declareTests);",
         ] {
@@ -2260,6 +2259,24 @@ mod tests {
         assert_eq!(source_tests("a.test.ts", rows, &[(2, 2)]).unwrap(), [template.clone()]);
         let runtime = [id("a.test.ts", "suite x row 2"), id("a.test.ts", "suite x other 2")];
         assert_eq!(runtime.map(|row| template.selects(&row)), [true, false]);
+        // GH #2093: escaped quotes in a static literal are still a static title.
+        let escaped = "it('reads each post\\'s \\\"depth\\\" from its creator\\'s capture', () => {});";
+        assert_eq!(
+            source_tests("a.test.ts", escaped, &[(1, 1)]).unwrap(),
+            [id("a.test.ts", "reads each post's \"depth\" from its creator's capture")]
+        );
+        assert!(source_tests("a.test.ts", "it('a\\u0041', () => {});", &[(1, 1)]).is_err());
+        // GH #2112: a parameterized describe around a static test title selects
+        // that test under every runtime suite name; the test title stays literal.
+        let looped = "for (const [mode, api] of rows) test.describe(api, () => {\n  test('answers 100% in time', () => {});\n});\ntest.describe(`ssr ${mode} run`, () => {\n  test('defers', () => {});\n});";
+        let wildcard = |name: &str| Identity { parameterized: true, ..id("a.test.ts", name) };
+        assert_eq!(source_tests("a.test.ts", looped, &[(2, 2)]).unwrap(), [wildcard("%s answers 100%% in time")]);
+        assert_eq!(source_tests("a.test.ts", looped, &[(5, 5)]).unwrap(), [wildcard("ssr %s run defers")]);
+        assert_eq!(
+            [("a.test.ts", "API hangs answers 100% in time"), ("a.test.ts", "answers 100% in time x")]
+                .map(|(path, name)| wildcard("%s answers 100%% in time").selects(&id(path, name))),
+            [true, false]
+        );
         // GH #1973: a TypeScript generic over an import type parses.
         let generic = "vi.mock('vue-i18n', async importOriginal => ({\n  ...(await importOriginal<typeof import('vue-i18n')>()),\n}));\nit('a', () => { expect(1).toBe(1); });";
         assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);

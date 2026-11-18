@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub(super) struct ShellEffects {
     /// Effective target and, for relative redirections, its original spelling.
     pub writes: Vec<(String, Option<String>)>,
+    pub directory_sinks: HashSet<String>,
     pub edits: Vec<String>,
     pub deletes: Vec<(String, bool)>,
     pub links: Vec<(ShellLink, PathBuf)>,
@@ -1275,6 +1276,11 @@ fn collect_script(
                         let path = rooted(&raw, base, original)?;
                         let redirection = (!Path::new(&path).is_absolute()
                             && relative_redirections.contains(&raw)).then(|| raw.clone());
+                        if matches!(name, Some("mv" | "cp" | "install"))
+                            && words.last().is_some_and(|destination| destination == &raw)
+                        {
+                            effects.directory_sinks.insert(path.clone());
+                        }
                         effects.writes.push((path, redirection));
                     }
                 }

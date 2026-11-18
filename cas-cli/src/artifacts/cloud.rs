@@ -19,6 +19,7 @@
 //! ships, `begin` answering 404 or 501 is not an error: it is the documented
 //! "storage is not live yet" boundary, and the caller keeps the artifact local.
 
+use crate::cloud::auth::CloudRequestExt;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::Read;
@@ -358,7 +359,7 @@ impl ArtifactUploadClient {
         let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(self.timeout)
-            .send_json(serde_json::json!({"reason": reason, "actor_id": actor_id}));
+            .cloud_send_json(serde_json::json!({"reason": reason, "actor_id": actor_id}));
         let response = match response {
             Ok(response) => response,
             Err(ureq::Error::Status(status, _)) => return Err(format!("Cloud revoke endpoint returned HTTP {status}")),
@@ -493,7 +494,7 @@ impl ArtifactUploadClient {
             .get(url.as_str())
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(remaining.min(self.timeout))
-            .call();
+            .cloud_call();
         let response = match response {
             Ok(response) => response,
             Err(ureq::Error::Status(404, _)) => return Ok(None),
@@ -557,7 +558,7 @@ impl ArtifactUploadClient {
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .timeout(self.timeout)
-            .send_json(&body);
+            .cloud_send_json(&body);
 
         let (status, body) = match classify(response) {
             Ok(ok) => ok,
@@ -671,7 +672,7 @@ impl ArtifactUploadClient {
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .timeout(self.timeout)
-            .send_json(declared);
+            .cloud_send_json(declared);
 
         let (status, body) = match classify(response) {
             Ok(ok) => ok,
@@ -723,7 +724,7 @@ impl ArtifactUploadClient {
         let response = ureq::get(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(self.timeout)
-            .call();
+            .cloud_call();
         let (status, body) = match classify(response) {
             Ok(ok) => ok,
             Err(transport) => {
@@ -888,6 +889,70 @@ mod tests {
             sha256: "c".repeat(64),
             team_id: None,
             project_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_session_reloads_login_and_retries_artifact_begin_once_cas_73d0() {
+        for scenario in ["stored", "environment", "missing", "invalid_environment", "rejected_retry", "foreign_endpoint", "server_error", "route_unauthorized", "retry_unauthorized"] {
+            let server = MockServer::start().await;
+            let foreign = MockServer::start().await;
+            let environment = matches!(scenario, "environment" | "invalid_environment" | "rejected_retry" | "foreign_endpoint" | "server_error" | "route_unauthorized" | "retry_unauthorized");
+            let verify = environment && !matches!(scenario, "foreign_endpoint" | "server_error" | "route_unauthorized");
+            let retry = scenario == "stored" || verify && scenario != "invalid_environment";
+            let success = matches!(scenario, "stored" | "environment");
+            let first_status = if scenario == "server_error" { 503 } else { 401 };
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(header("Authorization", "Bearer expired-fixture"))
+                .respond_with(ResponseTemplate::new(first_status).set_body_json(serde_json::json!({
+                    "error":if first_status == 503 { "upstream_unavailable" } else if scenario == "route_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
+                .expect(1).mount(&server).await;
+            if verify {
+                Mock::given(method("GET")).and(path("/api/sync/status"))
+                    .and(header("Authorization", "Bearer rotated-fixture"))
+                    .respond_with(ResponseTemplate::new(if scenario == "invalid_environment" { 401 } else { 200 })
+                        .set_body_json(serde_json::json!({})))
+                    .expect(1).mount(&server).await;
+            }
+            if retry {
+                Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                    .and(header("Authorization", "Bearer rotated-fixture"))
+                    .and(body_string_contains("cas-b72a"))
+                    .respond_with(ResponseTemplate::new(if success { 200 } else { 401 }).set_body_json(serde_json::json!({
+                        "artifact_id":"cloud-refreshed", "upload_url":"https://storage.example/put",
+                        "error":if scenario == "retry_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
+                    .expect(1).mount(&server).await;
+            }
+            let endpoint = server.uri();
+            let environment_endpoint = if scenario == "foreign_endpoint" { foreign.uri() } else { endpoint.clone() };
+            let result = tokio::task::spawn_blocking(move || {
+                let mut env = crate::test_support::TestEnvGuard::temp_home();
+                let cas_root = env.home().join("project/.cas");
+                std::fs::create_dir_all(&cas_root).unwrap();
+                let user_config = env.home().join(".cas/cloud.json");
+                env.set("CAS_ROOT", &cas_root);
+                env.set("CAS_USER_CLOUD_JSON", &user_config);
+                if environment {
+                    env.set("CAS_CLOUD_TOKEN", "rotated-fixture");
+                    env.set("CAS_CLOUD_ENDPOINT", &environment_endpoint);
+                }
+                crate::cloud::CloudConfig { endpoint:endpoint.clone(),
+                    token:Some(if scenario == "stored" { "rotated-fixture" } else { "expired-fixture" }.into()),
+                    ..Default::default() }.save_user().unwrap();
+                let result = ArtifactUploadClient::new(&endpoint, "expired-fixture").begin(&begin_request());
+                if scenario == "environment" {
+                    assert_eq!(crate::cloud::CloudConfig::load_user().unwrap().token.as_deref(), Some("rotated-fixture"));
+                }
+                result
+            }).await.unwrap();
+            if success { assert_eq!(result.unwrap().artifact_id, "cloud-refreshed"); }
+            else {
+                let error = result.err().expect("authorization or upstream failure");
+                let code = if scenario == "server_error" { "upstream_unavailable" } else if matches!(scenario, "route_unauthorized" | "retry_unauthorized") { "unauthorized" } else { "cloud_session_expired" };
+                assert!(error.to_string().contains(code), "{scenario}: {error}");
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 1 + usize::from(verify) + usize::from(retry), "{scenario}");
+            assert!(foreign.received_requests().await.unwrap().is_empty());
         }
     }
 

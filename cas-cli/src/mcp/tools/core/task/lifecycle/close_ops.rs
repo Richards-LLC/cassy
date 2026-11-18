@@ -14,6 +14,7 @@ pub(crate) mod task_attribution;
 pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;
+mod delivery_git;
 mod snapshot_approval;
 mod rule_references;
 mod rebased_delivery;
@@ -762,9 +763,72 @@ pub(crate) enum SupervisorAuthorityError {
     NotLive(cas_types::Agent),
 }
 
+/// A bookkeeping close of a parked delivery already on the repository's
+/// published default branch. It approves no new code and never consults the
+/// former worker's mutable checkout or historical/retired anchors.
+#[derive(Debug)]
+struct PublishedDeliveryProof {
+    anchor: String,
+    target: String,
+    target_sha: String,
+    release_tag: String,
+}
+
+fn published_delivery_proof(
+    root: &std::path::Path,
+    task: &Task,
+    receipt: Option<&str>,
+) -> Option<PublishedDeliveryProof> {
+    if task.status != TaskStatus::AwaitingMerge
+        || matches!(task.task_type, TaskType::Epic | TaskType::Gate)
+    {
+        return None;
+    }
+    let (repo, _) = crate::qa_batch::task_context(root, task).ok()?;
+    let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
+    if !delivery_git::oid(anchor) { return None; }
+    let anchor = crate::qa_batch::commit(&repo, anchor)?;
+    if let Some(receipt) = receipt
+        && crate::qa_batch::commit(&repo, receipt).as_deref() != Some(anchor.as_str())
+    {
+        return None;
+    }
+    if let Some(start) = task.deliverables.factory_branch_start.as_ref()
+        && !git_commit_is_ancestor(&repo, &start.base_sha, &anchor)
+    {
+        return None;
+    }
+    // Publication cannot erase a current rejection. Missing or unreadable
+    // verification state leaves the ordinary close gates in control.
+    let latest = crate::store::open_verification_store(root).ok()?
+        .get_latest_for_task(&task.id).ok()?;
+    if latest.is_some_and(|verdict| verdict.status == VerificationStatus::Rejected) { return None; }
+    if let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, &task.id).ok()?
+        && let Some(verdict) = cas_store::get_verification_for_dispatch(root, &dispatch.id).ok()?
+        && verdict.status == VerificationStatus::Rejected
+    {
+        return None;
+    }
+    let branch = crate::mcp::tools::core::task::repo_context::resolve_default_branch(&repo).ok()?;
+    let target = format!("refs/remotes/origin/{branch}");
+    let target_sha = crate::qa_batch::commit(&repo, &target)?;
+    if !git_commit_is_ancestor(&repo, &anchor, &target_sha) { return None; }
+    // A fresh main merge still owes its queue/receipt and correction gates.
+    // This recovery is for shipped releases, whose version tag contains the
+    // active delivery and is itself contained in the published default tip.
+    let tags = crate::git_evidence::git_text(&repo,
+        &["tag", "--list", "v*", "--contains", &anchor, "--merged", &target_sha])?;
+    let release_tag = tags.lines().filter_map(|tag| {
+        let version = semver::Version::parse(tag.strip_prefix('v')?).ok()?;
+        Some((version, tag.to_string()))
+    }).max_by(|left, right| left.0.cmp(&right.0))?.1;
+    Some(PublishedDeliveryProof { anchor, target, target_sha, release_tag })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskCloseDisposition {
     Delivered,
+    PublishedDelivery,
     NegativeResult,
     EvidenceOnly,
     Decision,
@@ -777,7 +841,7 @@ impl TaskCloseDisposition {
 
     fn terminal_outcome(self) -> cas_types::TaskTerminalOutcome {
         match self {
-            Self::Delivered => cas_types::TaskTerminalOutcome::Delivered,
+            Self::Delivered | Self::PublishedDelivery => cas_types::TaskTerminalOutcome::Delivered,
             Self::NegativeResult => cas_types::TaskTerminalOutcome::NegativeResult,
             Self::EvidenceOnly => cas_types::TaskTerminalOutcome::EvidenceOnly,
             Self::Decision => cas_types::TaskTerminalOutcome::Decision,
@@ -5449,6 +5513,7 @@ pub(crate) enum VerificationSkipReason {
     /// A live registered supervisor closed a Gate after recording the
     /// decision in the task timeline. No code delivery is being approved.
     SupervisorDecision,
+    AlreadyShipped,
 }
 
 impl VerificationSkipReason {
@@ -5456,7 +5521,7 @@ impl VerificationSkipReason {
     pub(crate) fn is_skip(&self) -> bool {
         matches!(self,
             Self::SupervisorBypass | Self::SupervisorNegativeResult
-                | Self::SupervisorEvidenceOnly | Self::SupervisorDecision
+                | Self::SupervisorEvidenceOnly | Self::SupervisorDecision | Self::AlreadyShipped
         )
     }
 
@@ -5489,6 +5554,9 @@ impl VerificationSkipReason {
             VerificationSkipReason::SupervisorDecision => {
                 " (decision recorded — supervisor-authorized gate)".to_string()
             }
+            VerificationSkipReason::AlreadyShipped => {
+                " (already shipped — recorded main-ancestry proof)".to_string()
+            }
         }
     }
 
@@ -5509,6 +5577,9 @@ impl VerificationSkipReason {
     /// just in the response text.
     pub(crate) fn audit_reason(&self) -> String {
         match self {
+            VerificationSkipReason::AlreadyShipped => {
+                "The task's active parked delivery is already on origin's default branch; this close records shipment and approves no new code.".to_string()
+            }
             VerificationSkipReason::None
                 | VerificationSkipReason::NoAssignee
                 | VerificationSkipReason::AssigneeInactive { .. }
@@ -8119,6 +8190,12 @@ impl CasCore {
                 Ok(receipt) => receipt,
                 Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-24", message))),
             };
+        // gate-audit[published_delivery]: selector Immutable active-anchor ancestry proves an already-published delivery; it cannot authorize an unshipped or newer cycle.
+        let published_delivery = (negative_result_receipt.is_none() && evidence_only_receipt.is_none()
+            && completion_receipt.is_none() && external_verification_receipt.is_none()
+            && !no_delivery_declared && inline_execution_note.is_none() && inline_external_ref.is_none())
+            .then(|| published_delivery_proof(&self.cas_root, &task, req.commit_receipt.as_deref()))
+            .flatten();
         let close_disposition = if task.task_type == TaskType::Gate {
             if let Err(message) = self.validate_gate_decision_close(&task) {
                 return Ok(Self::tool_error(crate::gates::tag("G-26", message.to_string())));
@@ -8128,9 +8205,18 @@ impl CasCore {
             TaskCloseDisposition::EvidenceOnly
         } else if negative_result_receipt.is_some() {
             TaskCloseDisposition::NegativeResult
+        } else if published_delivery.is_some() {
+            TaskCloseDisposition::PublishedDelivery
         } else {
             TaskCloseDisposition::Delivered
         };
+        if let Some(proof) = published_delivery.as_ref() {
+            close_notes.record(&mut task, &format!("MAIN_ANCESTRY_CLOSE: {}", serde_json::json!({
+                "anchor": proof.anchor, "target": proof.target, "target_sha": proof.target_sha,
+                "release_tag": proof.release_tag,
+                "disposition": "already_published", "park_gates": "not_replayed_after_publication",
+            })));
+        }
 
         let external_verification_receipt = match self.validate_external_verification_close(
             &task,
@@ -8264,6 +8350,7 @@ impl CasCore {
         // close projection may proceed until that exact dispatch resolves.
         // This guard also protects internal post-merge re-close calls.
         if close_disposition != TaskCloseDisposition::Decision
+            && published_delivery.is_none()
             && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
@@ -8686,6 +8773,7 @@ impl CasCore {
         // exact pushed correction through its declared WorkTarget instead.
         // This identifies code to lint/park; it never proves integration.
         let retired_receipt = if supervisor_override
+            && published_delivery.is_none()
             && !supervisor_closing_merged_receipt
             && !supervisor_closing_merged_anchor
             && matches!(self.compute_verification_skip_reason(&task, &req),
@@ -8703,7 +8791,7 @@ impl CasCore {
             }
         } else { None };
         let recovery_branch = retired_receipt.as_ref().map(|(branch, _)| format!("origin/{branch}"));
-        let worker_worktree_path = if matches!(close_disposition, TaskCloseDisposition::Decision | TaskCloseDisposition::EvidenceOnly)
+        let worker_worktree_path = if matches!(close_disposition, TaskCloseDisposition::Decision | TaskCloseDisposition::EvidenceOnly | TaskCloseDisposition::PublishedDelivery)
             || supervisor_closing_merged_anchor
             || supervisor_closing_merged_receipt
             || retired_receipt.is_some()
@@ -9779,7 +9867,7 @@ impl CasCore {
                         && let Some(paths) =
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
                     {
-                        gate_refusals.extend(receipt_scope::park_refusals(
+                        let mut receipt_refusals = receipt_scope::park_refusals(
                             &self.cas_root,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                             &task,
@@ -9789,14 +9877,43 @@ impl CasCore {
                             task_attribution::range_bounds(
                                 &close_project_root, &resolved_parent_branch, window, Some(tip),
                             ).as_deref(),
-                        ));
+                        );
+                        // GH #2041: authority and reason were validated at entry.
+                        // Waive only stability, retaining crate/content obligations.
+                        let before = receipt_refusals.len();
+                        if supervisor_override {
+                            receipt_refusals.retain(|refusal| {
+                                !refusal.starts_with("CHANGED_TEST_STABILITY_REQUIRED:")
+                                    && !refusal.starts_with("CHANGED_TEST_DISCOVERY_FAILED:")
+                            });
+                        }
+                        if receipt_refusals.len() != before {
+                            accepted_override_codes.push("G-61");
+                            parking.notes.push_str(&format!(
+                                "\n\nDECISION: authenticated supervisor waived park test stability [G-61] at {tip}. Reason: {}",
+                                req.reason.as_deref().unwrap_or_default().trim(),
+                            ));
+                        }
+                        gate_refusals.extend(receipt_refusals);
                     }
-                    // cas-e571: a build routed from another machine ships
-                    // its evidence to that machine's reviewer before parking.
-                    if gate_refusals.is_empty()
-                        && let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(&self.cas_root, &task)
-                    {
-                        gate_refusals.push(refusal);
+                    // Publish ordinary local proof too, without adding a gate.
+                    // Routed builds retain their existing strict publication rule.
+                    let mut publication_warning = String::new();
+                    if gate_refusals.is_empty() {
+                        let mut evidence_task = task.clone();
+                        evidence_task.deliverables.parked_close_reason = req.reason.clone();
+                        if let Err(warning) = crate::artifacts::proof::publish_routed_evidence(
+                            &self.cas_root, &evidence_task,
+                            worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                        ) {
+                            if crate::factory_build_routing::routed_from(&task)
+                                .is_some_and(|source| source != cas_types::Agent::get_or_generate_machine_id())
+                            { gate_refusals.push(warning); }
+                            else {
+                                publication_warning = format!("\nWARNING (non-blocking): {warning}");
+                                let _ = task_store.append_note(&task.id, &warning);
+                            }
+                        }
                     }
                     if !gate_refusals.is_empty() {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
@@ -9898,7 +10015,7 @@ impl CasCore {
                     } else {
                         msg
                     };
-                    let msg = format!("{msg}{impact_warning}");
+                    let msg = format!("{msg}{impact_warning}{publication_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,
@@ -9912,6 +10029,8 @@ impl CasCore {
                     let artifacts_root = self.load_config().factory().artifacts_root;
                     let msg = gate_text::upkeep_receipt(&self.cas_root,
                         artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
+                    let msg = accepted_override_codes.iter().fold(msg, |message, code|
+                        crate::gates::override_tag(code, message));
                     return Ok(Self::tool_error(msg));
                 }
             }
@@ -10032,7 +10151,9 @@ impl CasCore {
         });
 
         let assignee_state = self.compute_verification_skip_reason(&task, &req);
-        let skip_reason = if close_disposition == TaskCloseDisposition::Decision {
+        let skip_reason = if close_disposition == TaskCloseDisposition::PublishedDelivery {
+            VerificationSkipReason::AlreadyShipped
+        } else if close_disposition == TaskCloseDisposition::Decision {
             VerificationSkipReason::SupervisorDecision
         } else if close_disposition == TaskCloseDisposition::EvidenceOnly {
             VerificationSkipReason::SupervisorEvidenceOnly
@@ -10057,7 +10178,7 @@ impl CasCore {
                 }))
         );
         // Legacy errors also retain their authority when no typed dispatch exists.
-        let skip_verification = skip_reason.is_skip() && exact_dispatch_allows_skip
+        let skip_verification = published_delivery.is_some() || skip_reason.is_skip() && exact_dispatch_allows_skip
             && self.open_verification_store().is_ok_and(|store| {
                 store.get_latest_for_task(&req.id).is_ok_and(|latest| latest.is_none_or(|row| {
                     row.dispatch_id.is_some()
@@ -10623,13 +10744,10 @@ impl CasCore {
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))
                         {
-                            let delivery_branch = task.deliverables.parked_branch.as_deref()
-                                .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
-                                .or(task.assignee.as_deref()).unwrap_or("<delivery branch>");
                             return Ok(Self::tool_error(crate::gates::tag("G-70", format!(
-                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. Supervisor recovery: {}factory action=worktree_merge id={} task_id={} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {}task action=request_changes id={} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Repeating close cannot create a post-merge approval.",
-                                task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), delivery_branch, task.id,
-                                crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
+                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. For a historical delivery already integrated, a live registered supervisor audits its ancestry and content, then uses `{}task action=close id={} commit_receipt={} supervisor_override=true reason=\"Reviewed the integrated historical delivery and missing pre-merge approval\"`. This records a recovery decision; it does not create a pre-merge approval. An already-contained worktree_merge cannot supply the missing verdict. Request changes only when a code correction is needed, then review that correction before publication.",
+                                task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), task.id,
+                                task.deliverables.factory_branch_anchor.as_deref().unwrap_or("<integrated-delivery-sha>")
                             ))));
                         }
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
@@ -12088,7 +12206,9 @@ impl CasCore {
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
         task.status = TaskStatus::Closed;
-        if crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id).is_some() { task.pending_verification = false; }
+        if published_delivery.is_some() || crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id).is_some() {
+            task.pending_verification = false;
+        }
         task.deliverables.no_delivery_close_intent = None;
         task.terminal_outcome = Some(close_disposition.terminal_outcome());
         task.closed_at = Some(now);
@@ -15170,6 +15290,33 @@ fn without_promoted_changelog_fragments(
     paths: Vec<String>,
     owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
+    type Key = (std::path::PathBuf, String, String, Vec<String>, Vec<String>);
+    type Value = (Option<String>, Vec<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Value>>> = std::sync::OnceLock::new();
+    let immutable = delivery_git::oid(anchor) && delivery_git::oid(parent_branch);
+    let key = (repo_path.to_path_buf(), anchor.to_string(), parent_branch.to_string(), paths.clone(),
+        owners.iter().map(|owner| owner.to_string()).collect());
+    let cache = CACHE.get_or_init(Default::default);
+    if immutable && let Some(value) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return value;
+    }
+    let value = without_promoted_changelog_fragments_uncached(repo_path, anchor, parent_branch, paths, owners);
+    // A positive promotion is backed by immutable Git objects. A failure may
+    // be a transient read/deadline error, so leave it retryable.
+    if immutable && value.0.is_some() && let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 4096 { cache.clear(); }
+        cache.insert(key, value.clone());
+    }
+    value
+}
+
+fn without_promoted_changelog_fragments_uncached(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: Vec<String>,
+    owners: &[&str],
+) -> (Option<String>, Vec<String>) {
     let owned = |path: &str| {
         path.strip_prefix("changelog.d/")
             .and_then(|name| name.strip_suffix(".md"))
@@ -15277,6 +15424,29 @@ fn without_promoted_changelog_fragments(
 /// deleting release and the current target; a path or release subject alone
 /// cannot excuse a deletion.
 fn without_promoted_doc_fragments(
+    repo: &std::path::Path, anchor: &str, target: &str, paths: Vec<String>, owners: &[&str],
+) -> (Option<String>, Vec<String>) {
+    type Key = (std::path::PathBuf, String, String, Vec<String>, Vec<String>);
+    type Value = (Option<String>, Vec<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Value>>> = std::sync::OnceLock::new();
+    let immutable = delivery_git::oid(anchor) && delivery_git::oid(target);
+    let key = (repo.to_path_buf(), anchor.to_string(), target.to_string(), paths.clone(),
+        owners.iter().map(|owner| owner.to_string()).collect());
+    let cache = CACHE.get_or_init(Default::default);
+    if immutable && let Some(value) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return value;
+    }
+    let value = without_promoted_doc_fragments_uncached(repo, anchor, target, paths, owners);
+    // A positive promotion is backed by immutable Git objects. A failure may
+    // be a transient read/deadline error, so leave it retryable.
+    if immutable && value.0.is_some() && let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 4096 { cache.clear(); }
+        cache.insert(key, value.clone());
+    }
+    value
+}
+
+fn without_promoted_doc_fragments_uncached(
     repo: &std::path::Path, anchor: &str, target: &str, paths: Vec<String>, owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
     fn sections(text: &str) -> std::collections::BTreeMap<String, Vec<String>> {
@@ -17390,6 +17560,9 @@ pub(crate) fn task_without_own_commits_judged(
             ) || (!named_only
                 && task_attribution::lane_commits_all_claim_other_tasks(
                     repo_path, &reference, target, &identity,
+                    task_attribution::released_trunk_ref(repo_path, target)
+                        .filter(|reference| reference.starts_with("refs/remotes/"))
+                        .as_deref(),
                 ) != Some(true))
             {
                 return false;
@@ -22578,6 +22751,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                             task_id: Some(t.id.clone()),
                             known_commits: recorded_anchor.map(str::to_string).into_iter().collect(),
                         },
+                        None,
                     ) == Some(true)
                 {
                     0
@@ -26509,6 +26683,29 @@ pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
         })
 }
 
+/// Release-generated outputs cannot establish that a delivery's source was
+/// reverted (cas-895d3). Folded fragments retain their existing blob proof.
+pub(crate) fn release_generated_output(repo: &std::path::Path, path: &str) -> bool {
+    matches!(path, ".claude/CODEMAP.md" | "docs/PRODUCT_OVERVIEW.md" | "docs/qa/journeys.yaml"
+        | "CHANGELOG.md" | REFERENCE_HISTORY_LEDGER)
+        || regenerable_build_artifact(repo, path)
+}
+
+/// Generated-only losses still need real delivery evidence. Reuse the same
+/// task-owned ranges as the content walk; a sync import or a zero-net red
+/// control cannot supply that source evidence.
+pub(crate) fn release_delivery_has_source(
+    repo: &std::path::Path, base: &str, anchor: &str, task_id: &str,
+) -> bool {
+    let Some(ranges) = task_attribution::first_parent_delivery_ranges(repo, base, anchor, anchor, task_id) else { return false };
+    let Some(net) = delivery_git::text(repo, &["diff", "--name-only", "--no-renames", "-z", base, anchor, "--"]) else { return false };
+    let net: std::collections::HashSet<_> = net.split('\0').collect();
+    ranges.into_iter().filter_map(|(_, paths, _)| paths).flatten().any(|path| {
+        net.contains(path.as_str()) && !path.starts_with("changelog.d/")
+            && !release_generated_output(repo, &path)
+    })
+}
+
 /// GH #2026: for an anchor already on the release commit, the line walk also
 /// reads later edits as drops: a sibling's merge resolution rewriting the
 /// delivered lines, a rebuilt bundle, or the task's own sync merge resolving
@@ -26533,6 +26730,7 @@ pub(crate) fn release_dropped_path_reverted(
     };
     let exists = |rev: &str| git(&["cat-file", "-e", &format!("{rev}:{path}")])
         .is_some_and(|output| output.status.success());
+    if release_generated_output(repo, path) { return false; }
     let net_changes = git(&["diff", "--quiet", "--no-renames", base, anchor, "--", path])
         .is_some_and(|output| output.status.code() == Some(1));
     if !net_changes || (exists(anchor) && !exists(target)) {
@@ -26551,6 +26749,85 @@ pub(crate) fn release_dropped_path_reverted(
     // it applies only where the target again has the pre-delivery content.
     imported_revert || reverse_delivery_path_applies_to_tree(repo, anchor, base, target, path)
         .unwrap_or(true)
+}
+
+/// One release member's measured delivery: `(base, anchor, shipped, task_id)`
+/// as `delivery_content_presence_from_base_on_target_for_task` takes them, or
+/// no base for `delivery_content_presence_on_target_for_task`.
+pub(crate) struct TaskDeliveryRange<'a> {
+    pub(crate) base: Option<&'a str>,
+    pub(crate) anchor: &'a str,
+    pub(crate) shipped: &'a str,
+    pub(crate) task_id: &'a str,
+}
+
+/// cas-0e29e: before a release judges its members one at a time, enumerate
+/// every ordinary line walk their content presence will request on `target`
+/// and walk each delivered path once, carrying every member's owners. The
+/// per-member calls then read those answers. Walks that depend on an earlier
+/// answer (a dropped path's resolution, task-cycle, rename or regeneration
+/// proofs) cannot be enumerated here and still run when reached.
+pub(crate) fn prewalk_task_deliveries(repo: &std::path::Path, target: &str, deliveries: &[TaskDeliveryRange<'_>]) {
+    let mut requests = Vec::new();
+    for delivery in deliveries {
+        let (base, anchor) = match delivery.base {
+            Some(base) => (Some(base.to_string()), delivery.anchor),
+            None => (crate::qa_batch::release_close::delivery_base(repo, delivery.shipped, target), delivery.shipped),
+        };
+        let ranges = match base {
+            Some(base) => task_attribution::first_parent_delivery_ranges(repo, &base, anchor, delivery.shipped, delivery.task_id),
+            None => Some(vec![(delivery.shipped.to_string(), None, None)]),
+        };
+        for (commit, paths, base) in ranges.into_iter().flatten() {
+            requests.extend(line_requests(repo, &commit, target, paths.as_deref(), base.as_deref()));
+        }
+    }
+    delivery_evolution::prewalk_line_content_presence(repo, target, &requests);
+}
+
+/// cas-0e29e: a close measures each attributed task commit in its parent
+/// branch separately (`delivery_content_presence_in_parent_leaving_artifacts`),
+/// and every commit walked its paths through the same epic history. Walk each
+/// `(path, target)` once for all of them first; the per-commit measurements
+/// then read those answers.
+pub(super) fn prewalk_in_parent_deliveries(
+    repo: &std::path::Path,
+    commits: &[String],
+    parent_branch: &str,
+    carrier: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) {
+    let mut by_target: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+    for commit in commits {
+        let selected = match in_parent_artifact_split(repo, commit, parent_branch, carrier, carries_source) {
+            None => None,
+            Some((_, _, measured)) if measured.is_empty() => continue,
+            Some((_, _, measured)) => Some(measured),
+        };
+        let Some(target) = in_parent_target(repo, commit, parent_branch) else { continue };
+        let requests = line_requests(repo, commit, &target, selected.as_deref(), None);
+        by_target.entry(target).or_default().extend(requests);
+    }
+    for (target, requests) in by_target {
+        delivery_evolution::prewalk_line_content_presence(repo, &target, &requests);
+    }
+}
+
+/// The ordinary line walks one `delivery_content_presence_on_target_for_paths`
+/// call requests; none when its range is refused.
+fn line_requests(
+    repo: &std::path::Path,
+    commit: &str,
+    target: &str,
+    paths: Option<&[String]>,
+    base: Option<&str>,
+) -> Vec<delivery_evolution::LineRequest> {
+    let Ok(range) = delivery_line_range(repo, commit, target, paths, base) else { return Vec::new() };
+    range.paths.into_iter().map(|path| delivery_evolution::LineRequest {
+        parent: range.parent.clone(),
+        delivery: range.delivery.clone(),
+        path,
+    }).collect()
 }
 
 fn delivery_content_presence_on_target_for_paths(
@@ -26602,49 +26879,84 @@ fn delivery_content_presence_on_target_for_paths(
     }
 }
 
-fn delivery_content_presence_on_target_for_paths_raw(
+/// cas-0e29e: the first-parent range and delivered paths one
+/// `delivery_content_presence_on_target_for_paths` call walks, each path from
+/// `parent` to `target` (all resolved commits).
+#[derive(Clone)]
+struct DeliveryLineRange {
+    parent: String,
+    delivery: String,
+    target: String,
+    paths: Vec<String>,
+}
+
+fn delivery_line_range(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     target_ref: &str,
     selected_paths: Option<&[String]>,
-    resolution_only: bool,
     base: Option<&str>,
-) -> DeliveryContentPresence {
+) -> Result<DeliveryLineRange, DeliveryContentPresence> {
+    type Key = (std::path::PathBuf, String, String, Option<Vec<String>>, Option<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, DeliveryLineRange>>> = std::sync::OnceLock::new();
+    let immutable = delivery_git::oid(delivery_commit) && delivery_git::oid(target_ref)
+        && base.is_none_or(delivery_git::oid);
+    let key = (repo_path.to_path_buf(), delivery_commit.to_string(), target_ref.to_string(),
+        selected_paths.map(<[String]>::to_vec), base.map(str::to_string));
+    let cache = CACHE.get_or_init(Default::default);
+    if immutable && let Some(range) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return Ok(range);
+    }
+    let range = delivery_line_range_uncached(repo_path, delivery_commit, target_ref, selected_paths, base)?;
+    if immutable && let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 4096 { cache.clear(); }
+        cache.insert(key, range.clone());
+    }
+    Ok(range)
+}
+
+fn delivery_line_range_uncached(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    selected_paths: Option<&[String]>,
+    base: Option<&str>,
+) -> Result<DeliveryLineRange, DeliveryContentPresence> {
     use std::process::Command;
 
     if !is_safe_git_refname(delivery_commit) || !is_safe_git_refname(target_ref)
         || base.is_some_and(|base| !is_safe_git_refname(base)) {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: "delivery commit or target ref is not safe to pass to Git".to_string(),
-        };
+        });
     }
     if !git_ref_exists(repo_path, delivery_commit) || !git_ref_exists(repo_path, target_ref) {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!(
                 "delivery commit `{delivery_commit}` or target `{target_ref}` does not resolve"
             ),
-        };
+        });
     }
 
     let Some(delivery) = resolve_branch_sha(repo_path, &format!("{delivery_commit}^{{commit}}"))
     else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` does not peel to a commit"),
-        };
+        });
     };
     let delivery_commit = delivery.as_str();
 
     let Some(delivery_parent) = base.map(str::to_string)
         .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^1")))
     else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` has no resolvable first parent"),
-        };
+        });
     };
     let Some(target) = resolve_branch_sha(repo_path, target_ref) else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("target `{target_ref}` does not resolve to a commit"),
-        };
+        });
     };
 
     // Match repository_proof: lifecycle-owned .cas metadata is outside the
@@ -26667,17 +26979,17 @@ fn delivery_content_presence_on_target_for_paths_raw(
     let names = match names {
         Ok(output) if output.status.success() => output.stdout,
         Ok(output) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!(
                     "Git could not enumerate delivery paths (exit {})",
                     output.status
                 ),
-            };
+            });
         }
         Err(error) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!("failed to enumerate delivery paths: {error}"),
-            };
+            });
         }
     };
     let paths = names
@@ -26692,19 +27004,37 @@ fn delivery_content_presence_on_target_for_paths_raw(
     let paths = match paths {
         Ok(paths) if !paths.is_empty() => paths,
         Ok(_) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!(
                     "delivery commit `{delivery_commit}` has no first-parent tree effect"
                 ),
-            };
+            });
         }
         Err(_) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: "delivery paths are not valid UTF-8 and cannot be reported safely"
                     .to_string(),
-            };
+            });
         }
     };
+
+    Ok(DeliveryLineRange { parent: delivery_parent, delivery, target, paths })
+}
+
+fn delivery_content_presence_on_target_for_paths_raw(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    selected_paths: Option<&[String]>,
+    resolution_only: bool,
+    base: Option<&str>,
+) -> DeliveryContentPresence {
+    let DeliveryLineRange { parent: delivery_parent, delivery, target, paths } =
+        match delivery_line_range(repo_path, delivery_commit, target_ref, selected_paths, base) {
+            Ok(range) => range,
+            Err(unknown) => return unknown,
+        };
+    let delivery_commit = delivery.as_str();
 
     let mut dropped = Vec::new();
     let mut evolved = Vec::new();
@@ -26837,43 +27167,11 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
     carries_source: &std::cell::OnceCell<bool>,
     owners: &[&str],
 ) -> DeliveryContentPresence {
-    let ordinary = || {
-        delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, owners)
-    };
-    let Some(paths) = std::process::Command::new("git")
-        .args([
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "-z",
-            &format!("{delivery_commit}^1"),
-            delivery_commit,
-            "--",
-        ])
-        .current_dir(repo_path)
-        .measurement_output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|path| !path.is_empty())
-                .map(|path| String::from_utf8(path.to_vec()).ok())
-                .collect::<Option<Vec<_>>>()
-        })
+    let Some((paths, artifacts, measured)) =
+        in_parent_artifact_split(repo_path, delivery_commit, parent_branch, carrier, carries_source)
     else {
-        return ordinary();
+        return delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, owners);
     };
-    let (artifacts, measured): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
-        artifact_left_to_regeneration_rule(repo_path, carrier, path, carries_source)
-    });
-    if artifacts.is_empty() {
-        return ordinary();
-    }
-    if !delivery_reachable_in_parent(repo_path, delivery_commit, parent_branch) {
-        return ordinary();
-    }
     let inner = (!measured.is_empty()).then(|| {
         delivery_content_presence_in_parent_for_paths(
             repo_path,
@@ -26898,18 +27196,66 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
     }
 }
 
-/// The reachability [`delivery_content_presence_in_parent_for_paths`]
-/// requires before it measures anything.
-fn delivery_reachable_in_parent(
+/// The commit's paths, those left to cas-baf7's rule and those measured, as
+/// [`delivery_content_presence_in_parent_leaving_artifacts`] splits them; `None`
+/// when it makes the ordinary measurement instead.
+fn in_parent_artifact_split(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     parent_branch: &str,
-) -> bool {
+    carrier: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
+    let paths = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &format!("{delivery_commit}^1"),
+            delivery_commit,
+            "--",
+        ])
+        .current_dir(repo_path)
+        .measurement_output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(|path| String::from_utf8(path.to_vec()).ok())
+                .collect::<Option<Vec<_>>>()
+        })?;
+    let (artifacts, measured): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
+        artifact_left_to_regeneration_rule(repo_path, carrier, path, carries_source)
+    });
+    if artifacts.is_empty() || in_parent_target(repo_path, delivery_commit, parent_branch).is_none() {
+        return None;
+    }
+    Some((paths, artifacts, measured))
+}
+
+/// The parent ref [`delivery_content_presence_in_parent_for_paths`] measures
+/// on: the remote branch when it holds the delivery, else the local one.
+fn in_parent_target(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    parent_branch: &str,
+) -> Option<String> {
     let origin_parent = format!("origin/{parent_branch}");
-    (git_ref_exists(repo_path, &origin_parent)
-        && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent))
-        || (git_ref_exists(repo_path, parent_branch)
-            && git_commit_is_ancestor(repo_path, delivery_commit, parent_branch))
+    if git_ref_exists(repo_path, &origin_parent)
+        && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent)
+    {
+        Some(origin_parent)
+    } else if git_ref_exists(repo_path, parent_branch)
+        && git_commit_is_ancestor(repo_path, delivery_commit, parent_branch)
+    {
+        Some(parent_branch.to_string())
+    } else {
+        None
+    }
 }
 
 fn delivery_content_presence_in_parent_for_paths(
@@ -26920,26 +27266,17 @@ fn delivery_content_presence_in_parent_for_paths(
     resolution_only: bool,
     owners: &[&str],
 ) -> DeliveryContentPresence {
-    let origin_parent = format!("origin/{parent_branch}");
-    let target = if git_ref_exists(repo_path, &origin_parent)
-        && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent)
-    {
-        origin_parent.as_str()
-    } else if git_ref_exists(repo_path, parent_branch)
-        && git_commit_is_ancestor(repo_path, delivery_commit, parent_branch)
-    {
-        parent_branch
-    } else {
+    let Some(target) = in_parent_target(repo_path, delivery_commit, parent_branch) else {
         return DeliveryContentPresence::Unknown {
             reason: format!(
-                "delivery commit `{delivery_commit}` is not reachable from `{parent_branch}` or `{origin_parent}`"
+                "delivery commit `{delivery_commit}` is not reachable from `{parent_branch}` or `origin/{parent_branch}`"
             ),
         };
     };
     delivery_content_presence_on_target_for_paths(
         repo_path,
         delivery_commit,
-        target,
+        &target,
         selected_paths,
         resolution_only,
         owners,
@@ -30714,7 +31051,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "release-inventory-target", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "methodology-cleared", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "release-inventory-target", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -30794,6 +31131,7 @@ mod merge_state_gate_tests {
             task.deliverables.factory_branch_anchor = Some(source.clone());
             task.deliverables.parked_branch = Some("factory/worker".into());
             task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-192b0-fixture".into(), target_branch: "main".into() });
+            if row == "methodology-cleared" { task.execution_note = Some("no-code".into()); }
             tasks.add(&task).unwrap();
             if matches!(row, "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
@@ -30854,7 +31192,7 @@ mod merge_state_gate_tests {
                 tasks.update(&task).unwrap();
             }
             assert_ne!(landed, candidate.proof.head_commit);
-            if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
+            if matches!(row, "queue-landed" | "methodology-cleared" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             if row == "queue-target-progress" {
@@ -30909,6 +31247,18 @@ mod merge_state_gate_tests {
                 assert!(git_commit_is_ancestor(p, &source, "origin/main"));
                 assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "origin/main"));
             }
+            if row == "methodology-cleared" {
+                use crate::mcp::CasService;
+                env.set("CAS_AGENT_ROLE", "supervisor");
+                CasService::new(core.clone(), None).task(Parameters(serde_json::from_value(serde_json::json!({
+                    "action": "update", "id": task.id, "proof_scope_fix": true, "execution_note": "",
+                    "reason": "Correct the methodology label on the unchanged merged delivery",
+                })).unwrap())).await.unwrap();
+                task = tasks.get(&task.id).unwrap();
+                assert!(task.execution_note.is_none());
+                assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
+                    cas_types::VerificationDispatchState::Resolved);
+            }
             // Probe the same containment guard as well as full close, so a
             // prior content gate cannot conceal a permissive partial-patch rule.
             match verified_delivery::current(&root, &task) {
@@ -30921,7 +31271,7 @@ mod merge_state_gate_tests {
                     }
                     assert_eq!(
                         reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "containment guard: {row}",
+                        matches!(row, "queue-landed" | "methodology-cleared" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "containment guard: {row}",
                     );
                 },
                 _ => panic!("missing task-bound review: {row}"),
@@ -30998,7 +31348,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "methodology-cleared" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }
@@ -32088,6 +32438,83 @@ esac
             "{}",
             closed.notes
         );
+    }
+
+    #[tokio::test]
+    async fn shipped_anchor_closes_without_replaying_park_paperwork_cas_4cbf() {
+        use crate::mcp::CasService;
+        use cas_types::{Agent, AgentRole, FactoryBranchStart, WorkTarget};
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(repo, &["add", ".gitignore"]);
+        git(repo, &["commit", "-qm", "base"]);
+        let base = rev_parse_local(repo, "HEAD");
+        std::fs::write(repo.join("release.rs"), "fn shipped() {}\n").unwrap();
+        git(repo, &["add", "release.rs"]);
+        git(repo, &["commit", "-qm", "fix(cas-4cbf1): shipped implementation"]);
+        let shipped = rev_parse_local(repo, "HEAD");
+        git(repo, &["update-ref", "refs/remotes/origin/main", &shipped]);
+        git(repo, &["tag", "v0.1.0", &shipped]);
+        git(repo, &["checkout", "-qb", "unshipped"]);
+        std::fs::write(repo.join("pending.rs"), "fn pending() {}\n").unwrap();
+        git(repo, &["add", "pending.rs"]);
+        git(repo, &["commit", "-qm", "new unshipped cycle"]);
+        let unshipped = rev_parse_local(repo, "HEAD");
+        git(repo, &["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id='shipped-close-fixture'\n[verification]\nenabled=false\n").unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", repo);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let _cwd = env.enter_dir(repo);
+        let actor = "shipped-close-supervisor";
+        crate::store::open_agent_store(&root).unwrap().register(&Agent::new_with_role(
+            actor.into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        for (index, case) in ["shipped", "unshipped", "retired", "new-cycle", "foreign-receipt", "rejected"].into_iter().enumerate() {
+            let id = format!("cas-4cbf{}", index + 1);
+            let mut task = worker_task("retired-peer-worker");
+            task.id = id.clone();
+            task.status = TaskStatus::AwaitingMerge;
+            task.task_type = TaskType::Bug;
+            task.risk = vec![TaskRisk::None];
+            task.origin_project = Some("shipped-close-fixture".into());
+            task.worktree_id = Some("retired-peer-worktree".into());
+            let target = WorkTarget { repo_selector: "project:shipped-close-fixture".into(), target_branch: "main".into() };
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+                work_target: target, branch: "factory/retired-peer-worker".into(), assignee: "retired-peer-worker".into(),
+                base_sha: if case == "new-cycle" { unshipped.clone() } else { base.clone() },
+            });
+            task.deliverables.factory_branch_anchor = (case != "retired").then(||
+                if case == "unshipped" { unshipped.clone() } else { shipped.clone() });
+            if case == "retired" { task.deliverables.historical_factory_branch_anchors.push(shipped.clone()); }
+            store.add(&task).unwrap();
+            cas_store::create_verification_dispatch_bound(&root, &id, "task-verifier", actor,
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+            cas_store::timeout_verification_dispatch(&root, &id,
+                chrono::Utc::now() + chrono::Duration::hours(2)).unwrap();
+            if case == "rejected" {
+                let mut verdict = Verification::rejected("ver-shipped-rejected".into(), id.clone(), "fixture rejection".into(), Vec::new());
+                verdict.provenance = cas_types::VerificationProvenance::System;
+                cas_store::add_system_verification(&root, &verdict).unwrap();
+            }
+            let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"close", "id":id, "reason":"shipped delivery ancestry proof",
+                "commit_receipt":if case == "foreign-receipt" { &base } else if case == "unshipped" { &unshipped } else { &shipped },
+            })).unwrap())).await.unwrap();
+            let closes = case == "shipped";
+            assert_eq!(response.is_error == Some(true), !closes, "{case}: {response:?}");
+            assert_eq!(store.get(&id).unwrap().status == TaskStatus::Closed, closes, "{case}");
+        }
     }
 
     /// cas-4b22 (GH #1513): a delivery already shipped by a merged PR closes
@@ -38525,6 +38952,29 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             }
             other => panic!("a byte-identical delivered path is not dropped: {other:?}"),
         }
+    }
+
+    /// GH #1989: path history cannot report a loss when the authored final
+    /// snapshot is byte-identical on the target, even after a dropping merge.
+    #[test]
+    fn byte_identical_target_restoration_is_present_gh1989() {
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        std::fs::write(repo.join("own.ts"), "export const delivered = 1;\n").unwrap();
+        git(repo, &["add", "own.ts"]);
+        git(repo, &["commit", "-qm", "fix(cas-test1): delivered snapshot"]);
+        let anchor = rev_parse_local(repo, "HEAD");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", "-s", "ours", "factory/worker", "-m", "integrate without content"]);
+        std::fs::write(repo.join("own.ts"), "export const delivered = 1;\n").unwrap();
+        git(repo, &["add", "own.ts"]);
+        git(repo, &["commit", "-qm", "chore: restore final snapshot"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        assert_eq!(tree_path_blob(repo, &anchor, "own.ts"), tree_path_blob(repo, "main", "own.ts"));
+        assert!(matches!(run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", repo),
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)));
     }
 
     /// cas-f38ca: byte identity alone never clears a delivery the task itself

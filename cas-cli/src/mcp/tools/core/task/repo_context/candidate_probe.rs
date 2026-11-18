@@ -65,7 +65,7 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
                 })
                 .count();
             if running >= MAX_PENDING {
-                return Err("WORK TARGET REPOSITORY UNAVAILABLE: too many known-root filesystem probes are still blocked; retry after storage access recovers".to_string());
+                return Err("WORK TARGET REPOSITORY UNAVAILABLE: known-root filesystem probes have reached their pending limit".to_string());
             }
             let pending = Arc::new(PendingCandidate {
                 started: Instant::now(),
@@ -126,7 +126,7 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
         .unwrap_or_else(|error| error.into_inner());
     // Neither a still-running filesystem read nor a cached Git timeout proves
     // that a repository is absent. Preserve that distinction on every retry.
-    result.clone().unwrap_or(Err(BoundedRepoError::TimedOut)).map_err(|_| {
-        "WORK TARGET REPOSITORY UNAVAILABLE: known-root probe did not complete; retry after storage access recovers".to_string()
+    result.clone().unwrap_or(Err(BoundedRepoError::TimedOut)).map_err(|error| {
+        format!("WORK TARGET REPOSITORY UNAVAILABLE: known-root probe did not complete ({error:?})")
     })
 }

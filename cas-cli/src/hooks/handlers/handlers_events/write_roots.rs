@@ -114,15 +114,15 @@ impl WritePolicy {
                 // A root that cannot be resolved (missing, dangling symlink)
                 // admits nothing. Containment is judged on resolved paths, so
                 // `..` and symlinks inside the root cannot escape it.
-                // Strictly beneath the root: the root directory itself is
-                // never deleted, renamed or overwritten through it (GH #1182
-                // QA F02).
+                // Directory sinks may create children at the root. Editing,
+                // deleting or renaming the root itself remains separate.
                 && root
                     .path
                     .canonicalize()
                     .ok()
                     .or_else(|| root.creatable.then(|| missing_root(&root.path)).flatten())
-                    .is_some_and(|canonical| resolved.starts_with(&canonical) && resolved != canonical)
+                    .is_some_and(|canonical| resolved.starts_with(&canonical)
+                        && (resolved != canonical || mode == WriteMode::Create && resolved.is_dir()))
         })
     }
 

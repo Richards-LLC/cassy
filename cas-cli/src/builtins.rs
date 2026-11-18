@@ -334,6 +334,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
+        path: "skills/cas-client-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-client-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-client-report/references/accounting-entries.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-feature-report/SKILL.md",
         content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
     },
@@ -1122,6 +1130,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-client-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-client-report/references/accounting-entries.md"),
     },
     BuiltinFile {
         path: "skills/cas-feature-report/SKILL.md",
@@ -1959,6 +1975,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-client-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-client-report/references/accounting-entries.md"),
     },
     BuiltinFile {
         path: "skills/cas-feature-report/SKILL.md",

@@ -60,7 +60,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     commit(repo, "work.txt");
     run(repo, &["checkout", "-q", "main"]);
     let root = crate::store::init_cas_dir(repo).unwrap();
-    let mut supervisor = Agent::new_with_role("sup-id".into(), "supervisor".into(), AgentRole::Supervisor);
+    let mut supervisor = Agent::new_with_role("successor-id".into(), "supervisor".into(), AgentRole::Supervisor);
     supervisor.factory_session = Some("session".into());
     open_agent_store(&root).unwrap().register(&supervisor).unwrap();
     let store = open_task_store(&root).unwrap();
@@ -69,7 +69,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     let none = BTreeSet::new();
     let poll = |queued: &BTreeSet<String>| notify_train_cuts(&root, queued, now).unwrap();
     let frozen = || release_freeze::freeze_of(&open_task_store(&root).unwrap().get("cas-tr").unwrap()).is_some();
-    let wakes = || open_supervisor_queue_store(&root).unwrap().peek("sup-id", 10).unwrap();
+    let wakes = || open_supervisor_queue_store(&root).unwrap().peek("successor-id", 10).unwrap();
 
     poll(&none);
     assert!(!frozen(), "no changelog fragments");
@@ -99,6 +99,28 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     assert!(!frozen(), "one cut in 24 h reaches a one-per-day cap");
     config.set("release.auto_cut_max_per_day", "4").unwrap();
     config.save(&root).unwrap();
+
+    // The synced train names its departed owner. A local successor can act,
+    // but a stale heartbeat or unfinished release repair still prevents cuts.
+    supervisor.last_heartbeat = now - Duration::hours(1);
+    open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    poll(&none);
+    assert!(!frozen());
+    supervisor.last_heartbeat = now;
+    open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let mut repair = Task::new("cas-repair".into(), "Release repair".into());
+    repair.labels.push(release_freeze::REPAIR_LABEL.into());
+    store.add(&repair).unwrap();
+    store.add_dependency(&cas_types::Dependency::new(repair.id.clone(), "cas-tr".into(),
+        cas_types::DependencyType::ParentChild)).unwrap();
+    for status in [TaskStatus::Open, TaskStatus::InProgress, TaskStatus::AwaitingMerge] {
+        repair.status = status;
+        store.update(&repair).unwrap();
+        poll(&none);
+        assert!(!frozen(), "{status:?}");
+    }
+    repair.status = TaskStatus::Closed;
+    store.update(&repair).unwrap();
 
     poll(&none);
     poll(&none);

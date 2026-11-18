@@ -55,13 +55,22 @@ pub fn recommend<'a>(
             continue;
         }
         match capacity(account, now, threshold) {
-            Ok((reset, weekly, five)) => candidates.push((account, reset, weekly, five)),
+            Ok(capacity) => candidates.push((account, capacity.reset, capacity.weekly, capacity.five, capacity.five_reset, capacity.assumed)),
             Err(reason) => result.excluded.push((account, reason)),
+        }
+    }
+    // cas-c58f: an expired window's 0% is only assumed. Under either policy,
+    // observed accounts are chosen first; assumed ones are a fallback.
+    if candidates.iter().any(|c: &Candidate<'_>| !c.5) {
+        let (observed, assumed): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| !c.5);
+        candidates = observed;
+        for (account, ..) in assumed {
+            result.excluded.push((account, "usage assumed from stale or expired windows; observed accounts first".into()));
         }
     }
     let earliest = candidates
         .iter()
-        .filter_map(|(_, reset, _, _)| *reset)
+        .filter_map(|(_, reset, ..)| *reset)
         .min();
     let mut later = Vec::new();
     if config.selection == AccountSelection::SoonestReset
@@ -80,14 +89,16 @@ pub fn recommend<'a>(
         });
     }
     // The binding window is whichever of weekly and 5h is fuller (cas-2820).
-    let binding = |c: &(&Account, Option<DateTime<Utc>>, f64, f64)| c.2.max(c.3);
+    let binding = |c: &Candidate<'_>| c.2.max(c.3);
+    // Ties break on that window's own reset (cas-c58f).
+    let binding_reset = |c: &Candidate<'_>| if c.3 > c.2 { c.4 } else { c.1 };
     candidates.sort_by(|a, b| match config.selection {
-        // Most headroom on the binding window; ties by the earliest reset,
-        // an unknown weekly reset after every known one.
+        // Most headroom on the binding window; ties by its earliest reset,
+        // unknown resets last.
         AccountSelection::MostHeadroom => binding(a)
             .total_cmp(&binding(b))
-            .then(a.1.is_none().cmp(&b.1.is_none()))
-            .then(a.1.cmp(&b.1))
+            .then(binding_reset(a).is_none().cmp(&binding_reset(b).is_none()))
+            .then(binding_reset(a).cmp(&binding_reset(b)))
             .then(a.0.folder.cmp(&b.0.folder)),
         // An unknown weekly reset is eligible, after every known reset.
         AccountSelection::SoonestReset => a.1.is_none()
@@ -107,7 +118,7 @@ pub fn recommend<'a>(
             .push((skipped, format!("resets later than {}; {}", account.name, crate::cli::limits::format_reset(skipped.windows.iter().find(|w| w.name == "weekly").and_then(|w| w.resets_at), now))));
     }
     if reset.is_some() && config.selection == AccountSelection::SoonestReset {
-        for &(skipped, candidate_reset, _, _) in candidates.iter().skip(1) {
+        for &(skipped, candidate_reset, ..) in candidates.iter().skip(1) {
             if candidate_reset.is_none() {
                 result
                     .excluded
@@ -147,11 +158,24 @@ pub fn launch_choice<'a>(
     selection
 }
 
+/// A candidate: account, weekly reset, weekly and 5h used %, 5h reset, and
+/// whether an expired window's usage is only assumed empty.
+type Candidate<'a> = (&'a Account, Option<DateTime<Utc>>, f64, f64, Option<DateTime<Utc>>, bool);
+
+struct Capacity {
+    reset: Option<DateTime<Utc>>,
+    weekly: f64,
+    five: f64,
+    five_reset: Option<DateTime<Utc>>,
+    /// A window's reset has passed, so its 0% is assumed, not observed.
+    assumed: bool,
+}
+
 fn capacity(
     account: &Account,
     now: DateTime<Utc>,
     threshold: u8,
-) -> Result<(Option<DateTime<Utc>>, f64, f64), String> {
+) -> Result<Capacity, String> {
     if account.flags.disabled {
         return Err("disabled".into());
     }
@@ -169,17 +193,28 @@ fn capacity(
     }) {
         return Err("usage unknown".into());
     }
+    let assumed = std::cell::Cell::new(false);
+    let stale_observation = account.usage_observed_at.is_some_and(|at|
+        at > now || now.signed_duration_since(at).num_seconds() > crate::cli::limits::CLAUDE_SNAPSHOT_MAX_AGE);
     let window = |name: &str| -> Result<(Option<DateTime<Utc>>, f64), String> {
         let Some(w) = account.windows.iter().find(|w| w.name == name) else {
+            // An omitted window is unopened, not a cleared stale observation.
+            // Its absence does not invalidate another window's observed usage.
             return Ok((None, 0.0));
         };
         // A past timestamp proves rollover even if the registry cleared its
         // old percentage. Missing reset metadata alone does not prove rollover.
         if w.resets_at.is_some_and(|reset| reset <= now) {
+            assumed.set(true);
             return Ok((None, 0.0));
         }
         let used = match (w.used_percent, w.resets_at) {
-            (None, None) => 0.0, // Unopened window in an otherwise known account.
+            (None, None) => {
+                // Limits clears age-invalidated observations with unknown
+                // resets. Only a fresh unopened window is observed empty.
+                assumed.set(assumed.get() || stale_observation);
+                0.0
+            },
             (Some(used), _) if used.is_finite() && (0.0..=100.0).contains(&used) => used,
             _ => return Err(format!("{name} usage unknown")),
         };
@@ -188,9 +223,9 @@ fn capacity(
         }
         Ok((w.resets_at, used))
     };
-    let (_, five) = window("5h")?;
+    let (five_reset, five) = window("5h")?;
     let (reset, weekly) = window("weekly")?;
-    Ok((reset, weekly, five))
+    Ok(Capacity { reset, weekly, five, five_reset, assumed: assumed.get() })
 }
 
 /// Project selection/threshold override the global policy. Disabled folders
@@ -298,7 +333,7 @@ pub(crate) mod tests {
 
     #[test]
     fn selection_table() {
-        let now = "2026-10-27T12:00:00Z".parse().unwrap();
+        let now: DateTime<Utc> = "2026-10-27T12:00:00Z".parse().unwrap();
         let mut config = crate::config::Config::default();
         assert_eq!(config.get("accounts.threshold").as_deref(), Some("90"));
         for (key, value) in [
@@ -379,7 +414,26 @@ pub(crate) mod tests {
             } else {
                 Provider::Claude
             };
+            // cas-c58f: both bind at 50% on 5h; "soon" resets its 5h window first.
+            let mut five_later = row(provider, "later", 20, 10.0, 50.0);
+            five_later.windows[0].resets_at = Some(now + chrono::Duration::hours(4));
+            let mut five_soon = row(provider, "soon", 100, 10.0, 50.0);
+            five_soon.windows[0].resets_at = Some(now + chrono::Duration::hours(1));
+            // cas-c58f: an expired 95% 5h snapshot is only assumed empty.
+            let mut assumed_empty = row(provider, "assumed", 6, 30.0, 95.0);
+            assumed_empty.windows[0].resets_at = Some(now - chrono::Duration::hours(1));
+            let mut stale_cleared = row(provider, "stale-cleared", 6, 10.0, 0.0);
+            stale_cleared.usage_observed_at = Some(now - chrono::Duration::minutes(10));
+            stale_cleared.windows[0].used_percent = None;
+            stale_cleared.windows[0].resets_at = None;
             for (case, rows, selection, threshold, expected) in [
+                (
+                    "stale cleared window is not observed empty",
+                    vec![stale_cleared, row(provider, "observed", 6, 40.0, 20.0)],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("observed"),
+                ),
                 (
                     "soonest reset",
                     vec![b.clone(), a.clone()],
@@ -434,6 +488,20 @@ pub(crate) mod tests {
                     Some("b"),
                 ),
                 (
+                    "binding 5h tie on the 5h reset",
+                    vec![five_later, five_soon],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("soon"),
+                ),
+                (
+                    "observed usage before assumed-empty",
+                    vec![assumed_empty, row(provider, "observed", 6, 40.0, 20.0)],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("observed"),
+                ),
+                (
                     "configured threshold",
                     vec![a.clone(), b.clone()],
                     AccountSelection::SoonestReset,
@@ -461,19 +529,35 @@ pub(crate) mod tests {
                     90,
                     Some("idle"),
                 ),
+                // cas-c58f: an expired window's 0% is assumed; the observed
+                // account wins under either policy.
                 (
                     "expired Codex 5h snapshot",
-                    vec![busy.clone(), expired_five],
+                    vec![busy.clone(), expired_five.clone()],
                     AccountSelection::SoonestReset,
                     90,
-                    Some("idle"),
+                    Some("busy"),
+                ),
+                (
+                    "expired Codex 5h snapshot, most headroom",
+                    vec![busy.clone(), expired_five],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("busy"),
                 ),
                 (
                     "expired Codex cleared percentage",
-                    vec![busy, cleared_expired],
+                    vec![busy.clone(), cleared_expired.clone()],
                     AccountSelection::SoonestReset,
                     90,
-                    Some("idle"),
+                    Some("busy"),
+                ),
+                (
+                    "expired Codex cleared percentage, most headroom",
+                    vec![busy, cleared_expired],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("busy"),
                 ),
                 (
                     "unknown weekly reset eligible",

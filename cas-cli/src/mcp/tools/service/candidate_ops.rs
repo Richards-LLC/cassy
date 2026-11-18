@@ -58,7 +58,8 @@ impl CasService {
             .any(|lease| lease.task_id == task && lease.is_valid());
         if !holds_lease {
             return Err(refuse(format!(
-                "{task} is not {}'s active task; start your own task and request its candidate",
+                "{task} is not {}'s active task; queued requests require the task owner's lease. \
+                 A supervisor building for this task runs `cas qa candidate build --task {task} --rev {revision}` directly",
                 caller.name
             )));
         }
@@ -87,15 +88,16 @@ impl CasService {
             )));
         }
         if !queue::runner_is_live(cas_root) {
-            return Err(refuse(
+            return Err(refuse(format!(
                 "no factory daemon with a candidate queue is running for this project; \
-                 it may predate the queue, so ask the supervisor for this candidate",
-            ));
+                 it may predate the queue, so ask the supervisor to run \
+                 `cas qa candidate build --task {task} --rev {revision}` directly",
+            )));
         }
         if let Some(problem) = queue::sandbox_refusal(cas_root) {
             return Err(refuse(format!(
-                "{problem}. Nothing was queued. {}",
-                queue::SUPERVISOR_FALLBACK
+                "{problem}. Nothing was queued. Ask the supervisor to run \
+                 `cas qa candidate build --task {task} --rev {revision}` directly; a direct build needs no sandbox."
             )));
         }
         let request = CandidateRequest {

@@ -5,6 +5,9 @@ use std::process::Command;
 use super::epic_measurement::CommandExt as _;
 
 #[cfg(test)]
+pub(super) static USE_SHARED_WALK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(test)]
 static USE_PARALLEL_PROOF_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 #[cfg(test)]
@@ -330,7 +333,109 @@ fn meaningful(line: &str) -> bool {
 struct OwnedLines {
     positions: Vec<usize>,
     commits: Vec<String>,
-    baseline: Vec<String>,
+    baseline: std::sync::Arc<Baseline>,
+}
+
+/// The meaningful lines a delivery hunk replaced. Every line owner of that
+/// hunk shares one copy and its lookup set (cas-0e29e: a per-owner copy was
+/// O(owners x baseline) per walked edge).
+#[derive(Default)]
+struct Baseline {
+    lines: Vec<String>,
+    set: std::collections::HashSet<String>,
+}
+
+impl Baseline {
+    fn new(lines: Vec<String>) -> Self {
+        Self { set: lines.iter().cloned().collect(), lines }
+    }
+}
+
+/// cas-0e29e: every owner of an edge asks which added lines of its changed
+/// hunk retain its owned line. Re-tokenizing each (owned, added) pair made a
+/// hunk cost O(owned x added) tokenizations per owner. Each hunk touched by
+/// an owner is tokenized once per edge instead, and only added lines holding
+/// every token of the owned line (its rarest token's postings) are checked.
+struct EdgeIndex<'a> {
+    changes: &'a [Hunk],
+    resolution_parent_lines: Option<&'a std::collections::HashSet<String>>,
+    hunks: Vec<std::cell::OnceCell<HunkIndex<'a>>>,
+}
+
+struct HunkIndex<'a> {
+    removed: Vec<Vec<&'a str>>,
+    added: Vec<Vec<&'a str>>,
+    /// Ascending added-line indices containing each token.
+    by_token: std::collections::HashMap<&'a str, Vec<usize>>,
+    /// Ascending added-line indices of each exact line.
+    by_line: std::collections::HashMap<&'a str, Vec<usize>>,
+    /// Earlier removed lines equal to each removed line.
+    occurrence: Vec<usize>,
+    meaningful_added: Vec<&'a String>,
+    /// Some added line is meaningful and absent from the resolution parents.
+    novel_resolution_line: bool,
+    /// Added lines retaining each removed line, without and with merge-union
+    /// context. Every owner of a removed line, in every walked owner group,
+    /// gets the same answer on one edge, so it is computed once (cas-0e29e).
+    retained: [Vec<std::cell::OnceCell<Vec<usize>>>; 2],
+}
+
+impl<'a> EdgeIndex<'a> {
+    fn new(changes: &'a [Hunk], resolution_parent_lines: Option<&'a std::collections::HashSet<String>>) -> Self {
+        let hunks = changes.iter().map(|_| std::cell::OnceCell::new()).collect();
+        Self { changes, resolution_parent_lines, hunks }
+    }
+
+    fn hunk(&self, index: usize) -> &HunkIndex<'a> {
+        self.hunks[index].get_or_init(|| {
+            let hunk = &self.changes[index];
+            let added: Vec<_> = hunk.added.iter().map(|line| tokens(line)).collect();
+            let mut by_token: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+            for (position, line) in added.iter().enumerate() {
+                for token in line {
+                    let postings = by_token.entry(*token).or_default();
+                    if postings.last() != Some(&position) {
+                        postings.push(position);
+                    }
+                }
+            }
+            let mut by_line: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+            for (position, line) in hunk.added.iter().enumerate() {
+                by_line.entry(line.as_str()).or_default().push(position);
+            }
+            let mut seen: std::collections::HashMap<&str, usize> = Default::default();
+            let occurrence = hunk.removed.iter().map(|line| {
+                let count = seen.entry(line.as_str()).or_default();
+                *count += 1;
+                *count - 1
+            }).collect();
+            let meaningful_added: Vec<_> = hunk.added.iter().filter(|line| meaningful(line)).collect();
+            let novel_resolution_line = self.resolution_parent_lines.is_some_and(|parents| {
+                meaningful_added.iter().any(|line| !parents.contains(*line))
+            });
+            let retained = [0, 1].map(|_| hunk.removed.iter().map(|_| std::cell::OnceCell::new()).collect());
+            HunkIndex {
+                removed: hunk.removed.iter().map(|line| tokens(line)).collect(),
+                added, by_token, by_line, occurrence, meaningful_added, novel_resolution_line, retained,
+            }
+        })
+    }
+}
+
+impl HunkIndex<'_> {
+    /// Ascending added lines that may retain removed line `old`: each holds
+    /// every token of it, or equals it when it has none.
+    fn token_candidates(&self, old: usize, line: &str) -> &[usize] {
+        let wanted = &self.removed[old];
+        if wanted.is_empty() {
+            return self.by_line.get(line).map_or(&[], Vec::as_slice);
+        }
+        wanted
+            .iter()
+            .map(|token| self.by_token.get(token).map_or(&[][..], Vec::as_slice))
+            .min_by_key(|postings| postings.len())
+            .unwrap_or(&[])
+    }
 }
 
 pub(super) fn is_revert_message(message: &str) -> bool {
@@ -342,7 +447,14 @@ pub(super) fn is_revert_message(message: &str) -> bool {
             .any(|line| line.trim_start().starts_with("this reverts commit "))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TOKENIZED_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn tokens(line: &str) -> Vec<&str> {
+    #[cfg(test)]
+    TOKENIZED_LINES.with(|count| count.set(count.get() + 1));
     line.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|token| !token.is_empty())
         .collect()
@@ -574,16 +686,14 @@ fn parallel_edit_proofs(
     path: &str,
     context: &MergeUnionContext<'_>,
     changes: &[Hunk],
-    previous: &[Option<OwnedLines>],
+    mut positions: Vec<usize>,
 ) -> Result<ParallelEdits, String> {
-    #[cfg(test)]
-    if !USE_PARALLEL_PROOF_CACHE.load(std::sync::atomic::Ordering::Relaxed) {
-        return parallel_edit_proofs_uncached(repo, base, other, path, context, changes, previous);
-    }
-    let mut positions: Vec<_> = previous.iter().flatten()
-        .flat_map(|owner| owner.positions.iter().copied()).collect();
     positions.sort_unstable();
     positions.dedup();
+    #[cfg(test)]
+    if !USE_PARALLEL_PROOF_CACHE.load(std::sync::atomic::Ordering::Relaxed) {
+        return parallel_edit_proofs_uncached(repo, base, other, path, context, changes, &positions);
+    }
     let key = (repo.to_path_buf(), merge.to_string(), prior.to_string(), base.to_string(),
         other.to_string(), path.to_string(), positions);
     let cache = PARALLEL_PROOFS.get_or_init(Default::default);
@@ -591,7 +701,7 @@ fn parallel_edit_proofs(
         return Ok(proofs);
     }
     // Errors (including exhausted measurement budgets) must remain retryable.
-    let proofs = parallel_edit_proofs_uncached(repo, base, other, path, context, changes, previous)?;
+    let proofs = parallel_edit_proofs_uncached(repo, base, other, path, context, changes, &key.6)?;
     // Account for retained strings, positions and map buckets conservatively;
     // an oversized proof is returned without retaining it. Also bound entries.
     let bytes = std::mem::size_of::<ParallelProofKey>() + key.0.as_os_str().len()
@@ -622,15 +732,12 @@ fn parallel_edit_proofs_uncached(
     path: &str,
     context: &MergeUnionContext<'_>,
     changes: &[Hunk],
-    previous: &[Option<OwnedLines>],
+    positions: &[usize],
 ) -> Result<ParallelEdits, String> {
     let mut proofs = ParallelEdits::new();
-    let positions: std::collections::HashSet<_> = previous
-        .iter()
-        .flatten()
-        .flat_map(|owner| owner.positions.iter().copied())
-        .collect();
-    for position in positions {
+    // Each position's proof is independent of the others, so one call over
+    // several owner groups' positions answers each group's own positions.
+    for &position in positions {
         let Some(change) = changes.iter().find(|hunk| {
             hunk.old_count > 0
                 && (hunk.old_start..hunk.old_start + hunk.old_count).contains(&position)
@@ -818,7 +925,7 @@ impl MergeUnionContext<'_> {
 // Only ordinary edits may retain a generic line's symbols in a changed hunk.
 // Merge text requires exact equality; separately proven list unions use
 // MergeUnionContext, never this token-subsequence heuristic.
-fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
+fn retains_line(old: &str, new: &str, ordinary: bool, old_tokens: &[&str], new_tokens: &[&str]) -> bool {
     if old == new {
         return true;
     }
@@ -832,16 +939,14 @@ fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
     {
         return false;
     }
-    let old = tokens(old);
-    let new = tokens(new);
-    if old.is_empty() {
+    if old_tokens.is_empty() {
         return false;
     }
     let mut cursor = 0;
-    old.into_iter().all(|token| {
-        let Some(offset) = new[cursor..]
+    old_tokens.iter().all(|token| {
+        let Some(offset) = new_tokens[cursor..]
             .iter()
-            .position(|candidate| *candidate == token)
+            .position(|candidate| *candidate == *token)
         else {
             return false;
         };
@@ -852,16 +957,17 @@ fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
 
 fn advance(
     owner: &OwnedLines,
-    changes: &[Hunk],
+    edge: &EdgeIndex<'_>,
     ordinary: bool,
     merge_union: Option<&MergeUnionContext<'_>>,
     parallel_edits: &ParallelEdits,
-    resolution_parent_lines: Option<&std::collections::HashSet<String>>,
     retire_draft: bool,
     internal_resolution: bool,
     reverted: bool,
     commit: &str,
 ) -> Option<OwnedLines> {
+    let changes = edge.changes;
+    let resolution_parent_lines = edge.resolution_parent_lines;
     if reverted && owner.positions.is_empty() && !changes.is_empty() {
         return None;
     }
@@ -872,7 +978,7 @@ fn advance(
         && changes
             .iter()
             .flat_map(|hunk| &hunk.added)
-            .any(|line| meaningful(line) && owner.baseline.contains(line))
+            .any(|line| meaningful(line) && owner.baseline.set.contains(line))
     {
         return None;
     }
@@ -884,57 +990,65 @@ fn advance(
     // An owned QA merge may evolve into its own novel line. Imported parent
     // text still requires exact equality; task ownership cannot make a stale
     // expanded parent line carry a restricted delivery's ownership.
-    let retains_owned_line = |old: &str, new: &str| {
+    let retains_owned_line = |old: &str, new: &str, old_tokens: &[&str], new_tokens: &[&str]| {
         let novel_internal = internal_resolution
             && resolution_parent_lines.is_some_and(|parents| !parents.contains(new));
-        retains_line(old, new, ordinary || novel_internal)
+        retains_line(old, new, ordinary || novel_internal, old_tokens, new_tokens)
     };
     for line in &owner.positions {
         let mut offset = 0isize;
         let mut changed = false;
-        for hunk in changes {
+        for (hunk_index, hunk) in changes.iter().enumerate() {
             if hunk.old_count > 0
                 && (hunk.old_start..hunk.old_start + hunk.old_count).contains(line)
             {
                 if reverted {
                     return None;
                 }
-                let added: Vec<_> = hunk
-                    .added
-                    .iter()
-                    .filter(|line| meaningful(line))
-                    .cloned()
-                    .collect();
-                if !owner.baseline.is_empty()
-                    && (added == owner.baseline
+                let index = edge.hunk(hunk_index);
+                if !owner.baseline.lines.is_empty()
+                    && (index.meaningful_added.iter().copied().eq(owner.baseline.lines.iter())
                         || internal_resolution
-                            && added.iter().any(|line| owner.baseline.contains(line)))
+                            && index.meaningful_added.iter().any(|line| owner.baseline.set.contains(*line)))
                 {
                     // Unlabeled inverse patches also restore pre-delivery content.
                     return None;
                 }
                 let removed_index = *line - hunk.old_start;
                 let old = hunk.removed.get(removed_index)?;
-                let occurrence = hunk.removed[..removed_index]
-                    .iter()
-                    .filter(|previous| *previous == old)
-                    .count();
-                let retained: Vec<_> = hunk
-                    .added
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, new)| {
-                        retains_owned_line(old, new)
-                            || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
-                            || parallel_edits
-                                .get(line)
-                                .is_some_and(|edits| edits.contains_key(new.as_str()))
-                    })
-                    .collect();
-                if let Some((index, new)) = retained.get(occurrence) {
-                    next.positions.push(hunk.new_start + *index);
+                let old_tokens = &index.removed[removed_index];
+                let occurrence = index.occurrence[removed_index];
+                // The answer depends only on this removed line, the edge and
+                // whether the owner's group uses merge-union context.
+                let retained = index.retained[usize::from(merge_union.is_some())][removed_index].get_or_init(|| {
+                    // Only these added lines can satisfy any retention rule:
+                    // token retention needs every owned token, a parallel edit
+                    // names its exact line, and a list union needs a list.
+                    let mut candidates = index.token_candidates(removed_index, old).to_vec();
+                    if let Some(edits) = parallel_edits.get(line) {
+                        candidates.extend(edits.keys().flat_map(|new| index.by_line.get(new.as_str())).flatten());
+                    }
+                    if merge_union.is_some() && identifier_list(old).is_some() {
+                        candidates = (0..hunk.added.len()).collect();
+                    }
+                    candidates.sort_unstable();
+                    candidates.dedup();
+                    candidates
+                        .into_iter()
+                        .filter(|position| {
+                            let new = &hunk.added[*position];
+                            retains_owned_line(old, new, old_tokens, &index.added[*position])
+                                || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
+                                || parallel_edits
+                                    .get(line)
+                                    .is_some_and(|edits| edits.contains_key(new.as_str()))
+                        })
+                        .collect()
+                });
+                if let Some((index, new)) = retained.get(occurrence).map(|position| (*position, &hunk.added[*position])) {
+                    next.positions.push(hunk.new_start + index);
                     if (ordinary || internal_resolution)
-                        && old != *new
+                        && old != new
                         && !next.commits.iter().any(|known| known == commit)
                     {
                         next.commits.push(commit.to_string());
@@ -951,24 +1065,14 @@ fn advance(
                     // parent. Its resolution cannot invent ownership.
                     // Duplicate removal is loss, not a novel replacement.
                     let novel_resolution = resolution_parent_lines.is_some_and(|parents| {
-                        hunk.added
-                            .iter()
-                            .any(|line| meaningful(line) && !parents.contains(line))
-                            && !hunk
-                                .added
-                                .iter()
-                                .any(|line| parents.contains(line) && retains_line(old, line, true))
+                        index.novel_resolution_line
+                            && !index.token_candidates(removed_index, old).iter().any(|position| {
+                                let new = &hunk.added[*position];
+                                parents.contains(new)
+                                    && retains_line(old, new, true, old_tokens, &index.added[*position])
+                            })
                     });
-                    if (!ordinary && !novel_resolution)
-                        || hunk.added.iter().any(|new| {
-                            retains_owned_line(old, new)
-                                || merge_union
-                                    .is_some_and(|union| union.retains_list(*line, old, new))
-                                || parallel_edits
-                                    .get(line)
-                                    .is_some_and(|edits| edits.contains_key(new.as_str()))
-                        })
-                    {
+                    if (!ordinary && !novel_resolution) || !retained.is_empty() {
                         return None;
                     }
                     let replacement: Vec<_> = hunk
@@ -1137,8 +1241,39 @@ static WALKS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<WalkKey, Option<super::DeliveryContentPresence>>>,
 > = std::sync::OnceLock::new();
 
-/// Bound on memoized walks; the cache is cleared when it fills.
+/// Bound on memoized edge data; each cache is cleared when it fills.
 const WALK_CACHE_LIMIT: usize = 4096;
+
+/// Bound on memoized walk answers. An answer is a few path and commit ids,
+/// and a release prewalk stores one per member commit and path (cas-0e29e).
+const WALK_ANSWER_LIMIT: usize = 1 << 16;
+
+fn commit_of(repo: &Path, reference: &str) -> Option<String> {
+    super::delivery_git::commit(repo, reference)
+}
+
+/// Forget every memoized walk answer and parallel-edit proof, so a test
+/// can walk again from scratch.
+#[cfg(test)]
+pub(super) fn forget_walks() {
+    if let Some(walks) = WALKS.get() {
+        walks.lock().unwrap().clear();
+    }
+    if let Some(proofs) = PARALLEL_PROOFS.get() {
+        let mut proofs = proofs.lock().unwrap();
+        proofs.entries.clear();
+        proofs.bytes = 0;
+    }
+}
+
+fn remember_walk(key: WalkKey, answer: Option<super::DeliveryContentPresence>) {
+    if let Ok(mut cache) = WALKS.get_or_init(Default::default).lock() {
+        if cache.len() >= WALK_ANSWER_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, answer);
+    }
+}
 
 fn line_content_presence_impl(
     repo: &Path,
@@ -1152,9 +1287,7 @@ fn line_content_presence_impl(
     allow_partial: bool,
     retirements: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    let commit =
-        |reference: &str| super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"));
-    let key = match (commit(parent), commit(delivery), commit(target)) {
+    let key = match (commit_of(repo, parent), commit_of(repo, delivery), commit_of(repo, target)) {
         (Some(parent), Some(delivery), Some(target)) => Some((
             repo.to_path_buf(),
             parent,
@@ -1188,15 +1321,120 @@ fn line_content_presence_impl(
         allow_partial,
         retirements,
     )?;
-    if let Some(key) = key
-        && let Ok(mut cache) = walks.lock()
-    {
-        if cache.len() >= WALK_CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.insert(key, answer.clone());
+    if let Some(key) = key {
+        remember_walk(key, answer.clone());
     }
     Ok(answer)
+}
+
+/// The ancestry walk of one release member's delivered path, keyed exactly as
+/// `line_content_presence` memoizes it.
+pub(super) struct LineRequest {
+    pub(super) parent: String,
+    pub(super) delivery: String,
+    pub(super) path: String,
+}
+
+/// cas-0e29e: a release judges its members one at a time, and each member's
+/// task commits walked every delivered path through the same train history:
+/// O(members x commits x paths x edges) edge reads and Git spawns (the v4.29
+/// cut preview took 1339 s). Release callers know every member before judging
+/// any, so they enumerate each member's `line_content_presence` requests here
+/// first. Each path is then walked once to `target`, carrying every member's
+/// owners (`walk_owner_groups`), and every answer is memoized under the key
+/// its member's own call reads. Errors stay unmemoized, as for a single walk.
+pub(super) fn prewalk_line_content_presence(repo: &Path, target: &str, requests: &[LineRequest]) {
+    #[cfg(test)]
+    if !USE_SHARED_WALK.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(target) = commit_of(repo, target) else {
+        return;
+    };
+    let mut by_path: std::collections::BTreeMap<&str, Vec<(String, String)>> = Default::default();
+    let walks = WALKS.get_or_init(Default::default);
+    for request in requests {
+        let (Some(parent), Some(delivery)) =
+            (commit_of(repo, &request.parent), commit_of(repo, &request.delivery))
+        else {
+            continue;
+        };
+        let key = default_walk_key(repo, &parent, &delivery, &target, &request.path);
+        let starts = by_path.entry(request.path.as_str()).or_default();
+        if walks.lock().is_ok_and(|cache| !cache.contains_key(&key))
+            && !starts.iter().any(|known| known.0 == parent && known.1 == delivery)
+        {
+            starts.push((parent, delivery));
+        }
+    }
+    let paths: Vec<_> = by_path.into_iter().filter(|(_, starts)| !starts.is_empty()).collect();
+    let answers = super::measure_in_parallel(&paths, |(path, starts)| {
+        shared_line_content_presence(repo, &target, path, starts)
+    });
+    for ((path, starts), answers) in paths.iter().zip(answers) {
+        let answers = match answers {
+            Ok(answers) => answers,
+            Err(reason) => {
+                // Not silent: each member's own call repeats this path's walk.
+                tracing::warn!(path = *path, %reason, "cas-0e29e: shared release ownership walk failed");
+                continue;
+            }
+        };
+        for ((parent, delivery), answer) in starts.iter().zip(answers) {
+            if let Some(answer) = answer {
+                remember_walk(default_walk_key(repo, parent, delivery, &target, path), answer);
+            }
+        }
+    }
+}
+
+fn default_walk_key(repo: &Path, parent: &str, delivery: &str, target: &str, path: &str) -> WalkKey {
+    (
+        repo.to_path_buf(),
+        parent.to_string(),
+        delivery.to_string(),
+        target.to_string(),
+        path.to_string(),
+        Vec::new(),
+        false,
+        Vec::new(),
+        false,
+        Vec::new(),
+    )
+}
+
+/// `line_content_presence` for every `(parent, delivery)` start on one path,
+/// from a single walk. A start whose own setup fails stays unanswered (`None`)
+/// so its member's call reports that error itself.
+fn shared_line_content_presence(
+    repo: &Path,
+    target: &str,
+    path: &str,
+    starts: &[(String, String)],
+) -> Result<Vec<Option<Option<super::DeliveryContentPresence>>>, String> {
+    let mut answers = vec![None; starts.len()];
+    let mut groups = Vec::new();
+    let mut walked = Vec::new();
+    for (index, (parent, delivery)) in starts.iter().enumerate() {
+        match walk_start(repo, parent, delivery, target, path, false, &[]) {
+            Ok(WalkStart::Answer(answer)) => answers[index] = Some(answer),
+            Ok(WalkStart::Owners { delivery, owners, .. }) => {
+                walked.push((index, delivery.clone()));
+                groups.push((delivery, owners));
+            }
+            Err(_) => {}
+        }
+    }
+    if groups.is_empty() {
+        return Ok(answers);
+    }
+    let states = walk_owner_groups(repo, groups, target, path, &[], &[], &[])?;
+    for ((index, delivery), states) in walked.into_iter().zip(states) {
+        if let Ok(answer) = walk_finish(repo, &delivery, target, path, states, &[], &[], false, &[]) {
+            answers[index] = Some(answer);
+        }
+    }
+    Ok(answers)
 }
 
 /// cas-bdd2: a merge's bases, and a base's edits on a path, are the same for
@@ -1502,6 +1740,33 @@ fn line_content_presence_uncached(
     allow_partial: bool,
     retirements: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
+    match walk_start(repo, parent, delivery, target, path, novel_only, cycle)? {
+        WalkStart::Answer(answer) => Ok(answer),
+        WalkStart::Owners { delivery, target, owners } => {
+            let states = walk_owners(repo, &delivery, &target, path, owners, resolutions, cycle, retirements)?;
+            walk_finish(repo, &delivery, &target, path, states, resolutions, cycle, allow_partial, retirements)
+        }
+    }
+}
+
+enum WalkStart {
+    /// Decided without walking the history.
+    Answer(Option<super::DeliveryContentPresence>),
+    /// The delivered line owners at the resolved delivery commit.
+    Owners { delivery: String, target: String, owners: Vec<Option<OwnedLines>> },
+}
+
+/// Everything before the ownership walk: the delivered owners, or an answer
+/// that needs no walk.
+fn walk_start(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+    novel_only: bool,
+    cycle: &[String],
+) -> Result<WalkStart, String> {
     let delivery_commit = super::resolve_branch_sha(repo, &format!("{delivery}^{{commit}}"))
         .ok_or("delivery line anchor does not resolve to a commit")?;
     let target_commit = super::resolve_branch_sha(repo, &format!("{target}^{{commit}}"))
@@ -1513,11 +1778,11 @@ fn line_content_presence_uncached(
     if !novel_only
         && let Some(presence) = reference_history_additions_presence(repo, parent, delivery, target, path)?
     {
-        return Ok(Some(presence));
+        return Ok(WalkStart::Answer(Some(presence)));
     }
     let initial = match hunks(repo, parent, delivery, path) {
         Ok(hunks) => hunks,
-        Err(reason) if reason.starts_with("binary delivery") => return Ok(None),
+        Err(reason) if reason.starts_with("binary delivery") => return Ok(WalkStart::Answer(None)),
         Err(reason) => return Err(reason),
     };
     // Imported side content is not authored by this merge resolution. Its
@@ -1546,6 +1811,9 @@ fn line_content_presence_uncached(
     let mut owners: Vec<_> = initial
         .iter()
         .flat_map(|hunk| {
+            let baseline = std::sync::Arc::new(Baseline::new(
+                hunk.removed.iter().filter(|line| meaningful(line)).cloned().collect(),
+            ));
             hunk.added
                 .iter()
                 .enumerate()
@@ -1554,12 +1822,7 @@ fn line_content_presence_uncached(
                     Some(OwnedLines {
                         positions: vec![hunk.new_start + index],
                         commits: Vec::new(),
-                        baseline: hunk
-                            .removed
-                            .iter()
-                            .filter(|line| meaningful(line))
-                            .cloned()
-                            .collect(),
+                        baseline: baseline.clone(),
                     })
                 })
         })
@@ -1592,7 +1855,7 @@ fn line_content_presence_uncached(
                 if let Some(line) = record.strip_prefix('\t') {
                     if meaningful(line) {
                         if !author.is_some_and(|sha| cycle.iter().any(|owned| owned == sha)) {
-                            return Ok(None);
+                            return Ok(WalkStart::Answer(None));
                         }
                         task_draft = true;
                     }
@@ -1613,16 +1876,33 @@ fn line_content_presence_uncached(
             owners.push(Some(OwnedLines {
                 positions: Vec::new(),
                 commits: vec![delivery.to_string()],
-                baseline: Vec::new(),
+                baseline: Default::default(),
             }));
         }
     }
     if owners.is_empty() {
-        return Ok(None);
+        return Ok(WalkStart::Answer(None));
     }
     if !super::git_commit_is_ancestor(repo, delivery, target) {
         return Err("delivery line ancestry is not proven on the target".into());
     }
+    Ok(WalkStart::Owners { delivery: delivery.to_string(), target: target.to_string(), owners })
+}
+
+/// The answer from a walked delivery's owner states (`walk_owners`),
+/// following renames of the path.
+// gate-audit[allow_partial]: selector Selects measured line-presence matching; receipt authority remains with the caller's existing gate.
+fn walk_finish(
+    repo: &Path,
+    delivery: &str,
+    target: &str,
+    path: &str,
+    mut states: OwnerStates,
+    resolutions: &[String],
+    cycle: &[String],
+    allow_partial: bool,
+    retirements: &[String],
+) -> Result<Option<super::DeliveryContentPresence>, String> {
     let lost = |owners: &[Option<OwnedLines>]| {
         if allow_partial {
             !owners.iter().flatten().any(|owner| !owner.positions.is_empty())
@@ -1630,7 +1910,6 @@ fn line_content_presence_uncached(
             owners.iter().any(Option::is_none)
         }
     };
-    let mut states = walk_owners(repo, delivery, target, path, owners, resolutions, cycle, retirements)?;
     // cas-90d8: a later ordinary commit may rename the delivered file (for
     // example `release: vX` moving a dated release-notes draft). The
     // per-path walk reads that edge as a whole-file deletion, so carry the
@@ -1687,7 +1966,8 @@ type OwnerStates = std::collections::HashMap<String, Vec<Option<OwnedLines>>>;
 const RENAME_FOLLOW_LIMIT: usize = 8;
 
 /// Carry `owners` (positions in `path` at `start`) through every commit on
-/// the ancestry path `start..target`, returning each walked commit's state.
+/// the ancestry path `start..target`. Returns the state at `target` and at
+/// each commit `follow_rename` may read.
 fn walk_owners(
     repo: &Path,
     start: &str,
@@ -1698,24 +1978,71 @@ fn walk_owners(
     cycle: &[String],
     retirements: &[String],
 ) -> Result<OwnerStates, String> {
-    let width = owners.len();
-    let history = text(
-        repo,
-        &[
-            "rev-list",
-            "--ancestry-path",
-            "--topo-order",
-            "--reverse",
-            "--parents",
-            &format!("{start}..{target}"),
-        ],
-    )?;
-    let mut states = std::collections::HashMap::new();
-    states.insert(start.to_string(), owners);
-    let mut walked = vec![start];
-    for record in history.lines() {
-        for commit in record.split_whitespace() {
-            if !walked.contains(&commit) {
+    let groups = vec![(start.to_string(), owners)];
+    Ok(walk_owner_groups(repo, groups, target, path, resolutions, cycle, retirements)?
+        .pop()
+        .unwrap_or_default())
+}
+
+#[cfg(test)]
+pub(super) static EDGE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One owner group's state on a commit, per walked group; `None` where the
+/// commit is not on that group's `start..target` ancestry path.
+type GroupStates = Vec<Option<Vec<Option<OwnedLines>>>>;
+
+/// cas-0e29e: carry several owner groups, each from its own start, through
+/// one pass over the union of their `start..target` ancestry paths. Each
+/// changing edge's patch, revert label, merge context, parallel-edit proof
+/// and hunk index is read once for all groups. A group's state on a commit
+/// still comes only from its own states on that commit's parents, exactly as
+/// in a walk of that group alone: a commit descends from a group's start iff
+/// one of its parents holds that group's state. Merge-context use and the
+/// parallel-edit owner positions stay per group. Each group's result keeps
+/// its state at `target` and at the first parent of every ordinary commit
+/// lacking the path (the deletion parents `follow_rename` reads); other
+/// states are released once every child has read them.
+fn walk_owner_groups(
+    repo: &Path,
+    groups: Vec<(String, Vec<Option<OwnedLines>>)>,
+    target: &str,
+    path: &str,
+    resolutions: &[String],
+    cycle: &[String],
+    retirements: &[String],
+) -> Result<Vec<OwnerStates>, String> {
+    let count = groups.len();
+    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut listed = std::collections::HashSet::new();
+    let mut starts = Vec::new();
+    for (start, _) in &groups {
+        if starts.contains(start) {
+            continue;
+        }
+        starts.push(start.clone());
+        let history = text(
+            repo,
+            &[
+                "rev-list",
+                "--ancestry-path",
+                "--topo-order",
+                "--reverse",
+                "--parents",
+                &format!("{start}..{target}"),
+            ],
+        )?;
+        for record in history.lines() {
+            let fields: Vec<String> = record.split_whitespace().map(str::to_string).collect();
+            if !fields.is_empty() && listed.insert(fields[0].clone()) {
+                records.push(fields);
+            }
+        }
+    }
+    let records = parents_first(records);
+    let mut walked: Vec<&str> = starts.iter().map(String::as_str).collect();
+    for record in &records {
+        for commit in record {
+            if !walked.contains(&commit.as_str()) {
                 walked.push(commit);
             }
         }
@@ -1728,22 +2055,41 @@ fn walk_owners(
     };
     let mut changing_edges = Vec::new();
     let mut changing_commits = Vec::new();
-    for record in history.lines() {
-        let fields: Vec<_> = record.split_whitespace().collect();
+    for fields in &records {
         for prior in fields.iter().skip(1) {
-            if !unchanged(prior, fields[0]) {
-                changing_edges.push((*prior, fields[0]));
-                if !changing_commits.contains(&fields[0]) {
-                    changing_commits.push(fields[0]);
+            if !unchanged(prior, &fields[0]) {
+                changing_edges.push((prior.as_str(), fields[0].as_str()));
+                if !changing_commits.contains(&fields[0].as_str()) {
+                    changing_commits.push(fields[0].as_str());
                 }
             }
         }
     }
     let patches = edge_patches(repo, &changing_edges, path);
     let messages = commit_messages(repo, &changing_commits);
-    for record in history.lines() {
-        let fields: Vec<_> = record.split_whitespace().collect();
-        let commit = fields[0];
+    // Without blob ids no commit is known to lack the path: keep every state.
+    let mut kept: Option<std::collections::HashSet<&str>> = blobs.as_ref().map(|blobs| {
+        records
+            .iter()
+            .filter(|fields| fields.len() == 2 && blobs.get(&fields[0]).is_some_and(Option::is_none))
+            .map(|fields| fields[1].as_str())
+            .collect()
+    });
+    if let Some(kept) = kept.as_mut() {
+        kept.insert(target);
+    }
+    let mut readers: std::collections::HashMap<&str, usize> = Default::default();
+    for fields in &records {
+        for prior in fields.iter().skip(1) {
+            *readers.entry(prior.as_str()).or_default() += 1;
+        }
+    }
+    let mut states: std::collections::HashMap<String, GroupStates> = Default::default();
+    for (index, (start, owners)) in groups.into_iter().enumerate() {
+        states.entry(start).or_insert_with(|| vec![None; count])[index] = Some(owners);
+    }
+    for fields in &records {
+        let commit = fields[0].as_str();
         let ordinary = fields.len() == 2;
         // A revert label only matters for an edge that changes the path.
         let reverted = !fields.iter().skip(1).all(|prior| unchanged(prior, commit))
@@ -1754,6 +2100,7 @@ fn walk_owners(
         let mut union_changes = None;
         let mut union_base = None;
         let mut union_checked = false;
+        let mut union_used = vec![false; count];
         let resolution_parent_lines = if resolutions.iter().any(|resolution| resolution == commit) {
             let mut lines = std::collections::HashSet::new();
             for prior in fields.iter().skip(1) {
@@ -1772,20 +2119,35 @@ fn walk_owners(
         } else {
             None
         };
-        let mut merged: Vec<Option<OwnedLines>> = vec![None; width];
+        // A start inside another group's range keeps its own delivered state;
+        // none of its parents can hold that group's state.
+        let mut merged = states.remove(commit).unwrap_or_else(|| vec![None; count]);
+        let seeded: Vec<bool> = merged.iter().map(Option::is_some).collect();
         for prior in fields.iter().skip(1) {
-            let Some(previous) = states.get(*prior) else {
+            let Some(previous) = states.get(prior.as_str()) else {
                 continue;
             };
+            let live: Vec<usize> = (0..count)
+                .filter(|group| !seeded[*group] && previous[*group].is_some())
+                .collect();
+            if live.is_empty() {
+                continue;
+            }
             if unchanged(prior, commit) {
                 // No hunks on this edge: ownership passes through unchanged.
-                for (index, owner) in previous.iter().enumerate() {
-                    if merged[index].is_none() {
-                        merged[index] = owner.clone();
+                for &group in &live {
+                    let previous = previous[group].as_ref().expect("live group state");
+                    let merged = merged[group].get_or_insert_with(|| vec![None; previous.len()]);
+                    for (index, owner) in previous.iter().enumerate() {
+                        if merged[index].is_none() {
+                            merged[index] = owner.clone();
+                        }
                     }
                 }
                 continue;
             }
+            #[cfg(test)]
+            EDGE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let batched = patches
                 .as_ref()
                 .and_then(|patches| patches.get(&(prior.to_string(), commit.to_string())));
@@ -1797,22 +2159,27 @@ fn walk_owners(
             };
             // Most merge edges leave owned content unchanged. Only measure
             // both parents' base edits when a changed live hunk could need
-            // list union or an independently authored parallel edit.
-            if !union_checked
-                && fields.len() == 3
-                && previous.iter().any(Option::is_some)
+            // list union or an independently authored parallel edit. A
+            // group uses them from the first edge where its own owners do.
+            let union_edge = fields.len() == 3
                 && changes.iter().any(|hunk| {
                     !hunk.removed.is_empty() && hunk.added.iter().any(|line| meaningful(line))
-                })
-            {
+                });
+            for &group in &live {
+                let previous = previous[group].as_ref().expect("live group state");
+                if union_edge && previous.iter().any(Option::is_some) {
+                    union_used[group] = true;
+                }
+            }
+            if !union_checked && live.iter().any(|group| union_used[*group]) {
                 union_checked = true;
-                let bases = cached_merge_bases(repo, fields[1], fields[2])?;
+                let bases = cached_merge_bases(repo, &fields[1], &fields[2])?;
                 let bases: Vec<_> = bases.lines().collect();
                 if let [base] = bases.as_slice() {
                     union_base = Some(base.to_string());
                     union_changes = Some((
-                        cached_hunks(repo, base, fields[1], path)?,
-                        cached_hunks(repo, base, fields[2], path)?,
+                        cached_hunks(repo, base, &fields[1], path)?,
+                        cached_hunks(repo, base, &fields[2], path)?,
                     ));
                 }
             }
@@ -1829,61 +2196,128 @@ fn walk_owners(
                     }
                 }
             });
-            let parallel_edits = if let (Some(base), Some(context)) =
-                (union_base.as_deref(), merge_union.as_ref())
+            let union_groups: Vec<usize> =
+                live.iter().copied().filter(|group| union_used[*group]).collect();
+            let parallel_edits = if let (Some(base), Some(context), false) =
+                (union_base.as_deref(), merge_union.as_ref(), union_groups.is_empty())
             {
                 let other = if *prior == fields[1] {
-                    fields[2]
+                    &fields[2]
                 } else {
-                    fields[1]
+                    &fields[1]
                 };
-                parallel_edit_proofs(repo, commit, prior, base, other, path, context, &changes, previous)?
+                let positions = union_groups
+                    .iter()
+                    .flat_map(|group| previous[*group].iter().flatten().flatten())
+                    .flat_map(|owner| owner.positions.iter().copied())
+                    .collect();
+                parallel_edit_proofs(repo, commit, prior, base, other, path, context, &changes, positions)?
             } else {
                 ParallelEdits::new()
             };
-            let advanced: Vec<_> = previous
-                .iter()
-                .map(|owner| {
-                    owner.as_ref().and_then(|owner| {
-                        advance(
-                            owner,
-                            &changes,
-                            ordinary,
-                            merge_union.as_ref(),
-                            &parallel_edits,
-                            resolution_parent_lines.as_ref(),
-                            ordinary && cycle.iter().any(|owned| owned == commit),
-                            !ordinary
-                                && resolution_parent_lines.is_some()
-                                && cycle.iter().any(|owned| owned == commit),
-                            reverted,
-                            commit,
-                        ).or_else(|| {
-                            // Only the actual ordinary loss edge can retire a
-                            // live owner. A missing parent owner never reaches
-                            // this closure, so later task work cannot excuse
-                            // an earlier merge-resolution drop.
-                            (ordinary && retirements.iter().any(|sha| sha == commit)).then(|| {
-                                let mut retired = owner.clone();
-                                retired.positions.clear();
-                                if !retired.commits.iter().any(|sha| sha == commit) {
-                                    retired.commits.push(commit.to_string());
-                                }
-                                retired
+            let edge = EdgeIndex::new(&changes, resolution_parent_lines.as_ref());
+            let no_edits = ParallelEdits::new();
+            for &group in &live {
+                let previous = previous[group].as_ref().expect("live group state");
+                let merge_union = merge_union.as_ref().filter(|_| union_used[group]);
+                // As in a walk of this group alone, only a group using the
+                // merge context reads its parallel-edit proofs.
+                let parallel_edits = if union_used[group] { &parallel_edits } else { &no_edits };
+                let advanced: Vec<_> = previous
+                    .iter()
+                    .map(|owner| {
+                        owner.as_ref().and_then(|owner| {
+                            advance(
+                                owner,
+                                &edge,
+                                ordinary,
+                                merge_union,
+                                parallel_edits,
+                                ordinary && cycle.iter().any(|owned| owned == commit),
+                                !ordinary
+                                    && resolution_parent_lines.is_some()
+                                    && cycle.iter().any(|owned| owned == commit),
+                                reverted,
+                                commit,
+                            ).or_else(|| {
+                                // Only the actual ordinary loss edge can retire a
+                                // live owner. A missing parent owner never reaches
+                                // this closure, so later task work cannot excuse
+                                // an earlier merge-resolution drop.
+                                (ordinary && retirements.iter().any(|sha| sha == commit)).then(|| {
+                                    let mut retired = owner.clone();
+                                    retired.positions.clear();
+                                    if !retired.commits.iter().any(|sha| sha == commit) {
+                                        retired.commits.push(commit.to_string());
+                                    }
+                                    retired
+                                })
                             })
                         })
                     })
-                })
-                .collect();
-            for index in 0..previous.len() {
-                if merged[index].is_none() {
-                    merged[index] = advanced[index].clone();
+                    .collect();
+                let merged = merged[group].get_or_insert_with(|| vec![None; previous.len()]);
+                for (index, owner) in advanced.into_iter().enumerate() {
+                    if merged[index].is_none() {
+                        merged[index] = owner;
+                    }
                 }
             }
         }
         states.insert(commit.to_string(), merged);
+        if let Some(kept) = kept.as_ref() {
+            for prior in fields.iter().skip(1) {
+                let remaining = readers.get_mut(prior.as_str()).expect("counted parent");
+                *remaining -= 1;
+                if *remaining == 0 && !kept.contains(prior.as_str()) {
+                    states.remove(prior.as_str());
+                }
+            }
+        }
     }
-    Ok(states)
+    let mut results = vec![OwnerStates::new(); count];
+    for (commit, groups) in states {
+        for (index, state) in groups.into_iter().enumerate() {
+            if let Some(state) = state {
+                results[index].insert(commit.clone(), state);
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Order ancestry records so each commit follows every listed parent. One
+/// `rev-list --topo-order --reverse` listing already is, and keeps its order.
+fn parents_first(records: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    let position: std::collections::HashMap<&str, usize> = records
+        .iter()
+        .enumerate()
+        .map(|(index, fields)| (fields[0].as_str(), index))
+        .collect();
+    let mut waiting = vec![0usize; records.len()];
+    let mut children = vec![Vec::new(); records.len()];
+    for (index, fields) in records.iter().enumerate() {
+        for prior in fields.iter().skip(1) {
+            if let Some(&parent) = position.get(prior.as_str()) {
+                waiting[index] += 1;
+                children[parent].push(index);
+            }
+        }
+    }
+    let mut ready: std::collections::BTreeSet<usize> =
+        (0..records.len()).filter(|index| waiting[*index] == 0).collect();
+    let mut order = Vec::with_capacity(records.len());
+    while let Some(index) = ready.pop_first() {
+        order.push(index);
+        for &child in &children[index] {
+            waiting[child] -= 1;
+            if waiting[child] == 0 {
+                ready.insert(child);
+            }
+        }
+    }
+    let mut records: Vec<_> = records.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|index| records[index].take()).collect()
 }
 
 /// cas-90d8: find the first ordinary commit on the walked route that renames
@@ -1955,17 +2389,17 @@ fn follow_rename(
         let reverted = is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
         let retire_draft = cycle.iter().any(|owned| owned == commit);
         let no_parallel_edits = ParallelEdits::new();
+        let edge = EdgeIndex::new(&changes, None);
         let carried = previous
             .iter()
             .map(|owner| {
                 owner.as_ref().and_then(|owner| {
                     advance(
                         owner,
-                        &changes,
+                        &edge,
                         true,
                         None,
                         &no_parallel_edits,
-                        None,
                         retire_draft,
                         false,
                         reverted,

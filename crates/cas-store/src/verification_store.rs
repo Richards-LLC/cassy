@@ -2306,6 +2306,7 @@ fn correct_parked_delivery_proof_scope_inner(
     let store = SqliteVerificationStore::open(cas_dir)?;
     crate::shared_db::lock_connection(&store.conn)?
         .execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
+    let original = SqliteTaskStore::open(cas_dir)?.get(&corrected_task.id)?;
     let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
 
     let dispatch = get_latest_verification_dispatch_with_conn(&tx, &corrected_task.id)?
@@ -2377,7 +2378,39 @@ fn correct_parked_delivery_proof_scope_inner(
         ));
     }
 
-    if let Some(active) = dispatch.as_ref() {
+    // GH #2045: clearing methodology changes no reviewed code. Retain only
+    // the resolved approval for this unchanged delivery/scope; close still
+    // checks the live source and exact candidate landing independently.
+    let execution_note_only = allow_merged_delivery && !require_merged_delivery
+        && original.execution_note.is_some() && corrected_task.execution_note.is_none()
+        && original.assignee == corrected_task.assignee
+        && original.external_ref == corrected_task.external_ref
+        && original.risk == corrected_task.risk
+        && original.proof_targets == corrected_task.proof_targets
+        && original.deliverables.work_target == corrected_task.deliverables.work_target
+        && original.deliverables.factory_branch_start == corrected_task.deliverables.factory_branch_start
+        && original.deliverables.factory_branch_anchor == corrected_task.deliverables.factory_branch_anchor
+        && original.deliverables.historical_factory_branch_anchors == corrected_task.deliverables.historical_factory_branch_anchors
+        && original.deliverables.parked_branch == corrected_task.deliverables.parked_branch
+        && original.deliverables.commit_hash == corrected_task.deliverables.commit_hash
+        && original.deliverables.files_changed == corrected_task.deliverables.files_changed;
+    let preserve_approval = if execution_note_only
+        && let Some(active) = dispatch.as_ref()
+        && active.state == VerificationDispatchState::Resolved
+        // Synthetic candidates carry source identity in their manifest, not
+        // anchor_commits. Retain the binding; close validates that manifest
+        // and its source/landing before consuming this existing approval.
+        && active.repository.is_some()
+    {
+        tx.query_row(
+            "SELECT status, verification_type FROM verifications WHERE dispatch_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![active.id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?.is_some_and(|(status, kind)| status == "approved" && kind == "task")
+    } else { false };
+
+    if let Some(active) = dispatch.as_ref().filter(|_| !preserve_approval) {
         let invalidated = match active.state {
             VerificationDispatchState::Resolved | VerificationDispatchState::TimedOut => {
                 invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, &active.id)?.state
@@ -2406,7 +2439,7 @@ fn correct_parked_delivery_proof_scope_inner(
                 "proof-scope correction cannot rewrite a delivered transaction".to_string(),
             ));
         }
-        if *state != WorkerDeliveryState::Stale
+        if !preserve_approval && *state != WorkerDeliveryState::Stale
             && !(matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
                 && allow_merged_delivery)
         {

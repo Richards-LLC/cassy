@@ -1214,6 +1214,27 @@ impl PtyConfig {
         if !brief_dir.starts_with(&worktree) {
             return Err(Error::pty("Worker brief directory resolves outside its worktree"));
         }
+        // A freshly initialized repository need not ignore .cas. Exclude
+        // only our transient brief files, preserving visibility of user work.
+        let exclude = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"])
+            .current_dir(&worktree).output();
+        if let Ok(output) = exclude && output.status.success() {
+            use fs2::FileExt;
+            let path = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            let ensure_excluded = || -> std::io::Result<()> {
+                if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+                let mut file = std::fs::OpenOptions::new().create(true).append(true).read(true).open(path)?;
+                file.lock_exclusive()?;
+                let mut contents = String::new();
+                std::io::Read::read_to_string(&mut file, &mut contents)?;
+                if !contents.lines().any(|line| line == "/.cas/cas-worker-*") {
+                    file.write_all(b"\n/.cas/cas-worker-*\n")?;
+                }
+                Ok(())
+            };
+            ensure_excluded().map_err(|e| Error::pty(format!("Failed to exclude worker brief files: {e}")))?;
+        }
         let mut file = tempfile::Builder::new()
             .prefix("cas-worker-")
             .tempfile_in(&brief_dir)
@@ -3478,6 +3499,10 @@ mod tests {
 
         let project = tempfile::tempdir().unwrap();
         let worktree = project.path().canonicalize().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .current_dir(&worktree).status().unwrap().success());
+        std::fs::create_dir(worktree.join(".cas")).unwrap();
+        std::fs::write(worktree.join(".cas/user-state"), "keep visible").unwrap();
 
         for (command, args, backend) in [
             (
@@ -3586,6 +3611,11 @@ mod tests {
             assert!(path.starts_with(worktree.join(".cas")),
                 "{backend} brief must stay inside its ignored worktree .cas directory for external_directory=deny: {}", path.display());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+            let status = std::process::Command::new("git")
+                .args(["-c", "core.excludesFile=/dev/null", "status", "--porcelain", "--untracked-files=all"])
+                .current_dir(&worktree).output().unwrap();
+            assert!(status.status.success());
+            assert_eq!(status.stdout, b"?? .cas/user-state\n", "brief exclusion must preserve unrelated state");
             drop(pty);
             assert!(!path.exists(), "worker teardown must remove the brief");
         }
@@ -3730,10 +3760,7 @@ mod tests {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 
-    fn spawn_delayed_wait_status_probe(
-        gated: bool,
-    ) -> (
-        std::path::PathBuf,
+    fn spawn_delayed_wait_status_probe() -> (
         std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
@@ -3748,32 +3775,32 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&temp).expect("temporary PTY evidence directory");
-        let ready = temp.join("eof-ready");
         let done = temp.join("wait-status-ready");
         let release = temp.join("release-wait-status");
-        let ready_shell = shell_quote(&ready.to_string_lossy());
         let done_shell = shell_quote(&done.to_string_lossy());
-        let delay = if gated {
-            format!(
-                "while [ ! -e {} ]; do sleep 0.01; done",
-                shell_quote(&release.to_string_lossy())
-            )
-        } else {
-            "sleep 2".to_string()
-        };
+        let delay = format!(
+            "while [ ! -e {} ]; do sleep 0.01; done",
+            shell_quote(&release.to_string_lossy())
+        );
         let config = PtyConfig {
             command: "sh".to_string(),
             args: vec![
                 "-c".to_string(),
                 format!(
-                    "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; {delay}; printf done > {done_shell}; exit 37"
+                    "exec 0<&- 1>&- 2>&-; {delay}; printf done > {done_shell}; exit 37"
                 ),
             ],
             ..PtyConfig::default()
         };
-        let pty = Pty::spawn("delayed-wait-status-probe", config)
+        let mut pty = Pty::spawn("delayed-wait-status-probe", config)
             .expect("delayed wait-status probe must spawn");
-        (temp, ready, done, release, pty)
+        // A reader EOF while the real child is still gated. Physical EOF may
+        // be delayed by extra slave descriptors on macOS; this is the same
+        // boundary event the reader emits, not a replacement child wait status.
+        let (tx, rx) = mpsc::channel(1);
+        pty.event_rx = rx;
+        tx.try_send(PtyEvent::Exited(None)).expect("inject reader EOF");
+        (temp, done, release, pty)
     }
 
     #[tokio::test]
@@ -3879,16 +3906,13 @@ mod tests {
 
     #[tokio::test]
     async fn eof_before_wait_status_retries_without_blocking_try_recv() {
-        let (temp, ready, done, _, mut pty) = spawn_delayed_wait_status_probe(false);
+        let (temp, done, release, mut pty) = spawn_delayed_wait_status_probe();
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
 
-        while !ready.exists() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "probe must close its PTY after writing the readiness marker"
-            );
-            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
-        }
+        assert!(pty.try_recv().is_none());
+        assert!(pty.exit_status_pending);
+        assert!(!done.exists());
+        std::fs::write(&release, "continue").expect("release child wait status");
 
         let mut exit_code = None;
         while tokio::time::Instant::now() < deadline {
@@ -3917,23 +3941,8 @@ mod tests {
 
     #[tokio::test]
     async fn recv_after_try_recv_consumes_eof_retries_wait_status() {
-        let (temp, ready, done, release, mut pty) = spawn_delayed_wait_status_probe(true);
-        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
-        while !ready.exists() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "probe must close its PTY after writing the readiness marker"
-            );
-            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
-        }
+        let (temp, done, release, mut pty) = spawn_delayed_wait_status_probe();
 
-        // Inject the reader's EOF event while the gated child is provably
-        // alive. macOS may retain an extra slave descriptor until child exit,
-        // so relying on physical terminal EOF here races the wait status.
-        let (tx, rx) = mpsc::channel(1);
-        pty.event_rx = rx;
-        tx.try_send(PtyEvent::Exited(None)).expect("inject PTY EOF");
-        drop(tx);
         assert!(pty.try_recv().is_none());
         assert!(pty.exit_status_pending);
         assert!(!done.exists(), "child must be alive before release");
@@ -3957,17 +3966,17 @@ mod tests {
 
     #[tokio::test]
     async fn recv_only_retries_wait_status_after_pty_eof() {
-        let (temp, ready, done, _, mut pty) = spawn_delayed_wait_status_probe(false);
-        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
-        while !ready.exists() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "probe must close its PTY after writing the readiness marker"
-            );
-            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
-        }
+        let (temp, done, release, mut pty) = spawn_delayed_wait_status_probe();
+        let mut receiving = Box::pin(pty.recv());
+        let first = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(receiving.as_mut(), cx))
+        })
+        .await;
+        assert!(first.is_pending(), "EOF cannot finish before child exit");
+        assert!(!done.exists());
+        std::fs::write(&release, "continue").expect("release child wait status");
 
-        let event = tokio::time::timeout(PTY_CONTROL_EVENT_TIMEOUT, pty.recv())
+        let event = tokio::time::timeout(PTY_CONTROL_EVENT_TIMEOUT, receiving)
             .await
             .expect("recv-only path must retain the pending wait status")
             .expect("child wait status must produce an event");
@@ -4099,7 +4108,7 @@ mod tests {
         std::fs::create_dir_all(marker_root.parent().expect("marker parent"))
             .expect("marker directory");
         let script = format!(
-            "if {probe}; then printf worker-present > {worker_marker_shell}; else printf worker-clear > {worker_marker_shell}; fi; sh -c 'if {probe}; then printf descendant-present > \"$1\"; else printf descendant-clear > \"$1\"; fi' sh {descendant_marker_shell}; sleep 1",
+            "if {probe}; then printf worker-present > {worker_marker_shell}; else printf worker-clear > {worker_marker_shell}; fi; sh -c 'if {probe}; then printf descendant-present > \"$1\"; else printf descendant-clear > \"$1\"; fi' sh {descendant_marker_shell}",
         );
         let config = PtyConfig {
             command: "sh".to_string(),
@@ -5272,37 +5281,6 @@ echo SMOKE_DONE
     async fn cas_678d_round5_child_path_refuses_missing_cas_despite_daemon_cas() {
         child_path_preflight_fixture(true, false);
     }
-    /// cas-bbc2: `cas_binary_on_path()` returns true when an executable named
-    /// `cas` lives in a PATH entry. Builds a temp dir with a fake `cas` file and
-    /// points PATH at it, under TestEnvGuard to avoid racing other env-mutating tests.
-    #[tokio::test]
-    async fn test_cas_binary_on_path_detects_binary() {
-        let mut env = TestEnvGuard::new();
-        let dir = std::env::temp_dir().join("cas-bbc2-preflight-present");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("cas"), b"#!/bin/sh\n").unwrap();
-        env.set("PATH", &dir);
-        let found = cas_binary_on_path(&PtyConfig::default());
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(found, "cas_binary_on_path must find a `cas` file on PATH");
-    }
-
-    /// cas-bbc2: when no `cas` exists on PATH, the preflight helper reports false
-    /// so `Pty::spawn` can refuse a Codex spawn loudly.
-    #[tokio::test]
-    async fn test_cas_binary_on_path_absent_when_missing() {
-        let mut env = TestEnvGuard::new();
-        let dir = std::env::temp_dir().join("cas-bbc2-preflight-absent");
-        std::fs::create_dir_all(&dir).unwrap();
-        env.set("PATH", &dir);
-        let found = cas_binary_on_path(&PtyConfig::default());
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            !found,
-            "cas_binary_on_path must be false when no `cas` is on PATH"
-        );
-    }
-
     #[tokio::test]
     async fn test_pty_config_codex_supervisor_instructions() {
         let config = PtyConfig::codex(

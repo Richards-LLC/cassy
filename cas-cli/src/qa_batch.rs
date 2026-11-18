@@ -290,6 +290,7 @@ pub(crate) fn resolve_release_inventory(
             })
             .map(|t| t.id.clone()),
     );
+    let mut members = Vec::new();
     for id in candidates {
         let mut issue = |code| {
             inventory.exceptions.push(ReleaseInventoryException {
@@ -395,16 +396,11 @@ pub(crate) fn resolve_release_inventory(
                 issue(ReleaseInventoryCode::MissingMapping);
                 continue;
             };
-            if let Err(code) = release_delivery_effect(
-                repo, base.as_deref(), &anchor, &scope.final_release_sha, &id,
-            ) {
-                issue(code);
-                continue;
-            }
             let proofs = release_proof_refs(&receipts, &id, &anchor);
             (Some(anchor), Some(shipped), membership, proofs)
         };
-        inventory.deliveries.push(ReleaseDelivery {
+        let measured = membership != ReleaseMembership::ExplicitNoCode;
+        members.push((ReleaseDelivery {
             task_id: id,
             generation: delivery_generation(t),
             anchor,
@@ -412,7 +408,28 @@ pub(crate) fn resolve_release_inventory(
             shipped_commit,
             membership,
             proof_refs: proofs,
-        });
+        }, measured));
+    }
+    // cas-0e29e: every member's content walk crosses the same release
+    // history. Walk it once per delivered path for all members, then judge
+    // each member in order from those answers.
+    let measured: Vec<_> = members
+        .iter()
+        .filter(|(_, measured)| *measured)
+        .filter_map(|(delivery, _)| Some((delivery.base_sha.as_deref(), delivery.anchor.as_deref()?, delivery.task_id.as_str())))
+        .collect();
+    prewalk_release_effects(repo, &scope.final_release_sha, &measured);
+    for (delivery, measured) in members {
+        if measured
+            && let Some(anchor) = delivery.anchor.as_deref()
+            && let Err(code) = release_delivery_effect(
+                repo, delivery.base_sha.as_deref(), anchor, &scope.final_release_sha, &delivery.task_id,
+            )
+        {
+            inventory.exceptions.push(ReleaseInventoryException { task_id: delivery.task_id, code });
+            continue;
+        }
+        inventory.deliveries.push(delivery);
     }
     inventory
         .exceptions
@@ -1064,19 +1081,9 @@ pub(crate) fn release_delivery_effect(
     repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
 ) -> Result<(), ReleaseInventoryCode> {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{self, DeliveryContentPresence};
-    // A squash has the reviewed source tree but different commit identity.
-    // Continuity starts at its actual integration, then follows later edits.
-    let mapped = if ancestor(repo, anchor, target) == Some(true) { None } else {
-        Some(close_ops::find_squash_tree_match(repo, anchor, target)
-            .filter(|mapped| ancestor(repo, mapped, target) == Some(true))
-            .ok_or(ReleaseInventoryCode::UnprovenContent)?)
-    };
-    let shipped = mapped.as_deref().unwrap_or(anchor);
-    // A reused lane can record a newer start than the preserved delivery.
-    // Such a start cannot define this delivery's forward content range.
-    let base = base.filter(|base| ancestor(repo, base, anchor) == Some(true));
     // An explicitly empty delivery has no content that can be reverted.
-    if base == Some(anchor) { return Ok(()); }
+    let Some((base, shipped)) = release_effect_range(repo, base, anchor, target)? else { return Ok(()) };
+    let shipped = shipped.as_str();
     let presence = match base {
         Some(base) => close_ops::delivery_content_presence_from_base_on_target_for_task(repo, base, anchor, shipped, target, task_id),
         None => close_ops::delivery_content_presence_on_target_for_task(repo, shipped, target, task_id),
@@ -1085,11 +1092,55 @@ pub(crate) fn release_delivery_effect(
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => Ok(()),
         // GH #2026: on-target ancestry plus a measured range lets later edits
         // classify as evolution; only a real revert holds the member.
-        DeliveryContentPresence::Dropped { paths } if mapped.is_none() && base.is_some_and(|base|
-            !paths.iter().any(|path| close_ops::release_dropped_path_reverted(repo, base, anchor, target, path))) => Ok(()),
+        DeliveryContentPresence::Dropped { paths } if shipped == anchor && base.is_some_and(|base|
+            !paths.iter().any(|path| close_ops::release_dropped_path_reverted(repo, base, anchor, target, path))) => {
+                if paths.iter().all(|path| close_ops::release_generated_output(repo, path))
+                    && !base.is_some_and(|base| close_ops::release_delivery_has_source(repo, base, anchor, task_id))
+                {
+                    Err(ReleaseInventoryCode::UnprovenContent)
+                } else { Ok(()) }
+            },
         DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
         DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
     }
+}
+
+/// The measured base and shipped commit of a release delivery, or `None` for
+/// an explicitly empty delivery.
+fn release_effect_range<'a>(
+    repo: &Path, base: Option<&'a str>, anchor: &str, target: &str,
+) -> Result<Option<(Option<&'a str>, String)>, ReleaseInventoryCode> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops;
+    // A squash has the reviewed source tree but different commit identity.
+    // Continuity starts at its actual integration, then follows later edits.
+    let mapped = if ancestor(repo, anchor, target) == Some(true) { None } else {
+        Some(close_ops::find_squash_tree_match(repo, anchor, target)
+            .filter(|mapped| ancestor(repo, mapped, target) == Some(true))
+            .ok_or(ReleaseInventoryCode::UnprovenContent)?)
+    };
+    let shipped = mapped.unwrap_or_else(|| anchor.to_string());
+    // A reused lane can record a newer start than the preserved delivery.
+    // Such a start cannot define this delivery's forward content range.
+    let base = base.filter(|base| ancestor(repo, base, anchor) == Some(true));
+    Ok((base != Some(anchor)).then_some((base, shipped)))
+}
+
+/// cas-0e29e: walk every member's delivered paths once, together, before
+/// `release_delivery_effect` judges each member (`(base, anchor, task_id)`).
+fn prewalk_release_effects(repo: &Path, target: &str, members: &[(Option<&str>, &str, &str)]) {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::{self, TaskDeliveryRange};
+    let ranges: Vec<_> = members
+        .iter()
+        .filter_map(|(base, anchor, task_id)| {
+            let (base, shipped) = release_effect_range(repo, *base, anchor, target).ok()??;
+            Some((base, *anchor, shipped, *task_id))
+        })
+        .collect();
+    let deliveries: Vec<_> = ranges
+        .iter()
+        .map(|(base, anchor, shipped, task_id)| TaskDeliveryRange { base: *base, anchor, shipped, task_id })
+        .collect();
+    close_ops::prewalk_task_deliveries(repo, target, &deliveries);
 }
 
 /// The QA receipt covering this delivery.

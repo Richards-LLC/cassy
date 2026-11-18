@@ -15,7 +15,20 @@ use sha2::{Digest, Sha256};
 /// Short enough to leave room for Unix socket filenames. Full checkout identity
 /// lives in the private directory's marker, rather than its pathname.
 pub(crate) fn test_tmp_dir(cas_dir: &Path, worktree: &Path) -> PathBuf {
-    let root = configured_scratch_root(cas_dir).unwrap_or_else(|| cas_dir.to_path_buf());
+    // Test fixtures must not inherit a checkout or protected .cas ancestry (#2085).
+    let root = configured_scratch_root(cas_dir).filter(|root| {
+        !root.ancestors().any(|part| part.file_name().is_some_and(|name| name == ".cas"))
+            && existing_ancestor(root).is_none_or(|parent|
+                crate::worktree::GitOperations::detect_repo_root(parent).is_err())
+    }).unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            // SAFETY: geteuid has no preconditions and does not mutate process state.
+            PathBuf::from(format!("/tmp/cas-{}", unsafe { libc::geteuid() }))
+        }
+        #[cfg(not(unix))]
+        { std::env::temp_dir().join("cas") }
+    });
     let checkout = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
     let key = hex::encode(Sha256::digest(checkout.as_os_str().as_encoded_bytes()));
     root.join("t").join(&key[..16])
@@ -402,6 +415,23 @@ mod tests {
             std::fs::write(cas.join("config.toml"), config).unwrap();
         }
         (cas, worktree)
+    }
+
+    #[test]
+    fn capped_temporary_fixtures_do_not_discover_the_checkout_cas_2085() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.remove("CAS_ROOT");
+        let outer = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git").args(["init", "-q"])
+            .arg(outer.path()).status().unwrap();
+        assert!(status.success());
+        let (cas, worktree) = managed(outer.path(), Some("[factory]\n"));
+        let temporary = prepare_test_tmp(&cas, &worktree).unwrap();
+        let fixture = tempfile::tempdir_in(&temporary).unwrap();
+        assert!(crate::worktree::GitOperations::detect_repo_root(fixture.path()).is_err());
+        assert!(crate::store::find_cas_root_from(fixture.path()).is_err());
+        drop(fixture);
+        reclaim_test_tmp(&cas, &worktree).unwrap();
     }
 
     #[test]

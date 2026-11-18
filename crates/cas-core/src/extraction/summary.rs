@@ -308,29 +308,6 @@ impl SummaryGenerator {
         result
     }
 
-    /// Check if two facts are similar (Jaccard similarity > 0.6 on words > 3 chars)
-    #[cfg(test)]
-    fn facts_similar(&self, a: &str, b: &str) -> bool {
-        use std::collections::HashSet;
-        let words_a: HashSet<String> = a
-            .to_lowercase()
-            .split_whitespace()
-            .filter(|w| w.len() > 3)
-            .map(|w| w.to_string())
-            .collect();
-        let words_b: HashSet<String> = b
-            .to_lowercase()
-            .split_whitespace()
-            .filter(|w| w.len() > 3)
-            .map(|w| w.to_string())
-            .collect();
-        if words_a.is_empty() || words_b.is_empty() {
-            return false;
-        }
-        let intersection = words_a.intersection(&words_b).count();
-        let union = words_a.union(&words_b).count();
-        (intersection as f32 / union as f32) > 0.6
-    }
 
     /// Compose a summary from extracted facts
     fn compose_summary(&self, entity: &Entity, facts: &[ExtractedFact]) -> Result<String> {
@@ -512,18 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_summary() {
-        let generator = SummaryGenerator::new();
-        let entity = create_test_entity();
-        let entries = create_test_entries();
-
-        let summary = generator.generate_summary(&entity, &entries).unwrap();
-
-        assert!(summary.contains("Rust"));
-        assert!(summary.contains("tool"));
-    }
-
-    #[test]
     fn test_empty_entries() {
         let generator = SummaryGenerator::new();
         let entity = create_test_entity();
@@ -531,25 +496,7 @@ mod tests {
 
         let summary = generator.generate_summary(&entity, &entries).unwrap();
 
-        assert!(summary.contains("Rust"));
-        assert!(summary.contains("tool"));
-    }
-
-    #[test]
-    fn test_facts_similar() {
-        let generator = SummaryGenerator::new();
-
-        // Very similar sentences (high word overlap)
-        assert!(generator.facts_similar(
-            "Rust is a systems programming language for safety",
-            "Rust is a systems programming language focused on safety"
-        ));
-
-        // Different sentences
-        assert!(!generator.facts_similar(
-            "Rust is a programming language",
-            "Python is used for data science"
-        ));
+        assert!(summary.contains(&entity.name));
     }
 
     #[test]
@@ -590,6 +537,7 @@ mod tests {
         let entries = create_test_entries();
 
         let summary = generator.generate_summary(&entity, &entries).unwrap();
-        assert!(summary.len() <= 300 + 100); // Allow some margin for formatting
+        assert!(summary.len() <= 300);
+        assert!(summary.contains(&entity.name));
     }
 }

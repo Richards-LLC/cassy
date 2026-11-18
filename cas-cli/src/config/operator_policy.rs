@@ -587,7 +587,8 @@ pub fn user_write_roots() -> Vec<String> {
 /// built-in Downloads folder, then the project's Claude memory folders
 /// ([`claude_memory_roots`]), deduplicated in that order. Each but the memory folders passes
 /// [`resolve_project_write_root`] for the project; user-level and built-in
-/// roots must also pass it for the user store. A missing Downloads folder is
+/// roots also pass it for the user store. An explicit user-level parent root
+/// remains effective across its nested projects. A missing Downloads folder is
 /// skipped quietly; other unsafe or unresolved entries are skipped with a warning.
 pub fn effective_write_roots(project: &[String], user: &[String], cas_root: &Path) -> Vec<PathBuf> {
     let mut roots = effective_project_write_roots(project, cas_root);
@@ -597,7 +598,14 @@ pub fn effective_write_roots(project: &[String], user: &[String], cas_root: &Pat
         .map(|path| path.display().to_string());
     for raw in user.iter().chain(downloads.as_ref()) {
         match resolve_project_write_root(raw, &user_store)
-            .and_then(|_| resolve_project_write_root(raw, cas_root))
+            .and_then(|root| {
+                // An operator's user-level parent grant applies to ordinary
+                // files in every nested project. Policy files are still
+                // judged separately by the hook; don't silently drop the grant.
+                let project_cas = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+                if project_cas != root && project_cas.starts_with(&root) { Ok(root) }
+                else { resolve_project_write_root(raw, cas_root) }
+            })
         {
             Ok(root) if !roots.contains(&root) => roots.push(root),
             Ok(_) => {}

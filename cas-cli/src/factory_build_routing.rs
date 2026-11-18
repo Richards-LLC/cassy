@@ -271,7 +271,7 @@ fn send_error(error: impl ToString) -> crate::cloud::peer_mailbox::PeerSendError
     }
 }
 
-fn live_capacity(peer: &crate::cloud::peers::Peer, now: DateTime<Utc>) -> Option<BuildCapacity> {
+fn fresh_capacity(peer: &crate::cloud::peers::Peer, now: DateTime<Utc>) -> Option<BuildCapacity> {
     let fresh = |at: DateTime<Utc>| at <= now && now - at <= chrono::Duration::seconds(FRESH_SECS);
     if peer.own != Some(true)
         || !peer.live
@@ -286,7 +286,11 @@ fn live_capacity(peer: &crate::cloud::peers::Peer, now: DateTime<Utc>) -> Option
     let mut capacity: BuildCapacity = serde_json::from_value(peer.build_capacity.clone()?).ok()?;
     let remaining = capacity.max_workers?.saturating_sub(capacity.live_workers?);
     capacity.free_slots = capacity.free_slots.min(remaining);
-    (fresh(capacity.observed_at) && capacity.cpu_count > 0 && capacity.free_slots > 0).then_some(capacity)
+    (fresh(capacity.observed_at) && capacity.cpu_count > 0).then_some(capacity)
+}
+
+fn live_capacity(peer: &crate::cloud::peers::Peer, now: DateTime<Utc>) -> Option<BuildCapacity> {
+    fresh_capacity(peer, now).filter(|capacity| capacity.free_slots > 0)
 }
 
 fn expire(
@@ -528,23 +532,50 @@ pub(crate) fn route(
     guard: &crate::factory_build_guard::BuildGuardSnapshot,
 ) -> Result<Option<String>, String> {
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
-    let expected = tasks.get(task_id).map_err(|error| error.to_string())?;
-    let existing_receipt = || -> Result<Option<String>, String> {
+    let mut expected = tasks.get(task_id).map_err(|error| error.to_string())?;
+    let existing_receipt = |task: &mut cas_types::Task| -> Result<Option<String>, String> {
         if sender.role != cas_types::AgentRole::Supervisor { return Ok(None); }
         let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(None) };
         let key = format!("build-route:{project}:{task_id}");
         let Some((recipient, delivery)) = crate::cloud::peer_mailbox::build_route_ownership(root, &key)? else {
             return Ok(None);
         };
-        let original = expected.notes.lines().find_map(|line| {
+        let mut original = task.notes.lines().find_map(|line| {
             serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
                 .filter(|plan| plan.key == key)
         });
+        if let Some(plan) = original.as_mut()
+            && task.status == cas_types::TaskStatus::Open && task.assignee.is_none()
+            && crate::store::open_agent_store(root).map_err(|error| error.to_string())?
+                .get_lease(task_id).map_err(|error| error.to_string())?.is_none_or(|lease| !lease.is_valid())
+            && let Ok(PeerDiscovery::Found { peers, .. }) = discover_peers(root, Some(&sender.id))
+        {
+            let now = Utc::now();
+            let peer = peers.iter().find(|peer| peer.agent_id == plan.recipient_agent_id);
+            let departed_or_stale = peer.is_none_or(|peer| !peer.live
+                || now.signed_duration_since(peer.last_heartbeat).num_seconds() > FRESH_SECS
+                || peer.build_capacity.clone().and_then(|value| serde_json::from_value::<BuildCapacity>(value).ok())
+                    .is_some_and(|capacity| now.signed_duration_since(capacity.observed_at).num_seconds() > FRESH_SECS));
+            if let Some(capacity) = peer.and_then(|peer| fresh_capacity(peer, now)) {
+                plan.observed_at = Some(capacity.observed_at);
+                plan.free_slots = capacity.free_slots;
+                plan.live_workers = capacity.live_workers;
+                plan.max_workers = capacity.max_workers;
+                plan.load_per_cpu = capacity.load_1m.filter(|load| load.is_finite() && *load >= 0.0)
+                    .map(|load| load / capacity.cpu_count as f64);
+            } else if departed_or_stale && crate::cloud::peer_mailbox::retire_build_route(root, &key, &plan.recipient_agent_id)? {
+                let before = task.clone();
+                expire(root, task, plan, "peer departed or capacity is stale")?;
+                task.updated_at = tasks.update_if_current(task, &before).map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
+        }
         Ok(Some(format!("{}; existing delivery {delivery}", original
             .map(|plan| plan.receipt()).unwrap_or_else(|| format!("already routed to {recipient}")))))
     };
-    // Accepted and in-flight asks retain ownership even if presence disappears.
-    if let Some(receipt) = existing_receipt()? { return Ok(Some(receipt)); }
+    // Preserve accepted ownership during a discovery outage or transport send;
+    // an observed departure on an unclaimed task restores local admission.
+    if let Some(receipt) = existing_receipt(&mut expected)? { return Ok(Some(receipt)); }
     let mut task = expected.clone();
     let plan = prepare(root, sender, &mut task, brief, config, guard)?;
     if task.notes != expected.notes {
@@ -553,7 +584,7 @@ pub(crate) fn route(
             .map_err(|error| error.to_string())?;
     }
     let Some(plan) = plan else { return Ok(None) };
-    if let Some(receipt) = existing_receipt()? { return Ok(Some(receipt)); }
+    if let Some(receipt) = existing_receipt(&mut task)? { return Ok(Some(receipt)); }
     match plan.send(root, &task) {
         Ok(receipt) => Ok(Some(receipt)),
         Err(crate::cloud::peer_mailbox::PeerSendError::BuildRouteCooldown(_)) => {
@@ -712,7 +743,8 @@ mod tests {
         assert!(retry_route(&root, &sender).await.unwrap().is_some());
         server.reset().await; // Directory is unavailable after the original ask was accepted.
         assert!(retry_route(&root, &sender).await.unwrap().is_some());
-        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(server.received_requests().await.unwrap().iter().all(|request| request.method == "GET"));
+        server.reset().await;
         let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 1);
@@ -724,6 +756,36 @@ mod tests {
         conn.execute("UPDATE peer_message_outbox SET cloud_id=NULL,state='retrying',last_error=NULL,next_attempt_at=?1", [Utc::now().timestamp() + 120]).unwrap();
         assert!(retry_route(&root, &sender).await.unwrap().is_some());
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepted_route_releases_local_dispatch_when_peer_departs() {
+        for (peers, in_flight, retained) in [
+            (vec![], false, false),
+            (vec![peer("best", 1, 4.0, 1372)], false, false),
+            (vec![peer("best", 0, 4.0, 0)], false, true),
+            (vec![], true, true),
+        ] {
+            let server = MockServer::start().await;
+            let env = crate::test_support::TestEnvGuard::temp_home();
+            let (root, sender) = failed_route_fixture(&server, env.home()).await;
+            server.reset().await;
+            Mock::given(method("GET")).and(path("/api/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(directory(vec![peer("best", 1, 4.0, 0)]))).mount(&server).await;
+            Mock::given(method("POST")).and(path("/api/peer-messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"accepted-route","status":"queued"}))).mount(&server).await;
+            assert!(retry_route(&root, &sender).await.unwrap().is_some());
+            if in_flight {
+                let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+                conn.execute("UPDATE peer_message_outbox SET cloud_id=NULL,state='retrying',last_error=NULL,next_attempt_at=?1", [Utc::now().timestamp() + 120]).unwrap();
+            }
+            server.reset().await;
+            Mock::given(method("GET")).and(path("/api/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(directory(peers))).mount(&server).await;
+            assert_eq!(retry_route(&root, &sender).await.unwrap().is_some(), retained);
+            assert_eq!(retry_route(&root, &sender).await.unwrap().is_some(), retained);
+            assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST").count(), 0);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

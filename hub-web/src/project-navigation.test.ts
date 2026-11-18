@@ -21,6 +21,7 @@ describe("project-first navigation", () => {
       ["reason_42", `${first}\nMore context`, first],
       ["", message, first],
       ["Review this merge", message, "Review this merge"],
+      ["yes", message, "yes"],
       ["peer_ask_override", "", undefined],
       ["peer_ask_override", "peer_ask_override", undefined],
     ] as const) {

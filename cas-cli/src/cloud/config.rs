@@ -613,16 +613,18 @@ pub fn normalize_git_remote_url(url: &str) -> Option<String> {
         return None;
     }
 
-    // SSH form: `git@host:owner/repo[.git]`. Replace the `:` with `/` after
-    // stripping the user prefix so the parse falls through to the generic
-    // `host/owner/repo` extractor below.
-    let without_ssh_user = if let Some(rest) = trimmed.strip_prefix("git@") {
-        // Find the first `:` — that's the separator between host and path.
+    // SSH usernames are transport credentials, not repository identity.
+    // Normalize both home-relative and absolute scp paths to host/path.
+    let without_ssh_user = if let Some(rest) = trimmed.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        if host.is_empty() || path.trim_matches('/').is_empty() { return None; }
+        format!("{host}/{}", path.trim_start_matches('/'))
+    } else if let Some((user, rest)) = trimmed.split_once('@').filter(|(user, _)| !user.contains(['/', ':']) && !user.is_empty()) {
+        let _ = user;
         let (host, path) = rest.split_once(':')?;
-        format!("{host}/{path}")
-    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@") {
-        // ssh://git@host/path → strip prefix; rest already uses `/`.
-        rest.to_string()
+        if host.is_empty() || host.contains('/') || path.trim_matches('/').is_empty() { return None; }
+        format!("{host}/{}", path.trim_start_matches('/'))
     } else if let Some(rest) = trimmed.strip_prefix("https://") {
         rest.to_string()
     } else if let Some(rest) = trimmed.strip_prefix("http://") {
@@ -1131,7 +1133,9 @@ const EPHEMERAL_PORT_START: u16 = 32_768;
 /// directories remain valid destinations for integration-test fixtures.
 fn reject_fixture_cloud_write(path: &Path, config: &CloudConfig) -> Result<(), CasError> {
     let is_cloud_json = path.file_name().is_some_and(|name| name == "cloud.json");
-    let is_fixture = config.token.as_deref() == Some(TEST_FIXTURE_TOKEN)
+    let is_fixture = cfg!(test)
+        || cas_core::env_overlay::var_os("CAS_USER_CLOUD_JSON").is_some_and(|path| !path.is_empty())
+        || config.token.as_deref() == Some(TEST_FIXTURE_TOKEN)
         || is_loopback_ephemeral_endpoint(&config.endpoint);
 
     if is_cloud_json && is_fixture && !path_is_under_system_temp(path) {
@@ -2069,11 +2073,14 @@ mod tests {
         guard.set("CAS_USER_CLOUD_JSON", &user_path);
         guard.set("CAS_ROOT", &project_cas);
 
-        let cached =
-            store_login_credentials("http://127.0.0.1:33749", "test-token", None, None).unwrap();
-
-        assert!(cached.is_none(), "fixture cache writes must be rejected");
-        assert_eq!(std::fs::read(&project_cloud).unwrap(), before);
+        for (endpoint, token) in [
+            ("http://127.0.0.1:33749", "test-token"),
+            ("https://petra-stella-cloud.vercel.app", "fresh-token"),
+        ] {
+            let cached = store_login_credentials(endpoint, token, None, None).unwrap();
+            assert!(cached.is_none(), "fixture cache writes must be rejected");
+            assert_eq!(std::fs::read(&project_cloud).unwrap(), before);
+        }
     }
 
     #[test]

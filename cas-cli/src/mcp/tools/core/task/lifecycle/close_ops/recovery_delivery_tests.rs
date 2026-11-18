@@ -2145,6 +2145,22 @@ async fn recorded_own_commit_naming_another_task_stays_this_delivery_gh1944() {
     assert_eq!(delivery.commits.len(), 3, "{:?}", delivery.commits);
     task_commit_identity_in_repo(repo, &task, None).unwrap();
 
+    // GH #2043: recycling may reopen the task. Its recorded commits and
+    // original start must survive the real restart path without rewriting Git.
+    let boundary = task.deliverables.factory_branch_start.clone();
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let mut reopened = task.clone();
+    reopened.status = TaskStatus::Open;
+    tasks.update(&reopened).unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let restarted = text(f.core.cas_task_start_with_options(Parameters(
+        crate::mcp::tools::TaskStartRequest { id: TASK.into(), brief: Some(true), force: None },
+    )).await.unwrap());
+    let resumed = tasks.get(TASK).unwrap();
+    assert_eq!(resumed.status, TaskStatus::InProgress, "{restarted}");
+    assert_eq!(resumed.deliverables.factory_branch_start, boundary);
+    assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD"]), tip);
+
     commit_file(&f.worker_path, "d.rs", "fix(cas-dddd): unrecorded other task");
     assert!(task_attribution::started_delivery(repo, &task).is_err());
 }
@@ -2180,7 +2196,14 @@ async fn granted_commit_inside_no_ff_import_keeps_the_merge_gh1988() {
     })).await.unwrap();
     let granted = tasks.get(TASK).unwrap();
     let delivery = task_attribution::started_delivery(repo, &granted).unwrap().unwrap();
-    assert_eq!(delivery.commits, vec![merge]);
+    assert_eq!(delivery.commits, vec![merge.clone()]);
+    // Exercise rebind itself, including its branch/checkout/lease fences.
+    let replacement = format!("{BRANCH}-{TASK}-recovery");
+    git(&f.worker_path, &["switch", "-qc", &replacement]);
+    supervisor.rebind_task_branch(TASK, &replacement, "Approve the authorized merged repair").unwrap();
+    let rebound = tasks.get(TASK).unwrap();
+    assert_eq!(rebound.deliverables.factory_branch_start.unwrap().branch, replacement);
+    assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD"]), merge);
 }
 
 /// GH #1888 (cas-f45f): the returned task's start records the worker lane,
@@ -2331,4 +2354,37 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     let mut active = current;
     active.status = TaskStatus::InProgress;
     assert!(task_commit_identity_in_repo(&repo, &active, None).is_err());
+}
+
+/// GH #2041: a live supervisor's explicit stability decision applies at park,
+/// before the later risk gates, without forging a passing runner receipt.
+#[tokio::test]
+async fn supervisor_stability_exception_reaches_park_gh2041() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    git(&f.worker_path, &["reset", "--hard", "main"]);
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    start_on_lane(tasks.as_ref(), &git(repo, &["rev-parse", "main"]));
+    std::fs::write(f.worker_path.join("owned.test.js"), "test('custom config case', () => {});\n").unwrap();
+    git(&f.worker_path, &["add", "owned.test.js"]);
+    git(&f.worker_path, &["commit", "-qm", "test(cas-c6e1-fixture): custom config case"]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &tip]);
+    let request = |override_: bool| Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Reviewed stability exception for custom runner config".into()),
+        commit_receipt: Some(tip.clone()), supervisor_override: Some(override_),
+        no_delivery: None, stranded_branch_override: None, search_manifest: None,
+    });
+    let held = text(f.core.cas_task_close(request(false)).await.unwrap());
+    assert!(crate::gates::codes_in(&held).contains(&"G-61"), "{held}");
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(repo.join(".cas"), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    assert!(supervisor.resolve_live_supervisor_authority().is_ok());
+    let parked = text(supervisor.cas_task_close(request(true)).await.unwrap());
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{parked}");
+    assert!(tasks.get(TASK).unwrap().notes.contains("G-61"));
+    assert!(crate::factory_worker_check::PassingTests::new(&repo.join(".cas"), &f.worker_path, &tip)
+        .packages().is_empty());
 }

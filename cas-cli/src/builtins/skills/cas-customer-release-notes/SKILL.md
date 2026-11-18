@@ -12,6 +12,7 @@ in their words, wearing their brand. The product's `DESIGN.md` decides how the
 notes look. This skill decides only what they must say, and
 `cas deliverable finalize --audience customer` makes the file safe to send.
 
+General client findings belong to `cas-client-report`; shipped-feature walkthroughs to `cas-feature-report`.
 Team release notes for Slack belong to `cas-release-notes`; a version's
 internal report belongs to `cas-release-report`; an SOW completion report
 belongs to `cas-sow-delivery-report`. Nothing reaches the client, or the

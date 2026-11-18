@@ -9342,6 +9342,90 @@ mod cas_6b42_peer_delivery_tests {
         );
     }
 
+    /// GH #2103 (G-96), replaying two prowl deliveries: this machine merged a
+    /// peer delivery once (leaving a local ref at the parked tip T1), the task
+    /// was returned and the peer pushed T2 on top. The stale local ref is an
+    /// ancestor of the live origin tip: follow it. Real divergence still refuses.
+    #[test]
+    fn a_stale_local_ref_behind_the_live_origin_tip_is_followed_gh_2103() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, repo) = (dir.path().join("origin.git"), dir.path().join("work"));
+        std::fs::create_dir_all(&repo).unwrap();
+        git(dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(&repo, &["add", ".gitignore"]);
+        git(&repo, &["commit", "-qm", "seed"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+        let branch = "factory/calm-heron-12-cas-2103";
+        git(&repo, &["checkout", "-qb", branch]);
+        std::fs::write(repo.join("one.rs"), "first\n").unwrap();
+        git(&repo, &["add", "one.rs"]);
+        git(&repo, &["commit", "-qm", "fix(cas-2103): first park"]);
+        git(&repo, &["push", "-q", "origin", branch]);
+        git(&repo, &["checkout", "-q", "main"]);
+        // The peer reworks and re-parks at T2 on origin.
+        let publisher = dir.path().join("peer");
+        git(dir.path(), &["clone", "-q", "-b", branch, origin.to_str().unwrap(), publisher.to_str().unwrap()]);
+        std::fs::write(publisher.join("two.rs"), "second\n").unwrap();
+        git(&publisher, &["add", "two.rs"]);
+        git(&publisher, &["commit", "-qm", "fix(cas-2103): rework"]);
+        let reparked = git(&publisher, &["rev-parse", "HEAD"]);
+        git(&publisher, &["push", "-q", "origin", branch]);
+
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "sup-soundwave".into(), "calm-koala-86".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "worker-calm-heron".into(), "calm-heron-12".into(), cas_types::AgentRole::Worker,
+        )).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("sup-soundwave".into());
+        let work_target = cas_types::WorkTarget {
+            repo_selector: "project:cas-src".into(),
+            target_branch: "main".into(),
+        };
+        let mut task = cas_types::Task::new("cas-2103".into(), "Peer delivery".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("calm-heron-12".into());
+        task.deliverables.work_target = Some(work_target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target, assignee: "calm-heron-12".into(), branch: branch.into(), base_sha: base,
+        });
+
+        // This machine's ref was left at T1 by the earlier merge attempt.
+        git(&repo, &["fetch", "-q", "origin", &format!("{branch}~1:refs/heads/{branch}")]);
+        let stale = git(&repo, &["rev-parse", branch]);
+        assert_ne!(stale, reparked);
+        let resolved = core.started_task_merge_source(&repo, Some(&task), branch)
+            .expect("a local ref that is an ancestor of origin is not a conflict");
+        assert!(
+            matches!(&resolved, Some(StartedMergeSource::Merge(source)) if source.anchor == reparked),
+            "merges the re-parked tip"
+        );
+        assert_eq!(git(&repo, &["rev-parse", branch]), reparked, "stale ref fast-forwarded");
+
+        // Independent local work is real divergence: refuse and keep it.
+        git(&repo, &["checkout", "-q", branch]);
+        std::fs::write(repo.join("local.rs"), "local\n").unwrap();
+        git(&repo, &["add", "local.rs"]);
+        git(&repo, &["commit", "-qm", "local-only"]);
+        let local = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(publisher.join("three.rs"), "third\n").unwrap();
+        git(&publisher, &["add", "three.rs"]);
+        git(&publisher, &["commit", "-qm", "fix(cas-2103): more rework"]);
+        git(&publisher, &["push", "-q", "origin", branch]);
+        assert!(core.started_task_merge_source(&repo, Some(&task), branch).is_err());
+        assert_eq!(git(&repo, &["rev-parse", branch]), local, "divergent local work is kept");
+    }
+
     /// cas-6b42 (GH #1634), replaying cas-aa10: prowl's worker parked a
     /// delivery that soundwave's store still showed in progress. That merge
     /// names the peer instead of "branch missing"; once the park syncs, the
@@ -9449,5 +9533,106 @@ mod cas_6b42_peer_delivery_tests {
         assert!(refused.message.contains("[G-96]"));
         assert_eq!(git(&repo, &["rev-parse", branch]), local);
         assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
+    }
+}
+
+#[cfg(test)]
+mod cas_1184d_merge_identity_tests {
+    use crate::mcp::CasCore;
+    use cas_types::{Agent, AgentRole, Task, TaskStatus, TaskType, WorkTarget};
+    use std::path::Path;
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Cassy Test")
+            .env("GIT_AUTHOR_EMAIL", "cas-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Cassy Test")
+            .env("GIT_COMMITTER_EMAIL", "cas-test@example.invalid")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// GH #1689/#1692: an epic child whose task target is the repository's
+    /// integration branch (`staging`, also the epic's base) merges into the
+    /// epic lane. The G-102 repository binding compared the task's raw target
+    /// against that resolved lane and refused the child as a "repository
+    /// mismatch" although both name one repository and checkout.
+    #[tokio::test]
+    async fn an_epic_child_targeting_the_epic_base_merges_to_its_lane_gh_1689() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for key in ["CAS_ROOT", "CAS_CLONE_PATH", "CAS_AGENT_ROLE", "CAS_AGENT_NAME", "CAS_FACTORY_SESSION", "CAS_SESSION_ID"] {
+            env.remove(key);
+        }
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path();
+        git(path, &["init", "-qb", "staging"]);
+        std::fs::write(path.join(".gitignore"), ".cas/\n").unwrap();
+        std::fs::write(path.join("shared.md"), "base\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-qm", "seed"]);
+        let lane = "epic/rebuild-cas-0ab0";
+        git(path, &["branch", lane]);
+        let root = crate::store::init_cas_dir(path).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-src\"\n[verification]\nenabled=false\n[qa]\nmode='batch'\n",
+        ).unwrap();
+        let origin = root.join("origin.git");
+        git(path, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(path, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(path, &["push", "-q", "origin", "staging", lane]);
+        let worker = "cosmic-newt-36";
+        let branch = format!("factory/{worker}");
+        let checkout = root.join("worktrees").join(worker);
+        git(path, &["worktree", "add", "-qb", &branch, checkout.to_str().unwrap(), lane]);
+        std::fs::write(checkout.join("delivery.md"), "delivered\n").unwrap();
+        git(&checkout, &["add", "delivery.md"]);
+        git(&checkout, &["commit", "-qm", "fix(cas-ff46): deliver"]);
+        git(&checkout, &["push", "-q", "origin", &branch]);
+        let tip = git(&checkout, &["rev-parse", "HEAD"]);
+
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("supervisor".into());
+        let agents = core.open_agent_store().unwrap();
+        let mut supervisor = Agent::new("supervisor".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).unwrap();
+        let mut agent = Agent::new(worker.into(), worker.into());
+        agent.role = AgentRole::Worker;
+        agent.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());
+        agents.register(&agent).unwrap();
+
+        let target = WorkTarget { repo_selector: "project:cas-src".into(), target_branch: "staging".into() };
+        let tasks = core.open_task_store().unwrap();
+        let mut epic = Task::new("cas-0ab0".into(), "rebuild".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some(lane.into());
+        epic.deliverables.work_target = Some(target.clone());
+        tasks.add(&epic).unwrap();
+        let mut task = Task::new("cas-ff46".into(), "child".into());
+        task.depth = cas_types::TaskDepth::Light;
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some(worker.into());
+        task.deliverables.work_target = Some(target);
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some(branch.clone());
+        tasks.create_atomic(&task, &[], Some(&epic.id), None).unwrap();
+
+        let merged = core.worktree_merge(&branch, false, Some("cas-ff46"), false, None, false, None).await;
+        let refusal = merged.as_ref().err().map(|error| error.message.to_string());
+        assert!(
+            refusal.as_deref().is_none_or(|message| !message.contains("G-102")),
+            "{refusal:?}"
+        );
+        assert!(
+            crate::worktree::GitOperations::new(path.to_path_buf()).is_ancestor(&tip, lane),
+            "delivery reaches the epic lane: {refusal:?}"
+        );
     }
 }

@@ -1229,7 +1229,7 @@ mod tests {
                 // This is the producer's expected crate receipt, independent
                 // of the scope the park classifier just returned.
                 widened::record(root.path(), repo.path(), &head,
-                    widened::Proof { runner: "nextest".into(), scope: expected_scope }, 1).unwrap();
+                    widened::Proof { runner: "nextest".into(), scope: expected_scope, reason: "widened:fixture-unclassified-input".into() }, 1).unwrap();
             }
             let passing = PassingTests::new(root.path(), repo.path(), &head);
             assert!(widened::missing(&passing, &scopes).is_empty(), "{row}");

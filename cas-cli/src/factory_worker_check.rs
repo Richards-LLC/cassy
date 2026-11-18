@@ -2392,7 +2392,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 if uncertain {
                     let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                     widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into() });
                 }
                 tests
             },
@@ -2403,7 +2403,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
                 let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                 widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}") });
                 Vec::new()
             }
         }
@@ -5778,11 +5778,13 @@ JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
                 assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 1);
                 let head = fixture_head(&repo);
                 let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);
-                let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap().next().unwrap().unwrap();
-                let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt.path()).unwrap()).unwrap();
+                let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap()
+                    .map(|entry| serde_json::from_slice::<serde_json::Value>(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap())
+                    .find(|receipt| receipt["head"] == head).unwrap();
                 let widened = &receipt["test"]["widened"];
                 assert_eq!(widened["scope"]["File"], file);
-                assert!(widened["reason"].as_str().unwrap().starts_with("widened:"));
+                let reason = widened["reason"].as_str().unwrap();
+                assert!(reason.starts_with("widened:") && reason.contains(file));
                 assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none());
             }
         }

@@ -1084,8 +1084,9 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
             Ok(selected) if !selected.is_empty() => tests.extend(selected),
             result => {
                 let scope = super::widened::scope(&repo, file);
-                eprintln!("Widening {file} to {scope:?} for one capped pass: {}", result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into()));
-                widened.entry(scope).or_insert_with(|| file.clone());
+                let cause = result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into());
+                eprintln!("Widening {file} to {scope:?} for one capped pass: {cause}");
+                widened.entry(scope).or_insert_with(|| (file.clone(), cause));
             }
         }
     }
@@ -1105,8 +1106,8 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    for (scope, file) in &widened {
-        execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file)), test_env)?;
+    for (scope, (file, cause)) in &widened {
+        execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file, cause)), test_env)?;
     }
     if tests.is_empty() { return Ok(()); }
     let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None, test_env)?;
@@ -1303,7 +1304,7 @@ fn execute_tests(
     runner: &str,
     runner_config: Option<&Path>,
     tests: &[Identity],
-    widened: Option<(&super::widened::Scope, &str)>,
+    widened: Option<(&super::widened::Scope, &str, &str)>,
     test_env: &[String],
 ) -> Result<Proof> {
     let environment = test_env.iter().map(|spec| {
@@ -1320,7 +1321,7 @@ fn execute_tests(
     for test in tests {
         by_file.entry(&test.path).or_default().push(test);
     }
-    if let Some((scope, file)) = widened {
+    if let Some((scope, file, _)) = widened {
         super::widened::invalidate(cas_root, repo, head, scope)?;
         by_file.insert(file, Vec::new());
     }
@@ -1329,7 +1330,7 @@ fn execute_tests(
     for (path, selected) in by_file {
         // One config path: the caller's own `--config` wins over the
         // discovered runner config (cas-1468); never pass both.
-        let (package, discovered) = if let Some((super::widened::Scope::Package(directory), _)) = widened {
+        let (package, discovered) = if let Some((super::widened::Scope::Package(directory), _, _)) = widened {
             let package = repo.join(directory);
             let config = self::runner_config(&package, runner);
             (package, config)
@@ -1455,7 +1456,7 @@ fn execute_tests(
                     _ => { command.args(["--testNamePattern", &pattern]); }
                 }
             }
-            if !matches!(widened, Some((super::widened::Scope::Package(_), _))) {
+            if !matches!(widened, Some((super::widened::Scope::Package(_), _, _))) {
                 if runner == "jest" { command.arg("--runTestsByPath"); }
                 if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
                 else { command.arg(&file); }
@@ -1478,8 +1479,8 @@ fn execute_tests(
         consecutive_passes: if widened.is_some() { 1 } else { 5 },
         elapsed_ms: start.elapsed().as_millis(),
     };
-    if let Some((scope, _)) = widened {
-        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone() }, count as u64)?;
+    if let Some((scope, _, cause)) = widened {
+        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause}") }, count as u64)?;
         println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)

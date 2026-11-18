@@ -101,25 +101,28 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
         return true;
     };
-    let names_inert = depth == 0 && no_substitution(command);
+    // Names stay names only if every pipe consumer in the whole command reads
+    // just stdin text. Each context below is one statement and cannot see its
+    // pipe neighbours, so this is judged here, once, on the whole command.
+    let names_inert = depth == 0 && no_substitution(command) && {
+        let (arguments, piped) = super::pre_tool::shell_statement_arguments_with_pipes(command);
+        piped.iter().zip(&arguments).all(|(piped, argv)| !*piped || consumer_reads_stdin_only(argv))
+    };
     for mut context in contexts {
         let parents = context.command.matches("..").count().min(16);
         let directories: Vec<PathBuf> = std::mem::take(&mut context.directories).into_iter()
             .flat_map(|cwd| cwd_candidates(cwd, parents))
             .collect();
         let statements = super::pre_tool::shell_statement_words(&context.command);
-        let (arguments, piped) = super::pre_tool::shell_statement_arguments_with_pipes(&context.command);
-        // Names stay names only if every pipe consumer reads just stdin text.
-        let pipes_inert = names_inert && statements.len() == arguments.len()
-            && piped.iter().zip(&arguments).all(|(piped, argv)| !*piped || consumer_reads_stdin_only(argv));
+        let arguments = super::pre_tool::shell_statement_arguments(&context.command);
         for (at, words) in statements.iter().enumerate() {
             let Some(index) = super::pre_tool::unwrapped_command_index(words) else { continue; };
             let executable = Path::new(&words[index]).file_name().and_then(|name| name.to_str())
                 .unwrap_or(&words[index]).to_ascii_lowercase();
-            // Per statement: a listing, or a stdin-only consumer of a pipe, opens no file.
-            let names_only = pipes_inert
+            // Per statement: a listing opens no file.
+            let names_only = names_inert && statements.len() == arguments.len()
                 && arguments.get(at).is_some_and(|argv| {
-                    piped[at] || super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
+                    super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
                         argv[other] == words[index] && lists_names_only(&executable, &argv[other + 1..])
                     })
                 });

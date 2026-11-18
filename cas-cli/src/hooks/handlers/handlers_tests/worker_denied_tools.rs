@@ -332,6 +332,7 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
         "find ~ -name credentials.json | (xargs cat)",
         // Another segment of the compound command reads a store.
         "cat ~/.config/neonctl/credentials.json && find ~ -name x | head -3",
+        "find ~ -name credentials.json | head -3 ~/.config/neonctl/credentials.json",
         "find ~ -name credentials.json | xargs cat",
         "find ~ -name auth.json -exec cat {} +",
         "cat $(rg --files ~ | rg credentials.json)",

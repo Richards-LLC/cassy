@@ -1177,7 +1177,10 @@ fn test_recycled_worker_reclaims_dead_predecessor_lease() {
         assert!(matches!(result, ClaimResult::AlreadyClaimed { .. }));
     }
 
-    store.mark_stale("old-session").unwrap();
+    // Recycle retires the predecessor's row without revoking its lease.
+    let mut retired = store.get("old-session").unwrap();
+    retired.status = AgentStatus::Shutdown;
+    store.update(&retired).unwrap();
     let result = store.try_claim("task-1", "other-session", 600, None).unwrap();
     assert!(matches!(result, ClaimResult::AlreadyClaimed { .. }));
     let result = store.try_claim("task-1", "new-session", 600, None).unwrap();

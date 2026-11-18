@@ -19,6 +19,7 @@
 //! ships, `begin` answering 404 or 501 is not an error: it is the documented
 //! "storage is not live yet" boundary, and the caller keeps the artifact local.
 
+use crate::cloud::auth::CloudRequestExt;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::Read;
@@ -358,7 +359,7 @@ impl ArtifactUploadClient {
         let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(self.timeout)
-            .send_json(serde_json::json!({"reason": reason, "actor_id": actor_id}));
+            .cloud_send_json(serde_json::json!({"reason": reason, "actor_id": actor_id}));
         let response = match response {
             Ok(response) => response,
             Err(ureq::Error::Status(status, _)) => return Err(format!("Cloud revoke endpoint returned HTTP {status}")),
@@ -493,7 +494,7 @@ impl ArtifactUploadClient {
             .get(url.as_str())
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(remaining.min(self.timeout))
-            .call();
+            .cloud_call();
         let response = match response {
             Ok(response) => response,
             Err(ureq::Error::Status(404, _)) => return Ok(None),
@@ -557,7 +558,7 @@ impl ArtifactUploadClient {
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .timeout(self.timeout)
-            .send_json(&body);
+            .cloud_send_json(&body);
 
         let (status, body) = match classify(response) {
             Ok(ok) => ok,
@@ -671,7 +672,7 @@ impl ArtifactUploadClient {
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .timeout(self.timeout)
-            .send_json(declared);
+            .cloud_send_json(declared);
 
         let (status, body) = match classify(response) {
             Ok(ok) => ok,
@@ -723,7 +724,7 @@ impl ArtifactUploadClient {
         let response = ureq::get(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(self.timeout)
-            .call();
+            .cloud_call();
         let (status, body) = match classify(response) {
             Ok(ok) => ok,
             Err(transport) => {

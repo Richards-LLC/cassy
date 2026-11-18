@@ -62,6 +62,9 @@ pub enum StoreError {
         dispatch: Box<cas_types::VerificationDispatch>,
     },
 
+    #[error("premerge_repair_requires_new_commit: automatic repair for {dispatch_id} needs a new provable source commit")]
+    PremergeRepairRequiresNewCommit { dispatch_id: String },
+
     #[error(
         "local {entity_type} {operation} committed, but cloud sync is degraded; durable retry intent retained for {entity_id}: {reason}"
     )]

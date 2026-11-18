@@ -255,7 +255,9 @@ fn passing_summary_count(log: &str) -> Result<u64> {
     )?;
     let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
     if summaries.len() != 1 {
-        bail!("log must contain exactly one selected nextest summary");
+        // cas-e751: worker-check's producer log also holds the guard phase's
+        // summary; only its "Selected test log" isolates the requested run.
+        bail!("log must contain exactly one selected nextest summary; pass the \"Selected test log\" path worker-check prints, not its full output");
     }
     let run: u64 = summaries[0][1].parse()?;
     let count: u64 = summaries[0][2].parse()?;
@@ -337,6 +339,16 @@ fn targeted_test(args: &[String]) -> Option<TargetedTest> {
         harness,
         filter,
     })
+}
+
+/// The refusal names the shape the caller was attempting: a JavaScript
+/// runner command is never answered with the Cargo-only grammar.
+fn admission_refusal(args: &[String]) -> &'static str {
+    if javascript::names_runner(args) {
+        javascript::SHAPE
+    } else {
+        "Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed"
+    }
 }
 
 pub(crate) fn allowed_args(args: &[String]) -> bool {
@@ -2094,7 +2106,7 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Optio
 #[cfg(unix)]
 pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if !allowed_args(args) {
-        bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
+        bail!(admission_refusal(args));
     }
     validate_test_environment(args, test_env)?;
     let repo = std::env::current_dir()?;
@@ -2319,7 +2331,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
-        None => check_packages(args).context("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed")?,
+        None => check_packages(args).with_context(|| admission_refusal(args))?,
     };
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
@@ -3263,7 +3275,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         fixture_commit_as(&repo, "delivery");
         let receipt_head = fixture_head(&repo);
         record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
-        let identity = stability::Identity { path: "src/lib.rs".into(), name: "cached".into() };
+        let identity = stability::Identity::exact("src/lib.rs", "cached");
         let selection = TargetedTest { package: "cas".into(), harness: None, filter: "test(cached)".into() };
         let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &receipt_head, &selection);
         let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -4039,6 +4051,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
             for name in ["mcp::socket::tests::create_listener_refuses_a_live_socket",
                 "mcp::socket::tests::create_listener_reclaims_a_stale_socket_file",
                 "hub::idle_sync::tests::store_with_a_live_serve_is_skipped",
+                #[cfg(target_os = "linux")]
                 "factory_candidate_queue::tests::hung_build_kills_detached_children_releases_locks_and_reports_timeout"] {
                 let result = Command::new(std::env::current_exe().unwrap())
                     .args(["--exact", name, "--nocapture"]).env_remove(PROBE).output().unwrap();
@@ -4071,7 +4084,8 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let head = fixture_head(&repo);
         git(&project, &["remote", "add", "origin", project.to_str().unwrap()]).unwrap();
         git(&project, &["update-ref", "refs/remotes/origin/main", &head]).unwrap();
-        let scratch = base.join("rewind");
+        let scratch_dir = tempfile::Builder::new().prefix("cas").tempdir_in("/tmp").unwrap();
+        let scratch = scratch_dir.path().canonicalize().unwrap();
         std::fs::write(
             root.join("config.toml"),
             format!("[factory]\nscratch_root = {:?}\nartifacts_root = {:?}\n", scratch.display().to_string(), base.join("artifacts").display().to_string()),

@@ -11,14 +11,14 @@ fn test_sqlite_store_full_lifecycle() {
     assert!(!id.is_empty(), "ID must not be empty");
 
     // Create and add entry
-    let mut entry = Entry::new(id.clone(), "Test content".to_string());
+    let mut entry = Entry::new(id.clone(), "Test entry content".to_string());
     entry.entry_type = EntryType::Learning;
     entry.tags = vec!["test".to_string(), "integration".to_string()];
     store.add(&entry).expect("Failed to add entry");
 
     // Get entry
     let retrieved = store.get(&id).expect("Failed to get entry");
-    assert_eq!(retrieved.content, "Test content");
+    assert_eq!(retrieved.content, "Test entry content");
     assert_eq!(retrieved.tags.len(), 2);
 
     // Update entry

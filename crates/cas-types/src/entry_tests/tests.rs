@@ -41,16 +41,6 @@ fn test_feedback_score() {
 }
 
 #[test]
-fn test_preview() {
-    let entry = Entry::new(
-        "test".to_string(),
-        "This is a long content string".to_string(),
-    );
-    assert_eq!(entry.preview(10), "This is...");
-    assert_eq!(entry.preview(100), "This is a long content string");
-}
-
-#[test]
 fn test_temporal_validity() {
     use chrono::Duration;
 

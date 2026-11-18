@@ -115,7 +115,7 @@ fn test_sqlite_spec_store_list_approved() {
     store.init().expect("Failed to init store");
 
     // Create specs with different statuses
-    let draft = Spec {
+    let mut draft = Spec {
         id: store.generate_id().unwrap(),
         title: "Draft Spec".to_string(),
         status: SpecStatus::Draft,
@@ -153,6 +153,17 @@ fn test_sqlite_spec_store_list_approved() {
     // List all
     let all = store.list(None).expect("Failed to list all");
     assert_eq!(all.len(), 3);
+
+    draft.status = SpecStatus::Approved;
+    draft.approved_at = Some(chrono::Utc::now());
+    store.update(&draft).unwrap();
+    let approved_ids: std::collections::BTreeSet<_> = store
+        .list_approved()
+        .unwrap()
+        .into_iter()
+        .map(|spec| spec.id)
+        .collect();
+    assert_eq!(approved_ids, [draft.id, approved.id].into_iter().collect());
 }
 
 #[test]

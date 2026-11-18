@@ -626,6 +626,10 @@ mod tests {
         assert_eq!(promoted[0].id, epic.id);
         assert_eq!(promoted[0].deliverables.work_target.as_ref().unwrap().repo_selector, "project:freeze-test");
         assert_eq!(freeze_of(&promoted[0]).unwrap().tip, tip);
+        // Auto-cut waits for unfinished repairs; the fixture's repair has finished.
+        let mut repair = store.get("cas-fix").unwrap();
+        repair.status = cas_types::TaskStatus::Closed;
+        store.update(&repair).unwrap();
         // A frozen train cuts only on its train suite's green at the frozen tip.
         let dir = crate::train_ci::directory(&root, &epic.id).unwrap();
         std::fs::create_dir_all(&dir).unwrap();

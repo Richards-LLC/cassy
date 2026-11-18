@@ -809,18 +809,15 @@ export async function resolvePlaywright() {
     }
     return { playwright, version, source: 'node_modules' };
   } catch {
-    const explicit = process.env.PLAYWRIGHT_MODULE;
-    const binary = explicit || (() => {
+    const binary = (() => {
       try {
         return execFileSync('which', ['playwright'], { encoding: 'utf8' }).trim();
       } catch {
         return '';
       }
     })();
-    let packageDir = explicit && !explicit.endsWith('/.bin/playwright')
-      ? explicit
-      : binary ? join(dirname(binary), '..', 'playwright') : '';
-    let source = explicit ? 'PLAYWRIGHT_MODULE' : 'PATH';
+    let packageDir = binary ? join(dirname(binary), '..', 'playwright') : '';
+    let source = 'PATH';
     if (!packageDir || !existsSync(join(packageDir, 'package.json'))) {
       const cached = selectCachedPlaywright();
       packageDir = cached?.packageDir || '';

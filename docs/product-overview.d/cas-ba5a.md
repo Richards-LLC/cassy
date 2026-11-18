@@ -1,3 +1,3 @@
 ## Core Concepts
 
-Test-shape lint recognizes mock API error response inputs even when a scenario selector is named `source`. A narrow exemption covers literals on the exact `"error":` protocol key's line inside `.set_body_json(...)`; the general source-text and prose-pin detector retains its existing behavior, including shell source comparisons.
+Test-shape lint no longer treats a Rust loop variable that iterates only string literals (`for source in ["a", "b"]`, with no other binding in the file) as source text. A name bound to file text, or any shell or other-language source comparison, keeps the existing detection.

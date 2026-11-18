@@ -894,18 +894,18 @@ mod tests {
 
     #[tokio::test]
     async fn expired_session_reloads_login_and_retries_artifact_begin_once_cas_73d0() {
-        for source in ["stored", "environment", "missing", "invalid_environment", "rejected_retry", "foreign_endpoint", "server_error"] {
+        for source in ["stored", "environment", "missing", "invalid_environment", "rejected_retry", "foreign_endpoint", "server_error", "route_unauthorized", "retry_unauthorized"] {
             let server = MockServer::start().await;
             let foreign = MockServer::start().await;
-            let environment = matches!(source, "environment" | "invalid_environment" | "rejected_retry" | "foreign_endpoint" | "server_error");
-            let verify = environment && !matches!(source, "foreign_endpoint" | "server_error");
+            let environment = matches!(source, "environment" | "invalid_environment" | "rejected_retry" | "foreign_endpoint" | "server_error" | "route_unauthorized" | "retry_unauthorized");
+            let verify = environment && !matches!(source, "foreign_endpoint" | "server_error" | "route_unauthorized");
             let retry = source == "stored" || verify && source != "invalid_environment";
             let success = matches!(source, "stored" | "environment");
             let first_status = if source == "server_error" { 503 } else { 401 };
             Mock::given(method("POST")).and(path("/api/artifacts/begin"))
                 .and(header("Authorization", "Bearer expired-fixture"))
                 .respond_with(ResponseTemplate::new(first_status).set_body_json(serde_json::json!({
-                    "error":if first_status == 503 { "upstream_unavailable" } else { "Invalid API key" }})))
+                    "error":if first_status == 503 { "upstream_unavailable" } else if source == "route_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
                 .expect(1).mount(&server).await;
             if verify {
                 Mock::given(method("GET")).and(path("/api/sync/status"))
@@ -919,7 +919,8 @@ mod tests {
                     .and(header("Authorization", "Bearer rotated-fixture"))
                     .and(body_string_contains("cas-b72a"))
                     .respond_with(ResponseTemplate::new(if success { 200 } else { 401 }).set_body_json(serde_json::json!({
-                        "artifact_id":"cloud-refreshed", "upload_url":"https://storage.example/put"})))
+                        "artifact_id":"cloud-refreshed", "upload_url":"https://storage.example/put",
+                        "error":if source == "retry_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
                     .expect(1).mount(&server).await;
             }
             let endpoint = server.uri();
@@ -947,7 +948,7 @@ mod tests {
             if success { assert_eq!(result.unwrap().artifact_id, "cloud-refreshed"); }
             else {
                 let error = result.err().expect("authorization or upstream failure");
-                let code = if source == "server_error" { "upstream_unavailable" } else { "cloud_session_expired" };
+                let code = if source == "server_error" { "upstream_unavailable" } else if matches!(source, "route_unauthorized" | "retry_unauthorized") { "unauthorized" } else { "cloud_session_expired" };
                 assert!(error.to_string().contains(code), "{source}: {error}");
             }
             assert_eq!(server.received_requests().await.unwrap().len(), 1 + usize::from(verify) + usize::from(retry), "{source}");

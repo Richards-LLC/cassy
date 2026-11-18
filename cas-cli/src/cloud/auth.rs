@@ -74,12 +74,35 @@ fn expired() -> ureq::Error {
     )
 }
 
+// Cloud authentication returns this protocol error for invalid legacy keys and
+// expired/revoked read-only keys (Cloud lib/auth.ts). Other 401s belong to the
+// route, and must retain their original cause without attempting login recovery.
+fn classify_key_failure(
+    result: Result<ureq::Response, ureq::Error>,
+) -> (bool, Result<ureq::Response, ureq::Error>) {
+    let response = match result {
+        Err(ureq::Error::Status(401, response)) => response,
+        other => return (false, other),
+    };
+    let status_text = response.status_text().to_owned();
+    let body = match response.into_string() {
+        Ok(body) => body,
+        Err(error) => return (false, Err(error.into())),
+    };
+    let key_failure = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .is_some_and(|value| value["error"].as_str() == Some("Invalid API key"));
+    let response = ureq::Response::new(401, &status_text, &body)
+        .expect("valid buffered Cloud authorization response");
+    (key_failure, Err(ureq::Error::Status(401, response)))
+}
+
 fn send(
     request: ureq::Request,
     mut dispatch: impl FnMut(ureq::Request) -> Result<ureq::Response, ureq::Error>,
 ) -> Result<ureq::Response, ureq::Error> {
-    let result = dispatch(request.clone());
-    if !matches!(result, Err(ureq::Error::Status(401, _))) {
+    let (key_failure, result) = classify_key_failure(dispatch(request.clone()));
+    if !key_failure {
         return result;
     }
     let Some(original) = request
@@ -94,14 +117,12 @@ fn send(
     let Some(token) = recover_login(&endpoint, original) else {
         return Err(expired());
     };
-    // A 401 is a definite authentication rejection. Clone the request and retain
+    // The API key was rejected. Clone the request and retain
     // its body and operation IDs; transport failures and other statuses never retry here.
-    let result = dispatch(request.set("Authorization", &format!("Bearer {token}")));
-    if matches!(result, Err(ureq::Error::Status(401, _))) {
-        Err(expired())
-    } else {
-        result
-    }
+    let (key_failure, result) = classify_key_failure(dispatch(
+        request.set("Authorization", &format!("Bearer {token}")),
+    ));
+    if key_failure { Err(expired()) } else { result }
 }
 
 pub(crate) trait CloudRequestExt {

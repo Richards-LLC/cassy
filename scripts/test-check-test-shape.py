@@ -158,7 +158,7 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             (source.replace("'explicit');", "'Please' + ' try later');"), True),
             (source.replace("'explicit');", "'Please'.concat(' try later'));"), True),
             (source.replace("'explicit');", "'Please' /* marker */ + ' try later');"), True),
-            (source.replace("'explicit');", "/Please/);"), True),
+            (source.replace("'explicit');", "'explicit' // marker\n);"), False),
             (source.replace('marker', 'identity').replace('explicit', 'selected package'), True),
             (prose, True),
             (prose.replace('  assert.equal', '  child.stdout = runProduct().message;\n  assert.equal'), True),

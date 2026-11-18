@@ -148,3 +148,44 @@ fn ownership_walk_tokenizes_each_hunk_line_once_cas_0e29e() {
     assert!(tokenized > 0, "the ownership walk must run");
     assert!(tokenized <= 2 * LINES, "tokenized {tokenized} lines for one {LINES}-line hunk");
 }
+
+#[test]
+fn repeated_immutable_delivery_proof_avoids_git_spawns_cas_ac43() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("memoized-proof");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    std::fs::write(repo.join("owned.rs"), "fn value() { base() }\n").unwrap();
+    git(&["add", "owned.rs"]);
+    git(&["commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("owned.rs"), "fn value() { delivered() }\n").unwrap();
+    git(&["commit", "-qam", "fix(cas-ac43): delivery"]);
+    let anchor = git(&["rev-parse", "HEAD"]);
+    let proof = |target: &str| super::delivery_content_presence_on_target_for_paths(
+        &repo, &anchor, target, None, false, &["cas-ac43"], Some(&base));
+    let trace = repo.join("git.jsonl");
+    env.set("GIT_TRACE2_EVENT", &trace);
+    let first = proof(&anchor);
+    let count = || std::fs::read_to_string(&trace).unwrap().lines().filter(|line|
+        serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "start").count();
+    let before = count();
+    let repeated = proof(&anchor);
+    let extra = count() - before;
+    env.remove("GIT_TRACE2_EVENT");
+    assert_eq!(first, repeated);
+    assert!(before > 0);
+    assert_eq!(extra, 0, "immutable repeated proof spawned {extra} Git children");
+    // Advancing the target must not reuse the old answer.
+    git(&["revert", "--no-edit", &anchor]);
+    let reverted = git(&["rev-parse", "HEAD"]);
+    assert!(matches!(proof(&reverted), SomePresence @ super::DeliveryContentPresence::Dropped { .. }
+        if SomePresence != first));
+}

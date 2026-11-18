@@ -237,7 +237,7 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, mut proof: Proof)
     let receipt = CheckReceipt {
         head: head.into(), repo: repo.canonicalize()?, packages: Vec::new(),
         test: Some(TestReceipt { filter: selection.filter, harness: None,
-            count: proof.tests.len() as u64, stability: Some(proof), widened: None, selected_log: None,
+            count: proof.tests.len() as u64, stability: Some(proof), widened: None, lane: None, selected_log: None,
             host_path_opt_out: None, supervisor_recorded: None }),
     };
     std::fs::create_dir_all(path.parent().context("receipt directory")?)?;

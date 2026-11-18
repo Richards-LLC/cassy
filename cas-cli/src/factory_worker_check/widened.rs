@@ -62,7 +62,7 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, proof: Proof, cou
     let path = test_receipt_path(cas_root, &repo.canonicalize()?, head, &selection);
     let receipt = CheckReceipt { head: head.into(), repo: repo.canonicalize()?, packages: Vec::new(),
         test: Some(TestReceipt { filter: selection.filter, harness: None, count, stability: None,
-            widened: Some(proof), selected_log: None, host_path_opt_out: None, supervisor_recorded: None }) };
+            widened: Some(proof), lane: None, selected_log: None, host_path_opt_out: None, supervisor_recorded: None }) };
     std::fs::create_dir_all(path.parent().context("widened receipt directory")?)?;
     std::fs::write(path, serde_json::to_vec(&receipt)?)?;
     Ok(())

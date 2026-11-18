@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 pub(crate) mod stability;
 pub(crate) mod widened;
+pub(crate) mod lane;
 pub(crate) mod javascript;
 
 #[cfg(unix)]
@@ -134,6 +135,8 @@ struct TestReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     widened: Option<widened::Proof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    lane: Option<lane::Proof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_log: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
@@ -192,6 +195,9 @@ impl TestReceipt {
         }
         if let Some(proof) = &self.widened {
             note.push_str(&format!(" [widened: {:?}; runner={}; passes=1]", proof.scope, proof.runner));
+        }
+        if let Some(proof) = &self.lane {
+            note.push_str(&format!(" [lane impact: {} plan, one capped pass of lane CI's own selection]", proof.mode));
         }
         note
     }
@@ -358,7 +364,7 @@ fn admission_refusal(args: &[String]) -> &'static str {
 }
 
 pub(crate) fn allowed_args(args: &[String]) -> bool {
-    check_packages(args).is_some() || targeted_test(args).is_some() || javascript::allowed_args(args)
+    check_packages(args).is_some() || targeted_test(args).is_some() || lane::requested(args) || javascript::allowed_args(args)
 }
 
 /// Use the same explicit [[test]] name/path inventory as cas-test-targets.py;
@@ -642,6 +648,7 @@ pub(crate) fn record_supervisor_test(
             count,
             stability,
             widened: None,
+            lane: None,
             selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
@@ -1159,6 +1166,7 @@ impl<'a> PassingTests<'a> {
                         count: synced.count,
                         stability: None,
                         widened: None,
+            lane: None,
                         selected_log: None,
                         host_path_opt_out: None,
                         supervisor_recorded: None,
@@ -1788,6 +1796,7 @@ pub(crate) fn record_passing_test_for_tests(
             count: 1,
             stability: None,
                         widened: None,
+            lane: None,
             selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
@@ -2367,6 +2376,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
+        None if lane::requested(args) => Vec::new(),
         None => check_packages(args).with_context(|| admission_refusal(args))?,
     };
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
@@ -2384,8 +2394,16 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         validate_harness(&repo, test)?;
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
+    let lane = if lane::requested(args) {
+        Some(lane::select(&repo, &proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)?)
+    } else { None };
+    let test = match &lane {
+        Some(lane) => Some(lane.targeted()),
+        None => test,
+    };
     let mut widened_proof = None;
-    let owned_tests = if let Some(test) = &test {
+    // Lane CI's selection spans many files; park's per-test stability stays a separate named run.
+    let owned_tests = if let Some(test) = test.as_ref().filter(|_| lane.is_none()) {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         match stability::rust::selected_inputs(&repo, &base, &head, test) {
             Ok((tests, uncertain)) => {
@@ -2431,6 +2449,13 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
+    }
+    for path in lane.iter().flat_map(|lane| lane.receipt_paths(&cas_root, &repo, &head)) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
     let live_headful = live_headful_mode(test.as_ref(), isolated_test_env, host_path_opt_out.as_deref())?;
@@ -2583,7 +2608,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
     }
-    let mut cargo_args = if widened_proof.is_some() {
+    let mut cargo_args = if let Some(lane) = &lane {
+        lane.args()
+    } else if widened_proof.is_some() {
         // Scope matching uses the crate name; Cargo retains the caller's
         // version selector so duplicate names still resolve to the right crate.
         let package = &test.as_ref().expect("widened targeted test").package;
@@ -2593,7 +2620,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         cargo_args.extend(["--success-output".into(), "immediate".into()]);
     }
     // An omitted harness means library tests; do not build every test binary.
-    if test.as_ref().is_some_and(|test| test.harness.is_none())
+    if lane.is_none() && test.as_ref().is_some_and(|test| test.harness.is_none())
         && cargo_args.get(4).is_some_and(|arg| arg == "-E")
     {
         cargo_args.insert(4, "--lib".into());
@@ -2681,16 +2708,27 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     if clean_head(&repo)? != head {
         bail!("Worker tree changed during check; no PASS receipt recorded");
     }
+    let verified_count = |count_file: &Path| -> Result<u64> {
+        let count: u64 = std::fs::read_to_string(count_file)
+            .context("missing verified-test count")?
+            .trim()
+            .parse()?;
+        std::fs::remove_file(count_file)?;
+        if count == 0 {
+            bail!("Worker test executed zero tests; no PASS receipt recorded");
+        }
+        Ok(count)
+    };
+    if let Some(lane) = &lane {
+        let count = verified_count(&count_file)?;
+        lane::record(&cas_root, &repo, &head, lane, count, selected_log)?;
+        println!("lane-impact: PASS {head} {} plan, {count} tests in {:.1}s; covers {}", lane.proof.mode,
+            started.elapsed().as_secs_f64(), lane.packages.join(","));
+        return Ok(());
+    }
     let test_record = match test {
         Some(test) => {
-            let count: u64 = std::fs::read_to_string(&count_file)
-                .context("missing verified-test count")?
-                .trim()
-                .parse()?;
-            std::fs::remove_file(&count_file)?;
-            if count == 0 {
-                bail!("Worker test executed zero tests; no PASS receipt recorded");
-            }
+            let count = verified_count(&count_file)?;
             Some(TestReceipt {
                 filter: test.filter,
                 harness: test.harness,
@@ -2701,6 +2739,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                     elapsed_ms: started.elapsed().as_millis(),
                 }),
                 widened: widened_proof,
+                lane: None,
                 selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,

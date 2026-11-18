@@ -639,7 +639,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_peer_at_worker_cap_is_not_routed_cas_a92f() {
         let server = MockServer::start().await;
-        let env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
         let (root, mut sender) = failed_route_fixture(&server, env.home()).await;
         server.reset().await;
         let mut full = peer("best", 1, 17.64, 0);
@@ -665,9 +666,23 @@ mod tests {
         worker.id = "foreign-row".into(); worker.name = "foreign-row".into();
         worker.pid = Some(std::process::id()); worker.machine_id = Some("other-machine".into());
         agents.register(&worker).unwrap();
+        let user = env.home().join(".cas");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(user.join("config.toml"), "[factory]\nmax_workers = 20\n").unwrap();
+        let mut config = crate::config::Config::load(&root).unwrap();
+        config.factory.get_or_insert_with(Default::default).max_workers = Some(2);
+        config.save(&root).unwrap();
         publish_capacity(&root, &mut sender);
         let sample: serde_json::Value = serde_json::from_str(&sender.metadata[CAPACITY_META]).unwrap();
-        assert_eq!(sample["live_workers"], 1); assert_eq!(sample["max_workers"], 8);
+        assert_eq!(sample["live_workers"], 1);
+        assert_eq!(sample["max_workers"], 20);
+        assert_eq!(sample["free_slots"], 1);
+        worker.id = "last-local-slot".into(); worker.name = "last-local-slot".into();
+        worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        agents.register(&worker).unwrap();
+        publish_capacity(&root, &mut sender);
+        let sample: serde_json::Value = serde_json::from_str(&sender.metadata[CAPACITY_META]).unwrap();
+        assert_eq!(sample["free_slots"], 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1352,7 +1352,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks, supervisor_override, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
-                let core = crate::mcp::CasCore::supervisor_cli_core(root);
+                let core = supervisor_cli_core(root);
                 let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()), *supervisor_override, reason.as_deref())?;
                 crate::gates::facts::observe_cli_output(root, &receipt);
                 if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
@@ -1361,7 +1361,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::Train { command: TrainCommand::Drop { tasks, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train drop requires a Cassy project"))?;
-                let core = crate::mcp::CasCore::supervisor_cli_core(root);
+                let core = supervisor_cli_core(root);
                 let queue = crate::train_guardrails::GhTrainQueue(
                     root.parent().unwrap_or(root).to_path_buf(),
                 );

@@ -483,6 +483,20 @@ refuse_cut() {
     die "$2"
 }
 
+# cas-7971: the green frozen-train run already built this tip's CLI
+# (preflight-cli, produced by the receipt's own preflight job). The release
+# commit adds only version and release files, so that binary previews and
+# tracks the cut with no local build. Any miss falls through to the prebuild
+# lookup and the local build; a missing or red receipt never reaches here.
+train_receipt_cli() {
+    local dir="$1" producer
+    producer="$(jq -r '[.job_receipts[]? | select(.job == "fast-validation-preflight") | .producer_run][0] // empty' \
+        <<<"$train_receipt" 2>/dev/null)" || return 1
+    [[ "$producer" =~ ^[0-9]+$ ]] || return 1
+    "$gh_bin" run download "$producer" --name preflight-cli --dir "$dir" >&2 || return 1
+    chmod +x "$dir/cas" && "$dir/cas" --version >/dev/null
+}
+
 # Evaluate with the release commit's code before any push, enqueue or freeze.
 # Do not wait for a queue prebuild that this cut has not admitted yet.
 preview_cut() {
@@ -499,9 +513,12 @@ preview_cut() {
     local candidate_dir
     candidate_dir="$(git rev-parse --path-format=absolute --git-path "cas/cut-preview/$sha")"
     mkdir -p "$candidate_dir"
-    lookup="$(RELEASE_PREBUILD_WAIT_SECONDS=0 RELEASE_PREBUILD_PLATFORM=linux \
+    lookup=''
+    train_receipt_cli "$candidate_dir" || lookup="$(RELEASE_PREBUILD_WAIT_SECONDS=0 RELEASE_PREBUILD_PLATFORM=linux \
         "$script_dir/find-release-prebuild.sh" "$sha")"
-    if grep -qx 'found=true' <<<"$lookup"; then
+    if [[ -z "$lookup" ]]; then
+        candidate="$candidate_dir/cas"
+    elif grep -qx 'found=true' <<<"$lookup"; then
         run_id="$(sed -n 's/^run-id=//p' <<<"$lookup")"
         "$gh_bin" run download "$run_id" --name cas-x86_64-unknown-linux-gnu --dir "$candidate_dir"
         tar -xzf "$candidate_dir/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$candidate_dir" cas
@@ -598,6 +615,7 @@ fi
 fetch_base
 train_base="$(git merge-base "$remote/$base" HEAD)"
 first_child="$(git log --format=%H --no-merges "$train_base..HEAD" | tail -1)"
+train_receipt=''
 # The starting train tip, before version preparation, must already have its
 # CI suite receipt. The queue alone proves the subsequent release commit.
 if [[ "$branch" == epic/release-train-* ]]; then
@@ -608,8 +626,8 @@ if [[ "$branch" == epic/release-train-* ]]; then
     if prior_ci_start="$(python3 "$script_dir/train-ci.py" prepared --repo "$repo_root")"; then
         train_ci_start="$prior_ci_start"
     fi
-    python3 "$script_dir/train-ci.py" check --repo "$repo_root" --branch "$branch" --head "$train_ci_start" --gh "$gh_bin" \
-        || die "train full-set receipt is not green; no release commit was prepared"
+    train_receipt="$(python3 "$script_dir/train-ci.py" check --repo "$repo_root" --branch "$branch" --head "$train_ci_start" --gh "$gh_bin")" \
+        || { printf '%s\n' "$train_receipt" >&2; die "train full-set receipt is not green; no release commit was prepared"; }
 else
     say "no train receipt: the merge queue will run the full check set"
 fi

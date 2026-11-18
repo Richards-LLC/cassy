@@ -44,7 +44,9 @@ case "$1 $2" in
   "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
-  "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
+  "run download")
+    if [[ " $* " == *" --name preflight-cli "* ]]; then cp -R "${FAKE_PREFLIGHT_CLI:?}/." "${@: -1}"
+    else cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}"; fi ;;
   "api -X")
     case "$4" in
       */pulls?*) echo '[]' ;;
@@ -66,6 +68,7 @@ cat >"$tmp/bin/cas" <<'EOF'
 printf '%s\n' "$*" >>"${FAKE_CAS_LOG:?}"
 [[ "$1" == release ]] && printf 'CAS_ROOT=%s release %s\n' "${CAS_ROOT:-}" "$2" >>"$FAKE_CAS_LOG"
 case "$1 $2" in
+  "--version "*) echo 'cas 9.99.0' ;;
   "release context")
     case "${FAKE_CONTEXT_MODE:-}" in
       no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
@@ -612,10 +615,15 @@ train_receipt_cut() {
     write_valid_draft "$tmp/train-ci-notes.md"
     before="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$tmp/train-ci-artifact"
+    mkdir -p "$tmp/preflight-cli"
+    printf '#!/usr/bin/env bash\nprintf "preflight-cli %%s\\n" "$*" >>"$FAKE_CAS_LOG"\nexec "%s" "$@"\n' "$tmp/bin/cas" >"$tmp/preflight-cli/cas"
+    export FAKE_PREFLIGHT_CLI="$tmp/preflight-cli"
     export FAKE_TRAIN_ARTIFACT="$tmp/train-ci-artifact" FAKE_TRAIN_RUN="$tmp/train-ci-run.json" FAKE_TRAIN_LOG_ZIP="$tmp/train-ci-logs.zip"
     echo '{"workflow_runs":[]}' >"$FAKE_TRAIN_RUN"
+    : >"$FAKE_CAS_LOG"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || status=$?
-    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        ! grep -q '^qa candidate build ' "$FAKE_CAS_LOG" || return 1
     python3 - "$before" "$fixture" <<'PY'
 import json, os, pathlib, subprocess, sys, zipfile
 head=sys.argv[1]
@@ -625,6 +633,7 @@ jobs={name:'success' for name in ('fast-validation-preflight','fast-validation-c
 receipt={'schema':2,'scope':'full-set','head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','failures':[],
          'tree':subprocess.check_output(['git','-C',repo,'rev-parse','HEAD^{tree}'],text=True).strip(),
          'main_baseline':subprocess.check_output(['git','-C',repo,'rev-parse','origin/main'],text=True).strip(),
+         'job_receipts':[{'scope':'job','job':'fast-validation-preflight','producer_run':'456','outcome':'PASS'}],
          'required_jobs':list(jobs),'jobs':jobs,'checks':{'gate':'success','repair-publication':'success'},'elapsed_seconds':12,'journeys_required':False,'bridge_required':False}
 json.dump(receipt,open(pathlib.Path(os.environ['FAKE_TRAIN_ARTIFACT'])/'receipt.json','w'))
 with zipfile.ZipFile(os.environ['FAKE_TRAIN_LOG_ZIP'],'w') as archive: archive.writestr('full.log','Complete fixture log')
@@ -644,9 +653,14 @@ PY
     git -C "$fixture" add .claude/CODEMAP.md
     git -C "$fixture" commit --quiet -m 'CODEMAP-only follow-up to green train'
     before="$(git -C "$fixture" rev-parse HEAD)"
+    : >"$FAKE_CAS_LOG"
     run "$fixture" --no-watch --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
+    # cas-7971: a green receipt supplies the cut's CLI; no local candidate build.
+    ! grep -q '^qa candidate build ' "$FAKE_CAS_LOG" &&
+        grep -q '^preflight-cli release preview ' "$FAKE_CAS_LOG" &&
+        grep -q '^preflight-cli release track ' "$FAKE_CAS_LOG" || return 1
     # There is deliberately no Y run/artifact: retry must fetch X again.
     rm -rf "$fixture/.git/cas/train-ci"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
@@ -666,7 +680,7 @@ PY
     [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]]
 }
 check 'train_receipt_cut' 'train cut reuses green proof after CODEMAP-only work and prepared retries; source requires fresh proof'
-unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
+unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP FAKE_PREFLIGHT_CLI
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
 frozen_train_alias() {

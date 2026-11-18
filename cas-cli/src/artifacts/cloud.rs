@@ -892,6 +892,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_session_reloads_login_and_retries_artifact_begin_once_cas_73d0() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+            .and(header("Authorization", "Bearer expired-fixture"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({"error":"Invalid API key"})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+            .and(header("Authorization", "Bearer rotated-fixture"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id":"cloud-refreshed", "upload_url":"https://storage.example/put"})))
+            .expect(1).mount(&server).await;
+        let endpoint = server.uri();
+        let begun = tokio::task::spawn_blocking(move || {
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
+            let cas_root = env.home().join("project/.cas");
+            std::fs::create_dir_all(&cas_root).unwrap();
+            let user_config = env.home().join(".cas/cloud.json");
+            env.set("CAS_ROOT", &cas_root);
+            env.set("CAS_USER_CLOUD_JSON", &user_config);
+            crate::cloud::CloudConfig { endpoint:endpoint.clone(), token:Some("rotated-fixture".into()),
+                ..Default::default() }.save_user().unwrap();
+            // The client was constructed before another process renewed the stored login.
+            ArtifactUploadClient::new(&endpoint, "expired-fixture").begin(&begin_request())
+        }).await.unwrap().expect("the expired request must recover through the current stored login");
+        assert_eq!(begun.artifact_id, "cloud-refreshed");
+    }
+
+    #[tokio::test]
     async fn the_three_steps_succeed_and_the_bearer_never_reaches_the_object_store() {
         let server = MockServer::start().await;
         let upload_url = format!("{}/object/put?X-Amz-Signature=deadbeef", server.uri());

@@ -6728,7 +6728,17 @@ impl CasCore {
         parked.pending_worktree_merge = false;
         parked.updated_at = now;
 
-        let audit = audit::parked_note(now, reason);
+        let mut audit = audit::parked_note(now, reason);
+        // Snapshot the same authenticated owner used for delivery dispatch.
+        // Measurement is best effort and never changes park admission.
+        let owner_machine = (|| {
+            let agents = self.open_agent_store().ok()?;
+            let worker = agents.get(&self.get_registered_agent_id_read_only().ok()?).ok()?;
+            let owner = super::supervisor_push::resolve_worker_supervisor(
+                agents.as_ref(), worker.factory_session.as_deref())?;
+            agents.get(&owner.agent_id).ok()?.machine_id
+        })();
+        if let Some(machine) = owner_machine { audit.push_str(&format!(" merge_owner_machine={machine}")); }
         parked.notes = if parked.notes.is_empty() {
             audit
         } else {

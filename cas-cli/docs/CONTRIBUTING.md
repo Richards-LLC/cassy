@@ -5255,6 +5255,31 @@ stage totals retain their release-time window; the dated review rows show the
 complete retained history of those deliveries. Wakes are also grouped by the
 authenticated queue notice kind. A missing stamp remains unknown.
 
+Release friction sensors are also present in text and JSON (`sensors`). Online
+reports paginate Actions runs/jobs plus failed-job annotations/logs, retaining
+confirmed hosted runner communication losses and exit-143 shutdown evidence by
+job and runner labels. Failed/cancelled conclusions alone are not runner losses.
+GitHub captures are retained in `.cas/ledger-sensors/`; `--offline` reuses a
+matching capture and names missing inputs. Capture time and covered interval
+remain visible. Actions and project issue repositories resolve separately.
+Daily issue counts use UTC days, exclude pull requests, count opens and the
+retained `closed_at` snapshot, and divide agent-labelled/signed opens by all
+opens. Reopened issues have no retained closure timestamp; these snapshots do
+not reconstruct every historical close/reopen event.
+
+Park-to-train-merge cohorts use first parks in `[start, end)`, earliest canonical
+park notes refined by authenticated lifecycle relay timestamps, and the first
+subsequent `epic/*` merge observation (including merges after the cohort end).
+Reparks count once. Median is the usual midpoint; p90 is nearest rank
+`ceil(0.9*n)`. Unmatched parks remain right-censored at capture. This is the
+original baseline definition, distinct from commit-to-main latency. The local
+retained store is the coverage boundary; missing remote history is not inferred.
+`--park-visibility-minutes N` (default ten) measures cross-machine observation
+delay without affecting gates. New park and sync notes retain origin, owner and
+observer machines/timestamps; older rows without these facts remain unknown.
+No retained owner observation by capture is censored, not proof of loss.
+
+
 `cas ledger backfill` reuses the existing verdict and native-turn readers.
 Immutable legacy rows receive detail companions; aggregation suppresses their
 superseded metrics, so replay does not add another check or wake. Historical

@@ -7,12 +7,14 @@ use anyhow::{Context, Result, bail};
 use cas_store::{CheckOutcome, FeedbackSource, FeedbackVerdict, QualityEvent, QualityPayload};
 use chrono::{DateTime, Duration, Local, Utc};
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::Cli;
 
 #[path = "ledger_scorers.rs"]
 mod scorers;
+#[path = "ledger_sensors.rs"]
+mod sensors;
 
 #[derive(Args)]
 pub struct LedgerArgs {
@@ -30,6 +32,9 @@ enum LedgerCommand {
         /// Read local rows only; do not pull from Cloud first
         #[arg(long)]
         offline: bool,
+        /// Measurement deadline for cross-machine park visibility (never a gate).
+        #[arg(long, default_value_t = 10)]
+        park_visibility_minutes: u32,
     },
     /// Turn history already on disk into events, including filed Cassy problems (safe to rerun)
     Backfill {
@@ -67,12 +72,16 @@ enum LedgerCommand {
 
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
     match &args.command {
-        LedgerCommand::Report { release, offline } => {
+        LedgerCommand::Report { release, offline, park_visibility_minutes } => {
             if !offline {
                 pull_before_report(cas_root);
             }
             let repo = cas_root.parent().unwrap_or(cas_root);
-            let report = build_report(cas_root, repo, release.as_deref())?;
+            let mut report = build_report(cas_root, repo, release.as_deref())?;
+            if *park_visibility_minutes != 10 {
+                report.sensors = sensors::local(cas_root, report.from, report.to, *park_visibility_minutes);
+            }
+            sensors::external(cas_root, report.from, report.to, *offline, &mut report.sensors);
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -222,7 +231,7 @@ fn commit_to_main_minutes(repo: &Path, tag: &str) -> Option<f64> {
 
 /// A measured value, or the reason it could not be measured. Missing data is
 /// never reported as zero.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Measure<T> {
     Known(T),
@@ -733,6 +742,7 @@ struct LedgerReport {
     projects: Vec<String>,
     turns: TurnTotals,
     turns_by_notice_kind: BTreeMap<String, TurnTotals>,
+    wake_classification_missing_inputs: BTreeMap<String, usize>,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
     /// Turns per supervisor (its agent id), then per wake channel.
     turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
@@ -746,6 +756,7 @@ struct LedgerReport {
     reviews: Vec<DeliveryReviews>,
     /// Rubric scorers with cited hits (cas-a5eb); measurement only.
     scorers: Vec<scorers::Scorer>,
+    sensors: sensors::Sensors,
     intervention_rows: Vec<InterventionRow>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
@@ -843,6 +854,21 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         .is_some_and(|task| reviewed.contains(&(project_name(e), task.clone())))).cloned().collect();
     report.reviews = review_rows(&reviews);
     report.scorers = scorers::score(cas_root, repo, &report);
+    report.sensors = sensors::local(cas_root, report.from, report.to, 10);
+    let actors = crate::store::open_agent_store(cas_root).ok().and_then(|s| s.list(None).ok());
+    let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
+        QualityPayload::Turn { supersedes, .. } => supersedes.as_ref().map(|id| (e.project_id.clone(), id.clone())), _ => None,
+    }).collect();
+    for e in &events {
+        if superseded.contains(&(e.project_id.clone(), e.id.clone())) { continue }
+        if matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if notice_kind.as_ref()
+            .is_none_or(|kind| kind == "unknown" || kind.bytes().all(|b| b.is_ascii_digit()))) {
+            let reason = if actors.as_ref().is_none_or(|rows| !rows.iter().any(|a| e.actor.as_deref() == Some(a.id.as_str()))) {
+                "actor_identity_not_retained"
+            } else { "notice_kind_not_recovered_from_retained_inputs" };
+            *report.wake_classification_missing_inputs.entry(reason.into()).or_default() += 1;
+        }
+    }
     let published_at = published
         .then(|| cas_store::quality_release_events(cas_root))
         .transpose()?
@@ -985,6 +1011,7 @@ fn aggregate(
         projects: Vec::new(),
         turns: TurnTotals::default(),
         turns_by_notice_kind: BTreeMap::new(),
+        wake_classification_missing_inputs: BTreeMap::new(),
         turns_by_channel: BTreeMap::new(),
         turns_by_actor: BTreeMap::new(),
         deliveries: unknown("no merge record read"),
@@ -992,6 +1019,7 @@ fn aggregate(
         changes: unknown("no repository read"),
         reviews: review_rows(events),
         scorers: Vec::new(),
+        sensors: sensors::Sensors::default(),
         intervention_rows: Vec::new(),
         interventions_total: 0,
         interventions: BTreeMap::new(),
@@ -1295,6 +1323,9 @@ fn render(report: &LedgerReport) -> String {
     for (kind, row) in &report.turns_by_notice_kind {
         let _ = writeln!(out, "  notice {kind}: {} wakes, {} no-op", row.wakes, row.no_op_wakes);
     }
+    for (input, count) in &report.wake_classification_missing_inputs {
+        let _ = writeln!(out, "    unknown input {input}: {count} wakes");
+    }
     let _ = writeln!(out, "\nDelivery review history");
     for row in &report.reviews {
         let _ = writeln!(out, "  {} {}: {} rounds", row.task, row.cycle_id.as_deref().unwrap_or("cycle unknown"), row.rounds.len());
@@ -1381,6 +1412,8 @@ fn render(report: &LedgerReport) -> String {
         let cohort = serde_json::to_value(row.cohort).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         let _ = writeln!(out, "  {} {cohort} {} {}: {}", row.project, row.stage, row.check_id, counts(&row.row));
     }
+
+    sensors::render(&mut out, &report.sensors);
 
     let estimates=&report.estimates;
     let _ = writeln!(out,"\nEstimates: {} completed, {} hits, {} misses, {} below typical",

@@ -32315,6 +32315,77 @@ esac
         );
     }
 
+    #[tokio::test]
+    async fn shipped_anchor_closes_without_replaying_park_paperwork_cas_4cbf() {
+        use crate::mcp::CasService;
+        use cas_types::{Agent, AgentRole, FactoryBranchStart, WorkTarget};
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(repo, &["add", ".gitignore"]);
+        git(repo, &["commit", "-qm", "base"]);
+        let base = rev_parse_local(repo, "HEAD");
+        std::fs::write(repo.join("release.rs"), "fn shipped() {}\n").unwrap();
+        git(repo, &["add", "release.rs"]);
+        git(repo, &["commit", "-qm", "fix(cas-4cbf1): shipped implementation"]);
+        let shipped = rev_parse_local(repo, "HEAD");
+        git(repo, &["update-ref", "refs/remotes/origin/main", &shipped]);
+        git(repo, &["checkout", "-qb", "unshipped"]);
+        std::fs::write(repo.join("pending.rs"), "fn pending() {}\n").unwrap();
+        git(repo, &["add", "pending.rs"]);
+        git(repo, &["commit", "-qm", "new unshipped cycle"]);
+        let unshipped = rev_parse_local(repo, "HEAD");
+        git(repo, &["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id='shipped-close-fixture'\n[verification]\nenabled=false\n").unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", repo);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let _cwd = env.enter_dir(repo);
+        let actor = "shipped-close-supervisor";
+        crate::store::open_agent_store(&root).unwrap().register(&Agent::new_with_role(
+            actor.into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        for (index, case) in ["shipped", "unshipped", "retired", "new-cycle", "foreign-receipt"].into_iter().enumerate() {
+            let id = format!("cas-4cbf{}", index + 1);
+            let mut task = worker_task("retired-peer-worker");
+            task.id = id.clone();
+            task.status = TaskStatus::AwaitingMerge;
+            task.task_type = TaskType::Bug;
+            task.risk = vec![TaskRisk::None];
+            task.origin_project = Some("shipped-close-fixture".into());
+            task.worktree_id = Some("retired-peer-worktree".into());
+            let target = WorkTarget { repo_selector: "project:shipped-close-fixture".into(), target_branch: "main".into() };
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+                work_target: target, branch: "factory/retired-peer-worker".into(), assignee: "retired-peer-worker".into(),
+                base_sha: if case == "new-cycle" { unshipped.clone() } else { base.clone() },
+            });
+            task.deliverables.factory_branch_anchor = (case != "retired").then(||
+                if case == "unshipped" { unshipped.clone() } else { shipped.clone() });
+            if case == "retired" { task.deliverables.historical_factory_branch_anchors.push(shipped.clone()); }
+            store.add(&task).unwrap();
+            cas_store::create_verification_dispatch_bound(&root, &id, "task-verifier", actor,
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+            cas_store::timeout_verification_dispatch(&root, &id,
+                chrono::Utc::now() + chrono::Duration::hours(2)).unwrap();
+            let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"close", "id":id, "reason":"shipped delivery ancestry proof",
+                "commit_receipt":if case == "foreign-receipt" { &base } else if case == "unshipped" { &unshipped } else { &shipped },
+            })).unwrap())).await.unwrap();
+            let closes = case == "shipped";
+            assert_eq!(response.is_error == Some(true), !closes, "{case}: {response:?}");
+            assert_eq!(store.get(&id).unwrap().status == TaskStatus::Closed, closes, "{case}");
+        }
+    }
+
     /// cas-4b22 (GH #1513): a delivery already shipped by a merged PR closes
     /// through one supervisor override with its merge SHA. A blocker whose
     /// own delivery is on its target no longer holds the close, and the

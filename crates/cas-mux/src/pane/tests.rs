@@ -745,17 +745,21 @@ mod cases {
         assert!(before > 0, "the stand-in must print its ready banner");
 
         let payload = "Message from supervisor: cas-ac97 assignment that never becomes a turn";
-        rt.block_on(pane.inject_prompt(payload))
+        let receipt = rt.block_on(async { pane.inject_prompt_tracked(payload) })
             .expect("inject into an idle pane");
 
-        // Past the Codex 500ms submit settle, draining like the daemon poll.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        // Observe the real submit receipt and echoed bytes, not a guessed settle.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut echoed = Vec::new();
         while std::time::Instant::now() < deadline {
             let (bytes, _) = pane.drain_output();
             echoed.extend_from_slice(&bytes);
+            if receipt.result().is_some() && pane.bytes_received() - before >= payload.len() as u64 {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(matches!(receipt.result(), Some(Ok(()))), "physical payload and submit completion");
         let after = pane.bytes_received();
         eprintln!(
             "[cas-ac97] bytes_received before={before} after={after} delta={} echoed={:?}",

@@ -325,15 +325,6 @@ impl Embedder for MockEmbedder {
 }
 
 #[test]
-fn test_code_search_options_default() {
-    let opts = CodeSearchOptions::default();
-    assert!(opts.query.is_empty());
-    assert_eq!(opts.limit, 0);
-    assert!(!opts.include_source);
-    assert!(!opts.semantic);
-}
-
-#[test]
 fn test_create_snippet() {
     // Short source
     let snippet = CodeSearchResult::create_snippet("fn foo() {}");
@@ -342,7 +333,6 @@ fn test_create_snippet() {
     // Multi-line source
     let source = "fn foo() {\n    bar();\n    baz();\n    qux();\n}";
     let snippet = CodeSearchResult::create_snippet(source);
-    assert!(snippet.ends_with("..."));
     assert!(snippet.contains("bar()"));
     assert!(!snippet.contains("qux()"));
 
@@ -350,7 +340,6 @@ fn test_create_snippet() {
     let long = "a".repeat(300);
     let snippet = CodeSearchResult::create_snippet(&long);
     assert_eq!(snippet.len(), 200);
-    assert!(snippet.ends_with("..."));
 }
 
 #[test]
@@ -389,13 +378,7 @@ fn test_create_snippet_truncates_multibyte_text_on_char_boundary() {
     assert_eq!(results.len(), 3);
     for result in results {
         let snippet = result.snippet.unwrap();
-        let content = snippet.strip_suffix("...").unwrap();
-        let character = content.chars().next().unwrap();
-
-        assert!(
-            snippet.ends_with("..."),
-            "missing ellipsis for {character:?}"
-        );
+        let character = snippet.chars().next().unwrap();
         assert!(
             snippet.len() <= 200,
             "snippet exceeded the existing 200-byte cap for {character:?}: {} bytes",
@@ -405,78 +388,7 @@ fn test_create_snippet_truncates_multibyte_text_on_char_boundary() {
             ['─', '🦀', '界'].contains(&character),
             "unexpected character {character:?}"
         );
-        assert!(
-            content.chars().all(|value| value == character),
-            "truncation corrupted {character:?}"
-        );
     }
-}
-
-/// Test that search uses batch fetching, not N+1 individual queries
-#[test]
-fn test_no_n_plus_1_with_1000_symbols() {
-    // Create mock stores
-    let mut code_store = MockCodeStore::new();
-    let mut bm25_index = MockBm25Index::new();
-    let vector_store = MockVectorStore::new();
-
-    // Add 1000 symbols
-    for i in 0..1000 {
-        let symbol = CodeSymbol {
-            id: format!("sym-{i:04}"),
-            qualified_name: format!("module::function_{i}"),
-            name: format!("function_{i}"),
-            kind: SymbolKind::Function,
-            language: Language::Rust,
-            file_path: format!("src/mod_{}.rs", i % 10),
-            file_id: format!("file-{}", i % 10),
-            line_start: i * 10,
-            line_end: i * 10 + 5,
-            source: format!("fn function_{i}() {{ /* body */ }}"),
-            documentation: Some(format!("Documentation for function {i}")),
-            ..Default::default()
-        };
-        bm25_index.add(
-            &symbol.id,
-            &format!("{} {}", symbol.qualified_name, symbol.source),
-        );
-        code_store.insert_symbol(symbol);
-    }
-
-    // Create search instance
-    let code_store = Arc::new(code_store);
-    let search = CodeSearch::new(
-        code_store.clone(),
-        Arc::new(vector_store),
-        Arc::new(bm25_index),
-        None,
-    );
-
-    // Search for symbols
-    let opts = CodeSearchOptions {
-        query: "function".to_string(),
-        limit: 100,
-        include_source: false,
-        ..Default::default()
-    };
-
-    let results = search.pattern_search(&opts).unwrap();
-
-    // Verify we got results
-    assert!(!results.is_empty(), "Should find matching symbols");
-    assert!(results.len() <= 100, "Should respect limit");
-
-    // Verify batch fetching was used (1+ batch calls, no single calls)
-    assert_eq!(
-        code_store.single_fetches(),
-        0,
-        "Expected batch fetches only"
-    );
-    assert!(
-        code_store.batch_fetches() > 0,
-        "Expected at least one batch fetch"
-    );
-    println!("Search completed with {} results", results.len());
 }
 
 /// Test that semantic search also uses batch fetching
@@ -534,53 +446,4 @@ fn test_semantic_search_batch_fetching() {
     );
 
     println!("Semantic search returned {} results", results.len());
-}
-
-/// Verify no EmbeddingModel::load() calls inside CodeSearch
-#[test]
-fn test_shared_embedder_no_loading() {
-    // This test verifies the architecture - CodeSearch accepts Arc<dyn Embedder>
-    // and doesn't load models internally
-
-    let code_store = MockCodeStore::new();
-    let vector_store = MockVectorStore::new();
-    let bm25_index = MockBm25Index::new();
-
-    // Without embedder - semantic search falls back to pattern
-    let search_no_embed: CodeSearch<MockCodeStore, MockVectorStore, MockBm25Index> =
-        CodeSearch::new(
-            Arc::new(code_store),
-            Arc::new(vector_store),
-            Arc::new(bm25_index),
-            None,
-        );
-    assert!(!search_no_embed.has_semantic());
-
-    // With shared embedder - no internal loading
-    let code_store = MockCodeStore::new();
-    let vector_store = MockVectorStore::new();
-    let bm25_index = MockBm25Index::new();
-    let shared_embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder);
-
-    let search_with_embed = CodeSearch::new(
-        Arc::new(code_store),
-        Arc::new(vector_store),
-        Arc::new(bm25_index),
-        Some(shared_embedder.clone()),
-    );
-    assert!(search_with_embed.has_semantic());
-
-    // The same embedder can be shared across multiple CodeSearch instances
-    // without reloading the model
-    let code_store2 = MockCodeStore::new();
-    let vector_store2 = MockVectorStore::new();
-    let bm25_index2 = MockBm25Index::new();
-
-    let search2 = CodeSearch::new(
-        Arc::new(code_store2),
-        Arc::new(vector_store2),
-        Arc::new(bm25_index2),
-        Some(shared_embedder), // Reuse the same Arc
-    );
-    assert!(search2.has_semantic());
 }

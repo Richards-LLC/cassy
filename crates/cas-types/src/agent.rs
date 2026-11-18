@@ -518,6 +518,7 @@ mod tests {
         let agent = Agent::new("agent-test".to_string(), "Test Agent".to_string());
         assert_eq!(agent.id, "agent-test");
         assert_eq!(agent.name, "Test Agent");
+        assert_eq!(agent.role, AgentRole::Standard);
         assert_eq!(agent.agent_type, AgentType::Primary);
         assert_eq!(agent.status, AgentStatus::Active);
         assert!(agent.is_alive());
@@ -547,8 +548,8 @@ mod tests {
     #[test]
     fn test_heartbeat() {
         let mut agent = Agent::new("test".to_string(), "Test".to_string());
+        agent.last_heartbeat = Utc::now() - chrono::Duration::days(1);
         let old_heartbeat = agent.last_heartbeat;
-        std::thread::sleep(std::time::Duration::from_millis(10));
         agent.heartbeat();
         assert!(agent.last_heartbeat > old_heartbeat);
     }
@@ -605,11 +606,5 @@ mod tests {
         let agent = Agent::new("worker-1".to_string(), "Worker Agent".to_string())
             .with_role(AgentRole::Worker);
         assert_eq!(agent.role, AgentRole::Worker);
-    }
-
-    #[test]
-    fn test_agent_default_role() {
-        let agent = Agent::new("test".to_string(), "Test".to_string());
-        assert_eq!(agent.role, AgentRole::Standard);
     }
 }

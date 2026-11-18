@@ -965,6 +965,16 @@ impl Config {
         factory
     }
 
+    /// Host admission always uses the user policy, independently of project config.
+    pub(crate) fn machine_max_workers(&self) -> usize {
+        self.user_max_workers.unwrap_or_else(|| FactoryConfig::default().max_workers())
+    }
+
+    /// An explicit project limit applies only to workers in this project's store.
+    pub(crate) fn project_max_workers(&self) -> Option<usize> {
+        self.factory.as_ref().and_then(|factory| factory.max_workers)
+    }
+
     /// Where `factory().max_workers()` came from: project, user or default.
     pub fn max_workers_source(&self) -> &'static str {
         if self.factory.as_ref().is_some_and(|factory| factory.max_workers.is_some()) {

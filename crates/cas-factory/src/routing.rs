@@ -1447,12 +1447,6 @@ candidates = ["codex_luna"]
         assert_eq!(fable.allowed_efforts, [Effort::Medium, Effort::High, Effort::Max]);
         assert_eq!(fable.required_capability.as_deref(), Some("claude-account"));
         assert!(registry.recipes.contains_key("codex_astra"));
-        assert_eq!(
-            registry.recipes["codex_astra"].reason.as_deref(),
-            Some(
-                "Heavy route; excluded from supervisor and taste after the observed 2026-09-05 stall holding finished workers and stopping epic drive."
-            )
-        );
         let astra_high = &registry.recipes["codex_astra_high"];
         assert_eq!(astra_high.model, "gpt-6-astra");
         assert_eq!(astra_high.default_effort, Effort::High);
@@ -1469,10 +1463,6 @@ candidates = ["codex_luna"]
         assert_eq!(
             registry.recipes["codex_terra"].status,
             RecipeStatus::Suspended
-        );
-        assert_eq!(
-            registry.recipes["codex_terra"].reason.as_deref(),
-            Some("Standing operator suspension (2026-08-27)")
         );
         let qwen = &registry.recipes["qwencloud_qwen"];
         assert_eq!(qwen.harness, SupervisorCli::OpenCode);

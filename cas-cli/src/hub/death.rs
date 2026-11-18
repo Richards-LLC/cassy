@@ -186,10 +186,16 @@ mod reaper_tests {
     fn unit_reaper_writes_matching_exit_receipt() {
         let root = tempfile::tempdir().unwrap();
         let store = DaemonExitEvidenceStore::new(root.path());
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 0.1; exit 7"])
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "read release; exit 7"])
+            .stdin(std::process::Stdio::piped())
             .spawn().unwrap();
-        let receipt = reap_spawned_daemon("fixture-session", child, store.clone()).unwrap();
+        let release = child.stdin.take().unwrap();
+        let (identity, reaper) = supervise_spawned_daemon("fixture-session", child, store.clone()).unwrap();
+        // EOF lets the child exit only after the reaper owns its identity.
+        drop(release);
+        reaper.join().unwrap();
+        let receipt = store.read_matching(&identity).unwrap();
         assert_eq!(receipt.identity.session, "fixture-session");
         assert_eq!(receipt.exit, ProcessExit::Code(7));
         assert_eq!(store.read_matching(&receipt.identity), Some(receipt));

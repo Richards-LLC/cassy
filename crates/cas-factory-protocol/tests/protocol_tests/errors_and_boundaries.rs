@@ -43,23 +43,6 @@ fn test_decode_truncated_message() {
     assert!(result.is_err());
 }
 
-#[test]
-fn test_decode_extra_bytes_appended() {
-    let msg = ClientMessage::Ping { id: 42 };
-    let mut encoded = codec::encode(&msg).unwrap();
-
-    // Append extra bytes
-    encoded.extend_from_slice(b"extra garbage bytes");
-
-    // MessagePack should still decode successfully (ignoring trailing data)
-    // This behavior depends on rmp-serde implementation
-    let result = codec::decode::<ClientMessage>(&encoded);
-    // Either succeeds (ignoring extra) or fails - both are acceptable
-    if let Ok(decoded) = result {
-        assert_eq!(decoded, msg);
-    }
-}
-
 // =============================================================================
 // Boundary Values
 // =============================================================================

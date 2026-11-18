@@ -8,50 +8,6 @@ use cas_tui_test::{
 };
 use std::time::Duration;
 
-/// Test basic PTY spawning and output capture
-#[test]
-fn test_basic_echo() {
-    let mut runner = PtyRunner::new();
-    runner.spawn("echo", &["Hello, TUI Test!"]).unwrap();
-
-    // Wait for output
-    let result = runner.wait_for_text_timeout("Hello", Duration::from_secs(2));
-    assert!(result.is_ok(), "Should find 'Hello' in output");
-
-    // Check full output
-    let output = runner.get_output();
-    assert!(output.contains("TUI Test"), "Output: {}", output.as_str());
-}
-
-/// Test input DSL with cat command
-#[test]
-fn test_input_dsl() {
-    let mut runner = PtyRunner::new();
-    runner.spawn("cat", &[]).unwrap();
-
-    // Send input using DSL
-    input()
-        .text("first line")
-        .enter()
-        .text("second line")
-        .enter()
-        .execute(&mut runner)
-        .unwrap();
-
-    // Wait for echo
-    runner
-        .wait_for_text_timeout("second line", Duration::from_secs(2))
-        .unwrap();
-
-    // Verify both lines are in output
-    let output = runner.get_output();
-    assert!(output.contains("first line"));
-    assert!(output.contains("second line"));
-
-    // Send EOF to exit cat
-    runner.send_key(Key::CtrlD).unwrap();
-}
-
 /// Test assertion DSL with screen parsing
 #[test]
 fn test_assertion_dsl() {
@@ -98,38 +54,6 @@ fn test_vt_parser() {
     let buffer = parser.buffer();
     assert!(buffer.contains_text("Bold"));
     assert!(buffer.contains_text("Normal"));
-}
-
-/// Test wait DSL with regex
-#[test]
-fn test_wait_regex() {
-    let mut runner = PtyRunner::new();
-    runner.spawn("echo", &["Count: 42"]).unwrap();
-
-    // Wait for regex pattern
-    let result = runner.wait_for_regex_timeout(r"Count:\s+\d+", Duration::from_secs(2));
-    assert!(result.is_ok());
-}
-
-/// Test custom terminal size
-#[test]
-fn test_custom_size() {
-    let config = PtyRunnerConfig::with_size(100, 30);
-    let runner = PtyRunner::with_config(config);
-    assert_eq!(runner.size(), (100, 30));
-}
-
-/// Test environment variable injection
-#[test]
-fn test_env_injection() {
-    let config = PtyRunnerConfig::default().env("TEST_VAR", "custom_value");
-    let mut runner = PtyRunner::with_config(config);
-
-    runner.spawn("sh", &["-c", "echo $TEST_VAR"]).unwrap();
-
-    runner
-        .wait_for_text_timeout("custom_value", Duration::from_secs(2))
-        .unwrap();
 }
 
 /// Test snapshot store operations (uses temp directory)

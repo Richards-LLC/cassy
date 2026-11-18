@@ -549,6 +549,22 @@ Workers request candidates through `factory action=candidate_request`. If the qu
 
 Merge regeneration commits tracked generated outputs while leaving ignored native projections untracked.
 
+`factory.max_workers` in a project's `.cas/config.toml` limits that project's live workers. The same key in `~/.cas/config.toml` independently limits all live workers on the machine, defaulting to eight when unset. Leaving the project key unset adds no separate project cap. Spawn requests, including batches, must fit both limits. Worker status and refusals show the machine census plus any project cap; advertised peer capacity uses the smaller remaining allowance and the existing builder guard.
+
+An owned release train with merged work and no children in flight wakes its supervisor to run tip CI and freeze. Until recorded work changes, the watchdog repeats on its existing forty-five-minute cadence and pages the operator after ninety minutes. Frozen trains and trains owned by another supervisor remain excluded. Older trains with an explicit owner and release-train branch receive the same recovery.
+
+Candidate preparation completion and failure notices use the existing authenticated supervisor wake path, so an idle supervisor receives the next action without waiting for an unrelated event.
+
+Factory changed-test stability survives an unrelated failure in a broader Rust selection when each retained test has valid prior evidence and a positive passing outcome in every attempted run. Admission still removes overlapping evidence before execution; failed, unrun and changed-input cases cannot reuse it. Restored evidence covers stability only and does not claim the failed selection passed.
+
+- **Release friction sensors** — `cas ledger report --release vX.Y.Z` and `--json` show wake notice types, confirmed hosted runner communication/shutdown losses grouped by job and runner labels, daily project GitHub issue opens/closes and agent-filed share, cross-machine park observation delays, and first park to subsequent train merge median/p90. `--park-visibility-minutes N` changes the measurement deadline (default ten minutes). Missing evidence is named; unobserved parks are censored rather than declared lost. Online GitHub captures are retained under `.cas/ledger-sensors/` for `--offline` replay. No admission, refusal or release policy changes.
+
+Test authoring starts from production contracts and plausible regressions, keeps one strongest owner per contract, and offsets additions through consolidation. Approved test-deletion campaigns work in narrow subsystem slices, preserve the only regression guard, and record removed tests, remaining contracts and risks.
+
+### Integrated delivery review recovery
+
+A live registered supervisor can record a review directly for a parked delivery already integrated through a PR. The review binds its declared target tree and immutable delivery anchor, including PR follow-up commits. Unreviewed merges remain held; existing dispatch authority and all other close gates remain intact.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

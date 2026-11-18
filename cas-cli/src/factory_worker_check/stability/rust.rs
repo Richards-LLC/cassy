@@ -268,6 +268,44 @@ pub(crate) fn repeat_filter(tests: &[Test]) -> String {
         else { format!("test(={})", test.identity.name) }).collect::<Vec<_>>().join(" | ")
 }
 
+/// A broader selection can fail without breaking an owned test's existing
+/// streak. Restore only stability, never a PASS for that failed selection.
+pub(crate) fn restore_passing(cas_root: &Path, repo: &Path, head: &str,
+    tests: &[Test], prior: Vec<Proof>, log: &Path) -> Result<()> {
+    if prior.is_empty() || clean_head(repo).ok().as_deref() != Some(head) { return Ok(()); }
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
+    let summary = regex::Regex::new(r"(?m)^ *Summary +\[[^\r\n]*\] +[0-9]+ tests? run:")?;
+    let outcome = regex::Regex::new(r"^ *(\S+) +\[[^\]]*\] +\( *[0-9]+/ *[0-9]+\) +(\S+) +(\S+)$")?;
+    let mut passing = tests.iter().filter(|test| !test.parameterized)
+        .map(|test| test.identity.clone()).collect::<BTreeSet<_>>();
+    // Every attempted repeat must positively prove the identity passed. An
+    // empty/truncated log, launch failure or unrun test cannot restore proof.
+    for attempt in 1..=REQUIRED_PASSES {
+        let path = if attempt == 1 { log.to_path_buf() }
+            else { PathBuf::from(format!("{}.repeat-{attempt}", log.display())) };
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if attempt > 1 && error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return Ok(()),
+        };
+        let text = ansi.replace_all(&text, "");
+        if summary.find_iter(&text).count() != 1 { return Ok(()); }
+        passing.retain(|identity| {
+            let test = tests.iter().find(|test| test.identity == *identity).expect("owned identity");
+            let binary = test.harness.as_ref().map_or_else(|| test.package.clone(),
+                |harness| format!("{}::{harness}", test.package));
+            let rows = text.lines().filter_map(|line| outcome.captures(line))
+                .filter(|row| row[2] == binary && row[3] == identity.name).collect::<Vec<_>>();
+            rows.len() == 1 && &rows[0][1] == "PASS"
+        });
+    }
+    for mut proof in prior {
+        proof.tests.retain(|test| passing.contains(test));
+        if !proof.tests.is_empty() { super::record(cas_root, repo, head, proof)?; }
+    }
+    Ok(())
+}
+
 /// All five attempts stay in the original capped process and builder slot.
 /// The first selection keeps existing coverage; only owned tests repeat.
 pub(crate) fn wrap(command: Command, test: &TargetedTest, tests: &[Test], count: &Path) -> Command {

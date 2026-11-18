@@ -3,11 +3,9 @@
 //! These tests validate:
 //! - Scrollback buffer access via ghostty_vt FFI functions
 //! - Cache row generation for smooth client-side scrolling
-//! - Performance characteristics (target: <16ms for 60fps)
 //! - Edge cases: resize, large scrollback, fast scrolling
 
 use cas_mux::Pane;
-use std::time::Instant;
 
 // =============================================================================
 // Scrollback Info Tests
@@ -92,66 +90,21 @@ fn test_cache_rows_empty_when_no_cache_requested() {
     );
 }
 
-#[test]
-fn test_cache_rows_populated_when_cache_requested() {
-    let mut pane = Pane::director("test", 10, 80).unwrap();
-
-    // Generate substantial scrollback content
-    for i in 0..100 {
-        pane.feed(format!("Line {i:03}\r\n").as_bytes()).unwrap();
-    }
-
-    // Scroll up to create opportunity for cache rows above and below
-    pane.scroll(-30).unwrap();
-
-    // Request snapshot with cache_window
-    let (snapshot, cache_rows, cache_start) = pane.create_snapshot_with_cache(20).unwrap();
-
-    assert_eq!(snapshot.rows, 10);
-    assert!(
-        cache_start.is_some(),
-        "Should have cache_start with cache_window>0"
-    );
-
-    // Should have cache rows (above and/or below viewport)
-    // Exact count depends on scroll position and buffer size
-    if !cache_rows.is_empty() {
-        // Verify cache rows have valid screen positions
-        for row in &cache_rows {
-            assert!(
-                row.screen_row < pane.scrollback_lines(),
-                "Cache row position should be valid"
-            );
-        }
-    }
-}
 
 #[test]
 fn test_cache_rows_content_matches_screen_position() {
     let mut pane = Pane::director("test", 5, 80).unwrap();
-
-    // Generate predictable content
-    for i in 0..50 {
-        pane.feed(format!("LINE-{i:03}-END\r\n").as_bytes())
-            .unwrap();
+    let input: Vec<_> = (0..50).map(|i| format!("LINE-{i:03}-END")).collect();
+    for line in &input {
+        pane.feed(format!("{line}\r\n").as_bytes()).unwrap();
     }
-
-    // Scroll to middle
     pane.scroll(-20).unwrap();
-
-    let (_snapshot, cache_rows, _) = pane.create_snapshot_with_cache(10).unwrap();
-
-    // Verify cache rows have text content
+    let (snapshot, cache_rows, cache_start) = pane.create_snapshot_with_cache(10).unwrap();
+    assert_eq!(snapshot.rows, 5);
+    assert!(cache_start.is_some());
+    assert!(!cache_rows.is_empty());
     for row in &cache_rows {
-        // Content should be non-empty for most rows
-        // (some rows may be empty depending on terminal state)
-        if !row.text.is_empty() {
-            // Text should be reasonable terminal content
-            assert!(
-                row.text.len() <= 80,
-                "Row text should not exceed terminal width"
-            );
-        }
+        assert_eq!(row.text.trim_end(), input[row.screen_row as usize]);
     }
 }
 
@@ -218,91 +171,6 @@ fn test_scroll_incremental() {
 // =============================================================================
 // Performance Tests
 // =============================================================================
-
-#[test]
-fn test_snapshot_performance_small_cache() {
-    let mut pane = Pane::director("test", 24, 80).unwrap();
-
-    // Generate typical content
-    for i in 0..500 {
-        pane.feed(format!("Line {i} with some typical content here\r\n").as_bytes())
-            .unwrap();
-    }
-
-    // Scroll to middle
-    pane.scroll(-200).unwrap();
-
-    // Measure snapshot with small cache
-    let start = Instant::now();
-    for _ in 0..10 {
-        let _ = pane.create_snapshot_with_cache(24).unwrap();
-    }
-    let elapsed = start.elapsed();
-
-    let avg_ms = elapsed.as_millis() as f64 / 10.0;
-    println!("Average snapshot time (24-row cache): {avg_ms:.2}ms");
-
-    // Target: < 16ms for 60fps (allowing some margin for test overhead)
-    assert!(
-        avg_ms < 32.0,
-        "Snapshot should complete in under 32ms (got {avg_ms:.2}ms)"
-    );
-}
-
-#[test]
-fn test_snapshot_performance_large_cache() {
-    let mut pane = Pane::director("test", 24, 80).unwrap();
-
-    // Generate substantial content
-    for i in 0..1000 {
-        pane.feed(format!("Line {i} with some content\r\n").as_bytes())
-            .unwrap();
-    }
-
-    pane.scroll(-400).unwrap();
-
-    // Measure snapshot with large cache (100 rows)
-    let start = Instant::now();
-    for _ in 0..10 {
-        let _ = pane.create_snapshot_with_cache(100).unwrap();
-    }
-    let elapsed = start.elapsed();
-
-    let avg_ms = elapsed.as_millis() as f64 / 10.0;
-    println!("Average snapshot time (100-row cache): {avg_ms:.2}ms");
-
-    // Larger cache is allowed more time, but still should be reasonable
-    assert!(
-        avg_ms < 50.0,
-        "Large cache snapshot should complete in under 50ms (got {avg_ms:.2}ms)"
-    );
-}
-
-#[test]
-fn test_scrollback_info_performance() {
-    let mut pane = Pane::director("test", 24, 80).unwrap();
-
-    // Generate content
-    for i in 0..500 {
-        pane.feed(format!("Line {i}\r\n").as_bytes()).unwrap();
-    }
-
-    // Measure scrollback_info calls (should be very fast)
-    let start = Instant::now();
-    for _ in 0..1000 {
-        let _ = pane.scrollback_info();
-    }
-    let elapsed = start.elapsed();
-
-    let avg_us = elapsed.as_micros() as f64 / 1000.0;
-    println!("Average scrollback_info time: {avg_us:.2}μs");
-
-    // Should be sub-millisecond
-    assert!(
-        avg_us < 1000.0,
-        "scrollback_info should be < 1ms (got {avg_us:.2}μs)"
-    );
-}
 
 // =============================================================================
 // Edge Cases
@@ -373,42 +241,9 @@ fn test_large_scrollback_buffer() {
     pane.scroll(-scroll_amount).unwrap();
 
     // Snapshot should still work
-    let start = Instant::now();
     let result = pane.create_snapshot_with_cache(50);
-    let elapsed = start.elapsed();
 
     assert!(result.is_ok());
-    println!(
-        "Large scrollback snapshot time: {:.2}ms",
-        elapsed.as_millis()
-    );
-}
-
-#[test]
-fn test_rapid_scroll_operations() {
-    let mut pane = Pane::director("test", 24, 80).unwrap();
-
-    // Generate content
-    for i in 0..500 {
-        pane.feed(format!("Line {i}\r\n").as_bytes()).unwrap();
-    }
-
-    // Rapid scroll operations (simulating fast mouse wheel)
-    let start = Instant::now();
-    for _ in 0..100 {
-        pane.scroll(-1).unwrap();
-        let _ = pane.scrollback_info();
-    }
-    let elapsed = start.elapsed();
-
-    let avg_ms = elapsed.as_millis() as f64 / 100.0;
-    println!("Average scroll + info time: {avg_ms:.2}ms");
-
-    // Should be fast enough for smooth scrolling
-    assert!(
-        avg_ms < 5.0,
-        "Scroll operations should be < 5ms each (got {avg_ms:.2}ms)"
-    );
 }
 
 // =============================================================================

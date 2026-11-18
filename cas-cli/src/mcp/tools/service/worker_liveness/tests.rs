@@ -812,7 +812,7 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
         progress_watchdog::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
     }
     let rows = queue.peek_all(50).unwrap();
-    assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1);
+    assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 2);
     assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1);
 }
 

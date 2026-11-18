@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_worktree_lease_expiry() {
-        let mut lease = WorktreeLease::new("wt-1".to_string(), "agent-1".to_string(), 1);
+        let mut lease = WorktreeLease::new("wt-1".to_string(), "agent-1".to_string(), 600);
         assert!(lease.is_valid());
 
         // Simulate time passing
@@ -183,7 +183,6 @@ mod tests {
         let mut lease = WorktreeLease::new("wt-1".to_string(), "agent-1".to_string(), 60);
         let old_expires = lease.expires_at;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
         lease.renew(120);
 
         assert!(lease.expires_at > old_expires);
@@ -272,12 +271,10 @@ mod tests {
 
         // First claim
         let result1 = agent_store
-            .try_claim_worktree(&worktree.id, "agent-1", 600)
+            .try_claim_worktree(&worktree.id, "agent-1", 60)
             .unwrap();
         assert!(result1.is_success());
         let lease1 = result1.lease().unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Same agent claims again - should succeed (renew)
         let result2 = agent_store
@@ -286,7 +283,7 @@ mod tests {
         assert!(result2.is_success());
         let lease2 = result2.lease().unwrap();
 
-        // Should have extended expiry
+        // The second claim uses a longer duration, so no clock tick is needed.
         assert!(lease2.expires_at > lease1.expires_at);
     }
 
@@ -370,8 +367,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
         agent_store
             .renew_worktree_lease(&worktree.id, "agent-1", 120)
             .unwrap();
@@ -400,13 +395,10 @@ mod tests {
 
         let worktree = create_test_workspace(&worktree_store, "epic-expire");
 
-        // Agent 1 claims with very short duration
+        // Agent 1 seeds an already expired active lease
         agent_store
-            .try_claim_worktree(&worktree.id, "agent-1", 1)
+            .try_claim_worktree(&worktree.id, "agent-1", -60)
             .unwrap();
-
-        // Wait for expiration
-        std::thread::sleep(std::time::Duration::from_secs(2));
 
         // Agent 2 can now claim (expired lease)
         let result = agent_store
@@ -425,13 +417,10 @@ mod tests {
 
         let worktree = create_test_workspace(&worktree_store, "epic-reclaim");
 
-        // Claim with very short duration
+        // Seed an already expired active lease
         agent_store
-            .try_claim_worktree(&worktree.id, "agent-1", 1)
+            .try_claim_worktree(&worktree.id, "agent-1", -60)
             .unwrap();
-
-        // Wait for expiration
-        std::thread::sleep(std::time::Duration::from_secs(2));
 
         // Reclaim expired
         let count = agent_store.reclaim_expired_worktree_leases().unwrap();

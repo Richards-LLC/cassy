@@ -1676,10 +1676,23 @@ fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
     })
 }
 
+fn append_imported_park_provenance(task: &mut Task, sync_id: &str, source: &str) {
+    if task.status != cas_types::TaskStatus::AwaitingMerge { return }
+    let note = format!("[{}] [CAS_SYNC_STATUS] sync_id={sync_id} source={source} prior_status=not_present applied_status=awaiting_merge observer_machine={} observed_at={}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"), cas_types::Agent::get_or_generate_machine_id(), chrono::Utc::now().to_rfc3339());
+    if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
+    task.notes.push_str(&note);
+}
+
 fn append_sync_status_provenance(merged: &mut Task, local: &Task, sync_id: &str, source: &str) {
-    if local.status == merged.status {
-        return;
-    }
+    let machine = cas_types::Agent::get_or_generate_machine_id();
+    // A same-state refresh can be this machine's first observation of a park.
+    // Old snapshots have no observation clock and must stay unmeasurable.
+    let first_park_observation = merged.status == cas_types::TaskStatus::AwaitingMerge
+        && !local.notes.lines().any(|line| line.contains("[CAS_SYNC_STATUS]")
+            && line.contains("applied_status=awaiting_merge")
+            && line.split_whitespace().any(|word| word == format!("observer_machine={machine}")));
+    if local.status == merged.status && !first_park_observation { return; }
 
     let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
     let prior_close_reason = local
@@ -1688,8 +1701,8 @@ fn append_sync_status_provenance(merged: &mut Task, local: &Task, sync_id: &str,
         .unwrap_or("<none>")
         .replace(['\n', '\r'], " ");
     let note = format!(
-        "[{timestamp}] [CAS_SYNC_STATUS] sync_id={sync_id} source={source} prior_status={} prior_close_reason={prior_close_reason} applied_status={}",
-        local.status, merged.status,
+        "[{timestamp}] [CAS_SYNC_STATUS] sync_id={sync_id} source={source} prior_status={} prior_close_reason={prior_close_reason} applied_status={} observer_machine={} observed_at={}",
+        local.status, merged.status, cas_types::Agent::get_or_generate_machine_id(), chrono::Utc::now().to_rfc3339(),
     );
     if merged.notes.is_empty() {
         merged.notes = note;
@@ -1897,6 +1910,8 @@ impl CloudSyncer {
                 self.apply_task_from_sync(store, &merged, &local, "owner", "owner_wins")
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
+                let mut task = task;
+                append_imported_park_provenance(&mut task, sync_id, source);
                 store.add(&task)?;
                 Ok(UpsertResult::Created)
             }
@@ -3027,6 +3042,8 @@ impl CloudSyncer {
                 }
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
+                let mut task = task;
+                append_imported_park_provenance(&mut task, sync_id, source);
                 store.add(&task)?;
                 Ok(UpsertResult::Created)
             }
@@ -3261,6 +3278,8 @@ impl CloudSyncer {
                 }
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
+                let mut task = task;
+                append_imported_park_provenance(&mut task, sync_id, source);
                 store.add(&task)?;
                 Ok(UpsertResult::Created)
             }
@@ -5000,6 +5019,21 @@ mod web_close_tests {
                     "owner body update"
                 }
             );
+            let mut imported = local.clone();
+            imported.id = format!("imported-{route}");
+            let outcome = match route {
+                0 => syncer.upsert_owner_task(&*store, imported.clone(), "import-owner", "team_pull"),
+                1 => syncer.upsert_task(&*store, imported.clone(), "import-personal", "personal_pull"),
+                _ => syncer.upsert_task_with_strategy(&*store, imported.clone(), ConflictResolution::RemoteWins, "import-team", "team_pull"),
+            }.unwrap();
+            assert!(matches!(outcome, UpsertResult::Created));
+            let recorded = store.get(&imported.id).unwrap();
+            assert_eq!(recorded.status, TaskStatus::AwaitingMerge);
+            let fields: std::collections::BTreeMap<_, _> = recorded.notes.lines().last().unwrap().split_whitespace()
+                .filter_map(|word| word.split_once('=')).collect();
+            assert_eq!(fields["observer_machine"], cas_types::Agent::get_or_generate_machine_id());
+            assert!(chrono::DateTime::parse_from_rfc3339(fields["observed_at"]).is_ok());
+            assert_eq!(fields["prior_status"], "not_present");
         }
     }
 }

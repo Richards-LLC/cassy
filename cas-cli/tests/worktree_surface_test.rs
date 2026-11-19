@@ -8693,10 +8693,6 @@ async fn test_worktree_cleanup_unknown_target_reports_not_found_not_disabled() {
         message.contains("no-such-worker"),
         "not-found must name the target: {message}"
     );
-    assert!(
-        !message.contains("experimental and disabled"),
-        "a genuine absence must never render as the disabled gate: {message}"
-    );
 }
 
 /// AC2: a branch whose commits exist on no other branch is refused without

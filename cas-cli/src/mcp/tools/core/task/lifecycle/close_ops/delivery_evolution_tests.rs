@@ -167,16 +167,45 @@ fn repeated_immutable_delivery_proof_avoids_git_spawns_cas_ac43() {
     git(&["add", "owned.rs"]);
     git(&["commit", "-qm", "base"]);
     let base = git(&["rev-parse", "HEAD"]);
-    std::fs::write(repo.join("owned.rs"), "fn value() { delivered() }\n").unwrap();
-    git(&["commit", "-qam", "fix(cas-ac43): delivery"]);
-    let anchor = git(&["rev-parse", "HEAD"]);
-    let proof = |target: &str| delivery_content_presence_on_target_for_paths(
-        &repo, &anchor, target, None, false, &["cas-ac43"], Some(&base));
+    let mut members = Vec::new();
+    for index in 0..8 {
+        std::fs::write(repo.join("owned.rs"), format!("fn value() {{ delivered_{index}() }}\n")).unwrap();
+        git(&["commit", "-qam", "fix(cas-ac43): delivery member"]);
+        members.push(git(&["rev-parse", "HEAD"]));
+    }
+    let anchor = members.last().unwrap().clone();
+    std::fs::create_dir(repo.join(".cas")).unwrap();
+    std::fs::write(repo.join(".cas/record"), "lifecycle metadata\n").unwrap();
+    git(&["add", ".cas/record"]);
+    git(&["commit", "-qm", "fix(cas-ac43): metadata checkpoint"]);
+    members.push(git(&["rev-parse", "HEAD"]));
+    git(&["commit", "--allow-empty", "-qm", "fix(cas-ac43): empty checkpoint"]);
+    members.push(git(&["rev-parse", "HEAD"]));
+    let target = members.last().unwrap();
     let trace = repo.join("git.jsonl");
-    env.set("GIT_TRACE2_EVENT", &trace);
-    let first = proof(&anchor);
     let count = || std::fs::read_to_string(&trace).unwrap().lines().filter(|line|
         serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "start").count();
+    env.set("GIT_TRACE2_EVENT", &trace);
+    super::super::delivery_git::prime(&repo, &members);
+    for (index, member) in members.iter().enumerate() {
+        let range = super::super::delivery_line_range(&repo, member, target, None, None);
+        if index < 8 {
+            let range = range.unwrap();
+            assert_eq!(range.paths, vec!["owned.rs"]);
+            assert_eq!(range.parent, if index == 0 { &base } else { &members[index - 1] }.clone());
+            assert_eq!(&range.delivery, member);
+            assert_eq!(&range.target, target);
+        } else {
+            assert!(matches!(range, Err(DeliveryContentPresence::Unknown { .. })));
+        }
+    }
+    let member_spawns = count();
+    env.remove("GIT_TRACE2_EVENT");
+    assert_eq!(member_spawns, 2, "{member_spawns} Git spawns for {} member commits", members.len());
+    let proof = |target: &str| delivery_content_presence_on_target_for_paths(
+        &repo, &anchor, target, None, false, &["cas-ac43"], Some(&base));
+    env.set("GIT_TRACE2_EVENT", &trace);
+    let first = proof(&anchor);
     let before = count();
     let repeated = proof(&anchor);
     let extra = count() - before;

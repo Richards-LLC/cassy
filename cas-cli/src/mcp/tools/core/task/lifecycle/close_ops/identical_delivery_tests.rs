@@ -421,7 +421,11 @@ async fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             author_overrides: Default::default(), imported: false,
         };
         crate::qa_batch::release_close::ReleaseClose::for_receipt(&repo.join(".cas"), repo, task, &receipt)
-            .scope(async { run_factory_branch_merge_gate(task, &TaskCloseRequest {
+            .scope(async {
+                assert_eq!(crate::qa_batch::release_close::delivery_base(
+                    repo, task.deliverables.factory_branch_anchor.as_deref().unwrap(), &target,
+                ), task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.clone()));
+                run_factory_branch_merge_gate(task, &TaskCloseRequest {
                 id: task.id.clone(), no_delivery: None, reason: None, supervisor_override: None,
                 search_manifest: None, commit_receipt: None, stranded_branch_override: None,
             }, &target, repo) }).await
@@ -459,7 +463,7 @@ async fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             } else {
                 "imported();\nadded();\n"
             },
-            if rebound { "chore(cas-aaaa): trim helper" } else { "chore: trim helper" },
+            if rebound { "revert(cas-aaaa): trim helper" } else { "chore: trim helper" },
         );
         git(repo, &["checkout", "-q", "main"]);
         git(

@@ -26,7 +26,7 @@ factory action=spawn_workers count=1 lane=standard isolate=true task_id=<task-id
 
 Pass a stakeholder ask's Slack permalink or GitHub issue/PR URL as `external_ref`. Creation and staffing refuse a source a peer holds and name the owner; open a second task on it with `supervisor_override=true reason="<agreement>"` only once that peer agrees.
 
-A worker cannot recover a goal or a proof method the brief never named, so fill all four fields (`task action=update`) before you spawn onto or assign a task:
+A worker cannot recover a goal or a proof method the brief never named, so fill all five fields (`task action=update`) before you spawn onto or assign a task:
 
 | Field | Where it lives |
 |---|---|
@@ -34,6 +34,7 @@ A worker cannot recover a goal or a proof method the brief never named, so fill 
 | Scope: files to edit, and what is off-limits | `description` (or `design`) |
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: the touched tests; never name suites or evals | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
+| Test plan: extend one existing test; assert behaviour, ids or codes; no message/text assertions; failing-first ([Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests)) | `acceptance_criteria` or `design` |
 
 A brief names a full or stress run only as a named, justified exception.
 

@@ -1948,6 +1948,7 @@ mod tests {
     #[test]
     fn cas_da35c_expired_supervisor_approval_reuses_only_unchanged_candidate() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         run(repo, &["init", "-q", "-b", "epic/train"]);
@@ -1960,7 +1961,7 @@ mod tests {
         env.set("CAS_ROOT", &root);
         env.set("CAS_AGENT_ROLE", "supervisor");
         std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
-        std::fs::write(root.join("config.toml"), "[qa]\nmode = 'batch'\n[verification]\nenabled = true\n").unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='reuse-fixture'\n[qa]\nmode = 'batch'\n[verification]\nenabled = true\n").unwrap();
         commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
         run(repo, &["checkout", "-q", "-b", "factory/worker"]);
         let source = commit_file(repo, "src/lib.rs", "delivery\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
@@ -1974,6 +1975,9 @@ mod tests {
         let mut task = Task::new("cas-da35c-reuse".into(), "Review approval reuse".into());
         task.depth = cas_types::TaskDepth::Deep;
         task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:reuse-fixture".into(), target_branch: "epic/train".into(),
+        });
         task.deliverables.factory_branch_anchor = Some(source);
         core.open_task_store().unwrap().add(&task).unwrap();
         let held = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap_err();
@@ -2001,13 +2005,68 @@ mod tests {
         let reused = core.prepare_premerge_verification(&reparked, repo, "factory/worker", "epic/train").unwrap().unwrap();
         assert_eq!(reused.dispatch_id, dispatch.id);
         reused.validate_for_merge(&root, &reparked).unwrap();
-        // The real incident moved the target in reviewed code after approval.
-        // A clean merge with different reviewed context must request another review.
-        commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nchanged\nfifth\nlast\n", "target moved");
-        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
+        // GH #2170: the administrative target correction invalidates the
+        // old cycle, but merging only the new train changes no reviewed patch.
+        run(repo, &["checkout", "-q", "-b", "epic/next"]);
+        commit_file(repo, "src/sibling.rs", "sibling train work\n", "successor train");
+        let service = crate::mcp::CasService::new(core.clone(), None);
+        let correction = serde_json::from_value(serde_json::json!({
+            "action":"update", "id":task.id, "proof_scope_fix":true,
+            "target_branch":"epic/next", "reason":"carry approved delivery to successor train",
+        })).unwrap();
+        let corrected = runtime.block_on(service.task(rmcp::handler::server::wrapper::Parameters(correction))).unwrap();
+        assert_ne!(corrected.is_error, Some(true), "{corrected:?}");
+        run(repo, &["checkout", "-q", "factory/worker"]);
+        run(repo, &["merge", "-q", "--no-ff", "epic/next", "-m", "merge successor only"]);
+        let store = core.open_task_store().unwrap();
+        task = store.get(&task.id).unwrap();
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(run(repo, &["rev-parse", "HEAD"]));
+        store.update(&task).unwrap();
+        run(repo, &["checkout", "-q", "epic/next"]);
+        let dispatch_count = || rusqlite::Connection::open(root.join("cas.db")).unwrap()
+            .query_row("SELECT COUNT(*) FROM verification_dispatches WHERE task_id=?1", [&task.id], |row| row.get::<_, u64>(0)).unwrap();
+        let before = dispatch_count();
+        let carried = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next");
+        assert_eq!(dispatch_count(), before);
+        let carried = carried.unwrap().unwrap();
+        assert_eq!(carried.dispatch_id, dispatch.id);
+        assert_eq!(carried.verdict_id, approval.verdict_id);
+        carried.validate_for_merge(&root, &task).unwrap();
+        let repeated = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next").unwrap().unwrap();
+        assert_eq!(repeated.verdict_id, approval.verdict_id);
+        assert_eq!(dispatch_count(), before);
+
+        // A new commit in reviewed code still needs a real new review.
+        run(repo, &["checkout", "-q", "factory/worker"]);
+        let changed = commit_file(repo, "src/lib.rs", "new delivery\nsecond\nthird\nfourth\nfifth\nlast\n", "change reviewed source");
+        task.deliverables.factory_branch_anchor = Some(changed);
+        store.update(&task).unwrap();
+        run(repo, &["checkout", "-q", "epic/next"]);
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next").is_err());
         let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
         assert_ne!(replacement.id, dispatch.id);
-        assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state, cas_types::VerificationDispatchState::Invalidated);
+        let approve_changed = serde_json::from_value(serde_json::json!({
+            "task_id":task.id, "dispatch_id":replacement.id, "status":"approved",
+            "summary":"Reviewed the changed source", "issues":"[]",
+        })).unwrap();
+        assert_ne!(runtime.block_on(core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(approve_changed))).unwrap().is_error, Some(true));
+        // The original guard also holds a target edit in a reviewed file.
+        // Resolving its actual merge conflict creates unreviewed content.
+        commit_file(repo, "src/lib.rs", "target edit\nsecond\nthird\nfourth\nfifth\nlast\n", "target moved");
+        run(repo, &["checkout", "-q", "factory/worker"]);
+        let conflict = Command::new("git").current_dir(repo)
+            .args(["merge", "--no-ff", "epic/next", "-m", "merge with resolution"]).output().unwrap();
+        assert_eq!(conflict.status.code(), Some(1));
+        std::fs::write(repo.join("src/lib.rs"), "resolved delivery\nsecond\nthird\nfourth\nfifth\nlast\n").unwrap();
+        run(repo, &["add", "src/lib.rs"]);
+        run(repo, &["commit", "-qm", "resolve reviewed content conflict"]);
+        task.deliverables.factory_branch_anchor = Some(run(repo, &["rev-parse", "HEAD"]));
+        store.update(&task).unwrap();
+        run(repo, &["checkout", "-q", "epic/next"]);
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next").is_err());
+        let resolved = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        assert_ne!(resolved.id, replacement.id);
     }
 
     #[test]

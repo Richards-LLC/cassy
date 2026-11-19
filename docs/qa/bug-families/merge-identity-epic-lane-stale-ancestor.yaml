@@ -1,0 +1,3 @@
+title: Merge resolves one repository identity for an epic lane and recovers a stale ancestor local ref
+tasks: [cas-1184d]
+journeys: [FACTORY-MERGE]

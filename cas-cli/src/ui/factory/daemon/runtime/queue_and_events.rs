@@ -7169,6 +7169,9 @@ impl FactoryDaemon {
             // supervisor action. Unchanged in substance — but the authority is
             // now that CAS wrote the row, not that the row says so.
             WakeSender::Daemon => {
+                if crate::cloud::peer_mailbox::train_parks::ready_wake(source, prompt) {
+                    return Some(SupervisorWakeClass::Lifecycle);
+                }
                 if source == super::teams::DIRECTOR_AGENT_NAME
                     && super::delivery::parse_director_prompt(supervisor_name, prompt).is_some()
                 {

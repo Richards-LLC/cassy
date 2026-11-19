@@ -179,19 +179,27 @@ pub(crate) fn owned_route(root: &Path, sender: &Agent, target: &str) -> Result<O
 
 /// Internal notices use the same authenticated route and the existing durable
 /// outbox; their local id remains stable after Cloud has accepted the send.
-pub(crate) fn notice_route(root: &Path, target: &str) -> Result<Option<(Agent, String, String)>, String> {
+pub(crate) fn notice_route(root: &Path, task: &cas_types::Task, target: &str) -> Result<Option<(Agent, String, String)>, String> {
+    let Some(train) = train_parks::owner_train(root, task)? else { return Ok(None) };
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
-    let Some(owner) = crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
-        agents.as_ref(), crate::factory_session_scope::caller_factory_session().as_deref())
-        .and_then(|owner| agents.get(&owner.agent_id).ok()) else { return Ok(None) };
+    let Some(owner) = agents.list(None).map_err(|e| e.to_string())?.into_iter()
+        .filter(|actor| actor.role == AgentRole::Supervisor && actor.is_alive()
+            && owns_recipient(root, actor, train.epic_verification_owner.as_deref().unwrap()))
+        .max_by_key(|actor| actor.registered_at) else { return Ok(None) };
     Ok(owned_route(root, &owner, target)?.map(|(recipient, label)| (owner, recipient, label)))
 }
 
-pub(crate) fn worker_notice(root: &Path, target: &str, key: &str, prompt: &str, summary: &str) -> Result<Option<i64>, String> {
-    let Some((sender, recipient, label)) = notice_route(root, target)? else { return Ok(None) };
+pub(crate) fn worker_notice(root: &Path, task: &cas_types::Task, target: &str, key: &str, prompt: &str, summary: &str) -> Result<Option<i64>, String> {
+    let Some((sender, recipient, label)) = notice_route(root, task, target)? else { return Ok(None) };
+    let body = match train_parks::parked(task)? {
+        Some(park) if park.worker == recipient => format!("{}{}", train_parks::TAG,
+            serde_json::to_string(&train_parks::TrainMail::Result { park, cycle:task.deliverables.delivery_cycle,
+                status:task.status, occurrence:key.into(), body:prompt.into() }).map_err(|e| e.to_string())?),
+        _ => prompt.into(),
+    };
     let project_id = crate::cloud::resolve_canonical_id(root).ok_or("Project has no canonical identity")?;
     let message = PeerSend { project_id, sender_agent_id:sender.id, recipient_agent_id:recipient.clone(),
-        body:attach_message_intent(prompt, Some("status"), false)?, summary:Some(summary.into()),
+        body:attach_message_intent(&body, Some("status"), false)?, summary:Some(summary.into()),
         in_reply_to:None, dedupe_key:format!("{key}:{recipient}"), scope:PeerScope::Project, recipient_project_id:None };
     outbox::enqueue_notice(root, message, &label).map(Some)
 }

@@ -1,6 +1,6 @@
 //! Immutable worker claims admitted by the sole train owner before review.
 use super::*;
-use cas_types::{Agent, Task};
+use cas_types::{Agent, Task, TaskStatus};
 use sha2::{Digest, Sha256};
 
 pub(crate) const NOTE: &str = "TRAIN_PARK: ";
@@ -29,7 +29,7 @@ pub(crate) struct Park {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum TrainMail {
     Ready { park: Park },
-    Result { park: Park, body: String },
+    Result { park: Park, cycle: u32, status: TaskStatus, occurrence: String, body: String },
 }
 
 pub(crate) fn evidence_key(task: &Task) -> Result<String, String> {
@@ -56,7 +56,7 @@ impl Park {
         Ok(root.join("train-parks").join(format!("{key}.json")))
     }
 
-    fn current(&self, root: &Path, task: &Task) -> Result<bool, String> {
+    fn scope(&self, root: &Path, task: &Task) -> Result<bool, String> {
         let tasks = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?;
         let train = tasks.get(&self.train).map_err(|e| e.to_string())?;
         Ok(parked(task)?.as_ref() == Some(self) && self.task == task.id && self.epoch > 0
@@ -65,10 +65,13 @@ impl Park {
             && crate::factory_session_scope::train_owner_generation(&train)? == self.generation
             && tasks.get_parent_epic(&task.id).map_err(|e| e.to_string())?.is_some_and(|parent| parent.id == self.train)
             && task.assignee.as_deref().is_some_and(|id| id == self.name || id == self.worker)
-            && task.deliverables.delivery_cycle == self.cycle
+            && task.deliverables.work_target.as_ref().is_some_and(|work| work.target_branch == self.target))
+    }
+
+    fn current(&self, root: &Path, task: &Task) -> Result<bool, String> {
+        Ok(self.scope(root, task)? && task.deliverables.delivery_cycle == self.cycle
             && task.deliverables.parked_branch.as_deref() == Some(self.branch.as_str())
             && task.deliverables.factory_branch_anchor.as_deref() == Some(self.tip.as_str())
-            && task.deliverables.work_target.as_ref().is_some_and(|work| work.target_branch == self.target)
             && evidence_key(task)? == self.evidence)
     }
 }
@@ -83,7 +86,7 @@ pub(crate) fn ingest(root: &Path, recipient: &Agent, message: &ClaimedPeerMessag
     let task = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
         .get(&park.task).map_err(|e| e.to_string())?;
     if parked(&task)?.is_none() { return Err("Remote park has not synced yet; admission will retry".into()); }
-    if !park.current(root, &task)? { return reject; }
+    if !park.scope(root, &task)? { return reject; }
     let directory = WorkerDirectory::load(root, &recipient.id)?;
     match mail {
         TrainMail::Ready { park } => {
@@ -92,7 +95,7 @@ pub(crate) fn ingest(root: &Path, recipient: &Agent, message: &ClaimedPeerMessag
                 || message.sender_agent_id != park.worker || message.sender_name != park.name
                 || message.sender_machine_id.as_deref() != Some(park.machine.as_str())
                 || message.sender_session.as_deref() != Some(park.session.as_str())
-                || task.status != crate::types::TaskStatus::AwaitingMerge { return reject; }
+                || task.status != TaskStatus::AwaitingMerge || !park.current(root, &task)? { return reject; }
             if directory.claimed(&park.project, &park.task) {
                 return Err("TRAIN_PARK_CLAIM_ACTIVE: worker claim is still active; admission will retry after release".into());
             }
@@ -103,11 +106,40 @@ pub(crate) fn ingest(root: &Path, recipient: &Agent, message: &ClaimedPeerMessag
             std::fs::write(&temporary, serde_json::to_vec(&park).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             std::fs::rename(temporary, path).map_err(|e| e.to_string())?;
         }
-        TrainMail::Result { park, .. } => {
-            if recipient.id != park.worker || !directory.owner_message(message, &recipient.id) { return reject; }
+        TrainMail::Result { park, cycle, status, .. } => {
+            if recipient.id != park.worker || !directory.owner_message(message, &recipient.id)
+                || task.deliverables.delivery_cycle > cycle || cycle < park.cycle
+                || (task.is_terminal() && task.status != status) { return reject; }
+            if task.deliverables.delivery_cycle != cycle || task.status != status {
+                return Err("TRAIN_RESULT_STATE_PENDING: owner result awaits replicated task state".into());
+            }
+            if task.deliverables.factory_branch_anchor.as_deref() != Some(park.tip.as_str())
+                && !task.deliverables.historical_factory_branch_anchors.contains(&park.tip) { return reject; }
         }
     }
     Ok(None)
+}
+
+pub(crate) fn prompt(message: &ClaimedPeerMessage) -> Option<String> {
+    let (kind, body) = split_message_intent(&message.body);
+    let mail: TrainMail = serde_json::from_str(body.strip_prefix(TAG)?).ok()?;
+    let (body, ready) = match mail {
+        TrainMail::Ready { park } => (format!("Worker {}@{} parked {} at {} for {}.", park.name, park.machine, park.task, park.tip, park.target), Some(park)),
+        TrainMail::Result { body, .. } => (body, None),
+    };
+    let mut rendered = message.clone();
+    rendered.body = attach_message_intent(&body, kind.map(PeerMessageKind::as_str), false).ok()?;
+    let prompt = render_prompt(&rendered);
+    Some(match ready {
+        Some(park) => crate::prompt_revalidation::attach_worker_action_envelope(&prompt,
+            crate::prompt_revalidation::WorkerActionKind::Ready, &park.name, Some(&park.task)),
+        None => prompt,
+    })
+}
+
+pub(crate) fn ready_wake(source: &str, prompt: &str) -> bool {
+    source.starts_with("lifecycle-wake:train:")
+        && crate::prompt_revalidation::parse_worker_action_envelope(prompt).is_some()
 }
 
 pub(crate) fn admitted(root: &Path, task: &Task, branch: &str, tip: &str) -> bool {

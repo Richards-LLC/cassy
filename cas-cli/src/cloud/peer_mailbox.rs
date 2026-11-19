@@ -1486,7 +1486,7 @@ fn deliver_claimed_with_history(
                 continue; // Reply transport failure retries with the same dedupe key.
             }
         }
-        let key = match if recipient.role == AgentRole::Worker { Ok(None) } else { queue_key(recipient, message) } {
+        let key = match queue_key(recipient, message) {
             Ok(key) => key.unwrap_or_else(|| format!("peer:{}", message.id)),
             Err(error) => {
                 report.errors.push(format!("peer message {} queue identity failed: {error}", message.id));
@@ -1503,10 +1503,14 @@ fn deliver_claimed_with_history(
                 .filter(|summary| !summary.trim().is_empty())
                 .unwrap_or_else(|| message.body.chars().take(60).collect())
         );
+        let typed_prompt = train_parks::prompt(message);
+        let source = if typed_prompt.as_ref().is_some_and(|prompt| crate::prompt_revalidation::parse_worker_action_envelope(prompt).is_some()) {
+            format!("lifecycle-wake:{key}")
+        } else { format!("peer:{}@{}", message.sender_name, machine_of(message)) };
         match queue.enqueue_idempotent(
-            &format!("peer:{}@{}", message.sender_name, machine_of(message)),
+            &source,
             &recipient.name,
-            &if recipient.role == AgentRole::Worker
+            &if let Some(prompt) = typed_prompt { prompt } else if recipient.role == AgentRole::Worker
                 && !directory.as_ref().is_some_and(|d| d.owner_message(message, &recipient.id))
                 { workers::render_worker_prompt(message) } else { render_prompt(message) },
             Some(factory_session),

@@ -286,7 +286,7 @@ fn auto_unblock_worker_target(
                     && agent.is_alive()
                     && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
             });
-        if live_assignee.is_none() && let Some((_, _, label)) = crate::cloud::peer_mailbox::notice_route(cas_root, assignee)? {
+        if live_assignee.is_none() && let Some((_, _, label)) = crate::cloud::peer_mailbox::notice_route(cas_root, task, assignee)? {
             return Ok(AutoUnblockWorkerTarget::Worker(label));
         }
         return Ok(match live_assignee {
@@ -364,7 +364,7 @@ pub(crate) fn queue_auto_unblock_worker_wake(
                 task.id, blocker_id, task.id
             );
             let summary = format!("Task unblocked: {}", task.id);
-            let prompt_id = enqueue_worker_notice(cas_root, &worker_name, |_| (dedupe_key.clone(), prompt, summary))?;
+            let prompt_id = enqueue_worker_notice(cas_root, task, &worker_name, |_| (dedupe_key.clone(), prompt, summary))?;
             (worker_name, prompt_id, dedupe_key)
         }
     };
@@ -590,7 +590,7 @@ pub(crate) fn queue_request_changes_notice(
         AutoUnblockWorkerTarget::Worker(worker_name) => worker_name,
         AutoUnblockWorkerTarget::Skipped(reason) => return Err(reason),
     };
-    enqueue_worker_notice(cas_root, &worker_name, |worker_name| {
+    enqueue_worker_notice(cas_root, task, &worker_name, |worker_name| {
         (
             format!(
                 "supervisor-request-changes:{}:{}:worker:{worker_name}",
@@ -649,13 +649,14 @@ fn queue_assignee_notice(
     let AutoUnblockWorkerTarget::Worker(worker_name) = auto_unblock_worker_target(cas_root, task)? else {
         return Ok(None);
     };
-    enqueue_worker_notice(cas_root, &worker_name, content).map(Some)
+    enqueue_worker_notice(cas_root, task, &worker_name, content).map(Some)
 }
 
 /// Enqueue one idempotent prompt for an already-resolved live worker.
 // gate[N-26 notice]: Worker lifecycle notices
 fn enqueue_worker_notice(
     cas_root: &Path,
+    task: &cas_types::Task,
     worker_name: &str,
     content: impl FnOnce(&str) -> (String, String, String),
 ) -> Result<i64, String> {
@@ -666,7 +667,7 @@ fn enqueue_worker_notice(
         .filter(|session| !session.trim().is_empty());
     let (key, prompt, summary) = content(worker_name);
     if worker_name.contains('@') {
-        return crate::cloud::peer_mailbox::worker_notice(cas_root, worker_name, &key, &prompt, &summary)?
+        return crate::cloud::peer_mailbox::worker_notice(cas_root, task, worker_name, &key, &prompt, &summary)?
             .ok_or_else(|| "Remote worker owner/generation is no longer current; notice remains undelivered".into());
     }
     let result = queue.enqueue_idempotent(

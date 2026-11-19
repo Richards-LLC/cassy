@@ -89,6 +89,7 @@ pub(crate) fn quiet(text: &str) -> bool {
 
 /// Identity stays on the authenticated queue origin, never the sender's source label.
 fn sender(row: &QueuedPrompt, supervisor: &str, agents: &[cas_types::Agent]) -> Option<String> {
+    if row.origin == Some(QueueOrigin::Daemon) && crate::cloud::peer_mailbox::train_parks::ready_wake(&row.source, &row.prompt) { return None; }
     sender_fields(&row.prompt, &row.target, row.urgent, row.origin.as_ref(), supervisor, agents)
 }
 

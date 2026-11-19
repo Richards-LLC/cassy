@@ -1083,6 +1083,7 @@ async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_
         let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
         tasks.add(&train).unwrap();
         tasks.add(&task).unwrap();
+        tasks.add_dependency(&crate::types::Dependency::new(task.id.clone(), train.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
         crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
         crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
             .save_to_cas_dir(&machine.cas).unwrap();

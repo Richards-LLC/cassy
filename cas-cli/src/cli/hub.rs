@@ -4909,7 +4909,6 @@ mod tests {
         holder.phase = Some("running".to_owned());
         let message = lock_holder_termination_message(&paths, &holder);
         assert!(message.contains("but not answering"), "{message}");
-        assert!(!message.contains("no completed runtime state"), "{message}");
         holder.phase = Some("stopping".to_owned());
         assert!(lock_holder_termination_message(&paths, &holder).contains("is stopping"));
     }

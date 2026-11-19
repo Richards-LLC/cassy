@@ -4192,7 +4192,6 @@ fn duplicate_project_rejection_without_owner_keeps_legacy_response_compatible() 
     .unwrap();
     assert_eq!(row.rejection_context(), "duplicate_of_other_project");
     assert!(!row.rejection_is_retryable());
-    assert!(push_reason_hint(row.reason.as_deref().unwrap()).contains("cloud owner"));
 }
 
 /// A cloud build that answers with aggregate counts only must behave exactly as

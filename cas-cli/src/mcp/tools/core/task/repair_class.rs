@@ -48,10 +48,15 @@ pub(crate) fn require_class(store: &dyn TaskStore, task_id: &str, offered: Optio
     if failing.is_empty() {
         return Ok(class);
     }
+    // Coverage understands `|` only, and an all-exact class is just the failing
+    // names restated, so neither can name a class.
+    let names_a_class = |class: &str| !class.contains('&')
+        && class.split('|').any(|operand| !operand.trim().trim_start_matches("test(").starts_with('='));
     match class {
-        Some(class) if named_filter(&class) && failing.iter().all(|name| filter_matches(&class, name)) => Ok(Some(class)),
+        Some(class) if named_filter(&class) && names_a_class(&class)
+            && failing.iter().all(|name| filter_matches(&class, name)) => Ok(Some(class)),
         _ => Err(format!(
-            "CLASS_AUDIT_REQUIRED: task {task_id} has recorded failing tests ({}); a repair that fixes only those leaves their class unrun. Name the whole class as a nextest filter that selects them, e.g. class_audit=\"test(ui::) | test(gates::)\" on request_changes. Park will then require a passing capped receipt that runs it.",
+            "CLASS_AUDIT_REQUIRED: task {task_id} has recorded failing tests ({}); a repair that fixes only those leaves their class unrun. Name the whole class as a nextest filter that selects them using `|` and at least one substring operand (not only `test(=name)` and no `&`), e.g. class_audit=\"test(ui::) | test(gates::)\" on request_changes. Park will then require a passing capped receipt that runs it.",
             failing.join(", "),
         )),
     }

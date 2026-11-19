@@ -13906,6 +13906,14 @@ impl CasCore {
             )));
         }
 
+        // Persist exactly the selector in force; never clear a stored one, and before the
+        // transition so a failed write cannot drop the obligation.
+        if let Some(class) = &effective_class {
+            task_store
+                .patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                    format!("task request_changes could not record the class audit: {error}")))?;
+        }
         // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
         // deadlocked because the recovery action refused parked tasks whose
         // proof boundary was merged, unbound, or legacy — exactly the states a
@@ -13923,13 +13931,6 @@ impl CasCore {
                 format!("task request_changes rejected: {error}"),
             )
         })?;
-        // Persist exactly the selector in force; never clear a stored one.
-        if let Some(class) = &effective_class {
-            task_store
-                .patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
-                    format!("task request_changes could not record the class audit: {error}")))?;
-        }
         let sync = crate::store::publish_direct_task_write(&self.cas_root, &task.id)
             .err()
             .map(|error| format!(" Cloud sync of this verdict failed ({error}); peer machines will not see it until the task's next write."))

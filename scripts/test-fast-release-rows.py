@@ -484,8 +484,8 @@ esac
         validator.parent.mkdir()
         validator.write_text('''#!/usr/bin/env bash
 case "$*" in
-    'qa journeys --help'|'qa journeys --check') exit 0 ;;
-    'qa journeys --check --base'*) exit 0 ;;
+    'qa journeys --help') echo '--check --base'; exit 0 ;;
+    'qa journeys --check'|'qa journeys --check --base'*) exit 0 ;;
     *) exit 1 ;;
 esac
 ''')
@@ -493,7 +493,7 @@ esac
         on_path = self.fast_from(self.base, CAS_VALIDATOR_INSTALLER=str(installer),
                                  PATH=f"{validator.parent}:/usr/bin:/bin")
         self.assertFalse(ran.exists(), on_path.stdout + on_path.stderr)
-        self.assertNotIn("no Cassy validator is available", on_path.stdout + on_path.stderr)
+        self.assertNotIn("FAIL journey-catalog", on_path.stdout)
 
     def test_script_test_for_a_changed_script_runs_and_its_failure_is_named(self):
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n"

@@ -8046,6 +8046,16 @@ impl CasService {
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on, &retained_tasks, retained.is_partial());
         report.push_str(&retained.render());
+        // cas-9452: merged-to-epic is not shipped. Same determination epic
+        // close refuses on, printed as one token.
+        report.push_str(&format!(
+            "\n{}\n",
+            crate::mcp::tools::core::task::lifecycle::close_ops::epic_shipping(
+                &close_project_root,
+                epic.branch.as_deref(),
+                declared_repo_context.as_ref().map(|context| context.target_branch.as_str()),
+            ).status_token()
+        ));
         if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
             report.push_str(&gain.status_line());
         }

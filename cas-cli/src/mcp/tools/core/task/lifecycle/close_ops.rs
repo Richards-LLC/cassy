@@ -9010,13 +9010,40 @@ impl CasCore {
                 Some(gone) => epic_autoclose::retarget_children(&subtasks, gone, &target_branch),
                 None => subtasks,
             };
-            match run_epic_close_merge_gate(
-                &task,
-                &req,
-                &target_branch,
-                &close_project_root,
-                &subtasks,
-            ) {
+            // cas-9452: closed children prove the content reached the epic
+            // branch, not the default branch. Release closes carry their own
+            // batch receipt, so only a close outside one is measured here.
+            let unshipped = if crate::qa_batch::release_close::target(&self.cas_root, &task.id).is_none() {
+                let destination = declared_repo_context.as_ref().map(|context| context.target_branch.as_str());
+                let delivery = task.branch.as_deref().or(destination.is_none().then_some(target_branch.as_str()));
+                match epic_shipping(&close_project_root, delivery, destination) {
+                    EpicShipping::Unshipped { default_branch, commits } => {
+                        Some((delivery.unwrap_or(target_branch.as_str()).to_string(), default_branch, commits))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let epic_gate = match unshipped {
+                Some((delivery_branch, default_branch, count)) => EpicCloseGateOutcome::Reject(format!(
+                    "⚠️ EPIC NOT SHIPPED\n\n\
+                     Epic {} is delivered on `{delivery_branch}`, which carries {count} commit(s) \
+                     that `{default_branch}` does not have. Its children are closed because \
+                     they merged into that branch, not because the work shipped.\n\n\
+                     Merge `{delivery_branch}` into `{default_branch}` (or ship it in a release), \
+                     then close the epic again.",
+                    req.id
+                )),
+                None => run_epic_close_merge_gate(
+                    &task,
+                    &req,
+                    &target_branch,
+                    &close_project_root,
+                    &subtasks,
+                ),
+            };
+            match epic_gate {
                 EpicCloseGateOutcome::Proceed => {}
                 EpicCloseGateOutcome::ProceedWithNote(note) => {
                     close_notes.record(&mut task, &note);
@@ -19363,6 +19390,114 @@ fn resolve_close_gate_default_branch(repo_path: &std::path::Path) -> Result<Stri
          then retry.",
         repo_path.display()
     )))
+}
+
+/// cas-9452: commits on an epic's own branch that the default branch lacks.
+///
+/// Children merge into the epic branch and close there, so "every child is
+/// closed" says nothing about whether the epic's content ever shipped. A ref
+/// counts as shipped when any copy of the default branch (local or
+/// origin-tracking) already holds it, so a stale local default never makes a
+/// merged epic look unshipped. Unresolvable refs answer `None`: the check only
+/// blocks on positive evidence.
+fn epic_branch_commits_absent_from_default(
+    repo_path: &std::path::Path,
+    epic_branch: &str,
+    default_branch: &str,
+) -> Option<usize> {
+    use std::process::Command;
+    if epic_branch == default_branch
+        || !is_safe_git_refname(epic_branch)
+        || !is_safe_git_refname(default_branch)
+    {
+        return None;
+    }
+    let resolve = |name: &str| -> Vec<String> {
+        [format!("refs/remotes/origin/{name}"), format!("refs/heads/{name}")]
+            .into_iter()
+            .filter(|reference| {
+                Command::new("git")
+                    .args(["show-ref", "--verify", "--quiet", reference])
+                    .current_dir(repo_path)
+                    .measurement_status()
+                    .is_ok_and(|status| status.success())
+            })
+            .collect()
+    };
+    let epic_refs = resolve(epic_branch);
+    let default_refs = resolve(default_branch);
+    let ahead = |epic: &str, default: &str| -> Option<usize> {
+        let output = Command::new("git")
+            .args(["rev-list", "--no-merges", "--count", &format!("{default}..{epic}")])
+            .current_dir(repo_path)
+            .measurement_output()
+            .ok()?;
+        output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok()).flatten()
+    };
+    let mut worst: Option<usize> = None;
+    for epic in &epic_refs {
+        let mut best: Option<usize> = None;
+        for default in &default_refs {
+            if let Some(count) = ahead(epic, default) {
+                best = Some(best.map_or(count, |current| current.min(count)));
+            }
+        }
+        if let Some(count) = best {
+            worst = Some(worst.map_or(count, |current| current.max(count)));
+        }
+    }
+    worst
+}
+
+/// cas-9452: whether an epic's closing branch has reached the default branch.
+/// Close refuses on `Unshipped`; `epic_status` prints the same answer as a
+/// token so the board shows merged-to-epic apart from shipped before anyone
+/// tries to close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EpicShipping {
+    Shipped { default_branch: String },
+    Unshipped { default_branch: String, commits: usize },
+    Unknown,
+}
+
+/// `delivery_branch` is the epic's own branch (where its children landed);
+/// `destination` is where it is meant to end up, the declared target or, when
+/// none is declared, the default branch. A destination alone proves nothing:
+/// an epic that names `main` is shipped only once its own branch is on it.
+/// An epic with no branch of its own delivers straight to its destination.
+pub(crate) fn epic_shipping(
+    repo_path: &std::path::Path,
+    delivery_branch: Option<&str>,
+    destination: Option<&str>,
+) -> EpicShipping {
+    let destination = match destination {
+        Some(destination) => destination.to_string(),
+        None => match resolve_close_gate_default_branch(repo_path) {
+            Ok(default_branch) => default_branch,
+            Err(_) => return EpicShipping::Unknown,
+        },
+    };
+    let Some(delivery_branch) = delivery_branch.filter(|branch| *branch != destination) else {
+        return EpicShipping::Shipped { default_branch: destination };
+    };
+    match epic_branch_commits_absent_from_default(repo_path, delivery_branch, &destination) {
+        Some(0) => EpicShipping::Shipped { default_branch: destination },
+        Some(commits) => EpicShipping::Unshipped { default_branch: destination, commits },
+        None => EpicShipping::Unknown,
+    }
+}
+
+impl EpicShipping {
+    /// One machine-readable line for `epic_status`.
+    pub(crate) fn status_token(&self) -> String {
+        match self {
+            Self::Shipped { default_branch } => format!("epic_shipping: shipped default={default_branch}"),
+            Self::Unshipped { default_branch, commits } => {
+                format!("epic_shipping: unshipped commits={commits} default={default_branch}")
+            }
+            Self::Unknown => "epic_shipping: unknown".to_string(),
+        }
+    }
 }
 
 /// cas-cf64: resolve the real integration target for a non-epic task with

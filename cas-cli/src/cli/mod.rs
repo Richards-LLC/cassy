@@ -763,7 +763,6 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Machine-scoped config follows HOME and does not require an initialized
     // project. Project telemetry/tracing retain their own discovery paths.
-    silence_notice_for_explicit_store(&cli.command);
     let cas_root: Option<PathBuf> = match &cli.command {
         Some(Commands::Config(cmd)) => config::host_root_for_command(cmd)
             .or_else(|| find_cas_root().ok()),
@@ -966,7 +965,7 @@ fn command_store_guard(command: &Option<Commands>) -> StoreGuard {
 
 /// cas-008b: with `--store here` or `--store cas-root` given, the choice is
 /// made, so the ambient "CAS_ROOT supplies the default" notice must not print.
-fn silence_notice_for_explicit_store(command: &Option<Commands>) {
+pub fn silence_notice_for_explicit_store(command: &Option<Commands>) {
     if matches!(command_store_guard(command), Some((_, Some(_)))) {
         crate::store::detect::suppress_root_override_notice();
     }

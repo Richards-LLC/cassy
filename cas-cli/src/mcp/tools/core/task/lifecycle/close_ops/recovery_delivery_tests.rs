@@ -559,6 +559,7 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
     }
     // cas-adca: decode the structural field and enter the real spawn handler,
     // rather than calling the class helper with an already-recorded answer.
+    crate::migration::run_migrations(&root, false).unwrap();
     env.remove("CAS_FACTORY_SESSION");
     let mut repair = tasks.get(TASK).unwrap();
     repair.status = TaskStatus::Open;

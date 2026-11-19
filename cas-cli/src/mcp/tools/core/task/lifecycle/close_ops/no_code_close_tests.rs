@@ -933,7 +933,7 @@ async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
     ).unwrap();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    lifecycle_race_hook::before_terminal_write(id, move || {
+    lifecycle_race_hook::during_gate_io(id, move || {
         entered_tx.send(()).unwrap();
         release_rx.recv().unwrap();
     });
@@ -956,9 +956,10 @@ async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
     };
     // Unblock the close even when verifier startup returns an error.
     release_tx.send(()).unwrap();
-    let review = launch.expect("the real close barrier must not retain the store").unwrap();
-    review.join().unwrap();
     let response = closing.join().unwrap();
+    eprintln!("exact verifier launch during real Git attribution gate: {launch:?}");
+    let review = launch.expect("exact verifier claim while Git attribution gate remains paused").unwrap();
+    review.join().unwrap();
     assert_closed_without_lane(&f, id, &response);
     let task = f.task(id);
     assert_eq!(task.execution_note.as_deref(), Some("no-code"));

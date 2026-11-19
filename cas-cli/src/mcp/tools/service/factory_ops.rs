@@ -4746,7 +4746,7 @@ impl CasService {
                     })
                     .map(|task| task.id.clone())
                     .collect();
-                (!ids.is_empty()).then(|| standby::HeldWorker { name: worker.name.clone(), tasks: ids })
+                (!ids.is_empty()).then(|| standby::HeldWorker { name: worker.name.clone(), tasks: ids, cli: worker.metadata.get("worker_cli").cloned() })
             })
             .collect();
         // Never forced: a worker with unsaved work refuses here, with its state,
@@ -4828,6 +4828,7 @@ impl CasService {
             spawn.count = Some(1);
             spawn.worker_names = None;
             spawn.task_ids = Some(held.tasks.clone());
+            spawn.cli = held.cli.clone().or(spawn.cli);
             self.factory_spawn_workers_in(ctx, spawn).await?;
             respawned.push(format!("{} ({})", held.name, held.tasks.join(", ")));
         }

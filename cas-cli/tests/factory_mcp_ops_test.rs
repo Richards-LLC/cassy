@@ -3181,54 +3181,69 @@ fn standby_env() -> EnvGuard {
     EnvGuard::set(&[("CAS_AGENT_ROLE", "supervisor"), ("CAS_FACTORY_SESSION", STANDBY_SESSION)])
 }
 
-/// cas-94a0: standby stops every worker of the session, keeps what they held,
-/// and resume respawns exactly those workers from their queues.
-#[tokio::test]
-async fn standby_stops_every_worker_and_resume_respawns_the_ones_holding_tasks_cas_94a0() {
-    let _guard = standby_env();
-    let env = FactoryTestEnv::new();
-    // Isolated respawns need a real repository under the project.
-    init_sync_repo(&env, "alice");
-    env.create_epic("Standby Epic");
-    env.register_worker_in_session("alice", STANDBY_SESSION);
-    env.register_worker_in_session("bob", STANDBY_SESSION);
-    let mut task = Task::new("cas-held".to_string(), "queued for alice".to_string());
-    task.status = TaskStatus::Open;
+/// A clean, pushed worker holding an IN-PROGRESS task, plus a saved supervisor
+/// handoff. Returns the handoff's id.
+fn standby_in_progress_fixture(env: &FactoryTestEnv) -> String {
+    let worker_path = init_sync_repo(env, "alice");
+    let remote_path = worker_path.parent().unwrap().join("origin.git");
+    git_stdout(&worker_path, &["init", "--bare", remote_path.to_str().unwrap()]);
+    git_stdout(&worker_path, &["remote", "add", "origin", remote_path.to_str().unwrap()]);
+    git_stdout(&worker_path, &["config", "user.email", "test@cas"]);
+    git_stdout(&worker_path, &["config", "user.name", "CAS Test"]);
+    std::fs::write(worker_path.join("work.txt"), "committed work\n").unwrap();
+    git_stdout(&worker_path, &["add", "work.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "worker progress"]);
+    git_stdout(&worker_path, &["push", "-u", "origin", "factory/alice"]);
+    let mut worker = Agent::new(Agent::generate_fallback_id(), "alice".to_string());
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some(STANDBY_SESSION.to_string());
+    worker.metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    worker.metadata.insert("worker_cli".to_string(), "claude".to_string());
+    env.agent_store().register(&worker).expect("register worker");
+    let mut task = Task::new("cas-held".to_string(), "in progress for alice".to_string());
+    task.status = TaskStatus::InProgress;
     task.assignee = Some("alice".to_string());
     env.task_store().add(&task).expect("add task");
+    env.create_epic("Standby Epic");
+    let mut handoff = cas::types::Entry::new("2026-11-19-standby".to_string(), "STATE: cas-held in flight on alice".to_string());
+    handoff.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+    cas::store::open_store(&env.cas_root).expect("open store").add(&handoff).expect("save handoff");
+    handoff.id
+}
 
+/// Run /standby and check what it leaves behind; returns the marker.
+async fn standby_and_check(env: &FactoryTestEnv, handoff: &str) -> cas::factory_standby::Standby {
     env.service
         .factory_request(Parameters(factory_req("standby")))
         .await
-        .expect("a session with no unsaved work goes on standby");
-    let queued = env.spawn_queue().peek(10).expect("peek");
-    let stopped: Vec<String> = queued
-        .iter()
+        .expect("a clean, pushed worker with an in-progress task goes on standby");
+    let stopped: Vec<String> = env
+        .spawn_queue()
+        .peek(10)
+        .expect("peek")
+        .into_iter()
         .filter(|entry| entry.action == cas_store::SpawnAction::Shutdown)
-        .flat_map(|entry| entry.worker_names.clone())
+        .flat_map(|entry| entry.worker_names)
         .collect();
-    assert!(stopped.contains(&"alice".to_string()) && stopped.contains(&"bob".to_string()), "{stopped:?}");
+    assert_eq!(stopped, vec!["alice".to_string()], "the worker is shut down cleanly, without force");
+    let task = env.task_store().get("cas-held").expect("task");
+    assert_eq!(task.status, TaskStatus::InProgress, "standby leaves the task in progress");
+    assert_eq!(task.assignee.as_deref(), Some("alice"));
     let parked = cas::factory_standby::read(&env.cas_root, STANDBY_SESSION).expect("standby marker");
+    assert_eq!(parked.handoff.as_deref(), Some(handoff));
     assert_eq!(
         parked.workers,
-        vec![cas::factory_standby::HeldWorker { name: "alice".into(), tasks: vec!["cas-held".into()] }],
-        "only the worker that held a task is respawned"
+        vec![cas::factory_standby::HeldWorker { name: "alice".into(), tasks: vec!["cas-held".into()], cli: Some("claude".into()) }]
     );
-
     // A second request changes nothing.
+    let queued = env.spawn_queue().peek(10).expect("peek").len();
     env.service.factory_request(Parameters(factory_req("standby"))).await.expect("idempotent");
-    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), queued.len());
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), queued);
+    parked
+}
 
-    // The daemon applies the queued shutdowns; resume refuses to respawn a
-    // worker that is still live.
-    for mut agent in env.agent_store().list(None).expect("list agents") {
-        agent.status = AgentStatus::Shutdown;
-        env.agent_store().update(&agent).expect("record the daemon's shutdown");
-    }
-    let mut resume = factory_req("standby");
-    resume.status = Some("resume".to_string());
-    resume.cli = Some("claude".to_string());
-    env.service.factory_request(Parameters(resume)).await.expect("resume");
+/// The respawn: one replacement bound to the held in-progress task, the marker cleared.
+fn assert_respawned_on_the_held_task(env: &FactoryTestEnv) {
     assert!(!cas::factory_standby::active(&env.cas_root, STANDBY_SESSION));
     let respawned: Vec<_> = env
         .spawn_queue()
@@ -3237,9 +3252,49 @@ async fn standby_stops_every_worker_and_resume_respawns_the_ones_holding_tasks_c
         .into_iter()
         .filter(|entry| entry.action == cas_store::SpawnAction::Spawn)
         .collect();
-    // One replacement for the one worker that held a task; its branch is kept.
     assert_eq!(respawned.len(), 1);
-    assert!(!respawned[0].worker_names.contains(&"bob".to_string()));
+    assert_eq!(respawned[0].task_id.as_deref(), Some("cas-held"));
+    let task = env.task_store().get("cas-held").expect("task");
+    assert_eq!(task.status, TaskStatus::InProgress);
+    assert_eq!(task.assignee.as_deref(), respawned[0].worker_names.first().map(String::as_str));
+}
+
+/// cas-94a0 (a): standby, then Resume, on an in-progress task with a saved handoff.
+#[tokio::test]
+async fn standby_then_resume_restores_an_in_progress_task_with_its_handoff_cas_94a0() {
+    let _guard = standby_env();
+    let env = FactoryTestEnv::new();
+    let handoff = standby_in_progress_fixture(&env);
+    standby_and_check(&env, &handoff).await;
+
+    let mut resume = factory_req("standby");
+    resume.status = Some("resume".to_string());
+    let text = get_text(&env.service.factory_request(Parameters(resume)).await.expect("resume"));
+    assert!(text.contains(&handoff) && text.contains("cas-held"), "resume names the handoff and the task: {text}");
+    assert_respawned_on_the_held_task(&env);
+}
+
+/// cas-94a0 (b): the operator's first message does the same, through the
+/// supervisor's UserPromptSubmit hook.
+#[tokio::test]
+async fn standby_then_an_operator_message_restores_the_worker_with_its_handoff_cas_94a0() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_FACTORY_SESSION", STANDBY_SESSION),
+    ]);
+    let env = FactoryTestEnv::new();
+    let handoff = standby_in_progress_fixture(&env);
+    standby_and_check(&env, &handoff).await;
+
+    let input: cas::hooks::HookInput = serde_json::from_value(serde_json::json!({
+        "session_id": "operator-message", "hook_event_name": "UserPromptSubmit",
+        "cwd": env.cas_root.parent().unwrap(), "user_prompt": "I'm back, where are we?",
+    }))
+    .expect("hook input");
+    let out = cas::hooks::handle_user_prompt_submit(&input, Some(&env.cas_root)).expect("hook");
+    let context = serde_json::to_value(&out).unwrap()["hookSpecificOutput"]["additionalContext"].to_string();
+    assert!(context.contains(&handoff) && context.contains("cas-held"), "the hook names the handoff and the task: {context}");
+    assert_respawned_on_the_held_task(&env);
 }
 
 /// Adversarial probe: a worker with unsaved work stops standby. Nothing is

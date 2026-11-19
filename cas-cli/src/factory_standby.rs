@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 pub struct HeldWorker {
     pub name: String,
     pub tasks: Vec<String>,
+    /// The harness the stopped worker ran, so its replacement runs the same one.
+    #[serde(default)]
+    pub cli: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

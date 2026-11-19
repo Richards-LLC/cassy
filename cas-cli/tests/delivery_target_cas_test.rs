@@ -725,7 +725,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         run_git(&["commit", "-m", &subject], &worker_path);
 
         let mut delivery_branch = format!("factory/{worker}");
-        if row == "unparked" {
+        if row != "fresh-branch" {
             run_git(&["push", "origin", &delivery_branch], &worker_path);
         }
         if row == "fresh-branch" {
@@ -1301,6 +1301,7 @@ fn supervisor_merge_through_close_stays_under_stack_budget_cas_6a57() {
     std::fs::write(worker_path.join("delivered.txt"), "parked delivery\n").unwrap();
     run_git(&["add", "delivered.txt"], &worker_path);
     run_git(&["commit", "-m", "parked delivery"], &worker_path);
+    run_git(&["push", "origin", &format!("factory/{slug}")], &worker_path);
     let task_store = open_task_store(&cas_root).unwrap();
     let mut task = Task::new("cas-stack-budget".to_string(), "Parked delivery".to_string());
     task.task_type = TaskType::Task;

@@ -1,4 +1,0 @@
-title: Large returned deliveries share Rust inventories without weakening changed-test proof or close snapshot safety
-tasks: [cas-bc33]
-journeys: [FACTORY-CLOSE]
-invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-REFUSED-CLOSE-CORRECTION]

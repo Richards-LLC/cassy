@@ -1,4 +1,0 @@
-title: The director idle relay does not claim a pending delivery for a task that live state shows in progress again, such as one just assigned after an earlier task parked
-tasks: [cas-97dc]
-journeys: [FACTORY-SUPERVISE]
-invariants: [FACTORY-UNDELIVERED-RELAY-ACTION]

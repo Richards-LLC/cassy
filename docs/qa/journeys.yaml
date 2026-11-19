@@ -1856,6 +1856,109 @@ bug_families:
     tasks: [cas-08db]
     invariants: [FACTORY-FRESH-WORKER-CAPACITY]
     journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  background-close-continuation-loss:
+    title: Background close continuation loss records an outcome and wakes its supervisor
+    tasks: [cas-eeda]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-REFUSED-CLOSE-CORRECTION]
+  batch-qa-park-evidence:
+    title: Resolved batch mode keeps park evidence with the batch across target ancestry states
+    tasks: [cas-72c6]
+    journeys: [FACTORY-CLOSE, FACTORY-QA-RECEIPT]
+  capacity-notice-review-scratch:
+    title: The disk-pressure capacity notice counts verifier review scratch queued for deletion in its reclaimable total instead of reporting none found
+    tasks: [cas-7a37]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-CAPACITY-NOTICES]
+  close-proof-source-citation-not-receipt:
+    title: Close proof guard does not read a source file:line or DESIGN.md@revision citation as a receipt path, while a genuinely missing receipt path still refuses
+    tasks: [cas-d1c1]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-REFUSED-CLOSE-CORRECTION]
+  close-stability-repeated-rust-inventory:
+    title: Large returned deliveries share Rust inventories without weakening changed-test proof or close snapshot safety
+    tasks: [cas-bc33]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-REFUSED-CLOSE-CORRECTION]
+  cross-machine-park-evidence:
+    title: A park on one machine is mergeable from the other with its evidence at the cited paths
+    tasks: [cas-e442]
+    journeys: [FACTORY-CLOSE, FACTORY-QA-RECEIPT]
+  cut-train-red-repair:
+    title: A frozen cut train admits only its own named repair of recorded red CI without lifting its control markers
+    tasks: [cas-82e4]
+    journeys: [FACTORY-MERGE]
+  epic-closes-before-its-branch-ships:
+    title: An epic whose own branch carries commits the default branch lacks is refused at close as not shipped
+    tasks: [cas-9452]
+    journeys: [FACTORY-CLOSE]
+  idle-relay-pending-delivery-for-started-task:
+    title: The director idle relay does not claim a pending delivery for a task that live state shows in progress again, such as one just assigned after an earlier task parked
+    tasks: [cas-97dc]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-UNDELIVERED-RELAY-ACTION]
+  inactive-peer-takeover-advice:
+    title: Forced takeover after a peer supervisor exits routes follow-up advice to the replacement's own supervisor while ordinary peer claims still refuse start
+    tasks: [cas-c2b0]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+    invariants: [FACTORY-SOURCE-WORK-DELEGATION]
+  installer-adapter-timeout-diagnostic:
+    title: Release adapter deadlines log their phase and duration before retrying
+    tasks: [cas-3e9a]
+    journeys: [CLI-RELEASE]
+    invariants: [CLI-RELEASE-INSTALLED-RECONCILER, CLI-RELEASE-NOTICE-EXHAUSTION]
+  merge-identity-epic-lane-stale-ancestor:
+    title: Merge resolves one repository identity for an epic lane and recovers a stale ancestor local ref
+    tasks: [cas-1184d]
+    journeys: [FACTORY-MERGE]
+  missing-epic-target-start:
+    title: Task start refuses a target branch that exists neither locally nor on origin, naming it, instead of passing an empty start point to git
+    tasks: [cas-8bc4]
+    journeys: [FACTORY-SPAWN]
+    invariants: [FACTORY-DETACHED-SUCCESSOR]
+  operator-hold-after-worker-blocker-stall:
+    title: A newer supervisor hold for the operator outranks a worker's older blocker note, so the stall watchdog neither wakes nor pages for it
+    tasks: [cas-285a]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  python-source-edit-credential-data:
+    title: Python replacement-source literals are data while live credential reads remain refused
+    tasks: [cas-5d392]
+  release-closeout-issue-close-timeout:
+    title: Release closeout closes every referenced issue under its own deadline and names any it could not close
+    tasks: [cas-f162]
+    journeys: [CLI-RELEASE]
+  release-closeout-reviewed-drop:
+    title: Release closeout accepts a supervisor-reviewed drop for a member a later shipped task superseded
+    tasks: [cas-0489]
+    journeys: [CLI-RELEASE]
+  release-epic-promotion:
+    title: An operator-chosen release epic can become a visible train and freeze in one validated MCP call
+    tasks: [cas-e49f]
+    invariants: [CLI-RELEASE-EPIC-PROMOTION]
+    journeys: [CLI-RELEASE]
+  release-regenerated-docs-source-revert:
+    title: Regenerated release docs preserve shipped source evidence without hiding a source revert
+    tasks: [cas-895d3]
+    journeys: [CLI-RELEASE]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
+  release-tag-reviewed-drop:
+    title: Published tag verdicts honor validated closeout reviews for superseded deliveries
+    tasks: [cas-8f6f]
+    journeys: [CLI-RELEASE]
+  resumed-blocker-delivery-watchdog:
+    title: A delivered blocker notice cannot be recreated by a stale emission after resume
+    tasks: [cas-25e1]
+    journeys: [FACTORY-SUPERVISE]
+  supervisor-startup-over-budget:
+    title: A large predecessor handoff and integrated-delivery list no longer push the supervisor SessionStart past the inline cap; overflow is reached by receipt path
+    tasks: [cas-516f]
+    journeys: [FACTORY-SUPERVISE]
+  verifier-launch-store-contention:
+    title: Verifier startup waits outside client input and retains its exact dispatch through contention
+    tasks: [cas-d0f6]
+    journeys: [FACTORY-MERGE, FACTORY-CLOSE]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

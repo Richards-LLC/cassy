@@ -8051,6 +8051,27 @@ impl CasCore {
             data: None,
         })?;
 
+        // gate-audit[train_target]: G-100 Reject a dead integration target before
+        // receipts, test-shape, lane CI, hooks or verifier dispatch. Published
+        // ancestry is bookkeeping, and check_cut_merge retains red repairs.
+        if !task.is_terminal() && task.task_type != TaskType::Epic {
+            let parent = task_store.get_parent_epic(&task.id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            if let Some(target) = effective_close_work_target(&task, parent.as_ref())
+                && let Err(message) = super::super::release_train::check_cut_merge(&self.cas_root, &target.target_branch, Some(&task.id))
+                && published_delivery_proof(&self.cas_root, &task, req.commit_receipt.as_deref()).is_none()
+            {
+                let successor = super::super::release_train::successor_for_target(&self.cas_root, &target.target_branch)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
+                let remedy = successor.as_ref().map(|next| format!(" Successor: {} ({}). Retarget before running any checks.", next.id, next.effective_epic_branch().unwrap_or("unknown"))).unwrap_or_default();
+                let mut result = close_refusal::gate("G-100", "retarget_successor", format!("{message}{remedy}"));
+                let data = result.structured_content.as_mut().unwrap();
+                data["target_branch"] = target.target_branch.into();
+                data["successor_train"] = serde_json::to_value(successor.as_ref().map(|next| &next.id)).unwrap();
+                data["successor_branch"] = serde_json::to_value(successor.as_ref().and_then(|next| next.effective_epic_branch())).unwrap();
+                return Ok(result);
+            }
+        }
+
         if let Err(message) = crate::qa_batch::release_close::validate_task(&self.cas_root, &task) {
             return Ok(Self::tool_error(message));
         }
@@ -13974,11 +13995,12 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice}{sync} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice}{sync} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.{}\n\nDecision: {}",
             task.id,
             task.title,
             assignee,
             outcome.branch_handling,
+            crate::task_assignment::test_policy_note(&req.reason),
             req.reason.trim(),
         )))
     }
@@ -29762,8 +29784,55 @@ mod merge_state_gate_tests {
 
     #[tokio::test]
     async fn park_refuses_conflict_with_live_train_cas_c05a() {
-        let f = conflict_train_fixture(TaskStatus::InProgress);
+        let mut f = conflict_train_fixture(TaskStatus::InProgress);
         advance_conflicting_train(&f);
+        let root = f.dir.path().join(".cas");
+        let config = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        std::fs::write(root.join("config.toml"), format!("{config}\n[factory]\nrelease_train=true\n")).unwrap();
+        let gh = f._bare.path().join("gh");
+        let calls = f._bare.path().join("gh-calls");
+        crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '[]\\n'\n", calls.display()));
+        f._env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        f._env.set("GH_BIN", &gh);
+        let mut train = Task::new("cas-cut-target".into(), "Cut train".into());
+        train.task_type = TaskType::Epic;
+        train.branch = Some("epic/conflict-train".into());
+        train.labels = vec!["release-train".into()];
+        train.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:cas-anchor-fixture".into(), target_branch: "main".into() });
+        f.store.add(&train).unwrap();
+        let mut next = train.clone();
+        next.id = "cas-successor".into();
+        next.branch = Some("epic/successor".into());
+        git(f.dir.path(), &["branch", "epic/successor", "main"]);
+        f.store.add(&next).unwrap();
+        f.store.add_dependency(&cas_types::Dependency::new(f.task_id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let close = serde_json::json!({"action":"close", "id":f.task_id, "reason":"ready for review"});
+        for label in ["release-train-cut".to_string(), format!("release-train-frozen:{}:{}", chrono::Utc::now().timestamp(), f.local)] {
+            train.labels = vec!["release-train".into(), label, format!("release-train-successor:{}", next.id)];
+            f.store.update(&train).unwrap();
+            let result = f.service.task(Parameters(serde_json::from_value(close.clone()).unwrap())).await.unwrap();
+            let data = result.structured_content.unwrap_or_default();
+            assert_eq!(data["code"], "G-100");
+            assert_eq!(data["target_branch"], "epic/conflict-train");
+            assert_eq!(data["successor_train"], next.id);
+            assert!(std::fs::read_to_string(&calls).unwrap_or_default().is_empty());
+            assert!(cas_store::get_latest_verification_dispatch(&root, &f.task_id).unwrap().is_none());
+            assert_eq!(f.store.get(&f.task_id).unwrap().status, TaskStatus::InProgress);
+        }
+        // A cut release ejected for red CI still admits its own repair.
+        train.labels.push("release-train-cut".into());
+        f.store.update(&train).unwrap();
+        let mut repair = f.store.get(&f.task_id).unwrap();
+        repair.labels.push("release-repair".into());
+        f.store.update(&repair).unwrap();
+        let ci = crate::train_ci::directory(&root, &train.id).unwrap();
+        std::fs::create_dir_all(&ci).unwrap();
+        std::fs::write(ci.join("state.json"), serde_json::json!({"branch":"epic/conflict-train", "red_since":"now", "red_head":f.local, "run_id":"123"}).to_string()).unwrap();
+        assert_ne!(f.service.task(Parameters(serde_json::from_value(close).unwrap())).await.unwrap().structured_content.unwrap_or_default()["code"], "G-100");
+        repair.labels.clear();
+        f.store.update(&repair).unwrap();
+        train.labels = vec!["release-train".into()];
+        f.store.update(&train).unwrap();
         let (error, message) = close_text(&f).await;
         assert_eq!(error, Some(true), "{message}");
         assert_eq!(f.store.get(&f.task_id).unwrap().status, TaskStatus::InProgress, "{message}");
@@ -29771,6 +29840,18 @@ mod merge_state_gate_tests {
         assert!(cas_store::get_latest_verification_dispatch(&f.dir.path().join(".cas"), &f.task_id).unwrap().is_none());
         assert_eq!(rev_parse_local(f.dir.path(), "HEAD"), f.local);
         assert!(git_command(f.dir.path(), &["status", "--porcelain", "--untracked-files=no"]).output().unwrap().stdout.is_empty());
+        // Exact published ancestry admits bookkeeping on a cut target.
+        let mut delivered = f.store.get(&f.task_id).unwrap();
+        delivered.status = TaskStatus::AwaitingMerge;
+        f.store.update(&delivered).unwrap();
+        train.labels.push("release-train-cut".into());
+        train.labels.push(format!("release-train-successor:{}", next.id));
+        f.store.update(&train).unwrap();
+        git(f.dir.path(), &["branch", "-f", "main", &f.local]);
+        git(f.dir.path(), &["tag", "v9.9.9", &f.local]);
+        git(f.dir.path(), &["push", "-q", "origin", "main", "--tags"]);
+        let published = f.service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"close", "id":f.task_id, "reason":"published bookkeeping"})).unwrap())).await.unwrap();
+        assert_ne!(published.structured_content.unwrap_or_default()["code"], "G-100");
     }
 
     #[tokio::test]

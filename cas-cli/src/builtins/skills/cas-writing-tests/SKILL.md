@@ -10,7 +10,7 @@ metadata:
 
 ## Fewest tests
 
-Read production code first. Name each test's contract and a believable bug it catches at the public seam. Keep one strongest test per contract; extend its cases instead of adding siblings. Cover identity/state variants as rows. Models over-add tests: offset additions by consolidating existing coverage. Delete obsolete/duplicate tests after checking importers.
+Read production code first. Name each test's contract and a believable bug it catches at the public seam. Keep one strongest test per contract; extend its cases instead of adding siblings. Cover identity/state variants as rows. Models over-add tests: offset additions by consolidating existing coverage. Delete obsolete/duplicate tests after checking importers. A brief that asks for a test per item or for message-text assertions earns a Cassy warning; its phrases live in [brief-test-phrases.txt](references/brief-test-phrases.txt), which this skill owns.
 
 For browser/e2e/journey authoring, use [cas-playwright-tests](../cas-playwright-tests/SKILL.md); diagnose failures with `cas-playwright-debug`, and audit an existing suite with `cas-test-audit`.
 

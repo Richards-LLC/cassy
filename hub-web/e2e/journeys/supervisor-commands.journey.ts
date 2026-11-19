@@ -106,7 +106,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("Resume clears the badge", async () => {
         await page.locator("[data-resume-standby]").click();
         await expect.poll(() => hub.sends.length).toBe(1);
-        expect(hub.sends[0]!.target).toBe("supervisor");
+        expect(hub.sends[0]).toMatchObject({ session: PELICAN, target: machine.sessions[0]!.supervisor });
         await expect(page.locator(".conversation-standby")).toHaveCount(0);
         await expect(page.locator("[data-resume-standby]")).toHaveCount(0);
       });

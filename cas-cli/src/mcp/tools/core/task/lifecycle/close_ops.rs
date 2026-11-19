@@ -8051,7 +8051,7 @@ impl CasCore {
             data: None,
         })?;
 
-        // gate[G-100 park admission]: Reject a dead integration target before
+        // gate-audit[train_target]: G-100 Reject a dead integration target before
         // receipts, test-shape, lane CI, hooks or verifier dispatch. Published
         // ancestry is bookkeeping, and check_cut_merge retains red repairs.
         if !task.is_terminal() && task.task_type != TaskType::Epic {

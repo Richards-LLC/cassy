@@ -662,6 +662,7 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 f'match helper {{ Some(id) => assert_eq!(source, id("a.test.ts", "{sentence}")), _ => () }}',
                 f'use diagnostic::id; assert_eq!(source, id("a.test.ts", "{sentence}"));',
                 f'assert_eq!(source, id("a.test.ts", "{sentence}")); use diagnostic::id;',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}")); const id: fn(&str, &str) -> String = diagnostic;',
                 f'assert_eq!(source, diagnostic::Identity::exact("a.test.ts", "{sentence}"));',
                 f'struct Identity; assert_eq!(source, Identity::exact("a.test.ts", "{sentence}"));',
             ]
@@ -681,7 +682,7 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                     kinds = {line.split(': ', 1)[1].split(';', 1)[0]
                              for line in result.stdout.splitlines() if line.startswith('runtime_tests.rs:')}
                     self.assertEqual(result.returncode, status, result.stdout + result.stderr)
-                    if assertion in bypasses:
+                    if status:
                         self.assertIn('exact-text pin', kinds)
                     elif not status:
                         self.assertEqual(kinds, set())

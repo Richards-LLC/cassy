@@ -778,17 +778,26 @@ def rust_runtime_inputs(source):
     # A familiar spelling alone cannot turn an unrelated/shadowed type into
     # the stability identity. Fail closed on ambiguous local declarations.
     identity_import, conflicting_identity = False, False
+    item_bindings = []
     for i, token in enumerate(ts):
         if token.string:
             continue
         if token.value == 'use':
             end = next((j for j in range(i + 1, len(ts)) if ts[j].value == ';'), len(ts))
             names = [t.value for t in ts[i + 1:end]]
+            scopes = [(left, right) for left, right in ps.items()
+                      if ts[left].value == '{' and left < i < right]
+            item_bindings.append((set(names), *max(scopes, default=(-1, len(ts)))))
             if 'Identity' in names:
                 trusted = (re.fullmatch(r'(?:[A-Za-z_]\w*::)*stability::(?:Identity|\{(?:Identity|[A-Za-z_]\w*|,)+\})', ''.join(names)) is not None
                            and 'as' not in names)
                 identity_import |= trusted
                 conflicting_identity |= not trusted
+        if token.value in ('const', 'static') and i + 1 < len(ts):
+            name = i + 2 if ts[i + 1].value == 'mut' else i + 1
+            scopes = [(left, right) for left, right in ps.items()
+                      if ts[left].value == '{' and left < i < right]
+            item_bindings.append(({ts[name].value}, *max(scopes, default=(-1, len(ts)))))
         if token.value == 'Identity' and i:
             conflicting_identity |= (ts[i - 1].value in ('struct', 'enum', 'type', 'trait', 'mod', 'as')
                                      or i + 1 < len(ts) and ts[i + 1].value == ':')
@@ -820,10 +829,14 @@ def rust_runtime_inputs(source):
                   and token.value == 'exact' and (i == 2 or ts[i - 3].value not in ('.', '::')))
         local = (i == 0 or ts[i - 1].value not in ('.', '::', 'fn'))
         candidates = [entry for entry in helpers.get(token.value, []) if entry[0] < i < entry[1]]
-        helper = local and candidates and max(candidates)[2]
+        helper = (local and candidates and all(entry[2] for entry in candidates
+                  if entry[:2] == max(candidates)[:2])
+                  and not any(token.value in names and left < i < right
+                              for names, left, right in item_bindings))
         if helper:
             owner = max((fn for fn in functions if fn[2] < i < fn[3]),
                         key=lambda fn: fn[2], default=None)
+            helper = owner is not None
             if owner:
                 # Parameters, closures, loops, patterns and imports can all
                 # shadow a helper. Only declarations/calls preserve its binding.

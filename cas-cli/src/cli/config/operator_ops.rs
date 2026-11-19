@@ -117,6 +117,9 @@ pub(crate) fn execute_set_write_roots(value: &str, cli: &Cli, cas_root: &Path) -
                 "new_value": change.stored,
                 "migrated_from_operator_policy": change.migrated,
                 "dropped_from_operator_policy": change.dropped,
+                "ignored_in_projects": change.ignored_in_projects.iter()
+                    .map(|(project, root, reason)| serde_json::json!({"project": project, "root": root, "reason": reason}))
+                    .collect::<Vec<_>>(),
                 "path": config_path,
             })
         );
@@ -150,6 +153,12 @@ pub(crate) fn execute_set_write_roots(value: &str, cli: &Cli, cas_root: &Path) -
             eprintln!("  {entry}");
         }
     }
+    if !change.ignored_in_projects.is_empty() {
+        eprintln!("warning: stored, but these projects ignore the root:");
+        for (project, root, reason) in &change.ignored_in_projects {
+            eprintln!("  {project}: {root}: {}", reason.replace('\n', " "));
+        }
+    }
     Ok(())
 }
 
@@ -162,6 +171,21 @@ pub(crate) struct WriteRootsChange {
     pub migrated: Vec<String>,
     /// Legacy roots that no longer pass validation, with the reason.
     pub dropped: Vec<String>,
+    /// User-level sets only: `(project Cassy directory, root, reason)` for each
+    /// registered project that will ignore a stored root (cas-5245).
+    pub ignored_in_projects: Vec<(String, String, String)>,
+}
+
+/// Cassy directories of the projects in the host registry.
+fn registered_project_cas_roots() -> Vec<std::path::PathBuf> {
+    use crate::store::KnownRepoStore;
+    crate::store::known_repos::open_host_known_repo_store()
+        .and_then(|store| store.list().map_err(Into::into))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|repo| repo.path.join(".cas"))
+        .filter(|cas| cas.is_dir())
+        .collect()
 }
 
 /// Validate `value`, migrate legacy roots and write `[factory] write_roots`
@@ -227,7 +251,17 @@ pub(crate) fn set_project_write_roots(
 
     let joined = stored.join(",");
     record_event(cas_root, "operator_write_roots_set", &[("roots", joined.as_str())]);
-    Ok(WriteRootsChange { previous, stored, migrated, dropped })
+    // A user-level root applies to every project, and each project may drop
+    // it; the operator is told which, now, not when an agent is refused.
+    let ignored_in_projects = if crate::config::operator_policy::is_user_store(cas_root) {
+        crate::config::operator_policy::user_write_roots_ignored_by(&stored, &registered_project_cas_roots())
+            .into_iter()
+            .map(|(project, root, reason)| (project.display().to_string(), root, reason))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(WriteRootsChange { previous, stored, migrated, dropped, ignored_in_projects })
 }
 
 /// What the write-roots getter reports for one project.
@@ -901,7 +935,17 @@ large_artifact_dir = \"before\"\n",
         std::fs::create_dir_all(&inside).unwrap();
         let both = format!("{},{}", parent.display(), inside.display());
         // The real user store, the one the getter and the hook read.
-        set_project_write_roots(&both, &crate::config::host_config_dir(), PANE_CGROUP).unwrap();
+        // The setter says which registered project ignores a root, instead of
+        // plain success; the honoured parent grant is not flagged.
+        {
+            use crate::store::KnownRepoStore;
+            crate::store::known_repos::open_host_known_repo_store().unwrap().upsert(project.parent().unwrap()).unwrap();
+        }
+        let change = set_project_write_roots(&both, &crate::config::host_config_dir(), PANE_CGROUP).unwrap();
+        let named: Vec<_> = change.ignored_in_projects.iter().map(|(p, r, _)| (p.as_str(), r.as_str())).collect();
+        let project_cas = project.canonicalize().unwrap().display().to_string();
+        assert_eq!(named, vec![(project_cas.as_str(), inside.to_str().unwrap())], "{change:?}");
+        assert!(change.ignored_in_projects.iter().all(|(_, _, reason)| !reason.is_empty()));
         let report = write_roots_report(&project).unwrap();
         let ignored = report["ignored_roots"].as_array().expect("the getter reports ignored roots");
         assert_eq!(ignored.len(), 1, "{report}");

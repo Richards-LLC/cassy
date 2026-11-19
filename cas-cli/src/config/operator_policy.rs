@@ -620,6 +620,19 @@ pub fn ignored_write_roots(project: &[String], user: &[String], cas_root: &Path)
     ignored
 }
 
+/// The projects whose enforcement drops one of these user-level roots, as
+/// `(project Cassy directory, root, reason)`, by the same rule as
+/// [`ignored_write_roots`]. A parent grant the projects honour is not listed.
+pub fn user_write_roots_ignored_by(roots: &[String], project_cas_roots: &[PathBuf]) -> Vec<(PathBuf, String, String)> {
+    let mut ignored = Vec::new();
+    for cas_root in project_cas_roots.iter().filter(|root| !is_user_store(root)) {
+        for (root, reason) in ignored_write_roots(&[], roots, cas_root) {
+            ignored.push((cas_root.clone(), root, reason));
+        }
+    }
+    ignored
+}
+
 /// Every write root in effect for a project (cas-f0ea0): its own
 /// `[factory] write_roots` (`project`), the user-level roots (`user`) and the
 /// built-in Downloads folder, then the project's Claude memory folders

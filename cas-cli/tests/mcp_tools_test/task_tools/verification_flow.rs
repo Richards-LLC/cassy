@@ -7770,17 +7770,21 @@ async fn test_epic_close_refuses_an_epic_branch_that_never_reached_the_default_b
     // No declared target: the gate falls back to the epic's own branch.
     task_store.add(&epic).expect("persist epic fixture");
     // The board reads the same determination: merged-to-epic is not shipped.
-    let epic_status_of = |id: String| async move {
+    let board_dir = cas_dir.clone();
+    let epic_status_of = |id: String| {
+        let board_dir = board_dir.clone();
+        async move {
         let request: cas_mcp::types::FactoryRequest = serde_json::from_value(
             serde_json::json!({"action": "epic_status", "id": id}),
         )
         .expect("a valid epic_status request");
         extract_text(
-            CasService::new(cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None), None)
+            CasService::new(cas::mcp::CasCore::with_daemon(board_dir, None, None), None)
                 .factory_request(Parameters(request))
                 .await
                 .expect("epic_status returns"),
         )
+        }
     };
     let epic_status = || epic_status_of(epic.id.clone());
     // The same branch under an epic that names `main` as its destination: the

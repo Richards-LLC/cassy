@@ -842,10 +842,7 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub spawn_brief: Option<String>,
 
-    /// Structural nextest selector for the pre-assigned repair's test class.
-    #[schemars(
-        description = "spawn_workers with task_id: nextest class selector covering recorded failing tests. Persisted before enqueue; omission retains the task's recorded selector."
-    )]
+    // spawn_workers with task_id: nextest filter for the repair's whole test class.
     #[serde(default)]
     pub class_audit: Option<String>,
 
@@ -1464,10 +1461,7 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub spawn_brief: Option<String>,
 
-    /// Structural nextest selector for the pre-assigned repair's test class.
-    #[schemars(
-        description = "spawn_workers with task_id: nextest class selector covering recorded failing tests. Persisted before enqueue; omission retains the task's recorded selector."
-    )]
+    // spawn_workers with task_id: nextest filter for the repair's whole test class.
     #[serde(default)]
     pub class_audit: Option<String>,
 

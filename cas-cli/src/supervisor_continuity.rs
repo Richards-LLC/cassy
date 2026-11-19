@@ -7,8 +7,6 @@ use cas_types::{Agent, AgentRole};
 
 const SOURCE: &str = "supervisor-handoff";
 const RECOVERY_SOURCE: &str = "integrated-delivery-recovery";
-/// Inline recovery rows stay under this; the rest go to a receipt file.
-const RECOVERY_INLINE_BYTES: usize = 3000;
 
 /// Project facts, rather than a predecessor's session membership, determine
 /// recovery. This is an actionable list, not the bounded historical preview.
@@ -75,34 +73,21 @@ fn integrated_recovery(root: &Path, agent_id: &str) -> anyhow::Result<String> {
         rows.push(format!("- {}: merged into {target}; hold: {hold}; review path: {review}; next: task action=close id={} commit_receipt={anchor} reason=\"Recover integrated delivery\"\n", task.id, task.id));
     }
     if rows.is_empty() && skipped.is_empty() { return Ok(String::new()) }
-    let total = rows.len();
-    let mut lines = rows;
+    let mut body = rows.concat();
     if !skipped.is_empty() {
-        lines.push(format!("Skipped recovery rows ({}):\n", skipped.len()));
-        lines.extend(skipped);
+        body.push_str(&format!("Skipped recovery rows ({}):\n{}", skipped.len(), skipped.concat()));
     }
-    // cas-516f: startup carries a bounded slice; the complete list lives in a
-    // receipt so a large backlog cannot push SessionStart past the inline cap.
-    let mut shown = 0;
-    let mut used = 0;
-    for line in &lines {
-        if used + line.len() > RECOVERY_INLINE_BYTES { break }
-        used += line.len();
-        shown += 1;
-    }
-    let intro = |rows: &str| format!(
-        "Integrated deliveries to adopt/close ({total}):\nThese project deliveries have passed the read-only merge/content guard. Close still checks branch attribution, upkeep, ledger format and evidence, QA and verification; legacy receipts may need repair. Adopt only rows you own and use the immutable commit_receipt below to recheck those gates. Tier 2 still needs its own verifier and adversarial probe.\n{rows}"
+    let text = format!(
+        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Close still checks branch attribution, upkeep, ledger format and evidence, QA and verification; legacy receipts may need repair. Adopt only rows you own and use the immutable commit_receipt below to recheck those gates. Tier 2 still needs its own verifier and adversarial probe.\n{body}",
+        rows.len()
     );
+    // cas-516f: the complete list also lives in a receipt, so an over-budget
+    // SessionStart can compact it to a count and this path.
     let dir = root.join("supervisor-recovery");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{agent_id}.txt"));
-    std::fs::write(&path, intro(&lines.concat()))?;
-    let mut text = intro(&lines[..shown].concat());
-    if shown < lines.len() {
-        text.push_str(&format!("- {} more row(s) not shown.\n", lines.len() - shown));
-    }
-    text.push_str(&format!("Recovery receipt: {}\n", path.display()));
-    Ok(text)
+    std::fs::write(&path, &text)?;
+    Ok(format!("{text}Recovery receipt: {}\n", path.display()))
 }
 
 /// Summary of a startup message for an over-budget SessionStart: keeps the

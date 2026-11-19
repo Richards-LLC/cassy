@@ -43,7 +43,7 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> anyhow::Result<Daem
 
 pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
     let request = || -> anyhow::Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + VERIFIER_FACTORY_REQUEST_TIMEOUT;
         let mut stream = UnixStream::connect(crate::ui::factory::gui_socket_path(session))?;
         match read_frame(&mut stream, deadline)? {
             DaemonMessage::Welcome {
@@ -168,11 +168,13 @@ mod authority_tests {
         let (held, holding) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel::<()>();
         let holder = std::thread::spawn(move || {
-            let _guard = shared.lock().unwrap();
-            held.send(()).unwrap();
+            let _operation = cas_store::shared_db::connection_operation("slow_close_fixture");
+            let site = line!() + 1;
+            let _guard = cas_store::shared_db::begin_immediate_pooled(&shared).unwrap();
+            held.send(site).unwrap();
             released.recv().unwrap();
         });
-        holding.recv().unwrap();
+        let site = holding.recv_timeout(Duration::from_secs(5)).unwrap();
         let refused = {
             let _budget = cas_store::wait_budget::bound_waits_for(Duration::from_millis(20));
             owner_authority(&core).unwrap_err()
@@ -180,6 +182,9 @@ mod authority_tests {
         release.send(()).unwrap();
         holder.join().unwrap();
         assert!(refused.starts_with("verifier_factory_store_busy:"), "{refused}");
+        assert!(refused.contains("holder_operation=slow_close_fixture"), "{refused}");
+        let holder_site = refused.split_whitespace().find_map(|field| field.strip_prefix("holder_site="));
+        assert_eq!(holder_site, Some(format!("{}:{}", file!(), site).as_str()));
     }
 }
 

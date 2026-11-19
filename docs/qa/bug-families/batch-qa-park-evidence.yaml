@@ -1,3 +1,0 @@
-title: Resolved batch mode keeps park evidence with the batch across target ancestry states
-tasks: [cas-72c6]
-journeys: [FACTORY-CLOSE, FACTORY-QA-RECEIPT]

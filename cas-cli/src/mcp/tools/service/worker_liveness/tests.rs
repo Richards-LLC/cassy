@@ -637,10 +637,19 @@ for line in sys.stdin:
     elif command == 'write' and child is None:
         with open(sys.argv[3], 'a') as log:
             log.write('passing test\n')
+    elif command == 'exit_leaf' and child is None:
+        print('done', flush=True)
+        break
     elif child:
         child.stdin.write(command + '\n')
         child.stdin.flush()
         assert child.stdout.readline().strip() == 'done'
+        if command == 'exit_leaf':
+            try:
+                child.wait(timeout=1)
+                child = None
+            except subprocess.TimeoutExpired:
+                pass
     print('done', flush=True)
 if child:
     child.stdin.close()
@@ -845,6 +854,17 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     foreign.pid_starttime = Some(0);
     assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, later, 300).state, Liveness::Executing);
     assert_eq!(status(later).state, Liveness::Executing);
+    // A child that only burns CPU, writing nothing, is advancing too; the last
+    // write is older than the stall window, so only the CPU can say so.
+    tree.work("work");
+    let busy = status(after + chrono::Duration::minutes(20));
+    assert_eq!(busy.state, Liveness::Executing, "{}", busy.detail());
+    // The child exits while the worker stays alive and inactive: once the
+    // window passes with nothing advancing, it reads idle again.
+    tree.work("exit_leaf");
+    let gone = status(after + chrono::Duration::minutes(30));
+    assert_eq!(gone.state, Liveness::WaitingForInput, "{}", gone.detail());
+    assert_eq!(status(after + chrono::Duration::minutes(31)).state, Liveness::WaitingForInput);
 }
 
 // cas-8ea3: a Claude worker's row names the `cas serve --backend` grandchild as

@@ -2254,6 +2254,47 @@ mod tests {
         );
     }
 
+    /// GH #2146: a journey helper under `e2e/journeys` (no `.journey` suffix) holds no
+    /// tests, and its journeys run under a named Playwright config. It widens to its
+    /// package, where the caller's `--config` selects the journeys that import it; a
+    /// `File` run of the helper finds no tests and can never park.
+    #[test]
+    fn a_journey_helper_widens_to_its_package_not_to_a_file_of_no_tests_gh_2146() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let helper = "hub-web/e2e/journeys/responsive-goals.ts";
+        let journey = "hub-web/e2e/journeys/pair-link.journey.ts";
+        for (path, body) in [
+            ("hub-web/package.json", "{}".to_string()),
+            (helper, "export const lead = 1;\n".into()),
+            (journey, "import { lead } from \"./responsive-goals\";\ntest(\"pair\", async () => { lead; });\n".into()),
+        ] {
+            let full = repo.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        std::fs::write(repo.path().join(helper), "export const lead = 2;\n").unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &[helper.to_string()], None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(widened, [super::super::widened::Scope::Package("hub-web".into())]);
+        assert_eq!(super::super::widened::scope(repo.path(), journey), super::super::widened::Scope::File(journey.into()));
+    }
+
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
     /// apps/backend/jest.config.js and its ts-jest transform.
     #[test]

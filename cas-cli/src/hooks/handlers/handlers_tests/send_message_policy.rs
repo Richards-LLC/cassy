@@ -170,6 +170,57 @@ fn operator_claims_require_same_turn_evidence_gh1887() {
     }
 }
 
+/// cas-e032: a delivery-completion claim ("merged", "landed", "shipped",
+/// "green") needs same-turn delivery evidence, not any successful tool.
+#[test]
+fn delivery_claims_need_delivery_evidence_cas_e032() {
+    let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("supervisor"))]);
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("transcript.jsonl");
+    let user = serde_json::json!({"type":"user","message":{"role":"user","content":"is it in?"}});
+    // One successful tool call: its name, input and output.
+    let ran = |name: &str, input: serde_json::Value, output: &str| {
+        vec![
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"tool-1","name":name,"input":input}
+            ]}}),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"tool-1","content":output,"is_error":false}
+            ]}}),
+        ]
+    };
+    let bash = |command: &str, output: &str| ran("Bash", serde_json::json!({"command":command}), output);
+    for (evidence, message, denied) in [
+        (vec![], "It's merged", true),
+        (bash("git merge-base --is-ancestor abc123 origin/main", ""), "It's merged", false),
+        (bash("ls", "Cargo.toml"), "It's merged", true),
+        (ran("mcp__cas__task", serde_json::json!({"action":"close","id":"cas-1"}), "Status: Closed"), "It's landed", false),
+        (bash("ls", "Cargo.toml"), "The fix is shipped", true),
+        // Adversarial: a pending check does not make CI green.
+        (bash("gh pr checks 12", "build\tpending\t0\thttps://ci/1"), "CI is green", true),
+        (bash("gh pr checks 12", "build\tpass\t41s\thttps://ci/1"), "CI is green", false),
+        (bash("ls", "Cargo.toml"), "[unverified] CI is green", false),
+        (vec![], "fixed", true),
+        (bash("ls", "Cargo.toml"), "fixed", false),
+    ] {
+        let mut records = vec![user.clone()];
+        records.extend(evidence);
+        std::fs::write(&transcript, records.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let input: HookInput = serde_json::from_value(serde_json::json!({
+            "session_id":"delivery-evidence", "hook_event_name":"PreToolUse",
+            "transcript_path":transcript, "cwd":tmp.path(),
+            "tool_name":"mcp__cs__coordination", "tool_input":{
+                "action":"message", "target":"operator", "summary":"status", "message":message
+            }
+        })).unwrap();
+        let out = handle_pre_tool_use(&input, Some(tmp.path())).unwrap();
+        assert_eq!(deny_reason(&out).is_some(), denied, "{message}");
+        if denied {
+            assert!(crate::gates::codes_in(&deny_reason(&out).unwrap()).contains(&"H-47"));
+        }
+    }
+}
+
 #[test]
 fn clipboard_evidence_expires_after_overwrite_gh1887() {
     let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("supervisor"))]);

@@ -2919,6 +2919,10 @@ impl CasService {
                     ),
                 )
             })?;
+            // cas-bc25: a repair for recorded failing tests needs its class audit.
+            crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), task_id, None)
+                .map(drop)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
             preassigned_task = Some(task.clone());
             if task.is_terminal() {
                 return Err(Self::error(
@@ -3592,7 +3596,8 @@ impl CasService {
                 })?;
                 format!(
                     "\nSupervisor brief: stored on {task_id} and quoted in the worker's spawn \
-                     message, so it is read before task start."
+                     message, so it is read before task start.{}",
+                    crate::task_assignment::test_policy_note(brief),
                 )
             }
             _ => "\nSupervisor brief: none supplied or delivered. Pass spawn_brief with task_id \
@@ -6111,7 +6116,7 @@ impl CasService {
                 // globbing/reading the transcript twice per worker.
                 let context_usage = transcript_path_for_worker
                         .as_deref()
-                    .and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli));
+                    .and_then(|path| worker_context_usage(&self.inner.cas_root, agent, path));
                 let context_info = context_usage
                     .map(format_context_usage)
                     .unwrap_or_default();
@@ -13074,7 +13079,7 @@ pub(crate) fn worker_context_notice(
     if agent.role != cas_types::AgentRole::Worker { return None; }
     let threshold = crate::config::Config::load(root).ok()?.factory()
         .context_recycle_threshold_percent;
-    let usage = transcript.and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli_from_agent(agent)));
+    let usage = transcript.and_then(|path| worker_context_usage(root, agent, path));
     let (bucket, text) = match usage {
         Some(ContextUsage { input_tokens, model_context_window: Some(window) }) if window > 0 => {
             let percent = input_tokens.saturating_mul(100) / window;
@@ -13098,6 +13103,27 @@ pub(crate) fn worker_context_notice(
 
 fn context_notice_key(root: &std::path::Path, agent: &cas_types::Agent) -> String {
     format!("{}|{}|{}", root.display(), agent.id, agent.cc_session_id.as_deref().unwrap_or_default())
+}
+
+pub(crate) fn worker_context_usage(
+    root: &std::path::Path,
+    agent: &cas_types::Agent,
+    path: &std::path::Path,
+) -> Option<ContextUsage> {
+    let cli = worker_cli_from_agent(agent);
+    if cli == cas_mux::SupervisorCli::Codex
+        && let Some(boundary) = agent.factory_session.as_deref().and_then(|session| {
+            crate::factory_context_reset::worker_recycle_boundary(root, session, &agent.name)
+        })
+    {
+        // Registration can follow a valid current-session usage record.
+        // Only an actual stop/relaunch makes an older rollout predecessor data.
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        if chrono::DateTime::<chrono::Utc>::from(modified) < boundary {
+            return None;
+        }
+    }
+    read_context_usage_from_tail_for_cli(path, cli)
 }
 
 fn context_notice_buckets() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
@@ -14601,6 +14627,47 @@ mod spawn_lifecycle_tests {
             notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),
             "{notes}"
         );
+
+        // cas-5bf1: a compliant brief carries no testing-policy warning; one that
+        // asks for message-text assertions and a test per item warns with the
+        // rules' codes and is still delivered.
+        assert!(crate::gates::codes_in(&text).iter().all(|code| !matches!(*code, "N-106" | "N-107")), "{text}");
+        task_store
+            .add(&Task::new("cas-brief2".to_string(), "Fix the other sweep".to_string()))
+            .expect("add second task");
+        let asking: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude",
+            "task_id": "cas-brief2",
+            "spawn_brief": "Add a failing-first test per item and assert the PENDING message names the workflow."
+        }))
+        .expect("valid spawn request");
+        let warned = service.factory_spawn_workers(asking).await.expect("a warning never refuses");
+        let warned = warned
+            .content
+            .into_iter()
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let codes = crate::gates::codes_in(&warned);
+        assert!(codes.contains(&"N-106") && codes.contains(&"N-107"), "{warned}");
+        assert!(task_store.get("cas-brief2").expect("task").notes.contains("SPAWN BRIEF"), "the brief is still delivered");
+        // The same detector serves request_changes reasons and acceptance criteria.
+        for (text, expected) in [
+            ("Assert the error message text says the branch is stale.", vec!["N-106"]),
+            ("One test each for the three findings.", vec!["N-107"]),
+            ("The PENDING message must name the workflow.", vec!["N-106"]),
+            ("Add one test per item without changing production code.", vec!["N-107"]),
+            ("Assert the error message contains the workflow name, not just its code.", vec!["N-106"]),
+            ("Don't add a test per item.", vec![]),
+            ("Extend one existing test; assert behaviour, ids or codes; no message/text assertions; failing-first.", vec![]),
+        ] {
+            assert_eq!(crate::task_assignment::test_policy_warnings(text), expected, "{text}");
+        }
     }
 
     /// GH #257: spawning is another planning write moment. Its ordinary queue

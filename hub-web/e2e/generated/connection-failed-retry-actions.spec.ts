@@ -10,12 +10,16 @@ test.describe('Failed connection', () => {
     await expect(page.locator(".terminal-connecting-title")).toBeVisible();
     const attempts = page.getByRole('list', { name: 'Connection attempts' });
     await expect(attempts).toBeVisible();
-    await expect(attempts.getByRole('listitem')).toHaveCount(3);
+    // Earlier attempts, the failed third attempt, its outcome, and the last successful connection.
+    await expect(attempts.getByRole('listitem')).toHaveCount(4);
     await expect(attempts.getByRole('listitem').nth(0)).toBeVisible();
     await expect(attempts.getByRole('listitem').nth(0)).toContainText("2");
     await expect(attempts.getByRole('listitem').nth(1)).toContainText("3");
     await expect(attempts.getByRole('listitem').nth(1)).toBeVisible();
+    await expect(attempts.getByRole('listitem').nth(1)).toHaveClass(/\bfailed\b/);
     await expect(attempts.getByRole('listitem').nth(2)).toBeVisible();
+    await expect(attempts.getByRole('listitem').nth(2)).toHaveClass(/\bfailed\b/);
+    await expect(attempts.getByRole('listitem').nth(3)).toHaveClass(/\bevidence\b/);
 
     // 2. Locate and click Retry, then locate and click Diagnose.
     const retry = page.getByRole('button', { name: 'Retry' });

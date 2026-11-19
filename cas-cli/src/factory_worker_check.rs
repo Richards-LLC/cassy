@@ -307,7 +307,7 @@ fn passing_run_proves(run: &str, package: &str, harness: Option<&str>, filter: &
         && passes.iter().all(|pass| pass[1] == binary && stability::rust::filter_matches(filter, &pass[2]))
 }
 
-fn named_filter(filter: &str) -> bool {
+pub(crate) fn named_filter(filter: &str) -> bool {
     regex::Regex::new(r"^[ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\)(?:[ \t]*[|&][ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\))*[ \t]*$")
         .is_ok_and(|pattern| pattern.is_match(filter))
 }
@@ -820,6 +820,33 @@ fn report_disabled_admission(root: &Path, snapshot: &crate::factory_build_guard:
     }
 }
 
+fn violation_refusal(root: &Path, repo: &Path, snapshot: &crate::factory_build_guard::BuildGuardSnapshot, violations: &[String]) -> anyhow::Error {
+    let disk_wait = snapshot.disk.as_ref().and_then(|disk| disk.as_ref().ok()).is_some_and(|disk|
+        crate::factory_build_guard::disk_pressure(disk, snapshot.live_cargo_workers.saturating_add(snapshot.requested_builders)));
+    let kind = if disk_wait { crate::factory_capacity_wait::CapacityKind::Disk }
+        else { crate::factory_capacity_wait::CapacityKind::Other };
+    recorded_refusal(root, repo, &violations.join("; "), kind)
+}
+
+/// cas-45cd (GH #2165): changed-test classification costs minutes and its result
+/// is thrown away when admission refuses. Refuse an obviously saturated host
+/// (soft guard such as memory PSI, or every builder slot held) before
+/// classifying, without taking any lock or slot. The authoritative check still
+/// runs under the admission lock after classification.
+fn capacity_preflight(root: &Path, repo: &Path, config: &crate::config::FactoryConfig, slots: &Path) -> Result<()> {
+    let snapshot = crate::factory_build_guard::inspect(root, config, 1);
+    let violations = snapshot.violations();
+    if !violations.is_empty() {
+        return Err(violation_refusal(root, repo, &snapshot, &violations));
+    }
+    if available_slot_count(slots, config.max_concurrent_builders)? == 0 {
+        return Err(recorded_refusal(root, repo,
+            &format!("max_concurrent_builders={} slots are occupied", config.max_concurrent_builders),
+            crate::factory_capacity_wait::CapacityKind::Other));
+    }
+    Ok(())
+}
+
 fn available_slot_count(root: &Path, cap: usize) -> Result<usize> {
     std::fs::create_dir_all(root)?;
     let mut available = 0;
@@ -1167,6 +1194,11 @@ impl<'a> PassingTests<'a> {
             }
             records
         })
+    }
+
+    /// cas-bc25: the filters of this tip's passing receipts.
+    pub(crate) fn filters(&self) -> Vec<String> {
+        self.records().iter().map(|(_, _, test)| test.filter.clone()).collect()
     }
 
     pub(crate) fn receipts(&self) -> Vec<String> {
@@ -2405,6 +2437,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let config = crate::config::Config::load(&cas_root)?.factory();
     let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
+        capacity_preflight(&cas_root, &repo, &config, &cas_root.join("worker-check-slots"))?;
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         let classified = with_classification_progress(
             std::time::Duration::from_secs(30),
@@ -2471,11 +2504,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.violations();
     if !violations.is_empty() {
-        let disk_wait = snapshot.disk.as_ref().and_then(|disk| disk.as_ref().ok()).is_some_and(|disk|
-            crate::factory_build_guard::disk_pressure(disk, snapshot.live_cargo_workers.saturating_add(snapshot.requested_builders)));
-        let kind = if disk_wait { crate::factory_capacity_wait::CapacityKind::Disk }
-            else { crate::factory_capacity_wait::CapacityKind::Other };
-        let refusal = recorded_refusal(&cas_root, &repo, &violations.join("; "), kind);
+        let refusal = violation_refusal(&cas_root, &repo, &snapshot, &violations);
         drop(admission);
         return Err(refusal);
     }
@@ -6360,6 +6389,17 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
             before,
             "the runner rewrote the index (took the optional index lock)"
         );
+        // cas-45cd (GH #2165): a capacity-wait retry of a named test at an
+        // unchanged tip is refused before any changed-test classification.
+        let named: Vec<String> = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(capacity_wait)"]
+            .iter().map(|arg| arg.to_string()).collect();
+        stability::rust::CLASSIFICATIONS.set(0);
+        for _ in 0..2 {
+            let error = execute_at(&root, &named, &repo, Path::new("/nonexistent/cargo"))
+                .expect_err("the only builder slot is held");
+            assert!(error.to_string().contains("max_concurrent_builders=1"), "{error}");
+        }
+        assert_eq!(stability::rust::CLASSIFICATIONS.get(), 0, "capacity refusal classified changed tests first");
     }
 
     /// cas-a8dc: a slot is an flock on an open file description. A child

@@ -136,6 +136,11 @@ impl Inventory<'_> {
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static CLASSIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
     static INVENTORY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -281,6 +286,8 @@ pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
 }
 
 pub(crate) fn selected_inputs(repo: &Path, base: &str, head: &str, test: &TargetedTest) -> Result<(Vec<Test>, bool)> {
+    #[cfg(test)]
+    CLASSIFICATIONS.set(CLASSIFICATIONS.get() + 1);
     let (package, _) = package_selector(&test.package).context("test package")?;
     let paths = git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", base, head, "--"])
         .context("STABILITY_DIFF_READ")?;

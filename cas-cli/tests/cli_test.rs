@@ -2504,11 +2504,62 @@ fn test_knowledge_commands_open_and_upgrade_pre_m226_store() {
         .assert()
         .success()
         .stdout(predicate::str::contains("The legacy page is searchable."));
-    cas_cmd(temp.path())
+    // Keep the source plan independent of the bundled skills installed by init.
+    std::fs::remove_dir_all(temp.path().join(".claude")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".claude")).unwrap();
+    std::fs::create_dir_all(temp.path().join("docs")).unwrap();
+    let pending = [
+        ".claude/CODEMAP.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+        "docs/a.md",
+        "docs/z.md",
+    ];
+    // Create out of order: the plan must follow distillation order, not disk order.
+    for path in pending.iter().rev() {
+        std::fs::write(temp.path().join(path), format!("# {path}\n")).unwrap();
+    }
+    let store = cas_store::SqliteKnowledgeStore::open(&cas_dir).unwrap();
+    use cas_store::KnowledgeStore;
+    let pages_before = store.list_pages().unwrap();
+    let ledger_before = store.list_sources().unwrap();
+
+    let output = cas_cmd(temp.path())
         .current_dir(&temp)
-        .args(["knowledge", "build", "--dry-run", "--max-sources", "1"])
+        .args(["knowledge", "build", "--dry-run", "--json", "--max-sources", "5"])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["pending_sources"], serde_json::json!(pending));
+    assert_eq!(report["sources_scanned"], 6);
+    assert_eq!(report["sources_pending"], 6);
+    assert_eq!(report["sources_skipped"], 0);
+    assert_eq!(report["sources_deferred"], 1);
+    for field in ["llm_calls", "sources_attempted", "sources_failed", "pages_written", "sources_tombstoned"] {
+        assert_eq!(report[field], 0, "{field}");
+    }
+    assert_eq!(report["errors"], serde_json::json!([]));
+
+    let text = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "build", "--dry-run", "--max-sources", "5"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text).unwrap();
+    let mut rest = text.as_str();
+    for path in pending {
+        let offset = rest.find(path).expect("planned path must be exposed in order");
+        rest = &rest[offset + path.len()..];
+    }
+    assert_eq!(store.list_pages().unwrap(), pages_before);
+    assert_eq!(store.list_sources().unwrap(), ledger_before);
 
     let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("open upgraded store");
     for column in ["origin", "origin_project_id"] {

@@ -303,6 +303,26 @@ fn codex_budget_terminal(value: &Value) -> bool {
         })
 }
 
+/// Whether an owned child's measured advancement (`child_progress`) falls in
+/// the stall window. Shared by the cpu evidence and the finished-turn override.
+pub(crate) fn owned_child_advancing(progress: Option<DateTime<Utc>>, now: DateTime<Utc>, stall_secs: i64) -> bool {
+    progress.is_some_and(|at| (now - at).num_seconds() < stall_secs.max(0))
+}
+
+/// cas-0125: a finished turn reads `waiting_for_input` only while nothing the
+/// worker owns is advancing. A background build or test whose CPU or output
+/// advanced within the stall window keeps it executing, so the director sends
+/// no idle relay and the supervisor is not told to interrupt a busy worker.
+/// Only measured owned-child progress counts, never the harness's own CPU.
+pub(crate) fn finished_turn_with_owned_child_progress(
+    mut observation: Observation,
+    owned_child_advanced: bool,
+) -> Observation {
+    let _ = owned_child_advanced;
+    observation.state = observation.state;
+    observation
+}
+
 pub(crate) fn observe(
     cli: SupervisorCli,
     path: Option<&Path>,

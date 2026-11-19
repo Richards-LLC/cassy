@@ -129,16 +129,26 @@ fn fixed_cpu_evidence_agrees_while_cold_to_warm_sampling_changes_liveness() {
         let quiet = record_cpu_sample(&mut samples, 77, "build", 100);
         let warm = record_cpu_sample(&mut samples, 77, "build", 130);
         assert_eq!((cold, quiet, warm), (None, Some(false), Some(true)));
-        for (cpu_busy, expected) in [
+        // The finished turn with a busy harness stays idle on cpu evidence
+        // alone; only the owned child's measured progress changes it.
+        let evidence = ProcessEvidence { alive: Some(true), cpu_busy: warm, detail: "fixed cpu sample".into() };
+        let finished = observe(cli, Some(&path), evidence, now(), 300);
+        assert_eq!(finished.state, Liveness::WaitingForInput, "{cli:?}: {}", finished.detail());
+        let within = Some(now() - chrono::Duration::seconds(20));
+        let expired = Some(now() - chrono::Duration::seconds(400));
+        for (progress, expected) in [
             (None, Liveness::WaitingForInput),
-            (quiet, Liveness::WaitingForInput),
-            (warm, Liveness::Executing),
+            (expired, Liveness::WaitingForInput),
+            (within, Liveness::Executing),
         ] {
-            let evidence = ProcessEvidence {
-                alive: Some(true), cpu_busy, detail: format!("fixed cpu sample: {cpu_busy:?}"),
-            };
-            let got = observe(cli, Some(&path), evidence, now(), 300);
-            assert_eq!(got.state, expected, "{cli:?} finished turn, cpu {cpu_busy:?}: {}", got.detail());
+            let got = finished_turn_with_owned_child_progress(
+                finished.clone(), owned_child_advancing(progress, now(), 300));
+            assert_eq!(got.state, expected, "{cli:?} finished turn, child progress {progress:?}: {}", got.detail());
+        }
+        // An executing or dead worker keeps its own reading.
+        for (state, expected) in [(Liveness::Dead, Liveness::Dead), (Liveness::Stalled, Liveness::Stalled)] {
+            let other = Observation { state, evidence: "fixture".into() };
+            assert_eq!(finished_turn_with_owned_child_progress(other, true).state, expected);
         }
     }
 }

@@ -650,7 +650,10 @@ fn materialize_manifest(
             let committed = (|| -> anyhow::Result<()> {
                 let artifact = from_notes(&task.notes, id, &task.id)?.ok_or_else(|| anyhow::anyhow!("no committed artifact record {id}"))?;
                 anyhow::ensure!(artifact.sha256 == file.sha256, "artifact {id} has other bytes");
-                if let Some(local) = store.get(id)? { super::require_available(&local)?; }
+                if let Some(local) = store.get(id)? {
+                    super::require_available(&local)?;
+                    anyhow::ensure!(same_artifact(&local, &artifact), "cached artifact {id} has a different identity");
+                }
                 Ok(())
             })();
             if let Err(error) = committed { missing.push(format!("{} ({error})", file.name)); continue; }

@@ -112,7 +112,10 @@ pub(crate) fn ingest(root: &Path, recipient: &Agent, message: &ClaimedPeerMessag
 
 pub(crate) fn admitted(root: &Path, task: &Task, branch: &str, tip: &str) -> bool {
     let Ok(Some(park)) = parked(task) else { return false };
-    park.branch == branch && park.tip == tip && park.current(root, task).unwrap_or(false)
+    let fresh = crate::store::open_task_store_local(root).ok().and_then(|tasks| tasks.get(&task.id).ok());
+    task.status == crate::types::TaskStatus::AwaitingMerge
+        && fresh.is_some_and(|task| task.status == crate::types::TaskStatus::AwaitingMerge && park.current(root, &task).unwrap_or(false))
+        && park.branch == branch && park.tip == tip && park.current(root, task).unwrap_or(false)
         && park.path(root).ok().and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<Park>(&bytes).ok()).as_ref() == Some(&park)
 }

@@ -1225,7 +1225,11 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     task.notes.push_str(&format!("\n{}{}", train_parks::NOTE, serde_json::to_string(&park).unwrap()));
     for machine in [&host, &owner] {
         let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
-        tasks.add(&train).unwrap(); tasks.add(&task).unwrap();
+        tasks.add(&train).unwrap();
+        let mut stored = task.clone();
+        stored.notes = task.notes.lines().filter(|line| !line.starts_with("ARTIFACT_PROOF:")).collect::<Vec<_>>().join("\n");
+        tasks.add(&stored).unwrap();
+        tasks.append_trusted_note(&task.id, &format!("ARTIFACT_PROOF: {}", serde_json::to_string(&artifact).unwrap())).unwrap();
         tasks.add_dependency(&crate::types::Dependency::new(task.id.clone(), train.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
         crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
         crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }.save_to_cas_dir(&machine.cas).unwrap();
@@ -1280,6 +1284,10 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     assert!(train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
     let evidence = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&owner.cas,&task).unwrap();
     assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
+    let mut unparked = task.clone();
+    unparked.status = crate::types::TaskStatus::Open;
+    assert!(!train_parks::admitted(&owner.cas, &unparked, "factory/w", &tip));
+    assert!(crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(repo, &unparked, "factory/w", &tip).is_err());
     let (duplicate, _) = deliver(send("same-ready-another-cloud-id", &park)).await.unwrap();
     assert_eq!((duplicate.delivered, duplicate.duplicates), (0, 1));
     for field in ["owner", "generation", "cycle", "epoch", "branch", "tip", "target", "evidence"] {

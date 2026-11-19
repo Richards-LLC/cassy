@@ -1,5 +1,6 @@
-//! Ordered supervisor merge intents. The daemon advances one delivery at a
-//! time through normal merge admission; a pending verdict retains its position.
+//! Ordered supervisor merge intents. The daemon publishes one delivery at a
+//! time through normal merge admission, in order, while every queued delivery's
+//! verifier runs in parallel; a pending verdict retains its position.
 
 use std::path::{Path, PathBuf};
 
@@ -266,6 +267,8 @@ impl CasCore {
                 }
             }
             save(&path, &queue)?;
+            // GH #2169: appended entries' reviews start now, not at the next daemon scan.
+            start_queued_reviews(self, &queue, &*tasks, queue.next);
             let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
             return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
                 crate::gates::override_tag("G-114", receipt)
@@ -320,9 +323,12 @@ impl CasCore {
             ci_override,
         };
         let common = GitOperations::new(repo).canonical_repo_key()?;
-        let _target = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
+        let target_lock = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
             .context(crate::gates::tag("G-113", "target merge already in progress; retry train_merge after it finishes"))?;
         save(&path, &queue)?;
+        // GH #2169: every queued delivery's review starts now, outside the publication lock.
+        drop(target_lock);
+        start_queued_reviews(self, &queue, &*tasks, 0);
         let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
         Ok(if queue.ci_override.is_some() { crate::gates::override_tag("G-114", receipt) } else { receipt })
     }
@@ -452,6 +458,29 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     Ok(git.is_ancestor(&entry.sha, &target))
 }
 
+/// GH #2169: only publication is ordered. Every delivery from `from` on gets
+/// its candidate and verifier now (enqueue and append start them all, the daemon
+/// pass starts those behind the head), through the same preparation the head uses,
+/// so their reviews run while earlier entries publish. A publish that changes a
+/// later entry's reviewed files is re-reviewed by that preparation (G-104) when
+/// the entry reaches the head. A hold on its own dispatch is the expected
+/// answer here; any other refusal surfaces again when the entry is the head.
+fn start_queued_reviews(core: &CasCore, queue: &Queue, tasks: &dyn crate::store::TaskStore, from: usize) {
+    for entry in queue.entries.iter().skip(from) {
+        let Ok(task) = tasks.get(&entry.task) else { continue };
+        if task.status != TaskStatus::AwaitingMerge
+            || task.deliverables.factory_branch_anchor.as_deref() != Some(&entry.sha)
+            || task.deliverables.parked_branch.as_deref() != Some(&entry.branch)
+            || published(queue, entry, false).unwrap_or(false)
+        {
+            continue;
+        }
+        if let Err(error) = core.prepare_premerge_verification(&task, &queue.repo, &entry.branch, &queue.target) {
+            tracing::debug!(task = %entry.task, reason = %error.message, "queued train delivery review not started");
+        }
+    }
+}
+
 /// Existing daemon scan, off its control loop. No additional CI stage or
 /// model turn is needed to consume an approved candidate.
 // gate-audit[ci_override]: selector Derived accepted G-114 token forwarded in response; not another request flag.
@@ -517,6 +546,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             if !queue.active() {
                 break;
             }
+            start_queued_reviews(&core, &queue, &*tasks, queue.next + 1);
             if let Err(error) = crate::train_ci::guard(
                 &core,
                 &queue.train,
@@ -1148,6 +1178,8 @@ mod tests {
     /// GH #2018: a train entry that needs a verdict asks the factory daemon to
     /// start its verifier during the resume pass. A manual handoff instead
     /// named worktree_merge, which G-101 refuses while the train owns the target.
+    /// GH #2169: with three queued deliveries, one pass starts every verifier
+    /// before the first publish, and publication still follows queue order.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn resume_requests_daemon_verifier_for_train_entry_gh_2018() {
@@ -1165,10 +1197,19 @@ mod tests {
         )
         .unwrap();
         let tasks = fixture.core.open_task_store().unwrap();
-        let mut task = tasks.get(&fixture.ids[0]).unwrap();
-        task.depth = TaskDepth::Deep;
-        tasks.update(&task).unwrap();
+        // GH #2169: three independent deliveries; every verifier starts at once.
+        for id in &fixture.ids {
+            let mut task = tasks.get(id).unwrap();
+            task.depth = TaskDepth::Deep;
+            tasks.update(&task).unwrap();
+        }
+        // Enqueue and append start every review themselves, with no resume pass between.
+        let dispatch_exists = |id: &String| cas_store::get_latest_verification_dispatch(&fixture.root, id).unwrap().is_some();
+        fixture.start_with(&fixture.ids[..2]).await;
+        assert!(fixture.ids[..2].iter().all(dispatch_exists), "enqueue starts the queued reviews");
+        assert!(!dispatch_exists(&fixture.ids[2]));
         fixture.start().await;
+        assert!(dispatch_exists(&fixture.ids[2]), "an appended delivery's review starts at the append");
         // The live stuck state: a daemonless pass left this exact dispatch
         // Pending and unclaimed.
         let parked = tasks.get(&fixture.ids[0]).unwrap();
@@ -1185,75 +1226,108 @@ mod tests {
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();
+        let wanted = fixture.ids.len();
         let broker = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-            let mut client = loop {
+            let mut clients = Vec::new();
+            while clients.len() < wanted && std::time::Instant::now() < deadline {
                 match listener.accept() {
-                    Ok((client, _)) => break client,
-                    Err(_) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(20))
+                    Ok((client, _)) => {
+                        let broker_root = broker_root.clone();
+                        clients.push(std::thread::spawn(move || {
+                            let mut client = client;
+                            client.set_nonblocking(false).unwrap();
+                            client
+                                .write_all(&encode_message(&DaemonMessage::Welcome {
+                                    session_name: "queue-session".into(),
+                                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                                        epic_title: None, cols: 80, rows: 24 },
+                                    scrollback: None, protocol_version: PROTOCOL_VERSION,
+                                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+                                }).unwrap())
+                                .unwrap();
+                            let mut header = [0; FRAME_HEADER_SIZE];
+                            client.read_exact(&mut header).unwrap();
+                            let mut body = vec![0; decode_length(&header)];
+                            client.read_exact(&mut body).unwrap();
+                            let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                            else {
+                                panic!("unexpected factory control");
+                            };
+                            // The real daemon launch path claims the exact dispatch.
+                            let review = crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+                                &broker_root, "queue-session", &dispatch_id,
+                            )
+                            .unwrap();
+                            let claimed = cas_store::get_verification_dispatch(&broker_root, &dispatch_id).unwrap();
+                            client
+                                .write_all(&encode_message(&DaemonMessage::VerifierLaunched {
+                                    dispatch_id: dispatch_id.clone(),
+                                }).unwrap())
+                                .unwrap();
+                            if let Some(review) = review {
+                                review.join().unwrap();
+                            }
+                            (dispatch_id, claimed.state, claimed.verifier_agent_id)
+                        }));
                     }
-                    Err(_) => return None,
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
                 }
-            };
-            client.set_nonblocking(false).unwrap();
-            client
-                .write_all(&encode_message(&DaemonMessage::Welcome {
-                    session_name: "queue-session".into(),
-                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
-                        epic_title: None, cols: 80, rows: 24 },
-                    scrollback: None, protocol_version: PROTOCOL_VERSION,
-                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
-                }).unwrap())
-                .unwrap();
-            let mut header = [0; FRAME_HEADER_SIZE];
-            client.read_exact(&mut header).unwrap();
-            let mut body = vec![0; decode_length(&header)];
-            client.read_exact(&mut body).unwrap();
-            let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
-            else {
-                panic!("unexpected factory control");
-            };
-            // The real daemon launch path claims the exact dispatch.
-            let review = crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
-                &broker_root, "queue-session", &dispatch_id,
-            )
-            .unwrap();
-            let claimed = cas_store::get_verification_dispatch(&broker_root, &dispatch_id).unwrap();
-            client
-                .write_all(&encode_message(&DaemonMessage::VerifierLaunched {
-                    dispatch_id: dispatch_id.clone(),
-                }).unwrap())
-                .unwrap();
-            if let Some(review) = review {
-                review.join().unwrap();
             }
-            Some((dispatch_id, claimed.state, claimed.verifier_agent_id))
+            clients.into_iter().map(|client| client.join().unwrap()).collect::<Vec<_>>()
         });
 
         resume_pending(&fixture.root, "queue-session").await.unwrap();
 
-        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[0])
-            .unwrap()
-            .expect("the train entry needs a verdict");
-        let (launched, state, verifier) =
-            broker.join().unwrap().expect("one resume pass requests the daemon verifier");
-        assert_eq!((launched, state), (pending.id.clone(), VerificationDispatchState::Claimed));
-        assert!(verifier.is_some_and(|id| id.starts_with("task-verifier-")));
-        assert_eq!(dispatch.id, pending.id);
+        let dispatches: Vec<_> = fixture.ids.iter().map(|id| {
+            cas_store::get_latest_verification_dispatch(&fixture.root, id)
+                .unwrap()
+                .expect("every queued delivery has its own dispatch before any publish")
+        }).collect();
+        let launches = broker.join().unwrap();
+        // GH #2169: one resume pass started all three verifiers, and each claimed its own dispatch.
+        let mut launched: Vec<_> = launches.iter().map(|(id, _, _)| id.clone()).collect();
+        launched.sort();
+        let mut expected: Vec<_> = dispatches.iter().map(|d| d.id.clone()).collect();
+        expected.sort();
+        assert_eq!(launched, expected);
+        assert!(launches.iter().all(|(_, state, _)| *state == VerificationDispatchState::Claimed));
+        assert!(launches.iter().all(|(_, _, verifier)| verifier.as_ref().is_some_and(|id| id.starts_with("task-verifier-"))));
+        assert_eq!(dispatches[0].id, pending.id);
         let operations = GitOperations::new(fixture._repo.path().to_path_buf());
-        assert!(!operations.is_ancestor(&fixture.shas[0], "epic/train"));
-        // The verdict resumes the same position without a single merge.
+        for sha in &fixture.shas {
+            assert!(!operations.is_ancestor(sha, "epic/train") && !operations.is_ancestor(sha, "origin/epic/train"));
+        }
+        // Verdicts arrive out of order: nothing publishes ahead of the head.
         let service = crate::mcp::CasService::new(fixture.core.clone(), None);
-        let request = serde_json::from_value(serde_json::json!({
-            "action": "add", "task_id": fixture.ids[0], "dispatch_id": dispatch.id,
-            "status": "approved", "summary": "Exact train candidate reviewed",
-        }))
-        .unwrap();
-        let approval = service.verification(Parameters(request)).await.unwrap();
+        let approve = |index: usize| {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "add", "task_id": fixture.ids[index], "dispatch_id": dispatches[index].id,
+                "status": "approved", "summary": "Exact train candidate reviewed",
+            }))
+            .unwrap();
+            service.verification(Parameters(request))
+        };
+        for index in [2, 1] {
+            let approval = approve(index).await.unwrap();
+            assert_ne!(approval.is_error, Some(true), "{approval:?}");
+        }
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        for sha in &fixture.shas {
+            assert!(!operations.is_ancestor(sha, "origin/epic/train"), "published ahead of the head");
+        }
+        // The head's verdict releases all three, in queue order.
+        let approval = approve(0).await.unwrap();
         assert_ne!(approval.is_error, Some(true), "{approval:?}");
         resume_pending(&fixture.root, "queue-session").await.unwrap();
-        assert!(operations.is_ancestor(&fixture.shas[0], "origin/epic/train"));
+        for sha in &fixture.shas {
+            assert!(operations.is_ancestor(sha, "origin/epic/train"));
+        }
+        let train = |rev: &str| git(fixture._repo.path(), &["rev-parse", rev]);
+        assert_eq!(
+            [train("origin/epic/train^2"), train("origin/epic/train^1^2"), train("origin/epic/train^1^1^2")],
+            [fixture.shas[2].clone(), fixture.shas[1].clone(), fixture.shas[0].clone()],
+        );
     }
 
     /// GH #2017: a delivery still parked on a train whose branch is gone from

@@ -5195,10 +5195,16 @@ poll (`train_guardrails::notify_train_cuts`). For an uncut train it may freeze
 when the tip holds `changelog.d/` fragments, its declared must-land scope has
 landed, no merge-queue run is in flight, the operator has not paused it
 (Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
-label), the train's supervisor is registered on this machine and the cadence
+label), `epic_verification_owner` identifies a supervisor registered on this
+machine and the cadence
 allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
 frozen in 24 hours, the last at least `release.auto_cut_min_interval_hours`
-(default 2) ago. It freezes the train, then waits for the supervisor's
+(default 2) ago. A zero daily cap turns auto-cut off. Only the verification
+owner's machine applies its project config; a peer daemon cannot substitute
+its own enabled defaults, and an unknown owner or machine declines with
+G-122. A live successor on the owner's machine can recover the cut. Every
+freeze note, including an operator takeover, records `machine=<label>`.
+It freezes the train, then waits for the supervisor's
 `release-notes.md` in the train's artifact directory, waking the supervisor
 once per tip with a deadline. With the draft present it runs the
 repository's `scripts/release.sh --notes <draft>` once per tip in a dedicated

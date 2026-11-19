@@ -339,13 +339,14 @@ fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Optio
         anyhow::bail!("TRAIN_PROMOTION_REQUIRED: {train_id} is not a release train. Promote and freeze it in one call to factory:\n{command}");
     }
     ensure!(!is_cut_train(&task), "{train_id} is already cut; it accepts no merges");
+    let machine = crate::cloud::peers::machine_label_for(root);
     if let Some(freeze) = active(root, &task) {
         // A repeat freeze by the operator takes ownership of a standing freeze.
         if actor.starts_with("operator") && !operator_frozen(&task) {
             task.labels.retain(|label| label != SUPERVISOR_LIFTABLE_LABEL);
             task.updated_at = Utc::now();
             store.update(&task)?;
-            store.append_note(train_id, &format!("RELEASE FREEZE: {actor} took ownership of the standing freeze on {train_id}"))?;
+            store.append_note(train_id, &format!("RELEASE FREEZE: {actor} took ownership of the standing freeze on {train_id}; machine={machine}"))?;
         }
         let train_ci = crate::train_ci::freeze_dispatch(root, &task);
         return Ok((format!(
@@ -377,7 +378,7 @@ fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Optio
     let reason = reason.map(str::trim).filter(|reason| !reason.is_empty()).unwrap_or("release requested");
     store.append_note(
         train_id,
-        &format!("RELEASE FREEZE: {actor} froze {train_id} at {} on tip {tip}: {reason}", eastern(now)),
+        &format!("RELEASE FREEZE: {actor} froze {train_id} at {} on tip {tip}: {reason}; machine={machine}", eastern(now)),
     )?;
     let freeze = Freeze { at: DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now), tip };
     let train_ci = crate::train_ci::freeze_dispatch(root, &task);
@@ -599,9 +600,10 @@ mod tests {
         let repo = temp.path();
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='freeze-test'\n[factory]\nepic_base_branch='main'\n").unwrap();
         let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        let supervisor = cas_types::Agent::new_with_role(
+        let mut supervisor = cas_types::Agent::new_with_role(
             "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
         );
+        supervisor.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         core.open_agent_store().unwrap().register(&supervisor).unwrap();
         core.set_agent_id_for_testing(supervisor.id.clone());
         let store = core.open_task_store().unwrap();
@@ -806,6 +808,7 @@ mod tests {
         let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
         let mut supervisor = cas_types::Agent::new_with_role(id.into(), format!("{id}-name"), cas_types::AgentRole::Supervisor);
         supervisor.factory_session = Some(session.into());
+        supervisor.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         core.open_agent_store().unwrap().register(&supervisor).unwrap();
         core.set_agent_id_for_testing(supervisor.id);
         crate::mcp::tools::service::CasService::new(core, None)

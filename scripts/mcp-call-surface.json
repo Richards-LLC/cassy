@@ -140,6 +140,7 @@
         "allow_trunk",
         "artifacts",
         "branch",
+        "class_audit",
         "cleanup",
         "clear",
         "cli",

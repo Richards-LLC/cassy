@@ -253,7 +253,7 @@ pub(crate) fn set_project_write_roots(
     record_event(cas_root, "operator_write_roots_set", &[("roots", joined.as_str())]);
     // A user-level root applies to every project, and each project may drop
     // it; the operator is told which, now, not when an agent is refused.
-    let ignored_in_projects = if false && crate::config::operator_policy::is_user_store(cas_root) {
+    let ignored_in_projects = if crate::config::operator_policy::is_user_store(cas_root) {
         crate::config::operator_policy::user_write_roots_ignored_by(&stored, &registered_project_cas_roots())
             .into_iter()
             .map(|(project, root, reason)| (project.display().to_string(), root, reason))

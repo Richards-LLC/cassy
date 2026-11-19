@@ -260,6 +260,12 @@ pub(crate) fn mark_cut_trains(
     // train reconciliation owns the integration target instead.
     if enabled(repo) == Some(true) && !retired.is_empty() {
         let successor = ensure_successor(repo, store, &cut, integration)?;
+        for train in retired.iter().filter(|train| train.id != cut_id) {
+            let mut row = store.get(&train.id).map_err(|error| error.to_string())?;
+            row.labels.retain(|label| !label.starts_with(SUCCESSOR_LABEL));
+            row.labels.push(format!("{SUCCESSOR_LABEL}{}", successor.id));
+            store.update(&row).map_err(|error| error.to_string())?;
+        }
         rollover_children(cas_root, repo, store, &retired, &successor, cut_tip, included)?;
     }
     Ok(())
@@ -319,8 +325,8 @@ fn rollover_children(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore,
                 && old.effective_epic_branch().is_some_and(|lane| check_cut_merge(root, lane, Some(&child.id)).is_ok()))
         { continue; }
         let tip = anchor.or_else(|| child.deliverables.factory_branch_start.as_ref().and_then(|start| branch_tip(repo, &start.branch)));
-        let requires_merge = !tip.as_deref().is_some_and(|tip| is_ancestor(repo, &base, tip));
         let was_parked = child.status == TaskStatus::AwaitingMerge;
+        let requires_merge = tip.as_deref().map_or(was_parked, |tip| !is_ancestor(repo, &base, tip));
         if was_parked && requires_merge { child.status = TaskStatus::Open; }
         let mut target = child.deliverables.work_target.clone().or_else(|| next.deliverables.work_target.clone()).ok_or("child has no repository target")?;
         target.target_branch = lane.into();
@@ -342,7 +348,9 @@ fn rollover_children(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore,
         if let Some(assignee) = child.assignee.as_deref() {
             let worker = agents.iter().filter(|agent| agent.name == assignee || agent.id == assignee).max_by_key(|agent| agent.registered_at);
             let recipient = worker.map_or(assignee, |worker| worker.name.as_str());
-            let action = if requires_merge { "Merge the successor into your source branch before tests or CI, then re-park." } else { "Your source contains the successor base; keep its existing proof." };
+            let action = if requires_merge { "Merge the successor into your source branch before tests or CI, then re-park." }
+                else if tip.is_some() { "Your source contains the successor base; keep its existing proof." }
+                else { "Start your source from the successor before tests or CI." };
             let payload = serde_json::json!({"task_id":child.id,"target_train":next.id,"target_branch":lane,"requires_target_merge":requires_merge});
             queue.enqueue_idempotent("release-train", recipient,
                 &format!("{} was cut; {} now targets {} ({lane}). {action}\n{payload}", old.id, child.id, next.id),

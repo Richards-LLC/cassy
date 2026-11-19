@@ -29840,6 +29840,9 @@ mod merge_state_gate_tests {
         assert_eq!(rev_parse_local(f.dir.path(), "HEAD"), f.local);
         assert!(git_command(f.dir.path(), &["status", "--porcelain", "--untracked-files=no"]).output().unwrap().stdout.is_empty());
         // Exact published ancestry admits bookkeeping on a cut target.
+        let mut delivered = f.store.get(&f.task_id).unwrap();
+        delivered.status = TaskStatus::AwaitingMerge;
+        f.store.update(&delivered).unwrap();
         train.labels.push("release-train-cut".into());
         train.labels.push(format!("release-train-successor:{}", next.id));
         f.store.update(&train).unwrap();

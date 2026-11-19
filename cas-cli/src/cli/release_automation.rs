@@ -1896,7 +1896,7 @@ pub(super) mod tests {
             let notice = notices.iter().find(|row| row["task_id"] == child.id).unwrap();
             assert_eq!(notice["target_train"], successor.id);
             assert_eq!(notice["target_branch"], lane);
-            assert_eq!(notice["requires_target_merge"], child.id == "cas-c004");
+            assert_eq!(notice["requires_target_merge"], child.id == "cas-c004", "{}", child.id);
         }
 
         for (id, _, _, _, retired) in rows {

@@ -354,7 +354,7 @@ pub struct TaskRequest {
     /// Reason for close, cancel, request_changes, or a split takeover assignment. Close succeeds only once
     /// verification passes; the close response says what to do otherwise.
     #[schemars(
-        description = "Reason for close, cancel, request_changes or split takeover. Close succeeds only after verification passes; if close returns verification-required guidance, follow it."
+        description = "Reason for close, cancel, request_changes or split takeover. Close succeeds only after verification passes."
     )]
     #[serde(default)]
     pub reason: Option<String>,

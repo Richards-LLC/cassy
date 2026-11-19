@@ -4705,8 +4705,10 @@ impl CasService {
                 let mut spawn = req.clone();
                 spawn.action = "spawn_workers".into();
                 spawn.status = None;
+                // A stopped worker's branch is preserved, so its name is taken: the
+                // replacement is a fresh worker that inherits the held tasks.
                 spawn.count = Some(1);
-                spawn.worker_names = Some(held.name.clone());
+                spawn.worker_names = None;
                 spawn.task_ids = Some(held.tasks.clone());
                 self.factory_spawn_workers_in(&ctx, spawn).await?;
                 respawned.push(format!("{} ({})", held.name, held.tasks.join(", ")));

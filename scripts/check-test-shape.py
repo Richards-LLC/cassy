@@ -753,6 +753,7 @@ def rust_runtime_inputs(source):
     ts = tokens(source)
     ps = pairs(ts)
     helpers = {}
+    functions = []
     for i, token in enumerate(ts[:-2]):
         if token.string or token.value != 'fn' or i + 2 not in ps:
             continue
@@ -761,6 +762,7 @@ def rust_runtime_inputs(source):
                      if not ts[j].string and ts[j].value in ('{', ';')), None)
         if body is None or ts[body].value != '{':
             continue
+        functions.append((i + 2, end, body, ps[body]))
         # Only a direct, typed forwarder qualifies. A helper named `id` that
         # returns String does not make diagnostic text into machine identity.
         parameters = [ts[j].value for j in range(i + 3, end - 1)
@@ -781,7 +783,25 @@ def rust_runtime_inputs(source):
         local = (i == 0 or ts[i - 1].value not in ('.', '::'))
         candidates = [entry for entry in helpers.get(token.value, []) if entry[0] < i < entry[1]]
         if local and candidates and max(candidates)[2]:
-            identity = True
+            owner = max((fn for fn in functions if fn[2] < i < fn[3]),
+                        key=lambda fn: fn[2], default=None)
+            shadowed = False
+            if owner:
+                shadowed = any(ts[j].value == token.value and ts[j + 1].value == ':'
+                               for j in range(owner[0] + 1, owner[1] - 1))
+                for j in range(owner[2] + 1, i):
+                    if ts[j].string or ts[j].value != 'let':
+                        continue
+                    if any(ts[left].value == '{' and left < j < right < i for left, right in ps.items()):
+                        continue  # A completed inner block cannot shadow this call.
+                    eq = next((k for k in range(j + 1, i) if ts[k].value in ('=', ';')), i)
+                    if eq == i or ts[eq].value != '=' or not any(t.value == token.value for t in ts[j + 1:eq]):
+                        continue
+                    finish = eq + 1
+                    while finish < i and ts[finish].value != ';':
+                        finish = ps.get(finish, finish) + 1
+                    shadowed |= finish < i
+            identity = not shadowed
         if token.value == 'git' or (
             token.value == 'expect' and i > 0 and ts[i - 1].value == '.'
         ) or identity:

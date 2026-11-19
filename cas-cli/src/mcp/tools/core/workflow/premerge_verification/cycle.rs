@@ -254,6 +254,13 @@ pub(crate) fn approved(
     anchor: &str,
     published: &str,
 ) -> Result<Option<ApprovalMatch>, String> {
+    if let Some(verdict) = super::carryover::published(root, task, anchor, published)? {
+        let conn = connection(root)?;
+        return Ok(Some(ApprovalMatch {
+            legacy: false,
+            registry_version: stamp(&conn, &verdict)?.and_then(|stamp| stamp.registry_version),
+        }));
+    }
     let conn = connection(root)?;
     if !conn
         .table_exists(None, "verification_dispatches")

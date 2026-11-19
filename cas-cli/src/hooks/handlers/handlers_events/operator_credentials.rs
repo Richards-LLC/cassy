@@ -1377,11 +1377,7 @@ fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
         return false;
     };
     let root = tree.root_node();
-    fn malformed(node: Node<'_>) -> bool {
-        let mut cursor = node.walk();
-        node.is_error() || node.is_missing() || node.children(&mut cursor).any(malformed)
-    }
-    if root.has_error() || malformed(root) {
+    if root.has_error() {
         return false;
     }
     let mut imported = false;

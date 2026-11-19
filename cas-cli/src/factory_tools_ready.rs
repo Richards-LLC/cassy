@@ -4,6 +4,11 @@
 //! the moment it first lists its tools; the daemon holds the worker's wake
 //! until that record names a live server. No timer stands in for it.
 //!
+//! Only a launch the daemon started is held: it writes an awaiting record
+//! before the harness starts. A worker with no record (one whose server listed
+//! its tools before an upgraded daemon adopted it) never lists again, so
+//! holding it would hold its wakes forever (GH #2185).
+//!
 //! The record names the stable front, not the backend that answered: a hot
 //! update replaces the backend under a live client that never lists again.
 use std::path::{Path, PathBuf};
@@ -59,21 +64,24 @@ fn record_from_environment_as(cas_root: &Path, session: &str, worker: &str, own_
     }
 }
 
-/// A new or recycled worker starts with no record, so a record from its predecessor's
-/// still-live server cannot release its first wake early.
-pub(crate) fn clear(cas_root: &Path, session: &str, worker: &str) {
-    if let Some(path) = marker(cas_root, session, worker) {
-        let _ = std::fs::remove_file(path);
+/// A new or recycled worker starts awaiting its listing, so a record from its
+/// predecessor's still-live server cannot release its first wake early.
+pub(crate) fn await_listing(cas_root: &Path, session: &str, worker: &str) {
+    let Some(path) = marker(cas_root, session, worker).filter(|_| cas_root.is_dir()) else { return };
+    let written = std::fs::create_dir_all(path.parent().expect("marker has a parent")).and_then(|()| std::fs::write(&path, AWAITING));
+    if let Err(error) = written {
+        tracing::warn!(%error, worker, "could not record that this worker awaits its tools listing");
     }
 }
 
-/// Whether the worker's current MCP server has listed its tools. A record left
-/// by a server that has since exited (a recycled worker) does not count.
+const AWAITING: &str = "awaiting";
+
+/// Whether the worker's current MCP server has listed its tools. An awaiting
+/// record, or one left by a server that has since exited, does not count; no
+/// record at all is a worker this daemon did not launch, whose tools are listed.
 pub(crate) fn tools_listed(cas_root: &Path, session: &str, worker: &str, pid_alive: impl Fn(u32) -> bool) -> bool {
-    marker(cas_root, session, worker)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|pid| pid.trim().parse::<u32>().ok())
-        .is_some_and(pid_alive)
+    let Some(record) = marker(cas_root, session, worker).and_then(|path| std::fs::read_to_string(path).ok()) else { return true };
+    record.trim().parse::<u32>().is_ok_and(pid_alive)
 }
 
 /// A backend that is not the front's own process lists tools: `backend_pid` is that
@@ -88,6 +96,6 @@ pub(crate) fn note_listed_by_backend_for_test(cas_root: &Path, request_id: &str,
 }
 
 #[cfg(test)]
-pub(crate) fn forget_for_test(cas_root: &Path, session: &str, worker: &str) {
-    std::fs::remove_file(marker(cas_root, session, worker).expect("fixture names are valid")).expect("the fixture had listed its tools");
+pub(crate) fn path_for_test(cas_root: &Path, session: &str, worker: &str) -> PathBuf {
+    marker(cas_root, session, worker).expect("fixture names are valid")
 }

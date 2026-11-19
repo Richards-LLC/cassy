@@ -4437,7 +4437,13 @@ impl CasService {
         // process liveness still protects a running harness's unsaved work.
         let recovering_dead_worker = factory_session.is_some()
             && !super::agent_liveness::evaluate_supervision_liveness(&worker).is_live();
-        if snapshot.unsafe_worktree && !recovering_dead_worker {
+        // GH #2185: commits that are only local survive a recycle in the kept
+        // worktree and branch; only uncommitted files need the worker's checkpoint.
+        let only_commits_unpushed = snapshot
+            .clone_path
+            .as_deref()
+            .is_some_and(|path| dirty_file_count(path) == Ok(0));
+        if snapshot.unsafe_worktree && !only_commits_unpushed && !recovering_dead_worker {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(

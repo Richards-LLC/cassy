@@ -2206,9 +2206,9 @@ impl std::fmt::Display for SurfacingSource {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WakeAttempt {
-    /// No wake was attempted for this row: the idle gate vetoed it, the
-    /// recipient's channel is PTY (delivery already *is* a turn), or the row
-    /// never reached the nudge seam. The default for every historical row.
+    /// No wake was attempted for this row: the idle gate vetoed it, or the
+    /// row never reached the nudge seam. The default for every historical row.
+    /// A completed PTY-channel write is `Fired`: its typed payload is the wake.
     #[default]
     NotAttempted,
     /// CAS injected the wake into the recipient's pane and the mux reported

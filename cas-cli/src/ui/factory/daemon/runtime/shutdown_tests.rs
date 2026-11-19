@@ -1332,7 +1332,7 @@ async fn dead_recycle_refuses_unregistered_live_replacement_cas_35f6() {
 #[tokio::test(flavor = "current_thread")]
 async fn same_name_spawn_recovers_dead_pane_cas_35f6() {
     if !run_hermetic_recycle_child("same_name_spawn_recovers_dead_pane_cas_35f6") {
-        recover_dead_worker(false, cas_types::AgentStatus::Stale, "own").await;
+        recover_worker(false, Some(cas_types::AgentStatus::Stale), "own").await;
     }
 }
 
@@ -1360,13 +1360,25 @@ async fn recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6() {
     if !run_hermetic_recycle_child("recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6") {
         for status in [cas_types::AgentStatus::Stale, cas_types::AgentStatus::Shutdown] {
             for ownership in ["own", "foreign-session", "unregistered", "completed"] {
-                recover_dead_worker(true, status, ownership).await;
+                recover_worker(true, Some(status), ownership).await;
             }
         }
     }
 }
 
-async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus, ownership: &str) {
+/// GH #2185: a live, idle worker whose clean worktree holds only local commits is
+/// recycled, and the replacement runs on the same branch and HEAD.
+#[tokio::test(flavor = "current_thread")]
+async fn recycle_keeps_a_live_workers_local_commits_gh_2185() {
+    if !run_hermetic_recycle_child("recycle_keeps_a_live_workers_local_commits_gh_2185") {
+        recover_worker(true, None, "none").await;
+    }
+}
+
+/// Recover a worker holding a local-only commit: by recycle or same-name spawn when
+/// it died with `death`, or by recycle while it is still alive (`None`). `ownership`
+/// names who holds a build in its worktree, or `none` for no build.
+async fn recover_worker(recycle: bool, death: Option<cas_types::AgentStatus>, ownership: &str) {
     use crate::mcp::{CasCore, tools::CasService};
     use crate::worktree::{WorktreeConfig, WorktreeManager};
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -1441,7 +1453,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus, owne
     impl Drop for Build {
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
-    let mut build = if recycle {
+    let mut build = if recycle && ownership != "none" {
         let log = cas.join("build.log");
         std::fs::write(&log, "").unwrap();
         let run = crate::factory_worker_runs::register(&cas, &worker, &log, chrono::Utc::now()).unwrap().unwrap();
@@ -1474,22 +1486,24 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus, owne
         std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
         Some(child)
     } else { None };
-    // Kill only this fixture's child; consume its real PTY exit event.
-    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let (_, events) = daemon.app.mux.poll_batch();
-            if events.iter().any(|event| matches!(event, cas_mux::MuxEvent::PaneExited { pane_id, .. } if pane_id == name)) {
-                break;
+    if let Some(status) = death {
+        // Kill only this fixture's child; consume its real PTY exit event.
+        assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (_, events) = daemon.app.mux.poll_batch();
+                if events.iter().any(|event| matches!(event, cas_mux::MuxEvent::PaneExited { pane_id, .. } if pane_id == name)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    }).await.expect("killed worker emits its exit");
-    // The crash handler retains the checkout because the worker holds work.
-    daemon.app.mark_worker_crashed(name).await;
-    daemon.app.join_worker_worktree_cleanups();
-    old.status = status;
-    agents.update(&old).unwrap();
+        }).await.expect("killed worker emits its exit");
+        // The crash handler retains the checkout because the worker holds work.
+        daemon.app.mark_worker_crashed(name).await;
+        daemon.app.join_worker_worktree_cleanups();
+        old.status = status;
+        agents.update(&old).unwrap();
+    }
     let spec = cas_mux::WorkerSpec {
         cli: cas_mux::SupervisorCli::Codex, model: Some("gpt-6.1-sol".into()),
         ..cas_mux::WorkerSpec::builtin_default()
@@ -1502,7 +1516,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus, owne
         let service = CasService::new(core);
         let req = serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap();
         service.factory_request(rmcp::handler::server::wrapper::Parameters(req))
-            .await.expect("supervisor can recycle a dead worker with unpublished work");
+            .await.expect("supervisor can recycle a worker whose unpublished work is committed");
         daemon.enqueue_spawn_requests().unwrap();
         let request_id = match daemon.pending_spawns.front().unwrap() {
             super::super::PendingSpawn::Recycle { request_id, .. } => *request_id,
@@ -1513,7 +1527,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus, owne
             .into_iter().filter(|row| row.target == supervisor).map(|row| row.id).collect::<Vec<_>>();
         let before = supervisor_rows();
         daemon.process_pending_spawns().await;
-        if ownership != "own" {
+        if ownership != "own" && ownership != "none" {
             assert!(!daemon.pending_spawns.iter().any(|pending| matches!(pending,
                 super::super::PendingSpawn::Recycle { request_id: id, .. } if *id == request_id)));
             assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas, request_id).0.as_deref() == Some(SpawnLifecycleState::Failed.as_str())));
@@ -1527,15 +1541,16 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus, owne
             assert_eq!(std::fs::read_to_string(worker.join("precious")).unwrap(), "unpublished work");
             return;
         }
-        assert!(daemon.pending_spawns.iter().any(|pending| matches!(pending,
-            super::super::PendingSpawn::Recycle { request_id: id, name: held, .. } if *id == request_id && held == name)));
-        assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas, request_id).0.as_deref() == Some(SpawnLifecycleState::Provisioning.as_str())));
-        assert!(!daemon.spawn_verifications.contains_key(name));
-        assert_eq!(supervisor_rows(), before);
-        use std::io::Write;
-        let child = build.as_mut().unwrap();
-        child.0.stdin.as_mut().unwrap().write_all(&[1]).unwrap();
-        assert!(child.0.wait().unwrap().success());
+        if let Some(child) = build.as_mut() {
+            assert!(daemon.pending_spawns.iter().any(|pending| matches!(pending,
+                super::super::PendingSpawn::Recycle { request_id: id, name: held, .. } if *id == request_id && held == name)));
+            assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas, request_id).0.as_deref() == Some(SpawnLifecycleState::Provisioning.as_str())));
+            assert!(!daemon.spawn_verifications.contains_key(name));
+            assert_eq!(supervisor_rows(), before);
+            use std::io::Write;
+            child.0.stdin.as_mut().unwrap().write_all(&[1]).unwrap();
+            assert!(child.0.wait().unwrap().success());
+        }
         daemon.process_pending_spawns().await;
         daemon.app.join_worker_worktree_cleanups();
         daemon.process_pending_spawns().await;

@@ -1562,6 +1562,45 @@ fn cas_bfa1_epic_for_branch_prefers_live_owner_and_bounds_lookup() {
     );
 }
 
+/// cas-ddbe: the director's per-refresh read parsed the deliverables of every closed
+/// task. A finished, non-epic task now carries them only when they say it closed as
+/// evidence-only or a negative result, which is all the board reads from them, so
+/// what counts as delivered is unchanged.
+#[test]
+fn task_heads_read_drops_finished_deliverables_the_board_never_reads_cas_ddbe() {
+    let (_temp, store) = create_test_store();
+    let batch = || cas_types::IntegrationBatchEvidence {
+        branch: "b".into(), tip: "t".into(), base: "x".into(), delivered_head: "d".into(),
+        supervisor_id: "s".into(), recorded_at: chrono::Utc::now(),
+    };
+    let mut bulky = Task::new("cas-ddbe1".into(), "Closed with receipts".into());
+    bulky.status = TaskStatus::Closed;
+    bulky.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "/r".into(), target_branch: "epic/x".into() });
+    bulky.deliverables.integration_batch = Some(batch());
+    let mut evidence = Task::new("cas-ddbe2".into(), "Closed as evidence".into());
+    evidence.status = TaskStatus::Closed;
+    evidence.deliverables.evidence_only = Some(cas_types::EvidenceOnlyEvidence {
+        artifact_path: "/a".into(), reference: "pr".into(), rationale: "r".into(), supervisor_id: "s".into(),
+        supervisor_name: "sup".into(), commit_sha: "c".into(), base_sha: "b".into(), paths: vec![],
+    });
+    let mut epic = Task::new("cas-ddbe3".into(), "Closed epic".into());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::Closed;
+    epic.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "/r".into(), target_branch: "epic/y".into() });
+    let mut open = Task::new("cas-ddbe4".into(), "Open".into());
+    open.deliverables.integration_batch = Some(batch());
+    for task in [&bulky, &evidence, &epic, &open] {
+        store.add(task).unwrap();
+    }
+    let (tasks, _, _) = store.list_heads_with_parent_deps_and_start_gates().unwrap();
+    let head = |id: &str| tasks.iter().find(|row| row.id == id).unwrap();
+    assert!(head("cas-ddbe1").deliverables.work_target.is_none() && head("cas-ddbe1").deliverables.integration_batch.is_none(), "a finished task's unread deliverables are not carried");
+    assert!(head("cas-ddbe1").counts_as_delivered(), "still counts as delivered");
+    assert!(head("cas-ddbe2").deliverables.evidence_only.is_some() && head("cas-ddbe2").counts_as_delivered(), "evidence-only survives");
+    assert!(head("cas-ddbe3").deliverables.work_target.is_some(), "an epic keeps its deliverables for its branch");
+    assert!(head("cas-ddbe4").deliverables.integration_batch.is_some(), "an open task keeps its deliverables");
+}
+
 #[test]
 fn task_heads_read_carries_no_body_text_cas_5461() {
     let (_temp, store) = create_test_store();

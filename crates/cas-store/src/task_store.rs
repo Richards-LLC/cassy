@@ -1060,6 +1060,11 @@ impl SqliteTaskStore {
     /// ~100 MB; reading them held the shared connection for 1-2 s a pass
     /// (cas-5461). Read a task's body with `get`.
     ///
+    /// A finished task that is not an epic also drops its deliverables (cas-ddbe):
+    /// parsing them for every closed row on every refresh dominated the read, and
+    /// the board reads from them only whether the task closed as evidence-only or
+    /// a negative result, so a row naming neither carries none.
+    ///
     /// The prerequisite predicate matches `list_ready` and the `start` gate:
     /// a prerequisite resolves only once it is `closed` or `cancelled`.
     pub fn list_heads_with_parent_deps_and_start_gates(
@@ -1073,7 +1078,11 @@ impl SqliteTaskStore {
                 "SELECT id, title, '', '', '', '',
                  status, priority, task_type, assignee, labels, created_at, updated_at,
                  closed_at, NULL, external_ref, content_hash, branch, worktree_id,
-                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, '', execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door, review_dispatch_id
+                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id,
+                 CASE WHEN status IN ('closed', 'cancelled') AND task_type <> 'epic'
+                      AND instr(deliverables, '"evidence_only"') = 0 AND instr(deliverables, '"negative_result"') = 0
+                      THEN '{}' ELSE deliverables END,
+                 '', execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door, review_dispatch_id
                  FROM tasks ORDER BY priority, created_at DESC",
             )?;
             stmt.query_map([], Self::task_from_row)?

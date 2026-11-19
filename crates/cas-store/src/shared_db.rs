@@ -15,6 +15,91 @@ use rusqlite::Connection;
 use crate::SQLITE_BUSY_TIMEOUT;
 use crate::{Result, StoreError};
 
+/// Connection holder identity is captured at acquisition, never by taking the
+/// connection again. The registry is not held while waiting for a connection.
+#[derive(Clone)]
+struct ConnectionHolder {
+    operation: &'static str,
+    site: &'static std::panic::Location<'static>,
+    thread: std::thread::ThreadId,
+    since: Instant,
+}
+
+static HOLDERS: std::sync::LazyLock<Mutex<HashMap<usize, ConnectionHolder>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+thread_local! {
+    static OPERATION: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Names synchronous store work in contention diagnostics on this thread.
+#[must_use]
+pub struct ConnectionOperation {
+    previous: Option<&'static str>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+/// Scope a holding-operation name without changing any wait budget.
+pub fn connection_operation(operation: &'static str) -> ConnectionOperation {
+    ConnectionOperation {
+        previous: OPERATION.replace(Some(operation)),
+        _not_send: std::marker::PhantomData,
+    }
+}
+
+impl Drop for ConnectionOperation {
+    fn drop(&mut self) {
+        OPERATION.set(self.previous);
+    }
+}
+
+/// Removes holder metadata before unlocking, so an old guard cannot erase a
+/// successor's identity. The inner guard retains SQLite's poisoning behaviour.
+pub(crate) struct ConnectionGuard<'a> {
+    guard: MutexGuard<'a, Connection>,
+    key: usize,
+}
+
+impl std::ops::Deref for ConnectionGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection { &self.guard }
+}
+
+impl std::ops::DerefMut for ConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection { &mut self.guard }
+}
+
+impl Drop for ConnectionGuard<'_> {
+    fn drop(&mut self) {
+        HOLDERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
+    }
+}
+
+#[track_caller]
+fn track_connection<'a>(conn: &Mutex<Connection>, guard: MutexGuard<'a, Connection>) -> ConnectionGuard<'a> {
+    let site = std::panic::Location::caller();
+    let key = conn as *const _ as usize;
+    HOLDERS.lock().unwrap_or_else(|e| e.into_inner()).insert(key, ConnectionHolder {
+        operation: OPERATION.get().unwrap_or(site.file()),
+        site,
+        thread: std::thread::current().id(),
+        since: Instant::now(),
+    });
+    ConnectionGuard { guard, key }
+}
+
+fn contention_detail(conn: &Mutex<Connection>) -> String {
+    let holder = HOLDERS.lock().unwrap_or_else(|e| e.into_inner())
+        .get(&(conn as *const _ as usize)).cloned();
+    match holder {
+        Some(holder) => format!(
+            "shared SQLite connection held by another thread; holder_operation={} holder_site={}:{} holder_thread={:?} holder_elapsed_ms={}",
+            holder.operation, holder.site.file(), holder.site.line(), holder.thread, holder.since.elapsed().as_millis(),
+        ),
+        None => "shared SQLite connection held by another thread; holder_operation=unknown".into(),
+    }
+}
+
 /// Acquire a shared SQLite connection, converting a poisoned mutex into a
 /// recoverable store error instead of panicking the caller.
 ///
@@ -26,15 +111,17 @@ use crate::{Result, StoreError};
 /// polled only until the deadline: another thread of this process holding the
 /// connection across its own busy wait must not stall a UI thread (GH #1165).
 /// Without a budget this is a plain blocking lock.
-pub(crate) fn lock_connection(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
+#[track_caller]
+pub(crate) fn lock_connection(conn: &Mutex<Connection>) -> Result<ConnectionGuard<'_>> {
     lock_connection_with(conn, false)
 }
 
 /// [`lock_connection`] for stores that recover a poisoned mutex rather than
 /// fail on it. Fails only when the thread's wait budget runs out.
+#[track_caller]
 pub(crate) fn lock_connection_recovering(
     conn: &Mutex<Connection>,
-) -> Result<MutexGuard<'_, Connection>> {
+) -> Result<ConnectionGuard<'_>> {
     lock_connection_with(conn, true)
 }
 
@@ -42,44 +129,47 @@ pub(crate) fn lock_connection_recovering(
 /// poisoned mutex and, past a thread's wait budget, falls back to a blocking
 /// lock. Neither store is reached from the factory daemon loop; a store that
 /// is must use [`lock_connection`] and propagate the budget error.
-pub(crate) fn lock_connection_infallible(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+#[track_caller]
+pub(crate) fn lock_connection_infallible(conn: &Mutex<Connection>) -> ConnectionGuard<'_> {
     match lock_connection_recovering(conn) {
         Ok(guard) => guard,
-        Err(_) => conn.lock().unwrap_or_else(|error| error.into_inner()),
+        Err(_) => track_connection(conn, conn.lock().unwrap_or_else(|error| error.into_inner())),
     }
 }
 
 /// [`lock_connection`] for the pooled write path's bare mutex.
-pub(crate) fn lock_connection_mutex(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
+#[track_caller]
+pub(crate) fn lock_connection_mutex(conn: &Mutex<Connection>) -> Result<ConnectionGuard<'_>> {
     lock_connection(conn)
 }
 
+#[track_caller]
 fn lock_connection_with(
     conn: &Mutex<Connection>,
     recover_poison: bool,
-) -> Result<MutexGuard<'_, Connection>> {
+) -> Result<ConnectionGuard<'_>> {
     let poisoned = || StoreError::Other("shared SQLite connection lock poisoned".to_string());
     crate::wait_budget::note_store_access("sqlite connection");
     if crate::wait_budget::wait_deadline().is_none() {
         return match conn.lock() {
-            Ok(guard) => Ok(guard),
-            Err(error) if recover_poison => Ok(error.into_inner()),
+            Ok(guard) => Ok(track_connection(conn, guard)),
+            Err(error) if recover_poison => Ok(track_connection(conn, error.into_inner())),
             Err(_) => Err(poisoned()),
         };
     }
     let mut pause = Duration::from_micros(200);
     loop {
         match conn.try_lock() {
-            Ok(guard) => return Ok(guard),
+            Ok(guard) => return Ok(track_connection(conn, guard)),
             Err(std::sync::TryLockError::Poisoned(error)) if recover_poison => {
-                return Ok(error.into_inner());
+                return Ok(track_connection(conn, error.into_inner()));
             }
             Err(std::sync::TryLockError::Poisoned(_)) => return Err(poisoned()),
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         let Some(sleep) = crate::wait_budget::clamp_wait(pause) else {
             return Err(crate::wait_budget::budget_exhausted_store_error(
-                "shared SQLite connection held by another thread",
+                &contention_detail(conn),
             ));
         };
         std::thread::sleep(sleep);
@@ -674,7 +764,7 @@ const POOLED_BACKOFF_MS: &[u64] = &[5, 10, 20, 40, 80];
 /// Built only by [`begin_immediate_pooled`], which takes the guard per attempt
 /// and drops it while it sleeps; see that function for why.
 pub struct PooledImmediateTx<'a> {
-    conn: MutexGuard<'a, Connection>,
+    conn: ConnectionGuard<'a>,
     committed: bool,
 }
 
@@ -723,6 +813,7 @@ impl std::ops::Deref for PooledImmediateTx<'_> {
 ///
 /// As with the unpooled form, nothing runs inside the transaction until it is
 /// open, so the caller's body executes exactly once.
+#[track_caller]
 pub fn begin_immediate_pooled(shared: &Mutex<Connection>) -> crate::Result<PooledImmediateTx<'_>> {
     begin_immediate_pooled_bounded(shared, POOLED_ATTEMPT_BUSY, pooled_write_budget())
 }
@@ -752,6 +843,7 @@ fn pooled_write_budget() -> Duration {
 
 /// [`begin_immediate_pooled`] with an explicit per-attempt busy wait and total
 /// budget, so tests can exhaust the budget quickly.
+#[track_caller]
 pub fn begin_immediate_pooled_bounded(
     shared: &Mutex<Connection>,
     attempt_busy: Duration,
@@ -841,6 +933,7 @@ pub fn begin_immediate_pooled_bounded(
 
 /// Run `body` inside a write transaction acquired by
 /// [`begin_immediate_pooled`], committing on success.
+#[track_caller]
 pub fn with_immediate_write_txn_pooled<T, F>(shared: &Mutex<Connection>, body: F) -> crate::Result<T>
 where
     F: FnOnce(&Connection) -> crate::Result<T>,
@@ -1304,6 +1397,43 @@ mod tests {
         assert!(
             matches!(lock_connection(&conn), Err(StoreError::Other(_)))
         );
+    }
+
+    #[test]
+    fn contention_identifies_holder_and_clears_on_drop_cas_d0f6() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let shared = Arc::clone(&conn);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _operation = connection_operation("slow_close_fixture");
+            let site = line!() + 1;
+            let _guard = lock_connection(&shared).unwrap();
+            held_tx.send(site).unwrap();
+            release_rx.recv().unwrap();
+        });
+        let site = held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let refused = {
+            let _budget = crate::wait_budget::bound_waits_for(Duration::ZERO);
+            match lock_connection(&conn) { Err(error) => error, Ok(_) => panic!("holder lost its lock") }
+        };
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let StoreError::Database(rusqlite::Error::SqliteFailure(code, Some(detail))) = refused else {
+            panic!("contention must preserve SQLite busy classification");
+        };
+        assert_eq!(code.code, rusqlite::ErrorCode::DatabaseBusy);
+        // Holder identity and acquisition location are diagnostic data, rather
+        // than a sentence whose prose a test must pin.
+        assert!(detail.contains("holder_operation=slow_close_fixture"), "{detail}");
+        let holder_site = detail.split_whitespace().find_map(|field| field.strip_prefix("holder_site="));
+        assert_eq!(holder_site, Some(format!("{}:{}", file!(), site).as_str()));
+        assert!(!HOLDERS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&(Arc::as_ptr(&conn) as usize)));
+        // A raw external mutex owner must not inherit the preceding identity.
+        let _raw = conn.lock().unwrap();
+        let _budget = crate::wait_budget::bound_waits_for(Duration::ZERO);
+        let error = match lock_connection(&conn) { Err(error) => error, Ok(_) => panic!("raw lock lost") };
+        assert!(error.to_string().contains("holder_operation=unknown"));
     }
 
     // ── Concurrent access ───────────────────────────────────────────

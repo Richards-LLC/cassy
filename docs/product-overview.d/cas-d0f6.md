@@ -1,0 +1,3 @@
+## Core Concepts
+
+- Local factory verifier startup queues a critical external job and returns its dispatch-correlated result to the requesting socket. Authority, session scope and exact dispatch claim remain checked before a verifier starts. Shared SQLite guards record the holding operation, source location, thread and hold duration for contention diagnostics; task close names its operation, and untracked external mutex owners remain unknown. A late handoff ownership or state change is a typed dispatch refusal. Store contention and dropped daemon jobs do not consume launch attempts, and the daemon's store wait budget is shorter than the client's request deadline.

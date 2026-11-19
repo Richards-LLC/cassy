@@ -743,7 +743,8 @@ impl SqliteCodeVectorStore {
         .map_err(StoreError::from)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    #[track_caller]
+    fn lock(&self) -> Result<crate::shared_db::ConnectionGuard<'_>> {
         crate::shared_db::lock_connection(&self.conn)
     }
 }

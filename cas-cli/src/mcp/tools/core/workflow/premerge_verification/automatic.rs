@@ -256,6 +256,20 @@ pub(super) struct LaunchError {
     pub message: String,
 }
 
+/// The daemon names each refusal with a leading code. The code, matched whole,
+/// is the classification; the message text after it is never searched.
+pub(super) fn retry_for_code(message: &str) -> Retry {
+    match message.split_once(':').map_or(message, |(code, _)| code).trim() {
+        "verifier_factory_scope"
+        | "verifier_factory_task_terminal"
+        | "verifier_factory_owner"
+        | "verifier_factory_unsupported"
+        | "verifier_handoff_not_active" => Retry::Never,
+        "verifier_factory_store_busy" | "verifier_factory_launch_dropped" => Retry::Contended,
+        _ => Retry::Backoff,
+    }
+}
+
 /// A store refusal with its code, by the typed error: contention is named
 /// `verifier_factory_store_busy`, everything else keeps its own text.
 pub(super) fn store_refusal(error: &cas_store::StoreError) -> String {
@@ -1118,7 +1132,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let launched = request_with_retry(LAUNCH_ATTEMPTS, std::time::Duration::from_millis(50), std::time::Duration::from_secs(20), || {
             calls.set(calls.get() + 1);
-            claim(&core, &task, &second)
+            claim(&core, &task, &second).map_err(|message| LaunchError { retry: retry_for_code(&message), message })
         });
         binder.join().unwrap();
         assert_eq!(launched, Ok(()));

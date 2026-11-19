@@ -614,6 +614,8 @@ print(json.dumps(state))\n");
         let mut owner = Agent::new_with_role("sup".into(), "sup".into(), AgentRole::Supervisor);
         owner.factory_session = Some("session".into());
         crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
         let mut epic = cas_types::Task::new("cas-train".into(), "Release train".into());
         epic.task_type = TaskType::Epic;
         epic.labels.push(crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_LABEL.into());
@@ -637,7 +639,10 @@ if args[:2] == ['repo', 'view']: print('fixture/repo')
 elif args[:2] == ['workflow', 'run']:
     ref = args[args.index('--ref') + 1]
     tip = subprocess.check_output(['git', 'rev-parse', ref], text=True).strip()
-    listed.append(dict(id=max((run['id'] for run in listed), default=99) + 1, run_attempt=1, head_sha=tip, head_branch=ref,
+    if pathlib.Path('FAIL_DISPATCH').exists(): sys.exit(1)
+    run_id = max((run['id'] for run in listed), default=99) + 1
+    listed.append(dict(id=run_id, run_attempt=1, head_sha=tip, head_branch=ref,
+                       html_url=f'https://github.com/fixture/repo/actions/runs/{run_id}',
                        event='workflow_dispatch', status='queued', conclusion=None))
     runs.write_text(json.dumps(listed))
 elif args[0] == 'api':
@@ -649,8 +654,10 @@ elif args[0] == 'api':
     else: print(json.dumps({'workflow_runs': listed}))
 else: sys.exit(1)
 "#;
+        let fail_dispatch = fixtures.path().join("fail-dispatch");
         std::fs::write(&forge, forge_script.replace("RUNS", &runs.display().to_string())
-            .replace("CALLS", &calls.display().to_string())).unwrap();
+            .replace("CALLS", &calls.display().to_string())
+            .replace("FAIL_DISPATCH", &fail_dispatch.display().to_string())).unwrap();
         crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", forge.display()));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         env.set("GH_BIN", &gh);
@@ -663,15 +670,32 @@ else: sys.exit(1)
         }
         assert_eq!(dispatches(), 0, "merges into an unfrozen train start no train suite");
 
-        crate::mcp::tools::core::workflow::release_freeze::freeze(&root, "cas-train", "sup", Some("cut")).unwrap();
-        let by_hand = Command::new(&gh).current_dir(repo)
-            .args(["workflow", "run", "full-validation.yml", "--ref", lane]).status().unwrap();
-        assert!(by_hand.success());
+        let frozen = core.train_freeze("cas-train", Some("release-freeze: cut")).unwrap();
+        let expected = format!("workflow run full-validation.yml --ref {lane}");
+        let actual: Vec<_> = std::fs::read_to_string(&calls).unwrap().lines()
+            .filter(|call| call.starts_with("workflow run ")).map(str::to_owned).collect();
+        assert_eq!(actual, vec![expected]);
+        let frozen: Value = serde_json::from_str(&frozen).unwrap();
+        assert_eq!(frozen["train_ci"]["run_url"], "https://github.com/fixture/repo/actions/runs/100");
+        let repeated: Value = serde_json::from_str(&core.train_freeze(
+            "cas-train", Some("release-freeze: same tip"),
+        ).unwrap()).unwrap();
+        assert_eq!(dispatches(), 1);
+        assert_eq!(repeated["train_ci"]["run_url"], frozen["train_ci"]["run_url"]);
         observe(&root, "session").unwrap();
         observe(&root, "session").unwrap();
         assert_eq!(dispatches(), 1, "the run already under way at the frozen tip is its one run");
 
         git(&["commit", "-q", "--allow-empty", "-m", "release repair"]);
+        // A manually started run for the repair is adopted, not duplicated.
+        let by_hand = Command::new(&gh).current_dir(repo)
+            .args(["workflow", "run", "full-validation.yml", "--ref", lane]).status().unwrap();
+        assert!(by_hand.success());
+        let adopted: Value = serde_json::from_str(&core.train_freeze(
+            "cas-train", Some("release-freeze: repair tip"),
+        ).unwrap()).unwrap();
+        assert_eq!(adopted["train_ci"]["run_url"], "https://github.com/fixture/repo/actions/runs/101");
+        assert_eq!(dispatches(), 2);
         observe(&root, "session").unwrap();
         observe(&root, "session").unwrap();
         assert_eq!(dispatches(), 2, "the repair tip gets exactly one run of its own");
@@ -737,6 +761,13 @@ else: sys.exit(1)
         assert_eq!(read_state()["dispatches"][&head]["run_id"], "43884793331");
         assert!(!std::fs::read_to_string(&calls).unwrap().lines().any(|call|
             call.starts_with("run cancel ") || call.contains("/cancel")));
+        git(&["commit", "-q", "--allow-empty", "-m", "dispatch refusal"]);
+        std::fs::write(&fail_dispatch, "refuse dispatch").unwrap();
+        let failed: Value = serde_json::from_str(&core.train_freeze(
+            "cas-train", Some("release-freeze: report dispatch failure"),
+        ).unwrap()).unwrap();
+        assert_eq!(failed["train_ci"]["skip_reason"], "dispatch_failed");
+        assert!(failed["train_ci"]["run_url"].is_null());
     }
 
     #[test]

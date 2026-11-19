@@ -238,39 +238,76 @@ const LAUNCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1
 const CONTENTION_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 const CONTENTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Waits that clear on their own: another start for the same parent awaiting
-/// SubagentStart, or a busy shared store.
-fn contended(error: &str) -> bool {
-    error.contains("already awaiting SubagentStart")
-        || error.contains("wait budget is spent")
-        || error.contains("verifier_factory_store_busy")
-        || error.contains("verifier_factory_launch_dropped")
-        || error.contains("QueuedDroppedOldest")
-        || error.contains("database is locked")
+/// How the request side treats a refused launch (cas-4fd6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Retry {
+    /// Retrying cannot change the answer.
+    Never,
+    /// A wait that clears on its own; queue behind it without spending an attempt.
+    Contended,
+    /// Anything else: a bounded number of attempts with a growing delay.
+    Backoff,
+}
+
+/// A refused launch and what retrying it can achieve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LaunchError {
+    pub retry: Retry,
+    pub message: String,
+}
+
+/// The daemon names each refusal with a leading code. The code, matched whole,
+/// is the classification; the message text after it is never searched.
+pub(super) fn retry_for_code(message: &str) -> Retry {
+    match message.split_once(':').map_or(message, |(code, _)| code).trim() {
+        "verifier_factory_scope"
+        | "verifier_factory_task_terminal"
+        | "verifier_factory_owner"
+        | "verifier_factory_unsupported"
+        | "verifier_handoff_not_active" => Retry::Never,
+        "verifier_factory_store_busy" | "verifier_factory_launch_dropped" => Retry::Contended,
+        _ => Retry::Backoff,
+    }
+}
+
+/// A store refusal with its code, by the typed error: contention is named
+/// `verifier_factory_store_busy`, everything else keeps its own text.
+pub(super) fn store_refusal(error: &cas_store::StoreError) -> String {
+    use cas_store::StoreError;
+    let contended = match error {
+        StoreError::Database(sqlite) => cas_store::shared_db::is_busy_error(sqlite),
+        StoreError::Io(io) => io.kind() == std::io::ErrorKind::WouldBlock,
+        StoreError::VerifierHandoffPending => true,
+        _ => false,
+    };
+    if contended {
+        format!("verifier_factory_store_busy: {error}")
+    } else {
+        error.to_string()
+    }
 }
 
 /// cas-d824: a failed start is re-attempted here, on the thread that already
 /// owns the request, rather than waiting for an operator to repeat the merge.
-/// Scope and terminal-task refusals are permanent. Contention queues behind
-/// its holder with a doubling delay for up to `window` and spends no attempt
-/// (cas-111e); anything else is retried with a growing delay. Returns the
-/// attempts spent and the true blocker.
+/// A refusal is classified by its typed [`Retry`], not by its text: a
+/// permanent one stops at once, contention queues behind its holder with a
+/// doubling delay for up to `window` and spends no attempt (cas-111e), and
+/// anything else is retried with a growing delay. Returns the attempts spent
+/// and the true blocker.
 fn request_with_retry(
     attempts: u32,
     delay: std::time::Duration,
     window: std::time::Duration,
-    mut request: impl FnMut() -> Result<(), String>,
+    mut request: impl FnMut() -> Result<(), LaunchError>,
 ) -> Result<(), (u32, String)> {
     let started = std::time::Instant::now();
     let (mut attempt, mut waits) = (1, 0u32);
     loop {
         match request() {
             Ok(()) => return Ok(()),
-            Err(error) => {
-                let permanent = error.contains("verifier_factory_scope")
-                    || error.contains("verifier_factory_task_terminal")
-                    || error.contains("verifier_handoff_not_active");
-                if !permanent && contended(&error) {
+            Err(LaunchError { retry, message: error }) => {
+                let permanent = retry == Retry::Never;
+                if retry == Retry::Contended {
                     let pause = delay.saturating_mul(1 << waits.min(16)).min(CONTENTION_BACKOFF_CAP);
                     if started.elapsed() + pause >= window {
                         return Err((attempt, format!(
@@ -295,13 +332,13 @@ fn request_with_retry(
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> Result<VerificationDispatch, String> {
-    let dispatch = cas_store::get_verification_dispatch(root, id).map_err(|e| e.to_string())?;
+    let dispatch = cas_store::get_verification_dispatch(root, id).map_err(|e| store_refusal(&e))?;
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     if agents.get(&dispatch.owner_agent_id).is_ok() {
         return Ok(dispatch);
     }
     let machine = cas_types::Agent::get_or_generate_machine_id();
-    let retired = cas_store::SqliteAgentStore::open(root).map_err(|e| e.to_string())?;
+    let retired = cas_store::SqliteAgentStore::open(root).map_err(|e| store_refusal(&e))?;
     let dead = |agent: &cas_types::Agent| {
         agent.machine_id.as_deref() == Some(machine.as_str())
             && (agent.status == cas_types::AgentStatus::Shutdown || matches!(
@@ -310,19 +347,19 @@ pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> R
                 crate::mcp::daemon::LivenessOutcome::Dead { .. }
             ))
     };
-    for successor in agents.list(None).map_err(|e| e.to_string())? {
+    for successor in agents.list(None).map_err(|e| store_refusal(&e))? {
         if successor.role != cas_types::AgentRole::Supervisor || !successor.is_alive()
             || successor.machine_id.as_deref() != Some(machine.as_str()) || dead(&successor)
             || session.is_some_and(|session| successor.factory_session.as_deref() != Some(session))
         { continue; }
-        if retired.supervisor_handoffs_claimed_by(&successor).map_err(|e| e.to_string())?
+        if retired.supervisor_handoffs_claimed_by(&successor).map_err(|e| store_refusal(&e))?
             .iter().any(|handoff| handoff.agent_id == dispatch.owner_agent_id)
         {
             let verifier = dispatch.verifier_agent_id.as_deref()
                 .and_then(|id| agents.get(id).ok()).filter(&dead);
             return cas_store::adopt_retired_verification_dispatch(
                 root, id, &successor, verifier.as_ref(), chrono::Utc::now(),
-            ).map_err(|e| e.to_string());
+            ).map_err(|e| store_refusal(&e));
         }
     }
     Err("verification_owner_handoff_scope: missing owner's claimed local successor is unavailable".into())
@@ -334,7 +371,7 @@ pub(super) fn launch(
     let dispatch = launch_dispatch(&core.cas_root, &dispatch.id, None)?;
     #[cfg(unix)]
     if let Some(session) = core.open_agent_store().map_err(|e| e.to_string())?
-        .get(&dispatch.owner_agent_id).map_err(|e| e.to_string())?.factory_session
+        .get(&dispatch.owner_agent_id).map_err(|e| store_refusal(&e))?.factory_session
     {
         // The MCP backend may inherit the worker's userns. Only the factory
         // daemon owns the context from which the harness sandbox can start.
@@ -365,7 +402,7 @@ pub(super) fn launch_local(
     dispatch: &VerificationDispatch,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     if cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
-        .map_err(|e| e.to_string())?.state != cas_types::VerificationDispatchState::Pending {
+        .map_err(|e| store_refusal(&e))?.state != cas_types::VerificationDispatchState::Pending {
         return Ok(None);
     }
     // A candidate review reads its disposable candidate; a no-code close
@@ -396,7 +433,7 @@ fn launch_with_preparation(
     prepare: impl FnOnce(&Path) -> Result<(Command, Option<String>), String> + Send + 'static,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| store_refusal(&e))?;
     if live.state != cas_types::VerificationDispatchState::Pending {
         return Ok(None);
     }
@@ -414,7 +451,7 @@ fn launch_with_preparation(
         .open_agent_store()
         .map_err(|e| e.to_string())?
         .get(&live.owner_agent_id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| store_refusal(&e))?
         .factory_session;
     // One transaction: a bind lost to contention must not strand a pending
     // handoff that refuses every later start for this owner (cas-111e).
@@ -425,11 +462,11 @@ fn launch_with_preparation(
         &format!("daemon:{}", live.id),
         &child,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| store_refusal(&e))?;
     // Issuing the handoff may have refreshed an expired pending deadline; the
     // prompt, review budget and recovery guard must use the refreshed row.
     let live = cas_store::get_verification_dispatch(&core.cas_root, &live.id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| store_refusal(&e))?;
     let worker = core.clone();
     let task = task.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
@@ -892,37 +929,88 @@ mod tests {
 
     #[test]
     fn failed_launch_is_retried_unless_permanent_cas_d824() {
+        let refusal = |retry, message: &str| LaunchError { retry, message: message.into() };
         let calls = std::cell::Cell::new(0);
         let transient = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
-            if calls.get() < 3 { Err("verifier_factory_launch: store wait budget spent".into()) } else { Ok(()) }
+            if calls.get() < 3 { Err(refusal(Retry::Backoff, "verifier_factory_launch: busy")) } else { Ok(()) }
         });
         assert_eq!((transient, calls.get()), (Ok(()), 3));
         calls.set(0);
         let permanent = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
-            Err("verifier_factory_scope: not this session".into())
+            Err(refusal(Retry::Never, "verifier_factory_scope: not this session"))
         });
         assert_eq!((permanent.is_err(), calls.get()), (true, 1));
         calls.set(0);
         let exhausted = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
-            Err("verifier_factory_launch: busy".into())
+            Err(refusal(Retry::Backoff, "verifier_factory_launch: busy"))
         });
         assert_eq!((exhausted.map_err(|(attempts, _)| attempts), calls.get()), (Err(4), 4));
-        // GH #2148: six store refusals still leave the first launch attempt
-        // available. An exact-dispatch ownership/state mismatch is terminal.
-        for refusal in ["verifier_factory_store_busy", "database is locked", "wait budget is spent",
-            "verifier_factory_launch_dropped", "QueuedDroppedOldest"] {
-            calls.set(0);
-            let result = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::from_secs(5), || {
-                calls.set(calls.get() + 1);
-                if calls.get() <= 6 { Err(refusal.into()) }
-                else { Err("verifier_handoff_not_active: vdispatch-test".into()) }
-            });
-            assert_eq!((result.map_err(|(attempts, _)| attempts), calls.get()), (Err(1), 7));
-        }
+    }
 
+    /// cas-4fd6: the retry class comes from the code the daemon names, read
+    /// through the real request, not from words in the message. A NotLive owner
+    /// and an old daemon are never retried; six contention refusals still leave
+    /// the first attempt, then an exact-dispatch mismatch is terminal; a
+    /// transient failure whose text merely mentions a permanent code is retried.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_retry_class_is_the_daemons_code_not_its_text_cas_4fd6() {
+        use crate::ui::factory::{
+            ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, PROTOCOL_VERSION, SessionState,
+            decode_length, encode_message, gui_socket_path, local_gui_capabilities,
+        };
+        use std::io::{Read, Write};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let owner = "verifier_factory_owner: live registered supervisor required (agent a is supervisor with status Shutdown)";
+        let busy = "verifier_factory_store_busy: held";
+        let mut cases: Vec<(&str, Vec<Option<&str>>, Result<(), u32>)> = vec![
+            ("owner", vec![Some(owner)], Err(1)),
+            ("old-daemon", vec![None], Err(1)),
+            ("text-only", vec![Some("verifier_factory_launch_failed: see verifier_factory_scope"); 4], Err(4)),
+        ];
+        let mut contended = vec![Some(busy); 6];
+        contended.push(Some("verifier_handoff_not_active: vdispatch-test"));
+        cases.push(("contended", contended, Err(1)));
+        for (session, replies, expected) in cases {
+            let socket = gui_socket_path(session);
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let connections = replies.len();
+            let daemon = std::thread::spawn(move || {
+                for reply in replies {
+                    let (mut client, _) = listener.accept().unwrap();
+                    let capabilities = if reply.is_some() { local_gui_capabilities() } else { vec![] };
+                    client.write_all(&encode_message(&DaemonMessage::Welcome {
+                        session_name: session.into(),
+                        state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                            epic_title: None, cols: 80, rows: 24 },
+                        scrollback: None, protocol_version: PROTOCOL_VERSION,
+                        capabilities, pane_bootstrap: vec![],
+                    }).unwrap()).unwrap();
+                    let Some(message) = reply else { continue };
+                    let mut header = [0; FRAME_HEADER_SIZE];
+                    client.read_exact(&mut header).unwrap();
+                    let mut body = vec![0; decode_length(&header)];
+                    client.read_exact(&mut body).unwrap();
+                    let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                    else { panic!("unexpected factory control") };
+                    client.write_all(&encode_message(&DaemonMessage::Error {
+                        message: message.into(), client_ref: Some(dispatch_id),
+                    }).unwrap()).unwrap();
+                }
+            });
+            let attempts = std::cell::Cell::new(0);
+            let result = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::from_secs(5), || {
+                attempts.set(attempts.get() + 1);
+                super::factory_launch::request(session, "vdispatch-test")
+            });
+            assert_eq!(result.map_err(|(spent, _)| spent), expected, "{session}");
+            assert_eq!(attempts.get() as usize, connections, "{session}: one connection per attempt");
+            daemon.join().unwrap();
+        }
     }
 
     #[test]
@@ -1044,7 +1132,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let launched = request_with_retry(LAUNCH_ATTEMPTS, std::time::Duration::from_millis(50), std::time::Duration::from_secs(20), || {
             calls.set(calls.get() + 1);
-            claim(&core, &task, &second)
+            claim(&core, &task, &second).map_err(|message| LaunchError { retry: retry_for_code(&message), message })
         });
         binder.join().unwrap();
         assert_eq!(launched, Ok(()));

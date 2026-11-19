@@ -1028,7 +1028,7 @@ async fn train_owner_reaches_worker_host_without_a_local_supervisor_cas_b674() {
         .save_to_cas_dir(&machine.cas).unwrap();
     // No active lease: downward corrections and final results outlive park.
     Mock::given(method("GET")).and(path("/api/agents/locks"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"locks":[]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]})))
         .mount(&server).await;
     for (owner, stale, expected) in [("remote-owner", false, 1), ("intruder", false, 0), ("remote-owner", true, 0)] {
         let owner_row = serde_json::json!({"id":"remote-owner", "name":"owner", "agent_type":"primary",

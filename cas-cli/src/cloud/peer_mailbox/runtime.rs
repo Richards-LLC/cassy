@@ -164,7 +164,10 @@ impl PeerMailboxRuntime {
             };
             let local = agents.list(None).map_err(|error| error.to_string())?;
             let owner = local.iter().find(|a| a.role == AgentRole::Supervisor
-                && a.factory_session.as_deref() == Some(self.factory_session.as_str()) && live_supervisor(a));
+                && a.factory_session.as_deref() == Some(self.factory_session.as_str()) && live_supervisor(a))
+                .or_else(|| local.iter().find(|a| a.role == AgentRole::Worker
+                    && a.factory_session.as_deref() == Some(self.factory_session.as_str())
+                    && a.metadata.contains_key("train_owner")));
             let mut report = deliver_claimed_with_history(
                 &mailbox,
                 queue.as_ref(),

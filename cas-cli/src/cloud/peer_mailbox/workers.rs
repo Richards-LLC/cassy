@@ -9,6 +9,8 @@ use super::*;
 
 pub(crate) struct WorkerDirectory {
     workers: Vec<peers_detail::PeerWorkerRef>,
+    owners: BTreeMap<String, BTreeSet<String>>,
+    agents: Vec<crate::cloud::AgentInfo>,
     epics: BTreeMap<String, BTreeMap<String, chrono::DateTime<Utc>>>,
 }
 
@@ -27,7 +29,7 @@ impl WorkerDirectory {
         let now = Utc::now();
         let mut supervisors = peers::repo_peers(&agents, &repo, &aliases, None, now);
         peers::mark_own(&mut supervisors, Some(&owner));
-        supervisors.retain(|s| s.live && s.own == Some(true));
+        supervisors.retain(|s| s.own == Some(true));
         let workers = peers_detail::live_peer_workers(&supervisors, &agents, &aliases, now)
             .into_iter().filter(|worker| agents.iter().any(|a| a.id == worker.agent_id
                 && a.user_id.as_deref() == Some(owner.as_str()))).collect::<Vec<_>>();
@@ -54,7 +56,23 @@ impl WorkerDirectory {
                 }
             }
         }
-        Ok(Self { workers, epics })
+        let mut owners = BTreeMap::new();
+        for worker in &workers {
+            let agent = agents.iter().find(|a| a.id == worker.agent_id).unwrap();
+            let Some(train) = agent.metadata.get("train").and_then(|id| tasks.get(id).ok()) else { continue };
+            let Some(owner) = train.epic_verification_owner.as_deref() else { continue };
+            if train.is_terminal() || train.task_type != TaskType::Epic
+                || owner != worker.supervisor.agent_id
+                || agent.metadata.get("train_owner").map(String::as_str) != Some(owner)
+                || agent.metadata.get("train_owner_generation") != crate::factory_session_scope::train_owner_generation(&train).ok().as_ref()
+            { continue; }
+            let mut ids = BTreeSet::from([owner.to_string()]);
+            if let peers::SlotHolder::Successor { peer, .. } = peers::slot_holder(&supervisors, &worker.supervisor, !worker.supervisor.live) {
+                ids.insert(peer.agent_id.clone());
+            }
+            owners.insert(worker.agent_id.clone(), ids);
+        }
+        Ok(Self { workers, owners, agents, epics })
     }
 
     pub(crate) fn matches_local(&self, local: &Agent) -> bool {
@@ -62,7 +80,19 @@ impl WorkerDirectory {
             && self.workers.iter().any(|worker| worker.agent_id == local.id
                 && worker.name == local.name
                 && worker.supervisor.session == local.factory_session
-                && worker.supervisor.machine_id == local.machine_id)
+                && worker.machine_id == local.machine_id)
+    }
+
+    /// Lifecycle authority survives a released claim, but never an owner-generation change.
+    pub(crate) fn owner_of(&self, owner: &str, worker: &str) -> bool {
+        self.owners.get(worker).is_some_and(|ids| ids.contains(owner))
+    }
+
+    pub(crate) fn owner_message(&self, message: &ClaimedPeerMessage, worker: &str) -> bool {
+        self.owner_of(&message.sender_agent_id, worker)
+            && self.agents.iter().any(|agent| agent.id == message.sender_agent_id
+                && agent.machine_id == message.sender_machine_id
+                && agent.metadata.get(peers::META_FACTORY_SESSION) == message.sender_session.as_ref())
     }
 
     pub(crate) fn resolve(&self, target: &str) -> Result<Option<&peers_detail::PeerWorkerRef>, String> {
@@ -84,7 +114,7 @@ impl WorkerDirectory {
         let from = self.workers.iter().find(|w| w.agent_id == sender);
         let to = self.workers.iter().find(|w| w.agent_id == recipient);
         let (Some(from), Some(to)) = (from, to) else { return Err("both worker peers must be live registered workers of your account and repository".into()); };
-        if from.agent_id == to.agent_id || from.supervisor.machine_id == to.supervisor.machine_id {
+        if from.agent_id == to.agent_id || from.machine_id == to.machine_id {
             return Err("remote worker peers must be on different machines".into());
         }
         let now = Utc::now();

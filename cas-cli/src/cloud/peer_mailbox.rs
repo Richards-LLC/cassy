@@ -1265,9 +1265,10 @@ fn deliver_claimed_with_history(
     // Evaluate process/heartbeat liveness once per registry row, never per
     // historical ID. Both verified routing and legacy feedback reuse this set.
     let live: Vec<_> = all.iter().filter(|a| live_supervisor(a)).collect();
-    if !live
-        .iter()
-        .any(|a| a.factory_session.as_deref() == Some(factory_session))
+    if !live.iter().any(|a| a.factory_session.as_deref() == Some(factory_session))
+        && !workers.is_some_and(|(_, id)| all.iter().any(|a| a.id == id
+            && a.role == AgentRole::Worker && a.metadata.contains_key("train_owner")
+            && a.factory_session.as_deref() == Some(factory_session)))
     {
         report
             .errors
@@ -1454,9 +1455,12 @@ fn deliver_claimed_with_history(
             // registration, leaves the claim unacknowledged for a later poll.
             let Some(directory) = directory.as_ref().filter(|directory| directory.matches_local(recipient))
                 else { continue; };
-            let pair = directory.pair_for_receipt(&message.sender_agent_id, &recipient.id);
+            let owner_message = directory.owner_message(message, &recipient.id);
+            let pair = if owner_message { Ok(Some(())) } else {
+                directory.pair_for_receipt(&message.sender_agent_id, &recipient.id).map(|pair| pair.map(|_| ()))
+            };
             if message.scope != PeerScope::Project || !same_repo || pair.is_err()
-                || !workers::allowed_intent(&message.body)
+                || (!owner_message && !workers::allowed_intent(&message.body))
             {
                 report.rejected += 1;
                 acks.push((message.id.clone(), PeerAckOutcome::Rejected));
@@ -1501,7 +1505,9 @@ fn deliver_claimed_with_history(
         match queue.enqueue_idempotent(
             &format!("peer:{}@{}", message.sender_name, machine_of(message)),
             &recipient.name,
-            &if recipient.role == AgentRole::Worker { workers::render_worker_prompt(message) } else { render_prompt(message) },
+            &if recipient.role == AgentRole::Worker
+                && !directory.as_ref().is_some_and(|d| d.owner_message(message, &recipient.id))
+                { workers::render_worker_prompt(message) } else { render_prompt(message) },
             Some(factory_session),
             Some(&summary),
             Some(NotificationPriority::High),

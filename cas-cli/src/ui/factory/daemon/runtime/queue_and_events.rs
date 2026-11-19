@@ -7143,10 +7143,15 @@ impl FactoryDaemon {
     /// supervisor pane. Everything else stays queued in its inbox until resume.
     fn standby_denies(&self, sender: &WakeSender, source: &str, prompt: &str) -> bool {
         crate::factory_standby::active(self.app.cas_dir(), &self.session_name)
-            && !matches!(
-                Self::supervisor_wake_class(sender, self.app.supervisor_name(), source, prompt),
-                Some(SupervisorWakeClass::Operator | SupervisorWakeClass::Lifecycle)
-            )
+            && Self::standby_wake_denied(sender, self.app.supervisor_name(), source, prompt)
+    }
+
+    /// The standby rule alone: every row except the operator's and CAS lifecycle events.
+    fn standby_wake_denied(sender: &WakeSender, supervisor_name: &str, source: &str, prompt: &str) -> bool {
+        !matches!(
+            Self::supervisor_wake_class(sender, supervisor_name, source, prompt),
+            Some(SupervisorWakeClass::Operator | SupervisorWakeClass::Lifecycle)
+        )
     }
 
     fn row_is_supervisor_wake(
@@ -17243,6 +17248,24 @@ mod tests {
     /// signal is an inbox file write, and an idle supervisor has no upcoming
     /// turn boundary at which to read it — which is why every observed merge
     /// drain came from a scheduled sweep instead of the promised push.
+    /// cas-94a0: on standby the operator and a CAS lifecycle row still wake the
+    /// pane; a peer supervisor's message and an ordinary worker row do not.
+    #[test]
+    fn standby_wakes_only_for_the_operator_and_lifecycle_cas_94a0() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, lifecycle_prompt_source,
+        };
+        let name = "cosmic-bear-43";
+        let lifecycle = lifecycle_prompt_source(LifecycleTransition::AwaitingMerge, 41);
+        let denied = |sender: &WakeSender, source: &str, prompt: &str| {
+            FactoryDaemon::standby_wake_denied(sender, name, source, prompt)
+        };
+        assert!(!denied(&WakeSender::Operator, "operator", "status?"));
+        assert!(!denied(&WakeSender::Daemon, &lifecycle, &awaiting_merge_payload("cas-f02b")));
+        assert!(denied(&supervisor_sender("peer-supervisor"), "peer", "can you merge this?"));
+        assert!(denied(&worker_sender("alice"), "alice", "done"));
+    }
+
     #[test]
     fn awaiting_merge_lifecycle_row_wakes_an_idle_supervisor_pane() {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::{

@@ -13848,8 +13848,9 @@ impl CasCore {
             ));
         }
         // cas-bc25: a decline over recorded failing tests must name their class.
+        let mut effective_class: Option<String> = None;
         if !grant_only {
-            crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
+            effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
         }
         let supervisor_id = if source_commits.is_empty() {
@@ -13922,11 +13923,13 @@ impl CasCore {
                 format!("task request_changes rejected: {error}"),
             )
         })?;
-        // A later verdict without a class clears the earlier one.
-        task_store
-            .patch_execution_state(&task.id, &serde_json::json!({"class_audit": class_audit}))
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
-                format!("task request_changes could not record the class audit: {error}")))?;
+        // Persist exactly the selector in force; never clear a stored one.
+        if let Some(class) = &effective_class {
+            task_store
+                .patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                    format!("task request_changes could not record the class audit: {error}")))?;
+        }
         let sync = crate::store::publish_direct_task_write(&self.cas_root, &task.id)
             .err()
             .map(|error| format!(" Cloud sync of this verdict failed ({error}); peer machines will not see it until the task's next write."))

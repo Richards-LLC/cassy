@@ -37,17 +37,19 @@ pub(crate) fn recorded_class(store: &dyn TaskStore, task_id: &str) -> Option<Str
 }
 
 /// Refuse a verdict or repair spawn that leaves recorded failing tests without
-/// a class. `offered` is a selector supplied now; otherwise the stored one counts.
-pub(crate) fn require_class(store: &dyn TaskStore, task_id: &str, offered: Option<&str>) -> Result<(), String> {
+/// a class, and return the selector in force: the one offered now, else the
+/// stored one. Callers persist exactly that, so a repeat verdict that omits the
+/// class cannot erase the stored obligation.
+pub(crate) fn require_class(store: &dyn TaskStore, task_id: &str, offered: Option<&str>) -> Result<Option<String>, String> {
     let state = store.get_execution_state(task_id).ok().flatten().unwrap_or_else(|| json!({}));
     let failing = state_list(&state, "failing_tests");
-    if failing.is_empty() {
-        return Ok(());
-    }
     let class = offered.map(str::trim).filter(|class| !class.is_empty())
         .map(str::to_owned).or_else(|| recorded_class(store, task_id));
+    if failing.is_empty() {
+        return Ok(class);
+    }
     match class {
-        Some(class) if named_filter(&class) && failing.iter().all(|name| filter_matches(&class, name)) => Ok(()),
+        Some(class) if named_filter(&class) && failing.iter().all(|name| filter_matches(&class, name)) => Ok(Some(class)),
         _ => Err(format!(
             "CLASS_AUDIT_REQUIRED: task {task_id} has recorded failing tests ({}); a repair that fixes only those leaves their class unrun. Name the whole class as a nextest filter that selects them, e.g. class_audit=\"test(ui::) | test(gates::)\" on request_changes. Park will then require a passing capped receipt that runs it.",
             failing.join(", "),
@@ -56,8 +58,17 @@ pub(crate) fn require_class(store: &dyn TaskStore, task_id: &str, offered: Optio
 }
 
 /// Whether passing receipts at the tip (given as their filters) run every
-/// operand of the class. Uses the capped runner's own filter matcher.
+/// operand of the class. Uses the capped runner's own filter matcher, probed
+/// with names the operand selects, so exact `test(=name)` and substring
+/// `test(name)` keep their meaning: an exact receipt covers an exact operand,
+/// and only a substring receipt covers a substring operand's longer names.
 pub(crate) fn receipts_cover_class(receipt_filters: &[String], class: &str) -> bool {
-    class.split('|').map(|operand| operand.trim().trim_start_matches("test(").trim_end_matches(')').trim_start_matches('='))
-        .all(|operand| receipt_filters.iter().any(|filter| filter_matches(filter, operand)))
+    class.split('|').map(str::trim).all(|operand| {
+        let value = operand.trim_start_matches("test(").trim_end_matches(')');
+        let probes = match value.strip_prefix('=') {
+            Some(exact) => vec![exact.to_string()],
+            None => vec![value.to_string(), format!("{value}_x"), format!("x_{value}")],
+        };
+        receipt_filters.iter().any(|filter| probes.iter().all(|probe| filter_matches(filter, probe)))
+    })
 }

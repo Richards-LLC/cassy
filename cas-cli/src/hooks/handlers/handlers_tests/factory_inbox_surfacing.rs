@@ -132,6 +132,68 @@ fn cas_1485_supervisor_hooks_never_render_a_closed_task_merge_relay() {
     }
 }
 
+/// cas-0660: a Director merge alert queued while a delivery waited must not
+/// reach the supervisor once the task left the states that alert describes
+/// (request_changes reopens it, a merge closes it). A live one still surfaces.
+#[test]
+fn cas_0660_a_withdrawn_director_merge_alert_is_not_surfaced() {
+    let mut env = TestEnvGuard::temp_home();
+    supervisor_env(&mut env);
+    for tool_boundary in [false, true] {
+        for withdrawn in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let store = store_at(&temp);
+            let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
+            let mut task = Task::new("cas-0660-hook".into(), "declined delivery".into());
+            task.status = TaskStatus::AwaitingMerge;
+            tasks.add(&task).unwrap();
+            let evidence = crate::ui::factory::director::MergeAlertEvidence {
+                task_id: task.id.clone(),
+                factory_branch: "factory/worker-cas-0660".into(),
+                factory_tip: "a".repeat(40),
+                unmerged_count: 1,
+                epic_sha: "b".repeat(40),
+                checked_epic_ref: "epic/train".into(),
+                ref_disagreement: None,
+                push_required: false,
+            };
+            let context = serde_json::json!({
+                "merge_alert": evidence,
+                "retract_worker": null, "retract_task": null,
+                "retract_epic": null, "drop_if_worker_assigned": null,
+            });
+            let token = "CAS0660_ORIGINAL_ALERT";
+            let body = format!("{token}\n\n<cas-director-prompt>{context}</cas-director-prompt>");
+            let id = store
+                .enqueue_urgent_with_outcome(
+                    "director", "supervisor", &body, Some(SESSION), Some("Director prompt"),
+                    None, false, Some(&cas_store::QueueOrigin::Daemon),
+                )
+                .unwrap()
+                .id();
+            if withdrawn {
+                task.status = TaskStatus::Open;
+                tasks.update(&task).unwrap();
+            }
+            let hook = input("supervisor");
+            let surfaced = if tool_boundary {
+                let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget).and_then(|outcome| outcome.text)
+            } else {
+                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
+            };
+            let shown = surfaced.as_deref().is_some_and(|text| text.contains(token));
+            assert_eq!(shown, !withdrawn, "withdrawn={withdrawn} boundary={tool_boundary}: {surfaced:?}");
+            if withdrawn {
+                assert_eq!(
+                    store.message_delivery_report(id).unwrap().unwrap().pending_reason,
+                    Some(cas_store::PendingReason::SupersededStale)
+                );
+            }
+        }
+    }
+}
+
 /// The receipt ledger is the authoritative answer to whether a particular
 /// recipient alias has seen a row.  Check it without draining: a drain would
 /// create the very receipt this wiring test needs to prove already exists.

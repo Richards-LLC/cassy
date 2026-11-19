@@ -1,0 +1,18 @@
+# Phrases a supervisor brief, request_changes reason or acceptance criteria may not use
+# to ask for what cas-writing-tests rules out ("Fewest tests"; assert outcomes, not wording).
+# Cassy reads this file to attach a warning code to such a request; it never refuses one.
+# One regular expression per line (case-insensitive), matched one sentence at a time.
+# A sentence that matches [negation] is the rule itself and never warns.
+
+# N-106: asks to assert message, output or other text
+[N-106]
+\b(?:assert|asserts|asserting|assertion|assertions|pin|pins|pinned)\b[^.;\n]{0,48}\b(?:message|text|wording|prose|phrase|sentence|output|copy)\b
+\b(?:message|text|wording|output|reply)\b[^.;\n]{0,24}\b(?:to|must|should|that)\s+(?:name|say|mention|contain|include|state)\b
+
+# N-107: asks for a test per item instead of extending one existing test
+[N-107]
+\b(?:one|its own|separate)\s+(?:failing-first\s+)?tests?\s+(?:per|for each|for every|each)\b
+\b(?:failing-first\s+)?tests?\s+(?:per|for each|for every)\s+(?:item|case|row|file|variant|lane|finding|criterion)\b
+
+[negation]
+\b(?:no|not|never|nor|without|avoid|don't|do not|instead of|rather than)\b

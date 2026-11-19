@@ -28,42 +28,46 @@ pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the f
 
 /// cas-5bf1: what a supervisor's brief, request_changes reason or acceptance
 /// criteria may not ask for under cas-writing-tests ("Fewest tests", "assert
-/// outcomes, not wording"). Two rules, matched sentence by sentence; a sentence
-/// that negates the ask ("no message text assertions", "don't add a test per
-/// item") is the rule itself, never a violation. The patterns are the one
-/// phrase source for all three surfaces; they are advice, so a hit warns and
-/// never refuses.
+/// outcomes, not wording"). The phrases live in that skill's
+/// `references/brief-test-phrases.txt`, which the skill owns and ships; this reads
+/// them. A hit warns and never refuses; a sentence that negates the ask ("no
+/// message text assertions") is the rule itself, never a violation.
 // gate[N-106 notice]: A brief asks to assert message or output text
 const TEXT_ASSERTION_CODE: &str = "N-106";
 // gate[N-107 notice]: A brief asks for a test per item
 const PER_ITEM_TEST_CODE: &str = "N-107";
 
-static TEXT_ASSERTION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?i)\b(?:assert|asserts|asserting|assertion|assertions|pin|pins|pinned|verify|verifies|check|checks|test|tests)\b[^.;\n]{0,48}\b(?:message|text|wording|prose|phrase|sentence|output|copy)\b|\b(?:message|text|wording|output|reply)\b[^.;\n]{0,24}\b(?:to|must|should|that)\s+(?:name|say|mention|contain|include|state)\b|\bexact (?:text|wording|message|string)\b",
-    )
-    .expect("static text-assertion pattern")
-});
-static PER_ITEM_TEST: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?i)\b(?:a|one|its own|separate|failing-first)\s+(?:failing-first\s+)?tests?\s+(?:per|for each|for every|each)\b|\btests?\s+(?:per|for each|for every)\s+(?:item|case|row|file|variant|lane|finding|criterion)\b|\bone test each\b|\bper-item tests?\b",
-    )
-    .expect("static per-item pattern")
-});
-static NEGATION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"(?i)\b(?:no|not|never|nor|without|avoid|don't|do not|instead of|rather than)\b")
-        .expect("static negation pattern")
-});
+const BRIEF_TEST_PHRASES: &str = include_str!("builtins/skills/cas-writing-tests/references/brief-test-phrases.txt");
 
-/// The warning codes `text` earns, each at most once, in a stable order.
+/// The phrase file's `[section]` as one case-insensitive pattern.
+fn phrase_section(section: &str) -> regex::Regex {
+    let mut current = "";
+    let patterns: Vec<&str> = BRIEF_TEST_PHRASES
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter(|line| match line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            Some(name) => { current = name; false }
+            None => current == section,
+        })
+        .collect();
+    regex::Regex::new(&format!("(?i){}", patterns.iter().map(|pattern| format!("(?:{pattern})")).collect::<Vec<_>>().join("|")))
+        .expect("brief-test-phrases.txt holds valid patterns")
+}
+
+static PHRASES: std::sync::LazyLock<[(&'static str, regex::Regex); 2]> = std::sync::LazyLock::new(|| {
+    [(TEXT_ASSERTION_CODE, phrase_section(TEXT_ASSERTION_CODE)), (PER_ITEM_TEST_CODE, phrase_section(PER_ITEM_TEST_CODE))]
+});
+static NEGATION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| phrase_section("negation"));
+
+/// The warning codes `text` earns, each at most once, in the file's order.
 pub(crate) fn test_policy_warnings(text: &str) -> Vec<&'static str> {
     let mut codes = Vec::new();
     for sentence in text.split(['.', ';', '\n']).filter(|sentence| !NEGATION.is_match(sentence)) {
-        if TEXT_ASSERTION.is_match(sentence) && !codes.contains(&TEXT_ASSERTION_CODE) {
-            codes.push(TEXT_ASSERTION_CODE);
-        }
-        if PER_ITEM_TEST.is_match(sentence) && !codes.contains(&PER_ITEM_TEST_CODE) {
-            codes.push(PER_ITEM_TEST_CODE);
+        for (code, pattern) in PHRASES.iter() {
+            if pattern.is_match(sentence) && !codes.contains(code) {
+                codes.push(*code);
+            }
         }
     }
     codes

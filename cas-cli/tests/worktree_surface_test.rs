@@ -4732,6 +4732,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
         let worker = root.join("worktrees").join(name);
         repo.add_worktree(&worker, &format!("factory/{name}"));
         let source = worker.join(format!("cas-cli/src/{name}.rs"));
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::write(source, "// gate[G-999 merge-admission integrity]: Fixture gate\n").unwrap();
         run_git(&["add", "."], &worker);
         run_git(&["commit", "-m", name], &worker);

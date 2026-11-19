@@ -332,13 +332,13 @@ fn request_with_retry(
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> Result<VerificationDispatch, String> {
-    let dispatch = cas_store::get_verification_dispatch(root, id).map_err(|e| e.to_string())?;
-    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    let dispatch = cas_store::get_verification_dispatch(root, id).map_err(|e| store_refusal(&e))?;
+    let agents = crate::store::open_agent_store(root).map_err(|e| store_refusal(&e))?;
     if agents.get(&dispatch.owner_agent_id).is_ok() {
         return Ok(dispatch);
     }
     let machine = cas_types::Agent::get_or_generate_machine_id();
-    let retired = cas_store::SqliteAgentStore::open(root).map_err(|e| e.to_string())?;
+    let retired = cas_store::SqliteAgentStore::open(root).map_err(|e| store_refusal(&e))?;
     let dead = |agent: &cas_types::Agent| {
         agent.machine_id.as_deref() == Some(machine.as_str())
             && (agent.status == cas_types::AgentStatus::Shutdown || matches!(
@@ -347,19 +347,19 @@ pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> R
                 crate::mcp::daemon::LivenessOutcome::Dead { .. }
             ))
     };
-    for successor in agents.list(None).map_err(|e| e.to_string())? {
+    for successor in agents.list(None).map_err(|e| store_refusal(&e))? {
         if successor.role != cas_types::AgentRole::Supervisor || !successor.is_alive()
             || successor.machine_id.as_deref() != Some(machine.as_str()) || dead(&successor)
             || session.is_some_and(|session| successor.factory_session.as_deref() != Some(session))
         { continue; }
-        if retired.supervisor_handoffs_claimed_by(&successor).map_err(|e| e.to_string())?
+        if retired.supervisor_handoffs_claimed_by(&successor).map_err(|e| store_refusal(&e))?
             .iter().any(|handoff| handoff.agent_id == dispatch.owner_agent_id)
         {
             let verifier = dispatch.verifier_agent_id.as_deref()
                 .and_then(|id| agents.get(id).ok()).filter(&dead);
             return cas_store::adopt_retired_verification_dispatch(
                 root, id, &successor, verifier.as_ref(), chrono::Utc::now(),
-            ).map_err(|e| e.to_string());
+            ).map_err(|e| store_refusal(&e));
         }
     }
     Err("verification_owner_handoff_scope: missing owner's claimed local successor is unavailable".into())
@@ -370,8 +370,8 @@ pub(super) fn launch(
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let dispatch = launch_dispatch(&core.cas_root, &dispatch.id, None)?;
     #[cfg(unix)]
-    if let Some(session) = core.open_agent_store().map_err(|e| e.to_string())?
-        .get(&dispatch.owner_agent_id).map_err(|e| e.to_string())?.factory_session
+    if let Some(session) = core.open_agent_store().map_err(|e| store_refusal(&e))?
+        .get(&dispatch.owner_agent_id).map_err(|e| store_refusal(&e))?.factory_session
     {
         // The MCP backend may inherit the worker's userns. Only the factory
         // daemon owns the context from which the harness sandbox can start.
@@ -391,7 +391,7 @@ pub(super) fn launch(
                         recovery(&worker.cas_root, &dispatch)
                     ));
                 }
-            }).map(Some).map_err(|e| e.to_string());
+            }).map(Some).map_err(|e| store_refusal(&e));
     }
     launch_local(core, task, &dispatch)
 }
@@ -402,7 +402,7 @@ pub(super) fn launch_local(
     dispatch: &VerificationDispatch,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     if cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
-        .map_err(|e| e.to_string())?.state != cas_types::VerificationDispatchState::Pending {
+        .map_err(|e| store_refusal(&e))?.state != cas_types::VerificationDispatchState::Pending {
         return Ok(None);
     }
     // A candidate review reads its disposable candidate; a no-code close
@@ -415,7 +415,7 @@ pub(super) fn launch_local(
     // its stderr. The exact dispatch and candidate remain unchanged.
     let directory = core.cas_root.join("verification-runs").join(&dispatch.id)
         .join(format!("attempt-{:032x}", rand::random::<u128>()));
-    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&directory).map_err(|e| store_refusal(&e))?;
     let output = directory.join("verdict.json");
     let root = core.cas_root.clone();
     launch_with_preparation(core, task, dispatch, output, move |output| {
@@ -433,7 +433,7 @@ fn launch_with_preparation(
     prepare: impl FnOnce(&Path) -> Result<(Command, Option<String>), String> + Send + 'static,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| store_refusal(&e))?;
     if live.state != cas_types::VerificationDispatchState::Pending {
         return Ok(None);
     }
@@ -449,9 +449,9 @@ fn launch_with_preparation(
     child.metadata.insert(OWNER_KEY.into(), live.id.clone());
     child.factory_session = core
         .open_agent_store()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| store_refusal(&e))?
         .get(&live.owner_agent_id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| store_refusal(&e))?
         .factory_session;
     // One transaction: a bind lost to contention must not strand a pending
     // handoff that refuses every later start for this owner (cas-111e).
@@ -462,11 +462,11 @@ fn launch_with_preparation(
         &format!("daemon:{}", live.id),
         &child,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| store_refusal(&e))?;
     // Issuing the handoff may have refreshed an expired pending deadline; the
     // prompt, review budget and recovery guard must use the refreshed row.
     let live = cas_store::get_verification_dispatch(&core.cas_root, &live.id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| store_refusal(&e))?;
     let worker = core.clone();
     let task = task.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {

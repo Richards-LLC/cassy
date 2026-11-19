@@ -1,4 +1,0 @@
-title: A newer supervisor hold for the operator outranks a worker's older blocker note, so the stall watchdog neither wakes nor pages for it
-tasks: [cas-285a]
-journeys: [HUB-J26]
-invariants: [HUB-J26-GOAL]

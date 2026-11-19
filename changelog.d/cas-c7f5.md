@@ -1,3 +1,0 @@
-### Added — Mux
-
-- **A native turn observer for Codex rollouts** — Was: the mux had no way to wait on a harness's own record of a turn starting or ending, so tests and callers guessed from sleeps or PTY quiet, which cannot tell a long tool call from idle. Now: `cas_mux::readiness::RolloutTurnObserver` tails the Codex rollout's `task_started`, `task_complete` and `turn_aborted` rows, and a wait that sees no start returns a typed timeout at its deadline, naming what the rollout did show. Measured: with row reading removed 2 of the 3 observer tests fail (909f5a9e3e); with it all 3 pass. The live-provider tests still sleep and are converted in a follow-up after an opt-in provider run.

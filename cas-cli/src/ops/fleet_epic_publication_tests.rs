@@ -180,6 +180,8 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let server = runtime.block_on(wiremock::MockServer::start());
             let lock = cas_types::TaskLease::new("train-lock".into(), owner.id.clone(), 600);
+            let mut lock_record = serde_json::to_value(&lock).unwrap();
+            lock_record["id"] = serde_json::json!("owner-lock");
             runtime.block_on(async {
                 use wiremock::{Mock, ResponseTemplate};
                 use wiremock::matchers::{method, path_regex};
@@ -189,7 +191,7 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
                         "agent_id":owner.id, "expires_at":lock.expires_at,
                     }))).mount(&server).await;
                 Mock::given(method("GET")).and(path_regex("/lock$"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock":lock})))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock":lock_record})))
                     .mount(&server).await;
             });
             let peer_repo = tempfile::tempdir().unwrap();

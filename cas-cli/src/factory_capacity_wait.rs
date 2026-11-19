@@ -31,7 +31,7 @@ pub(crate) enum CapacityKind {
 #[derive(Default)]
 struct ReclaimableCaches {
     caches: Vec<(PathBuf, u64)>,
-    /// cas-7a37: verifier review-scratch output queued for deletion, still on disk.
+    /// cas-7a37: bytes the guarded review-scratch inventory could free now.
     review_scratch_bytes: u64,
     complete: bool,
 }
@@ -97,13 +97,15 @@ fn reclaimable_caches(root: &Path) -> Result<ReclaimableCaches> {
             known.extend(entries.flatten().map(|entry| entry.path()));
         }
     }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let report = crate::factory_target_cache::inspect_until(root, TargetCachePolicy::from(config.factory()),
-        &known, &live, std::time::Instant::now() + std::time::Duration::from_secs(2))?;
+        &known, &live, deadline)?;
+    let review_scratch = crate::factory_review_scratch::reclaimable_bytes_until(root, Some(deadline));
     Ok(ReclaimableCaches {
         caches: report.caches.into_iter().filter(|cache| matches!(cache.disposition,
             CacheDisposition::Eligible | CacheDisposition::Selected)).map(|cache| (cache.path, cache.bytes)).collect(),
-        review_scratch_bytes: report.pending_reclaim_bytes,
-        complete: report.inventory_complete,
+        review_scratch_bytes: review_scratch.unwrap_or(0),
+        complete: report.inventory_complete && review_scratch.is_some(),
     })
 }
 
@@ -603,7 +605,7 @@ fn reconcile_with_inventory(
         let workers = waits.iter().map(|wait| format!("- {} ({}): {}", wait.worker_name, wait.task_id, wait.cause)).collect::<Vec<_>>().join("\n");
         let mut caches = inventory.caches.iter().map(|(path, bytes)| format!("- {}: {bytes} bytes", path.display())).collect::<Vec<_>>();
         if inventory.review_scratch_bytes > 0 {
-            caches.push(format!("- verifier review scratch queued for deletion: {} bytes", inventory.review_scratch_bytes));
+            caches.push(format!("- verifier review scratch: {} bytes", inventory.review_scratch_bytes));
         }
         let caches = caches.join("\n");
         let total = reclaimable_bytes.map_or_else(|| "unknown (inventory incomplete)".to_string(), |bytes| format!("{bytes} bytes"));

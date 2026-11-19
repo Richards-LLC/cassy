@@ -3592,7 +3592,8 @@ impl CasService {
                 })?;
                 format!(
                     "\nSupervisor brief: stored on {task_id} and quoted in the worker's spawn \
-                     message, so it is read before task start."
+                     message, so it is read before task start.{}",
+                    crate::task_assignment::test_policy_note(brief),
                 )
             }
             _ => "\nSupervisor brief: none supplied or delivered. Pass spawn_brief with task_id \
@@ -14409,6 +14410,43 @@ mod spawn_lifecycle_tests {
             notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),
             "{notes}"
         );
+
+        // cas-5bf1: a compliant brief carries no testing-policy warning; one that
+        // asks for message-text assertions and a test per item warns with the
+        // rules' codes and is still delivered.
+        assert!(crate::gates::codes_in(&text).iter().all(|code| !matches!(*code, "N-106" | "N-107")), "{text}");
+        task_store
+            .add(&Task::new("cas-brief2".to_string(), "Fix the other sweep".to_string()))
+            .expect("add second task");
+        let asking: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude",
+            "task_id": "cas-brief2",
+            "spawn_brief": "Add a failing-first test per item and assert the PENDING message names the workflow."
+        }))
+        .expect("valid spawn request");
+        let warned = service.factory_spawn_workers(asking).await.expect("a warning never refuses");
+        let warned = warned
+            .content
+            .into_iter()
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let codes = crate::gates::codes_in(&warned);
+        assert!(codes.contains(&"N-106") && codes.contains(&"N-107"), "{warned}");
+        assert!(task_store.get("cas-brief2").expect("task").notes.contains("SPAWN BRIEF"), "the brief is still delivered");
+        // The same detector serves request_changes reasons and acceptance criteria.
+        for (text, expected) in [
+            ("Assert the error message text says the branch is stale.", vec!["N-106"]),
+            ("One test each for the three findings.", vec!["N-107"]),
+            ("Extend one existing test; assert behaviour, ids or codes; no message/text assertions; failing-first.", vec![]),
+        ] {
+            assert_eq!(crate::task_assignment::test_policy_warnings(text), expected, "{text}");
+        }
     }
 
     /// GH #257: spawning is another planning write moment. Its ordinary queue

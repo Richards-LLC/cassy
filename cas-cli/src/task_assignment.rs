@@ -26,6 +26,61 @@ pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the f
      through the real path, replaying the real incident; extend an existing test before adding one, and fix or delete a flaky test \
      instead of retrying it (cas-writing-tests, Fewest tests).";
 
+/// cas-5bf1: what a supervisor's brief, request_changes reason or acceptance
+/// criteria may not ask for under cas-writing-tests ("Fewest tests", "assert
+/// outcomes, not wording"). Two rules, matched sentence by sentence; a sentence
+/// that negates the ask ("no message text assertions", "don't add a test per
+/// item") is the rule itself, never a violation. The patterns are the one
+/// phrase source for all three surfaces; they are advice, so a hit warns and
+/// never refuses.
+// gate[N-106 notice]: A brief asks to assert message or output text
+const TEXT_ASSERTION_CODE: &str = "N-106";
+// gate[N-107 notice]: A brief asks for a test per item
+const PER_ITEM_TEST_CODE: &str = "N-107";
+
+static TEXT_ASSERTION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b(?:assert|asserts|asserting|assertion|assertions|pin|pins|pinned|verify|verifies|check|checks|test|tests)\b[^.;\n]{0,48}\b(?:message|text|wording|prose|phrase|sentence|output|copy)\b|\b(?:message|text|wording|output|reply)\b[^.;\n]{0,24}\b(?:to|must|should|that)\s+(?:name|say|mention|contain|include|state)\b|\bexact (?:text|wording|message|string)\b",
+    )
+    .expect("static text-assertion pattern")
+});
+static PER_ITEM_TEST: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b(?:a|one|its own|separate|failing-first)\s+(?:failing-first\s+)?tests?\s+(?:per|for each|for every|each)\b|\btests?\s+(?:per|for each|for every)\s+(?:item|case|row|file|variant|lane|finding|criterion)\b|\bone test each\b|\bper-item tests?\b",
+    )
+    .expect("static per-item pattern")
+});
+static NEGATION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\b(?:no|not|never|nor|without|avoid|don't|do not|instead of|rather than)\b")
+        .expect("static negation pattern")
+});
+
+/// The warning codes `text` earns, each at most once, in a stable order.
+pub(crate) fn test_policy_warnings(text: &str) -> Vec<&'static str> {
+    let mut codes = Vec::new();
+    for sentence in text.split(['.', ';', '\n']).filter(|sentence| !NEGATION.is_match(sentence)) {
+        if TEXT_ASSERTION.is_match(sentence) && !codes.contains(&TEXT_ASSERTION_CODE) {
+            codes.push(TEXT_ASSERTION_CODE);
+        }
+        if PER_ITEM_TEST.is_match(sentence) && !codes.contains(&PER_ITEM_TEST_CODE) {
+            codes.push(PER_ITEM_TEST_CODE);
+        }
+    }
+    codes
+}
+
+/// The warnings appended to a response, empty when `text` complies. Each names
+/// its rule through its code; the request is never refused.
+pub(crate) fn test_policy_note(text: &str) -> String {
+    test_policy_warnings(text)
+        .into_iter()
+        .map(|code| match code {
+            TEXT_ASSERTION_CODE => crate::gates::tag("N-106", "\nWarning: this asks to assert message or output text; cas-writing-tests rules out wording assertions. Nothing was refused."),
+            _ => crate::gates::tag("N-107", "\nWarning: this asks for a test per item; cas-writing-tests (Fewest tests) extends one existing test. Nothing was refused."),
+        })
+        .collect()
+}
+
 /// Carried by every assignment and spawn brief. It points at the principle
 /// rather than repeating it, since the task start the worker runs next
 /// carries it (cas-d9db).

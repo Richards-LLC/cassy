@@ -9722,8 +9722,9 @@ impl CasCore {
                     // for the push; the tip's receipts can be read already.
                     // gate[G-59 park integrity]: Unpushed delivery tip (close refused at park)
                     let unpushed_refusal = measured_branch.as_deref().zip(anchor.as_deref()).and_then(|(branch, tip)| {
-                        unpushed_delivery_tip(&close_project_root, branch, tip, task.delivery_mode)
-                            .map(|pushed| crate::gates::tag("G-59", unpushed_delivery_tip_refusal(branch, tip, &pushed)))
+                        let pushed = unpushed_delivery_tip(&close_project_root, branch, tip, task.delivery_mode);
+                        (pushed.is_some() || never_pushed_delivery_branch(&close_project_root, branch, task.delivery_mode))
+                            .then(|| crate::gates::tag("G-59", unpushed_delivery_tip_refusal(branch, tip, pushed.as_deref())))
                     });
                     let tip_is_pushed = unpushed_refusal.is_none();
                     gate_refusals.extend(unpushed_refusal);
@@ -16991,11 +16992,47 @@ pub(crate) fn unpushed_delivery_tip(
     (!git_commit_is_ancestor(repo_path, tip, &remote)).then_some(pushed)
 }
 
+/// cas-176e (GH #2136): `measured_branch` was never pushed. No cached
+/// `origin/<branch>` exists and a live `ls-remote` of origin succeeds without
+/// listing it, so the merge would reach for a commit GitHub does not have and
+/// refuse only after a full review cycle. An unreachable or absent origin is
+/// unknown, not never-pushed, and does not refuse.
+pub(crate) fn never_pushed_delivery_branch(
+    repo_path: &std::path::Path,
+    measured_branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> bool {
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge
+        || measured_branch.starts_with("origin/")
+        || !is_safe_git_refname(measured_branch)
+        || resolve_branch_sha(repo_path, &format!("origin/{measured_branch}^{{commit}}")).is_some()
+    {
+        return false;
+    }
+    let remote_ref = format!("refs/heads/{measured_branch}");
+    let mut command = std::process::Command::new("git");
+    command
+        .current_dir(repo_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["ls-remote", "--heads", "--refs", "origin", &remote_ref]);
+    let timeout = std::time::Duration::from_secs(10);
+    crate::bounded_process::run_command(&mut command, crate::bounded_process::Deadline::after(timeout), timeout)
+        .is_ok_and(|output| output.status.success() && output.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
 // gate-audit[forward]: G-59 Pure renderer; park caller tags unpushed delivery refusal.
-fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> String {
-    let [push] = match crate::worktree::GitOperations::git_remedies([&["push", "origin", branch]]) {
+/// `pushed` is the cached origin tip, or `None` when the branch was never pushed.
+fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: Option<&str>) -> String {
+    let [push] = match crate::worktree::GitOperations::git_remedies([&["push", "-u", "origin", branch]]) {
         Ok(commands) => commands,
         Err(refusal) => return refusal,
+    };
+    let Some(pushed) = pushed else {
+        return format!(
+            "CLOSE REFUSED: the delivery tip `{tip}` on `{branch}` was never pushed; origin has no `{branch}`. \
+             The merge reads the published branch, so review would approve a commit it cannot merge. \
+             Run `{push}` and close again."
+        );
     };
     format!(
         "CLOSE REFUSED: the delivery tip `{tip}` on `{branch}` is absent from the cached origin ref. \
@@ -29749,6 +29786,21 @@ mod merge_state_gate_tests {
         );
     }
 
+    // cas-176e (GH #2136): a branch origin never had parks nothing, and the
+    // refusal names the push that creates it.
+    #[tokio::test]
+    async fn cas_176e_close_refuses_never_pushed_branch_naming_push() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        let p = fixture.dir.path();
+        git(p, &["push", "-q", "origin", "--delete", &fixture.branch]);
+        git(p, &["update-ref", "-d", &format!("refs/remotes/origin/{}", fixture.branch)]);
+        let (is_error, text) = close_text(&fixture).await;
+        assert_eq!(is_error, Some(true), "{text}");
+        assert!(text.contains(&format!("push -u origin {}", fixture.branch)), "{text}");
+        let stored = fixture.store.get(&fixture.task_id).unwrap();
+        assert_ne!(stored.status, TaskStatus::AwaitingMerge, "{text}");
+    }
+
     // cas-44e93 AC2: once an unpushed anchor was recorded, re-closing from
     // the pushed tip moves the anchor there; no request_changes needed.
     #[tokio::test]
@@ -34797,7 +34849,7 @@ esac
         });
         let branch = resolve_close_delivery_branch(p, &task, "worker").unwrap();
         assert_eq!(branch, "factory/worker-cas-test1");
-        let refusal = unpushed_delivery_tip_refusal(&branch, &tip, &base);
+        let refusal = unpushed_delivery_tip_refusal(&branch, &tip, Some(&base));
 
         assert_eq!(head_sha(p), tip);
         assert_eq!(rev_parse_local(p, "factory/worker"), parked);

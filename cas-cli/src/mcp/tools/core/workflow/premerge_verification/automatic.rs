@@ -333,7 +333,7 @@ fn request_with_retry(
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> Result<VerificationDispatch, String> {
     let dispatch = cas_store::get_verification_dispatch(root, id).map_err(|e| store_refusal(&e))?;
-    let agents = crate::store::open_agent_store(root).map_err(|e| store_refusal(&e))?;
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     if agents.get(&dispatch.owner_agent_id).is_ok() {
         return Ok(dispatch);
     }
@@ -370,7 +370,7 @@ pub(super) fn launch(
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let dispatch = launch_dispatch(&core.cas_root, &dispatch.id, None)?;
     #[cfg(unix)]
-    if let Some(session) = core.open_agent_store().map_err(|e| store_refusal(&e))?
+    if let Some(session) = core.open_agent_store().map_err(|e| e.to_string())?
         .get(&dispatch.owner_agent_id).map_err(|e| store_refusal(&e))?.factory_session
     {
         // The MCP backend may inherit the worker's userns. Only the factory
@@ -391,7 +391,7 @@ pub(super) fn launch(
                         recovery(&worker.cas_root, &dispatch)
                     ));
                 }
-            }).map(Some).map_err(|e| store_refusal(&e));
+            }).map(Some).map_err(|e| e.to_string());
     }
     launch_local(core, task, &dispatch)
 }
@@ -415,7 +415,7 @@ pub(super) fn launch_local(
     // its stderr. The exact dispatch and candidate remain unchanged.
     let directory = core.cas_root.join("verification-runs").join(&dispatch.id)
         .join(format!("attempt-{:032x}", rand::random::<u128>()));
-    std::fs::create_dir_all(&directory).map_err(|e| store_refusal(&e))?;
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
     let root = core.cas_root.clone();
     launch_with_preparation(core, task, dispatch, output, move |output| {
@@ -449,7 +449,7 @@ fn launch_with_preparation(
     child.metadata.insert(OWNER_KEY.into(), live.id.clone());
     child.factory_session = core
         .open_agent_store()
-        .map_err(|e| store_refusal(&e))?
+        .map_err(|e| e.to_string())?
         .get(&live.owner_agent_id)
         .map_err(|e| store_refusal(&e))?
         .factory_session;

@@ -1,0 +1,3 @@
+title: A worker with an advancing owned child is not reported as waiting for input
+tasks: [cas-0125]
+journeys: [FACTORY-SUPERVISE]

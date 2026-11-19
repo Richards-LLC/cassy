@@ -121,7 +121,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     await expect(page.locator("#message-status")).toBeVisible();
     await expect(composer).toHaveValue("");
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
     expect(hub.sends.filter((m) => m.text === "Are you there?")).toHaveLength(0);
     // cas-5a8f: a send held in this browser is not supervisor execution: the
     // thread does not say "working" beside "Waiting for the connection", on

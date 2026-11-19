@@ -267,6 +267,8 @@ impl CasCore {
                 }
             }
             save(&path, &queue)?;
+            // GH #2169: appended entries' reviews start now, not at the next daemon scan.
+            start_queued_reviews(self, &queue, &*tasks, queue.next);
             let receipt = queue.render();
             return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
                 crate::gates::override_tag("G-114", receipt)
@@ -321,9 +323,12 @@ impl CasCore {
             ci_override,
         };
         let common = GitOperations::new(repo).canonical_repo_key()?;
-        let _target = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
+        let target_lock = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
             .context(crate::gates::tag("G-113", "target merge already in progress; retry train_merge after it finishes"))?;
         save(&path, &queue)?;
+        // GH #2169: every queued delivery's review starts now, outside the publication lock.
+        drop(target_lock);
+        start_queued_reviews(self, &queue, &*tasks, 0);
         let receipt = queue.render();
         Ok(if queue.ci_override.is_some() { crate::gates::override_tag("G-114", receipt) } else { receipt })
     }
@@ -453,14 +458,15 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     Ok(git.is_ancestor(&entry.sha, &target))
 }
 
-/// GH #2169: only publication is ordered. Every delivery behind the head gets
-/// its candidate and verifier now, through the same preparation the head uses,
+/// GH #2169: only publication is ordered. Every delivery from `from` on gets
+/// its candidate and verifier now (enqueue and append start them all, the daemon
+/// pass starts those behind the head), through the same preparation the head uses,
 /// so their reviews run while earlier entries publish. A publish that changes a
 /// later entry's reviewed files is re-reviewed by that preparation (G-104) when
 /// the entry reaches the head. A hold on its own dispatch is the expected
 /// answer here; any other refusal surfaces again when the entry is the head.
-fn start_queued_reviews(core: &CasCore, queue: &Queue, tasks: &dyn crate::store::TaskStore) {
-    for entry in queue.entries.iter().skip(queue.next + 1) {
+fn start_queued_reviews(core: &CasCore, queue: &Queue, tasks: &dyn crate::store::TaskStore, from: usize) {
+    for entry in queue.entries.iter().skip(from) {
         let Ok(task) = tasks.get(&entry.task) else { continue };
         if task.status != TaskStatus::AwaitingMerge
             || task.deliverables.factory_branch_anchor.as_deref() != Some(&entry.sha)
@@ -540,7 +546,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             if !queue.active() {
                 break;
             }
-            start_queued_reviews(&core, &queue, &*tasks);
+            start_queued_reviews(&core, &queue, &*tasks, queue.next + 1);
             if let Err(error) = crate::train_ci::guard(
                 &core,
                 &queue.train,
@@ -1197,7 +1203,13 @@ mod tests {
             task.depth = TaskDepth::Deep;
             tasks.update(&task).unwrap();
         }
+        // Enqueue and append start every review themselves, with no resume pass between.
+        let dispatch_exists = |id: &String| cas_store::get_latest_verification_dispatch(&fixture.root, id).unwrap().is_some();
+        fixture.start_with(&fixture.ids[..2]).await;
+        assert!(fixture.ids[..2].iter().all(dispatch_exists), "enqueue starts the queued reviews");
+        assert!(!dispatch_exists(&fixture.ids[2]));
         fixture.start().await;
+        assert!(dispatch_exists(&fixture.ids[2]), "an appended delivery's review starts at the append");
         // The live stuck state: a daemonless pass left this exact dispatch
         // Pending and unclaimed.
         let parked = tasks.get(&fixture.ids[0]).unwrap();

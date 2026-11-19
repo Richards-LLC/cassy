@@ -7139,6 +7139,21 @@ impl FactoryDaemon {
     /// a supervisor. Quiet acknowledgements/copies do not. QueueSelect debounces
     /// and caps directed messages; the existing pane gate protects busy turns,
     /// composers and drafts. A wake row remains pending until a handoff succeeds.
+    /// cas-94a0: on standby only the operator and CAS lifecycle events wake the
+    /// supervisor pane. Everything else stays queued in its inbox until resume.
+    fn standby_denies(&self, sender: &WakeSender, source: &str, prompt: &str) -> bool {
+        crate::factory_standby::active(self.app.cas_dir(), &self.session_name)
+            && Self::standby_wake_denied(sender, self.app.supervisor_name(), source, prompt)
+    }
+
+    /// The standby rule alone: every row except the operator's and CAS lifecycle events.
+    fn standby_wake_denied(sender: &WakeSender, supervisor_name: &str, source: &str, prompt: &str) -> bool {
+        !matches!(
+            Self::supervisor_wake_class(sender, supervisor_name, source, prompt),
+            Some(SupervisorWakeClass::Operator | SupervisorWakeClass::Lifecycle)
+        )
+    }
+
     fn row_is_supervisor_wake(
         sender: &WakeSender,
         supervisor_name: &str,
@@ -7912,6 +7927,14 @@ impl FactoryDaemon {
                 UrgentToolCallHold::Interrupt
             }
         })
+    }
+
+    /// A Codex worker whose Cassy MCP server has not listed its tools yet (GH #2128).
+    /// The supervisor, broadcasts and other harnesses are unaffected.
+    fn worker_awaits_cassy_tools(&self, pane: &str) -> bool {
+        self.app.mux.get(pane).is_some_and(|pane| {
+            matches!(pane.kind(), cas_mux::PaneKind::Worker) && pane.harness() == cas_mux::SupervisorCli::Codex
+        }) && !crate::factory_tools_ready::tools_listed(self.app.cas_dir(), &self.session_name, pane, crate::mcp::daemon::pid_alive)
     }
 
     /// Combine off-loop transcript inputs with the pane's current vetoes.
@@ -9154,6 +9177,10 @@ impl FactoryDaemon {
         let now = chrono::Utc::now();
         let recheck = chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap();
         let ready: Vec<_> = self.queue_jobs.inline_parked.iter().filter_map(|(id, (row, declined))| {
+            if row.target == "supervisor"
+                && self.standby_denies(&self.wake_sender_for(row.origin.as_ref()), &row.source, &row.prompt) {
+                return None;
+            }
             if now - *declined >= recheck {
                 return Some((*id, row.target.clone(), false)); // durable recheck is due
             }
@@ -10620,6 +10647,21 @@ impl FactoryDaemon {
                     );
                     continue;
                 }
+                // GH #2128: a Codex worker's first wake can arrive before its Cassy MCP
+                // server has listed its tools, so `task` and `coordination` do not exist
+                // yet. Hold the row until the worker's server reports it listed them.
+                if self.worker_awaits_cassy_tools(pane_target) {
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: Some("the worker's Cassy tools are not listed yet; if this persists, check the worker's MCP configuration with `cas factory doctor`".into()),
+                        },
+                    );
+                    continue;
+                }
             }
 
 
@@ -10692,6 +10734,12 @@ impl FactoryDaemon {
                     if queued.urgent && !self.app.mux.pane_ready_for_injection(name) {
                         tally.failed += 1;
                         tally.notes.push(format!("{name}: pane not ready"));
+                        continue;
+                    }
+                    // GH #2128: the broadcast waits for a Codex worker's tools like a wake does.
+                    if self.worker_awaits_cassy_tools(name) {
+                        tally.failed += 1;
+                        tally.notes.push(format!("{name}: Cassy tools not listed yet"));
                         continue;
                     }
                     // The claim is taken just before the handoff, as before C3;
@@ -10896,7 +10944,10 @@ impl FactoryDaemon {
                     let wake_slot_available = !supervisor_wake_sent;
                     // cas-9e81: keep the REASON, not just the verdict — it is
                     // persisted as the row's wake_attempt_detail below.
-                    let wake_decision = if inline_supervisor_body
+                    let wake_decision = if is_supervisor_target
+                        && self.standby_denies(&wake_sender, &queued.source, &queued.prompt) {
+                        WakeDecision::deny("supervisor is on standby: only the operator and CAS lifecycle events wake it")
+                    } else if inline_supervisor_body
                         && (self.app.mux.pane_inject_busy(&pane_target)
                             || self.app.mux.get(&pane_target).is_some_and(|pane| pane.is_composer_dirty())) {
                         WakeDecision::deny("inline pane has an active composer or prior inject")
@@ -17229,6 +17280,24 @@ mod tests {
     /// signal is an inbox file write, and an idle supervisor has no upcoming
     /// turn boundary at which to read it — which is why every observed merge
     /// drain came from a scheduled sweep instead of the promised push.
+    /// cas-94a0: on standby the operator and a CAS lifecycle row still wake the
+    /// pane; a peer supervisor's message and an ordinary worker row do not.
+    #[test]
+    fn standby_wakes_only_for_the_operator_and_lifecycle_cas_94a0() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, lifecycle_prompt_source,
+        };
+        let name = "cosmic-bear-43";
+        let lifecycle = lifecycle_prompt_source(LifecycleTransition::AwaitingMerge, 41);
+        let denied = |sender: &WakeSender, source: &str, prompt: &str| {
+            FactoryDaemon::standby_wake_denied(sender, name, source, prompt)
+        };
+        assert!(!denied(&WakeSender::Operator, "operator", "status?"));
+        assert!(!denied(&WakeSender::Daemon, &lifecycle, &awaiting_merge_payload("cas-f02b")));
+        assert!(denied(&supervisor_sender("peer-supervisor"), "peer", "can you merge this?"));
+        assert!(denied(&worker_sender("alice"), "alice", "done"));
+    }
+
     #[test]
     fn awaiting_merge_lifecycle_row_wakes_an_idle_supervisor_pane() {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
@@ -23019,6 +23088,108 @@ mod stall_nudge_rework_tests {
         daemon.last_pane_output_bytes.insert("worker-a".into(), bytes);
         daemon.pane_silent_since.insert("worker-a".into(), Instant::now() - Duration::from_secs(46));
         assert!(daemon.app.mux.pane_ready_for_injection("worker-a"));
+    }
+
+    /// GH #2128: a Codex worker's assignment wake must not go out while its Cassy MCP
+    /// server has not listed its tools; it goes out once the server reports it did.
+    #[tokio::test]
+    async fn a_codex_workers_first_wake_waits_for_its_cassy_tools_gh_2128() {
+        let (_root, cas_dir, _worker, _nudge) = fixture(false);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        make_worker_ready(&mut daemon).await;
+        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let wake = queue.enqueue("supervisor", "worker-a", "your next instruction").unwrap();
+
+        // A ready pane takes a queued wake within a pass or two; several passes show it is held.
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(wake).unwrap().unwrap().processed_at.is_none(), "no wake before the tools are listed");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let reason: Option<String> = conn.query_row("SELECT last_pending_reason FROM prompt_queue WHERE id = ?", [wake], |r| r.get(0)).unwrap();
+        assert_eq!(reason.as_deref(), Some("gated_not_ready"));
+
+        // The front lists tools privately before Codex has any: that does not release the wake.
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_AGENT_ROLE", "worker"),
+            ("CAS_FACTORY_SESSION", daemon.session_name.as_str()),
+            ("CAS_AGENT_NAME", "worker-a"),
+        ]);
+        crate::factory_tools_ready::note_tools_listed(&cas_dir, &format!("{}probe", crate::factory_tools_ready::FRONT_PROBE_PREFIX));
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(wake).unwrap().unwrap().processed_at.is_none(), "a private probe listing does not release the wake");
+
+        // The external client's own tools/list does.
+        crate::factory_tools_ready::note_tools_listed(&cas_dir, "1");
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(wake).unwrap().unwrap().processed_at.is_some(), "the wake goes out once the tools are listed");
+
+        // A hot update retires the backend that listed the tools, behind the same front,
+        // and the client never lists again: the record names the front, so wakes still go.
+        let retired_backend = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            child.id()
+        };
+        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        env.set(crate::factory_tools_ready::FRONT_PID_ENV, &std::process::id().to_string());
+        crate::factory_tools_ready::note_listed_by_backend_for_test(&cas_dir, "1", retired_backend);
+        let after_swap = queue.enqueue("supervisor", "worker-a", "after the swap").unwrap();
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(after_swap).unwrap().unwrap().processed_at.is_some(), "a backend swap does not hold the worker's wakes");
+    }
+
+    /// GH #2128: the other ways an actionable prompt reaches a Codex worker (its spawn
+    /// handoff and the respawn resume brief) wait for its tools like a wake.
+    #[tokio::test]
+    async fn a_codex_workers_spawn_handoff_and_resume_brief_wait_for_its_cassy_tools_gh_2128() {
+        let (_root, cas_dir, _worker, _nudge) = fixture(false);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        make_worker_ready(&mut daemon).await;
+        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let spawn = crate::task_assignment::enqueue_spawn_message(&cas_dir, &daemon.session_name, "worker-a", "cas-1234", "your first instruction").unwrap();
+        let resume = crate::ui::factory::enqueue_context_resume_brief(&cas_dir, "supervisor", Some(&daemon.session_name), "worker-a").unwrap()
+            .expect("the fixture worker holds a task, so a resume brief is queued");
+        let rows = [("spawn handoff", spawn), ("resume brief", resume)];
+
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let transported = |row: i64| -> bool {
+            let at: Option<String> = conn.query_row("SELECT transport_delivered_at FROM prompt_queue WHERE id = ?", [row], |r| r.get(0)).unwrap();
+            at.is_some()
+        };
+        for (name, row) in rows {
+            assert!(!transported(row), "{name} waits for the worker's tools");
+        }
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_AGENT_ROLE", "worker"),
+            ("CAS_FACTORY_SESSION", daemon.session_name.as_str()),
+            ("CAS_AGENT_NAME", "worker-a"),
+        ]);
+        crate::factory_tools_ready::note_tools_listed(&cas_dir, "1");
+        for _ in 0..6 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        for (name, row) in rows {
+            assert!(transported(row), "{name} goes out once the tools are listed");
+        }
     }
 
     #[tokio::test]

@@ -1471,6 +1471,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     }).await.expect("killed worker emits its exit");
     // The crash handler retains the checkout because the worker holds work.
     daemon.app.mark_worker_crashed(name).await;
+    daemon.app.join_worker_worktree_cleanups();
     old.status = status;
     agents.update(&old).unwrap();
     let spec = cas_mux::WorkerSpec {
@@ -1491,13 +1492,14 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
             super::super::PendingSpawn::Recycle { request_id, .. } => *request_id,
             _ => panic!("unexpected lifecycle action"),
         };
+        let supervisor = daemon.app.supervisor_name().to_string();
         let supervisor_rows = || open_prompt_queue_store(&cas).unwrap().peek_all(100).unwrap()
-            .into_iter().filter(|row| row.target == daemon.app.supervisor_name()).map(|row| row.id).collect::<Vec<_>>();
+            .into_iter().filter(|row| row.target == supervisor).map(|row| row.id).collect::<Vec<_>>();
         let before = supervisor_rows();
         daemon.process_pending_spawns().await;
         assert!(daemon.pending_spawns.iter().any(|pending| matches!(pending,
             super::super::PendingSpawn::Recycle { request_id: id, name: held, .. } if *id == request_id && held == name)));
-        assert_eq!(shutdown_row_state(&cas, request_id).0.as_deref(), Some(SpawnLifecycleState::Provisioning.as_str()));
+        assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas, request_id).0.as_deref() == Some(SpawnLifecycleState::Provisioning.as_str())));
         assert!(!daemon.spawn_verifications.contains_key(name));
         assert_eq!(supervisor_rows(), before);
         use std::io::Write;
@@ -1513,7 +1515,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
         replacement.factory_session = Some(SESSION.into());
         agents.register(&replacement).unwrap();
         daemon.reconcile_spawn_verifications().await;
-        assert_eq!(shutdown_row_state(&cas, request_id).0.as_deref(), Some(SpawnLifecycleState::Registered.as_str()));
+        assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas, request_id).0.as_deref() == Some(SpawnLifecycleState::Registered.as_str())));
         assert_eq!(supervisor_rows(), before);
     } else {
         // The named spawn consumer uses this same prepare/provision/finish path.

@@ -187,7 +187,7 @@ SHA. If no run is reported, read its skip/failure reason; the manual command is
 `gh workflow run full-validation.yml --ref <train branch>`. On that tip run
 `cargo tree -i aws-lc-rs --target x86_64-unknown-linux-gnu` (empty graph), capped
 `cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'`, and
-`python3 scripts/check-test-shape.py` before `train_freeze`. Lint the committed
+`python3 scripts/check-test-shape.py`. Lint the committed
 notes with `python3 scripts/release-train-announce.py --lint <draft>`.
 <!-- cas-src:end -->
 

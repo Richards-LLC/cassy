@@ -1272,7 +1272,7 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
             "id":"claim", "task_id":crate::cloud::peer_claims::claim_key(REPO,&task.id), "agent_id":"worker", "status":"active",
             "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(), "renewed_at":chrono::Utc::now().to_rfc3339(),
             "renewal_count":1, "epoch":1
-        }]}))).mount_as_scoped(&server).await;
+        }]}))).with_priority(1).expect(1).mount_as_scoped(&server).await;
     let (held, ack) = deliver(send("before-claim-release", &park)).await.unwrap();
     assert_eq!((held.delivered,held.rejected), (0,0)); assert!(ack.is_empty());
     assert!(owner.rows().is_empty());

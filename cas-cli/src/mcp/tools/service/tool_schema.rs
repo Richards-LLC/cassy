@@ -190,7 +190,7 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
     {
         decision.insert(
             "description".to_string(),
-            Value::String("train_freeze: promote validates and promotes an open epic, then freezes it; lift lets the train's live supervisor lift its freeze with a reason, audited and sent to the operator. epic_split id=<split>: accept, reject, cancel or status.".to_string()),
+            Value::String("train_freeze: promote an open epic then freeze it; lift lets the train's live supervisor lift its freeze with a reason, audited and sent to the operator. epic_split id=<split>: accept, reject, cancel or status.".to_string()),
         );
     }
     if let Some(Value::Object(action)) = properties.get_mut("action") {

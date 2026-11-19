@@ -2247,6 +2247,31 @@ pub struct ProofScopeCorrectionOutcome {
     pub dispatch_id: Option<String>,
 }
 
+/// Reuse the latest original Approved verdict after the caller has persisted
+/// and independently validated a clean-merge carry mapping. Neither the
+/// verdict nor its immutable repository boundary is rewritten.
+pub fn carry_forward_approved_verification(cas_dir: &Path, expected: &Task, dispatch_id: &str, verdict_id: &str) -> Result<()> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let clock: String = tx.query_row("SELECT updated_at FROM tasks WHERE id=?1", [&expected.id], |row| row.get(0))?;
+    if DateTime::parse_from_rfc3339(&clock).map_err(|e| StoreError::Parse(e.to_string()))?.with_timezone(&Utc) != expected.updated_at {
+        return Err(StoreError::Parse("approval carry raced a task change".into()));
+    }
+    let active = get_latest_verification_dispatch_with_conn(&tx, &expected.id)?
+        .ok_or_else(|| StoreError::NotFound("carry dispatch".into()))?;
+    let verdict: Option<(String,String)> = tx.query_row(
+        "SELECT id,status FROM verifications WHERE task_id=?1 AND dispatch_id=?2 ORDER BY created_at DESC,id DESC LIMIT 1",
+        params![expected.id,dispatch_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    if active.id != dispatch_id || !matches!(active.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+        || !verdict.is_some_and(|(id,status)| id == verdict_id && status == "approved") {
+        return Err(StoreError::Parse("carry does not name the latest approved verdict".into()));
+    }
+    tx.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?1 AND state='invalidated'", [dispatch_id])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Atomically invalidate a parked task's stale proof after a supervisor fixes
 /// its repository/branch scope. Unlike `request_changes`, this is an
 /// administrative correction: it records no failed-review verdict and keeps
@@ -3123,10 +3148,7 @@ fn issue_server_verifier_handoff_with_conn(
         |row| row.get(0),
     )?;
     if pending_count != 0 {
-        return Err(StoreError::Parse(
-            "another task-verifier spawn is already awaiting SubagentStart for this parent; wait for it to bind or for exact failure cleanup/expiry"
-                .to_string(),
-        ));
+        return Err(StoreError::VerifierHandoffPending);
     }
 
     let mut dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;

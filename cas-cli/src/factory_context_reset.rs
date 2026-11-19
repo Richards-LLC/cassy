@@ -42,6 +42,24 @@ use std::path::{Path, PathBuf};
 
 use cas_mux::SupervisorCli;
 
+fn recycle_boundary_path(root: &Path, session: &str, worker: &str) -> PathBuf {
+    use sha2::Digest;
+    let key = sha2::Sha256::digest(format!("{session}\0{worker}").as_bytes());
+    root.join("worker-context-boundaries").join(format!("{key:x}"))
+}
+
+/// Written after the predecessor stops and before the replacement launches.
+pub(crate) fn record_worker_recycle_boundary(root: &Path, session: &str, worker: &str) -> std::io::Result<()> {
+    let path = recycle_boundary_path(root, session, worker);
+    std::fs::create_dir_all(path.parent().expect("boundary directory"))?;
+    std::fs::write(path, chrono::Utc::now().to_rfc3339())
+}
+
+pub(crate) fn worker_recycle_boundary(root: &Path, session: &str, worker: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let value = std::fs::read_to_string(recycle_boundary_path(root, session, worker)).ok()?;
+    chrono::DateTime::parse_from_rfc3339(value.trim()).ok().map(|at| at.with_timezone(&chrono::Utc))
+}
+
 /// Payload marking a `prompt_queue` row as a context-reset control command.
 ///
 /// Deliberately not human prose: the daemon matches it exactly and hard-routes

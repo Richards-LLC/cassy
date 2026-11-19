@@ -6,6 +6,7 @@ makes the fixture command park a process named rustc for crate cas_store.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -29,12 +30,27 @@ exit "${FAKE_EXIT:-0}"
 
 def run(tmp, timeout_minutes=0.05, **env):
     runs = tmp / f"runs-{time.monotonic_ns()}"
-    environment = dict(os.environ, RUNS=str(runs), WEDGED_PID=str(tmp / "wedged.pid"), **env)
+    pid_file = tmp / "wedged.pid"
+    pid_file.unlink(missing_ok=True)
+    environment = dict(os.environ, RUNS=str(runs), WEDGED_PID=str(pid_file), **env)
     started = time.monotonic()
-    result = subprocess.run(
-        [sys.executable, str(WATCHDOG), "--label", "own tests", "--timeout-minutes", str(timeout_minutes),
-         "--heartbeat-seconds", "1", "--log", str(tmp / "watchdog.log"), "--", "bash", "-c", COMMAND],
-        env=environment, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(WATCHDOG), "--label", "own tests", "--timeout-minutes", str(timeout_minutes),
+             "--heartbeat-seconds", "1", "--log", str(tmp / "watchdog.log"), "--", "bash", "-c", COMMAND],
+            env=environment, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        # A broken watchdog can exit while its fixture still holds the pipes.
+        # Reap only the session our own fixture recorded, retaining its error.
+        if pid_file.exists():
+            try:
+                os.killpg(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if error.stderr:
+            print(error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else error.stderr,
+                  file=sys.stderr)
+        raise
     return result, len(runs.read_text().splitlines()), time.monotonic() - started
 
 

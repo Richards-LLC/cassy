@@ -644,11 +644,43 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 (prefix, f'let id = |path: &str, name: &str| name.to_string(); assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
                 (prefix.replace('fn check() {', 'fn check(id: fn(&str, &str) -> String) {'), f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
             ]
+            # These are rendered/projection uses, not comparisons of identities.
+            bypasses = [
+                f'assert_eq!(source, id("a.test.ts", "{sentence}").name);',
+                f'assert_eq!(source, Identity::exact("a.test.ts", "{sentence}").name);',
+                f'assert_eq!(selected, id("a.test.ts", {{ assert_eq!(source, "{sentence}"); name }}));',
+                f'assert_eq!(source, (id("a.test.ts", "{sentence}")).name);',
+                f'assert_eq!(source, [id("a.test.ts", "{sentence}")][0].name);',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}").name.to_string());',
+                f'assert_eq!(source, format!("{{:?}}", id("a.test.ts", "{sentence}")));',
+                f'assert_eq!(source, render(id("a.test.ts", "{sentence}")));',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}").name_pattern());',
+                f'assert_eq!(selected, id("a.test.ts", format!("{{}}", source == "{sentence}")));',
+                f'assert_eq!(selected, id("a.test.ts", {{ source == "{sentence}"; name }}));',
+                f'let check = |id: fn(&str, &str) -> String| assert_eq!(source, id("a.test.ts", "{sentence}"));',
+                f'for id in helpers {{ assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                f'match helper {{ Some(id) => assert_eq!(source, id("a.test.ts", "{sentence}")), _ => () }}',
+                f'use diagnostic::id; assert_eq!(source, id("a.test.ts", "{sentence}"));',
+                f'assert_eq!(source, diagnostic::Identity::exact("a.test.ts", "{sentence}"));',
+                f'struct Identity; assert_eq!(source, Identity::exact("a.test.ts", "{sentence}"));',
+            ]
+            cases.extend((prefix, assertion, 1) for assertion in bypasses)
+            cases.extend([
+                (prefix, f'assert_eq!(selected, id("a.test.ts", "{sentence}"));', 0),
+                (prefix, f'assert_eq!(&selected, &(id("a.test.ts", "{sentence}")));', 0),
+                (prefix, f'assert_eq!(selected.id, id("a.test.ts", "{sentence}").id);', 0),
+            ])
             for setup, assertion, status in cases:
                 with self.subTest(assertion=assertion, setup=setup):
                     path.write_text(setup + assertion + '\n}\n')
                     result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+                    kinds = {line.split(': ', 1)[1].split(';', 1)[0]
+                             for line in result.stdout.splitlines() if line.startswith('runtime_tests.rs:')}
                     self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                    if assertion in bypasses:
+                        self.assertIn('exact-text pin', kinds)
+                    elif not status:
+                        self.assertEqual(kinds, set())
 
     def test_cli_changed_since_scans_non_rust_test_files(self):
         with tempfile.TemporaryDirectory() as root:

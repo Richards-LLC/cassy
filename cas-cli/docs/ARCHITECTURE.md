@@ -96,6 +96,8 @@ Two properties of the knowledge surface are load-bearing and easy to get wrong:
 
 `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` are **views over this surface, not a parallel one**: both are ordinary distillable sources, so the `codemap` and `project-overview` skills query `cas knowledge search` before regenerating and run `cas knowledge build` after writing, which turns each doc into a page plus a source-ledger entry.
 
+`cas knowledge build --dry-run --json` returns report counts and `pending_sources`, the complete ordered list of paths that need distillation before the `--max-sources` cap. `sources_deferred` counts paths beyond that cap. Plain dry-run output lists the same plan. Previews make no model calls and do not change knowledge pages or source ledger rows, so a caller can check whether CODEMAP is among the first five sources before running a bounded build.
+
 **Search reality check:** every "search" above except the knowledge surface goes through the live Tantivy BM25/hybrid implementation in `cas-cli/src/hybrid_search/` (doc types `entry`/`task`/`rule`/`skill`/`spec`/`code_symbol`/`code_file`). `cas-core/src/search/` supplies only shared temporal/artifact types. The knowledge surface has its own SQLite FTS5 index instead. **Neither is semantic on its own.** There is no local embedder; the semantic channel exists only when the cloud does — see below.
 
 ### The local/cloud boundary for project knowledge

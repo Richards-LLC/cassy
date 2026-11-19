@@ -68,7 +68,8 @@ impl Pending {
         // journal for the next recovery pass.
         if self.journal.failed || noted.is_err() {
             let agents = crate::store::open_agent_store(&self.root)
-                .and_then(|s| s.list(None))
+                .map_err(|e| e.to_string())?
+                .list(None)
                 .map_err(|e| e.to_string())?;
             let recipient = crate::supervisor_notices::resolve(
                 &agents,

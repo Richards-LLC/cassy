@@ -3175,6 +3175,102 @@ async fn test_shutdown_workers_all() {
     assert!(text.contains("ALL workers"), "Should say ALL: {text}");
 }
 
+const STANDBY_SESSION: &str = "standby-session-cas-94a0";
+
+fn standby_env() -> EnvGuard {
+    EnvGuard::set(&[("CAS_AGENT_ROLE", "supervisor"), ("CAS_FACTORY_SESSION", STANDBY_SESSION)])
+}
+
+/// cas-94a0: standby stops every worker of the session, keeps what they held,
+/// and resume respawns exactly those workers from their queues.
+#[tokio::test]
+async fn standby_stops_every_worker_and_resume_respawns_the_ones_holding_tasks_cas_94a0() {
+    let _guard = standby_env();
+    let env = FactoryTestEnv::new();
+    env.create_epic("Standby Epic");
+    env.register_worker_in_session("alice", STANDBY_SESSION);
+    env.register_worker_in_session("bob", STANDBY_SESSION);
+    let mut task = Task::new("cas-held".to_string(), "queued for alice".to_string());
+    task.status = TaskStatus::Open;
+    task.assignee = Some("alice".to_string());
+    env.task_store().add(&task).expect("add task");
+
+    env.service
+        .factory_request(Parameters(factory_req("standby")))
+        .await
+        .expect("a session with no unsaved work goes on standby");
+    let queued = env.spawn_queue().peek(10).expect("peek");
+    let stopped: Vec<String> = queued
+        .iter()
+        .filter(|entry| entry.action == cas_store::SpawnAction::Shutdown)
+        .flat_map(|entry| entry.worker_names.clone())
+        .collect();
+    assert!(stopped.contains(&"alice".to_string()) && stopped.contains(&"bob".to_string()), "{stopped:?}");
+    let parked = cas::factory_standby::read(&env.cas_root, STANDBY_SESSION).expect("standby marker");
+    assert_eq!(
+        parked.workers,
+        vec![cas::factory_standby::HeldWorker { name: "alice".into(), tasks: vec!["cas-held".into()] }],
+        "only the worker that held a task is respawned"
+    );
+
+    // A second request changes nothing.
+    env.service.factory_request(Parameters(factory_req("standby"))).await.expect("idempotent");
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), queued.len());
+
+    let mut resume = factory_req("standby");
+    resume.status = Some("resume".to_string());
+    env.service.factory_request(Parameters(resume)).await.expect("resume");
+    assert!(!cas::factory_standby::active(&env.cas_root, STANDBY_SESSION));
+    let respawned: Vec<_> = env
+        .spawn_queue()
+        .peek(10)
+        .expect("peek")
+        .into_iter()
+        .filter(|entry| entry.action == cas_store::SpawnAction::Spawn)
+        .collect();
+    assert_eq!(respawned.len(), 1);
+    assert_eq!(respawned[0].worker_names, vec!["alice"]);
+}
+
+/// Adversarial probe: a worker with unsaved work stops standby. Nothing is
+/// shut down, nothing is recorded, and no commit can be lost.
+#[tokio::test]
+async fn standby_refuses_a_dirty_worker_and_changes_nothing_cas_94a0() {
+    let _guard = standby_env();
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    let remote_path = worker_path.parent().unwrap().join("origin.git");
+    git_stdout(&worker_path, &["init", "--bare", remote_path.to_str().unwrap()]);
+    git_stdout(&worker_path, &["remote", "add", "origin", remote_path.to_str().unwrap()]);
+    let mut worker = Agent::new(Agent::generate_fallback_id(), "alice".to_string());
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some(STANDBY_SESSION.to_string());
+    worker.metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.agent_store().register(&worker).expect("register worker");
+    std::fs::write(worker_path.join("uncommitted.txt"), "live WIP\n").unwrap();
+
+    let err = env
+        .service
+        .factory_request(Parameters(factory_req("standby")))
+        .await
+        .expect_err("unsaved work must refuse standby");
+    assert!(err.message.contains("dirty_files=1"), "the refusal names the unsaved state: {err:?}");
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+    assert!(!cas::factory_standby::active(&env.cas_root, STANDBY_SESSION));
+}
+
+/// Only a supervisor may park a session.
+#[tokio::test]
+async fn standby_is_supervisor_only_cas_94a0() {
+    let _guard = EnvGuard::set(&[("CAS_AGENT_ROLE", "worker"), ("CAS_FACTORY_SESSION", STANDBY_SESSION)]);
+    let env = FactoryTestEnv::new();
+    env.service
+        .factory_request(Parameters(factory_req("standby")))
+        .await
+        .expect_err("a worker cannot park the session");
+    assert!(!cas::factory_standby::active(&env.cas_root, STANDBY_SESSION));
+}
+
 #[tokio::test]
 async fn test_shutdown_workers_supervisor_scoping() {
     let _guard = EnvGuard::set(&[

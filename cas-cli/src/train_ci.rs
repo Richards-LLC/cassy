@@ -605,6 +605,9 @@ print(json.dumps(state))\n");
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/train-ci.py")),
         )
         .unwrap();
+        std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+        std::fs::write(repo.join(".github/workflows/full-validation.yml"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/full-validation.yml"))).unwrap();
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "train CI observer"]);
         let lane = "epic/release-train-vnext-cas-train";

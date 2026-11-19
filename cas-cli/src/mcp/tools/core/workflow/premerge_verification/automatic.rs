@@ -244,6 +244,8 @@ fn contended(error: &str) -> bool {
     error.contains("already awaiting SubagentStart")
         || error.contains("wait budget is spent")
         || error.contains("verifier_factory_store_busy")
+        || error.contains("verifier_factory_launch_dropped")
+        || error.contains("QueuedDroppedOldest")
         || error.contains("database is locked")
 }
 

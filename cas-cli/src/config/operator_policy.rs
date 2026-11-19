@@ -582,6 +582,57 @@ pub fn user_write_roots() -> Vec<String> {
     }
 }
 
+/// One user-level (or built-in) write root as a project sees it: valid for
+/// the user store, then either an explicit parent of the project's Cassy
+/// directory (honoured in every nested project) or valid for the project.
+/// The single rule behind both enforcement and the getter's ignored list.
+fn resolve_user_level_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<PathBuf> {
+    let user_store = crate::config::host_config_dir();
+    resolve_project_write_root(raw, &user_store).and_then(|root| {
+        // An operator's user-level parent grant applies to ordinary
+        // files in every nested project. Policy files are still
+        // judged separately by the hook; don't silently drop the grant.
+        let project_cas = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+        if project_cas != root && project_cas.starts_with(&root) {
+            Ok(root)
+        } else {
+            resolve_project_write_root(raw, cas_root)
+        }
+    })
+}
+
+/// The configured write roots that [`effective_write_roots`] drops for this
+/// project, each with the reason, by the same rule. A root the operator set
+/// on purpose must not silently do nothing.
+pub fn ignored_write_roots(project: &[String], user: &[String], cas_root: &Path) -> Vec<(String, String)> {
+    let reason = |error: anyhow::Error| error.to_string().replace('\n', " ");
+    let mut ignored = Vec::new();
+    for raw in project {
+        if let Err(error) = resolve_project_write_root(raw, cas_root) {
+            ignored.push((raw.clone(), reason(error)));
+        }
+    }
+    for raw in user {
+        if let Err(error) = resolve_user_level_write_root(raw, cas_root) {
+            ignored.push((raw.clone(), reason(error)));
+        }
+    }
+    ignored
+}
+
+/// The projects whose enforcement drops one of these user-level roots, as
+/// `(project Cassy directory, root, reason)`, by the same rule as
+/// [`ignored_write_roots`]. A parent grant the projects honour is not listed.
+pub fn user_write_roots_ignored_by(roots: &[String], project_cas_roots: &[PathBuf]) -> Vec<(PathBuf, String, String)> {
+    let mut ignored = Vec::new();
+    for cas_root in project_cas_roots.iter().filter(|root| !is_user_store(root)) {
+        for (root, reason) in ignored_write_roots(&[], roots, cas_root) {
+            ignored.push((cas_root.clone(), root, reason));
+        }
+    }
+    ignored
+}
+
 /// Every write root in effect for a project (cas-f0ea0): its own
 /// `[factory] write_roots` (`project`), the user-level roots (`user`) and the
 /// built-in Downloads folder, then the project's Claude memory folders
@@ -592,21 +643,11 @@ pub fn user_write_roots() -> Vec<String> {
 /// skipped quietly; other unsafe or unresolved entries are skipped with a warning.
 pub fn effective_write_roots(project: &[String], user: &[String], cas_root: &Path) -> Vec<PathBuf> {
     let mut roots = effective_project_write_roots(project, cas_root);
-    let user_store = crate::config::host_config_dir();
     let downloads = host_downloads_dir()
         .filter(|path| path.is_dir())
         .map(|path| path.display().to_string());
     for raw in user.iter().chain(downloads.as_ref()) {
-        match resolve_project_write_root(raw, &user_store)
-            .and_then(|root| {
-                // An operator's user-level parent grant applies to ordinary
-                // files in every nested project. Policy files are still
-                // judged separately by the hook; don't silently drop the grant.
-                let project_cas = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
-                if project_cas != root && project_cas.starts_with(&root) { Ok(root) }
-                else { resolve_project_write_root(raw, cas_root) }
-            })
-        {
+        match resolve_user_level_write_root(raw, cas_root) {
             Ok(root) if !roots.contains(&root) => roots.push(root),
             Ok(_) => {}
             Err(error) => {

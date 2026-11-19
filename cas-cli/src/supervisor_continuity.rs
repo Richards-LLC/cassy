@@ -93,15 +93,26 @@ fn integrated_recovery(root: &Path, agent_id: &str) -> anyhow::Result<String> {
     let intro = |rows: &str| format!(
         "Integrated deliveries to adopt/close ({total}):\nThese project deliveries have passed the read-only merge/content guard. Close still checks branch attribution, upkeep, ledger format and evidence, QA and verification; legacy receipts may need repair. Adopt only rows you own and use the immutable commit_receipt below to recheck those gates. Tier 2 still needs its own verifier and adversarial probe.\n{rows}"
     );
+    let dir = root.join("supervisor-recovery");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{agent_id}.txt"));
+    std::fs::write(&path, intro(&lines.concat()))?;
     let mut text = intro(&lines[..shown].concat());
     if shown < lines.len() {
-        let dir = root.join("supervisor-recovery");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{agent_id}.txt"));
-        std::fs::write(&path, intro(&lines.concat()))?;
-        text.push_str(&format!("- {} more row(s) not shown.\nRecovery receipt: {}\n", lines.len() - shown, path.display()));
+        text.push_str(&format!("- {} more row(s) not shown.\n", lines.len() - shown));
     }
+    text.push_str(&format!("Recovery receipt: {}\n", path.display()));
     Ok(text)
+}
+
+/// Summary of a startup message for an over-budget SessionStart: keeps the
+/// title, counts and receipt paths, drops the row bodies and the recovery
+/// preamble. Every row stays reachable through the named receipt.
+pub(crate) fn compact_startup(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.starts_with("- ") && !line.starts_with("These project deliveries"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn preview(value: &serde_json::Value) -> serde_json::Value {

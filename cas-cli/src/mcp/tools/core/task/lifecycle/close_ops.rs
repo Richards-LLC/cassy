@@ -7988,12 +7988,17 @@ impl CasCore {
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let id = req.id.clone();
-        let mut result = crate::async_runtime::heap_future(|| {
+        let mut close = crate::async_runtime::heap_future(|| {
             self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
                 external_verification_receipt, negative_result, evidence_only,
                 inline_external_ref, inline_execution_note)
-        })
-        .await;
+        });
+        // This operation is thread-local: scope each poll, never an await
+        // that could resume on another executor thread.
+        let mut result = std::future::poll_fn(|cx| {
+            let _operation = cas_store::shared_db::connection_operation("close");
+            std::future::Future::poll(close.as_mut(), cx)
+        }).await;
         if let Err(error) = crate::mcp::tools::core::task::close_refusal::record(&self.cas_root, &id, &result) {
             tracing::warn!(task_id = %id, %error, "could not record latest close outcome for progress watchdog");
         }
@@ -16181,7 +16186,7 @@ fn reviewed_delivery_drop_reason(reason: Option<&str>) -> Option<&str> {
 /// whose resulting state survives on the target. A re-anchored delivery may
 /// postdate the commits that superseded its earlier content (GH #1160).
 /// The caller supplies a reason only after live supervisor authentication.
-fn validated_delivery_drop_review(
+pub(crate) fn validated_delivery_drop_review(
     repo: &std::path::Path,
     anchor: &str,
     parent: &str,

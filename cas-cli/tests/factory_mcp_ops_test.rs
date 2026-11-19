@@ -11544,6 +11544,20 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         if shape == "target-dirty" {
             std::fs::write(path.join("uncommitted.txt"), "keep this work\n").unwrap();
         }
+        if shape == "reset-to-origin" {
+            // cas-5e29d: the returned task is Open again. Before the
+            // supervisor's rebind the reset lane's unnamed replacement commit
+            // has no attribution, so the assignee's restart is refused.
+            let mut returned = env.task_store().get(&task.id).unwrap();
+            returned.status = TaskStatus::Open;
+            env.task_store().update(&returned).unwrap();
+            let refused = worker_service.task(Parameters(start_request())).await;
+            assert!(
+                refused.is_err() || refused.as_ref().is_ok_and(|result| result.is_error.unwrap_or(false)),
+                "control: an unapproved replacement lane must not start"
+            );
+            assert_eq!(git(&["rev-parse", "HEAD"]), tip, "a refused start leaves the lane alone");
+        }
         let previous = env.task_store().get(&task.id).unwrap();
         let lease = serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap();
         let refs = git(&["show-ref"]);
@@ -11664,6 +11678,15 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap(),
             lease
         );
+        if shape == "reset-to-origin" {
+            // cas-5e29d: with the lane rebound, the assignee restarts without
+            // rewriting any commit message, and the replacement tip is intact.
+            let restarted = worker_service.task(Parameters(start_request())).await
+                .expect("the assignee restarts a rebound replacement lane");
+            assert!(!restarted.is_error.unwrap_or(false), "{}", get_text(&restarted));
+            assert_eq!(env.task_store().get(&task.id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(git(&["rev-parse", "HEAD"]), tip, "restart keeps the replacement commits");
+        }
         if shape == "redelivery-suffix" {
             // The rebound lane's live origin tip is the task's recorded delivery.
             let response = env.service.verification(Parameters(serde_json::from_value(serde_json::json!({

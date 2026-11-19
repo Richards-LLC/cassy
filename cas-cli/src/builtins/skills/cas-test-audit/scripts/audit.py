@@ -13,10 +13,10 @@ CLASSES = ('flake-prone', 'dead', 'duplicate', 'wording-pinned', 'style-pinned',
 EXCLUDE = {'.git', '.cas', 'target', 'dist', 'node_modules', 'vendor', 'build', '__pycache__', '.venv'}
 SUFFIXES = {'.rs', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py'}
 FIX = {
-    'fixed-sleep': 'Wait on readiness, completion, a channel or the observable event; delete a test with no unique behavior.',
-    'instant-port': 'Wait for the server shutdown/ready event; do not infer it from one connection attempt.',
-    'instant-teardown': 'Join/wait for the exact process, task or cleanup event before asserting its final state.',
-    'tight-deadline': 'Await the event under a runner safety deadline; use a controlled clock to test a timing contract.',
+    'fixed-sleep': 'Apply cas-writing-tests Test hygiene item 4; delete a test with no unique behavior.',
+    'instant-port': 'Apply cas-writing-tests Test hygiene item 4; do not infer shutdown from one connection attempt.',
+    'instant-teardown': 'Apply cas-writing-tests Test hygiene item 4 before asserting the final state.',
+    'tight-deadline': 'Apply cas-writing-tests Test hygiene item 4.',
     'shared-port': 'Bind port zero and retain the listener, then pass its assigned port to this test.',
     'shared-path': 'Use a per-test temporary directory and pass the owned path to the subject.',
     'shared-state': 'Give each test its own state or restore it with a full-duration isolation guard.',

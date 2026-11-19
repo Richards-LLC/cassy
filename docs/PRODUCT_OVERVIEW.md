@@ -565,6 +565,51 @@ Test authoring starts from production contracts and plausible regressions, keeps
 
 A live registered supervisor can record a review directly for a parked delivery already integrated through a PR. The review binds its declared target tree and immutable delivery anchor, including PR follow-up commits. Unreviewed merges remain held; existing dispatch authority and all other close gates remain intact.
 
+- **Reviewed drop at release closeout** - A member whose lines a later shipped task deleted or moved is held as reverted. The release review ledger may carry a NOT A ROUTE row for that task with `reviewed-drop: <commit>[,<commit>...] -- <why>`; closeout checks it with the same review a normal close uses (the commits exist, reach the release and touch the dropped files) and releases the member. Without a valid review the member stays held.
+
+- **Withdrawn merge alerts** - A Director merge alert waits in the queue until its recipient's next turn. At that turn the inbox checks the alert's task: if it is no longer parked or active (changes were requested, or it merged), the alert is withheld and marked read instead of shown under MERGE REQUIRED. Only rows the daemon itself queued can be withheld this way.
+
+- **Resolved merge identity** - A delivery whose task targets the epic's base branch merges to the epic lane under one repository and branch identity; the merge no longer refuses it as a repository mismatch. A re-parked peer delivery whose earlier local branch ref is an ancestor of the live origin tip is fast-forwarded to it, while a local ref carrying its own commits still refuses.
+
+- Blocked-task lifecycle emission rechecks the current task status before constructing an alert episode. A resumed task no longer creates another notice from the cleared hold's fallback event timestamp. Delivered notices retain their receipts; a new blocked episode still alerts the owning supervisor.
+
+- **Operator holds do not page at night** - A task the supervisor blocks for the operator's decision stops counting toward the stall watchdog even when the worker left an older blocker note; a block the factory still owns keeps waking the supervisor and paging once.
+
+Was: a killed release adapter logged structured timeout fields followed by a generic pending notice.
+Now: its timeout event also says which adapter timed out and after how many seconds, such as `installed adapter timed out after 45s`.
+
+- **Supervisor startup budget** - The supervisor's startup message carries the predecessor handoff and the integrated deliveries to adopt. The complete lists live in the handoff receipt and in a recovery receipt under `supervisor-recovery/`, both named in the message. When the whole message would pass the 9 KB budget, both collapse to counts and receipt paths.
+
+- Worker credential protection permits validated Python pathlib edits to repository source containing credential-path fixtures. Replacement strings are data; file targets still pass credential-path checks, and scripts with execution or unknown calls retain conservative inspection.
+
+- **Batch QA ownership at park** — Resolved batch mode defers implementer evidence to the staging receipt even when target refs are unavailable. Proven integrated deliveries retain their final-close evidence path. Per-task mode still requires the individual bundle, and recorded batch evidence debt still requires its receipt before final close.
+
+- **Disk-pressure notice counts review scratch** - When builds wait on disk pressure, the notice to the supervisor now includes the build output of finished verifier review walks, and output already queued for deletion, in its reclaimable total, so it no longer says nothing can be freed while that output still fills the disk.
+
+- **Missing epic branch at task start** - Starting a task whose epic target branch was never pushed or was deleted now refuses with the branch name and asks the supervisor to create or push it, instead of failing with an empty git start point; no task branch is created.
+
+- Release tag verdicts reuse recorded release closeout reviews for superseded delivery content. A review must bind the exact task anchor and unchanged ledger bytes, with its reviewed commit contained by the published tag. The ordinary delivery-drop validator checks the named replacement commits and dropped paths against that tag; absent or invalid reviews leave the member held.
+
+- **Epic close measures shipping** - Children close when they merge into their epic's branch, so closed children do not show the work reached the default branch. Closing an epic outside a release now checks the epic's own branch against its destination (the declared target, else the default branch, local or origin): if the destination lacks commits that branch carries, the close is refused as EPIC NOT SHIPPED with the commit count, and it goes through once the branch is merged. A release close keeps its batch-receipt path and is not measured this way. `epic_status` prints the same answer as one `epic_shipping` line (shipped, unshipped with the commit count, or unknown), so the board shows merged-to-epic apart from shipped before anyone tries to close.
+
+Test-shape lint no longer treats a Rust loop variable that iterates only string literals (`for source in ["a", "b"]`) as source text inside that loop's body. Code outside the body, a body that rebinds the name, and any shell or other-language source comparison keep the existing detection.
+
+Changed-test discovery shares Rust inventories across files and delivery ranges within one evaluation. Each new evaluation reads its delivery again; missing-test detection, uncertainty widening and five-consecutive-pass evidence remain required. The G-61 timing log includes the task and delivery head for latency diagnosis.
+
+- Local factory verifier startup queues a critical external job and returns its dispatch-correlated result to the requesting socket. Authority, session scope and exact dispatch claim remain checked before a verifier starts. Shared SQLite guards record the holding operation, source location, thread and hold duration for contention diagnostics; task close names its operation, and untracked external mutex owners remain unknown. A late handoff ownership or state change is a typed dispatch refusal. Store contention and dropped daemon jobs do not consume launch attempts, and the daemon's store wait budget is shorter than the client's request deadline.
+
+- **Source citations in close reasons** - A close reason may cite a source line (`file.rs:743`) or a design revision (`DESIGN.md@rev`) beside its receipts without being refused as a missing receipt file; a citation like that is not accepted as a receipt either, and a cited receipt path that does not exist still refuses the close.
+
+- The operator-evidence guard treats "merged", "landed", "shipped" and "green" as delivery claims that need same-turn delivery evidence (git ancestry, a passing GitHub check or run, a Cassy task close or status, or a merge receipt), not any successful tool result. "Green", "fixed" and "landed" are now checked as completion claims.
+
+- Background task closes retain a local recovery journal until their terminal `CLOSE_OUTCOME` note is saved. Outcome recording participates in backend retirement. Lost continuations record an unknown mutation outcome and wake the owning supervisor; the daemon recovers unlocked journals after process exit without retrying the close mutation.
+
+- **Release closeout issue closes** - After a release, closeout closes each GitHub issue its shipped tasks reference. Each close runs under its own 30-second deadline, up to three attempts with a growing pause, with at most four closes in flight; the ownership and task-state checks still run per issue before any write. An issue that still fails is listed by number in the closeout notice and stays open, so the next closeout pass reads it as open and tries it again.
+
+- **Hub publication cause** - When Tailscale Serve cannot publish, `cas hub status` shows the cause on a row under the loopback-only warning, and the running hub writes one stderr line (the service journal) each time that cause changes. Retries of the same failure add no further lines.
+
+- **Train main sync** - An open release train that lacks commits on the integration branch takes them in a merge on each CI poll, published to origin, and the workers with unfinished deliveries on the lane are told. A frozen train is left alone. A conflicting merge changes nothing and files one sync task under the train naming the files, plus one supervisor notice.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

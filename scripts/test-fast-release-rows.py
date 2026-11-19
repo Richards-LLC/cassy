@@ -465,6 +465,36 @@ esac
         owned = self.fast_from(self.base, **env)
         self.assertIn("PASS journey-catalog", owned.stdout, owned.stdout + owned.stderr)
 
+    def test_validator_recovery_names_the_installer_failure_and_uses_a_cas_on_path_cas_d4ed(self):
+        installer = self.repo / ".git" / "failing-install.sh"
+        installer.write_text('#!/usr/bin/env bash\necho "INSTALLER-CAUSE-8c1f http 403" >&2\ntouch "$(dirname "$0")/installer-ran"\nexit 1\n')
+        ran = self.repo / ".git" / "installer-ran"
+        # A runner with no cas anywhere: the installer's own cause must reach
+        # the row's output, not only the generic FIX line.
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        bare = self.fast_from(self.base, CAS_VALIDATOR_INSTALLER=str(installer), PATH="/usr/bin:/bin")
+        self.assertEqual(bare.returncode, 1, bare.stdout + bare.stderr)
+        self.assertIn("INSTALLER-CAUSE-8c1f", bare.stdout + bare.stderr, bare.stdout + bare.stderr)
+        self.assertTrue(ran.exists())
+        ran.unlink()
+        # The advice names PATH, so a released cas on PATH is selected and the
+        # installer is never run.
+        validator = self.repo / ".git" / "bin" / "cas"
+        validator.parent.mkdir()
+        validator.write_text('''#!/usr/bin/env bash
+case "$*" in
+    'qa journeys --help') echo '--check --base'; exit 0 ;;
+    'qa journeys --check'|'qa journeys --check --base'*) exit 0 ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        on_path = self.fast_from(self.base, CAS_VALIDATOR_INSTALLER=str(installer),
+                                 PATH=f"{validator.parent}:/usr/bin:/bin")
+        self.assertFalse(ran.exists(), on_path.stdout + on_path.stderr)
+        self.assertNotIn("FAIL journey-catalog", on_path.stdout)
+
     def test_script_test_for_a_changed_script_runs_and_its_failure_is_named(self):
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n"
                    "\tcd .. && python3 scripts/test-unrelated.py\n")
@@ -870,6 +900,12 @@ esac
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         [logs] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
         self.assertIn(str(logs), refused.stderr)
+        # cas-3833: the refusal line itself, which is all a worker sees when
+        # the push output is tailed, names the failing row and the log path.
+        self.assertTrue(
+            any("ci-script-tests-changed" in line and str(logs) in line for line in refused.stderr.splitlines()),
+            refused.stderr,
+        )
         row_log = logs / "ci-script-tests-changed.log"
         original_log = row_log.read_text()
         self.assertIn("fixture diagnostic: prebuild poll expired", original_log)

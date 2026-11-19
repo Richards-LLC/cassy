@@ -20,6 +20,74 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
+async fn resumed_blocker_replay_does_not_claim_its_delivered_notice_was_lost_cas_25e1() {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LifecycleTransition;
+    use cas_types::{Agent, AgentRole, Task, TaskStatus};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&root);
+    let name = daemon.app.supervisor_name().to_string();
+    env.set("CAS_FACTORY_SESSION", &daemon.session_name);
+    env.set("CAS_AGENT_NAME", &name);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    let agents = core.open_agent_store().unwrap();
+    for (id, label, role) in [("lead-id", name.as_str(), AgentRole::Supervisor), ("worker-id", "worker", AgentRole::Worker)] {
+        let mut agent = Agent::new_with_role(id.into(), label.into(), role);
+        agent.factory_session = Some(daemon.session_name.clone());
+        agents.register(&agent).unwrap();
+    }
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = Task::new("cas-25e1-replay".into(), "worker hold".into());
+    task.assignee = Some("worker-id".into());
+    task.status = TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let start = chrono::Utc::now();
+    task.status = TaskStatus::Blocked;
+    tasks.update(&task).unwrap();
+    tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+        "reason": "Waiting for supervisor", "who": "worker-id", "when": start
+    }})).unwrap();
+    let push = || core.push_task_lifecycle("cas-25e1-replay", "worker hold", TaskStatus::InProgress,
+        TaskStatus::Blocked, "worker-id", None, LifecycleTransition::Blocked, &start.to_rfc3339());
+    push().unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let original = queue.peek_all(10).unwrap().pop().unwrap();
+    let rendered = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(&root), &crate::hooks::HookInput {
+        session_id: "supervisor-turn".into(), agent_role: Some("supervisor".into()), ..Default::default()
+    }).expect("the real turn hook injects the lifecycle body");
+    assert!(rendered.contains(&original.prompt)); // Exact producer payload.
+    assert_eq!(queue.recipient_receipt(original.id, &name).unwrap(), Some(cas_store::SurfacingSource::HookSurfaced));
+
+    // Resume clears the structured hold. A stale reconciler still holds the
+    // old Blocked emission; its fallback event timestamp creates a new key.
+    task.status = TaskStatus::Open;
+    tasks.update(&task).unwrap();
+    tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": null})).unwrap();
+    push().unwrap();
+    let replayed = queue.peek_all(10).unwrap().into_iter().map(|row| row.id).collect::<Vec<_>>();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while replayed.iter().any(|id| queue.queued_prompt(*id).unwrap().unwrap().processed_at.is_none()) {
+            daemon.process_prompt_queue().await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(queue.list_undelivered_lifecycle_relays(10).unwrap().is_empty());
+    assert!(queue.peek_all(10).unwrap().iter().all(|row| row.source != "delivery-watchdog"));
+    assert_eq!(queue.message_delivery_report(original.id).unwrap().unwrap().stage, cas_store::DeliveryStage::Confirmed);
+
+    // A genuinely new blocked transition still emits its own notice.
+    task.status = TaskStatus::Blocked;
+    tasks.update(&task).unwrap();
+    tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+        "reason": "A different prerequisite", "who": "worker-id", "when": start + chrono::Duration::seconds(1)
+    }})).unwrap();
+    push().unwrap();
+    assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn r1_approved_verdict_leaves_close_recovery_with_supervisor() {
     r1_verification_wait_wakes("verdict").await;
 }

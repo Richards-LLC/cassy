@@ -125,6 +125,8 @@ pub enum LifecyclePushResult {
     Recovered { notification_id: i64 },
     /// Same occurrence fully complete (durable + prompt) — no new side effects.
     AlreadyComplete { notification_id: i64 },
+    /// The task resumed before a stale blocked transition could be emitted.
+    Superseded,
     /// No owning supervisor found for the factory session (non-factory or empty).
     NoSupervisor,
 }
@@ -1122,6 +1124,11 @@ fn emit_task_lifecycle_transition_in_project(
     let key = if kind == LifecycleTransition::Blocked && let Some(root) = cas_dir {
         let task = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
             .get(task_id).map_err(|e| e.to_string())?;
+        // Resume clears the hold. Recomputing its episode from an old status
+        // event would create a second notice about an already-delivered blocker.
+        if task.status != TaskStatus::Blocked {
+            return Ok(LifecyclePushResult::Superseded);
+        }
         let (_, episode) = super::super::block_hold::alert_episode(root, &task)?;
         format!("{task_id}:blocked-episode:{}:{}:{episode}:{}", factory_session.as_deref().unwrap_or(""), recipient.id,
             if escalation { "deadline" } else { "initial" })
@@ -1913,11 +1920,11 @@ fn drain_lifecycle_outbox_inner(
             Ok(LifecyclePushResult::AlreadyComplete { .. }) => {
                 report.already_complete += 1;
             }
-            Ok(LifecyclePushResult::NoSupervisor) => {
+            Ok(result @ (LifecyclePushResult::NoSupervisor | LifecyclePushResult::Superseded)) => {
                 report.failed += 1;
                 report
                     .errors
-                    .push(format!("id={}: unexpected NoSupervisor during drain", n.id));
+                    .push(format!("id={}: unexpected {result:?} during drain", n.id));
             }
             Err(e) => {
                 report.failed += 1;

@@ -422,8 +422,9 @@ pub(crate) fn resolve_release_inventory(
     for (delivery, measured) in members {
         if measured
             && let Some(anchor) = delivery.anchor.as_deref()
-            && let Err(code) = release_delivery_effect(
+            && let Err(code) = release_delivery_effect_reviewed(
                 repo, delivery.base_sha.as_deref(), anchor, &scope.final_release_sha, &delivery.task_id,
+                review.reviewed_drop(&delivery.task_id, Some(anchor)).as_deref(),
             )
         {
             inventory.exceptions.push(ReleaseInventoryException { task_id: delivery.task_id, code });
@@ -1052,6 +1053,7 @@ pub(crate) fn prepare_release_tag_receipt(
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let reviews = release_close::read_receipts(root, &project)?;
     let mut heads = BTreeMap::new();
     let mut tag_sha = None;
     for id in task_ids {
@@ -1068,9 +1070,10 @@ pub(crate) fn prepare_release_tag_receipt(
         tag_sha.get_or_insert(candidate.clone());
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| crate::gates::tag("G-117", format!("task {id} has no resolvable delivery anchor")))?;
-        if release_delivery_effect(&repo,
+        let reviewed_drop = release_close::reviewed_drop_for_tag(&reviews, &repo, id, &anchor, &candidate);
+        if release_delivery_effect_reviewed(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
-            &anchor, &candidate, &task.id).is_err() {
+            &anchor, &candidate, &task.id, reviewed_drop.as_deref()).is_err() {
             return Err(crate::gates::tag("G-117", format!("release tag {tag} does not contain task {id}'s delivery tree effect")));
         }
         heads.insert(id.clone(), anchor);
@@ -1104,6 +1107,16 @@ pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor
 pub(crate) fn release_delivery_effect(
     repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
 ) -> Result<(), ReleaseInventoryCode> {
+    release_delivery_effect_reviewed(repo, base, anchor, target, task_id, None)
+}
+
+/// As [`release_delivery_effect`], where a supervisor's reviewed drop may
+/// accept measured loss. The default stays held: the review must name
+/// commits that resolve, reach the target and touch the dropped paths.
+pub(crate) fn release_delivery_effect_reviewed(
+    repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
+    reviewed_drop: Option<&str>,
+) -> Result<(), ReleaseInventoryCode> {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{self, DeliveryContentPresence};
     // An explicitly empty delivery has no content that can be reverted.
     let Some((base, shipped)) = release_effect_range(repo, base, anchor, target)? else { return Ok(()) };
@@ -1124,6 +1137,9 @@ pub(crate) fn release_delivery_effect(
                     Err(ReleaseInventoryCode::UnprovenContent)
                 } else { Ok(()) }
             },
+        DeliveryContentPresence::Dropped { paths } if reviewed_drop.is_some_and(|reason| matches!(
+            close_ops::validated_delivery_drop_review(repo, anchor, target, &paths, Some(reason)),
+            Ok(Some(_)))) => Ok(()),
         DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
         DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
     }

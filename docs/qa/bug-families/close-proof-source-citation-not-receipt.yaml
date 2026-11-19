@@ -1,4 +1,0 @@
-title: Close proof guard does not read a source file:line or DESIGN.md@revision citation as a receipt path, while a genuinely missing receipt path still refuses
-tasks: [cas-d1c1]
-journeys: [FACTORY-CLOSE]
-invariants: [FACTORY-REFUSED-CLOSE-CORRECTION]

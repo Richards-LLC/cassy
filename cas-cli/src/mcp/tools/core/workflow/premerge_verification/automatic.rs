@@ -244,6 +244,8 @@ fn contended(error: &str) -> bool {
     error.contains("already awaiting SubagentStart")
         || error.contains("wait budget is spent")
         || error.contains("verifier_factory_store_busy")
+        || error.contains("verifier_factory_launch_dropped")
+        || error.contains("QueuedDroppedOldest")
         || error.contains("database is locked")
 }
 
@@ -266,7 +268,8 @@ fn request_with_retry(
             Ok(()) => return Ok(()),
             Err(error) => {
                 let permanent = error.contains("verifier_factory_scope")
-                    || error.contains("verifier_factory_task_terminal");
+                    || error.contains("verifier_factory_task_terminal")
+                    || error.contains("verifier_handoff_not_active");
                 if !permanent && contended(&error) {
                     let pause = delay.saturating_mul(1 << waits.min(16)).min(CONTENTION_BACKOFF_CAP);
                     if started.elapsed() + pause >= window {
@@ -907,6 +910,19 @@ mod tests {
             Err("verifier_factory_launch: busy".into())
         });
         assert_eq!((exhausted.map_err(|(attempts, _)| attempts), calls.get()), (Err(4), 4));
+        // GH #2148: six store refusals still leave the first launch attempt
+        // available. An exact-dispatch ownership/state mismatch is terminal.
+        for refusal in ["verifier_factory_store_busy", "database is locked", "wait budget is spent",
+            "verifier_factory_launch_dropped", "QueuedDroppedOldest"] {
+            calls.set(0);
+            let result = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::from_secs(5), || {
+                calls.set(calls.get() + 1);
+                if calls.get() <= 6 { Err(refusal.into()) }
+                else { Err("verifier_handoff_not_active: vdispatch-test".into()) }
+            });
+            assert_eq!((result.map_err(|(attempts, _)| attempts), calls.get()), (Err(1), 7));
+        }
+
     }
 
     #[test]

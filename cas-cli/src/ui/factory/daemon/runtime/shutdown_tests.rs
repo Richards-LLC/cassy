@@ -1719,6 +1719,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         held.assignee = Some(NAME.into());
         held.status = cas_types::TaskStatus::InProgress;
         tasks.add(&held).unwrap();
+        agents.try_claim(&held.id, &old_registration.id, 1800, None).unwrap();
         let peer = "roster-peer";
         register_idle_worker(&cas_dir, peer);
         let mut registration = agents.get(&format!("agent-{peer}")).unwrap();
@@ -1750,7 +1751,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         cli,
         model: Some(if cli == cas_mux::SupervisorCli::Claude { "claude-opus-5-5" } else { "gpt-6.1-sol" }.into()),
         effort: Some(cas_mux::Effort::High),
-        config_dir: (cli == cas_mux::SupervisorCli::Claude).then(|| account.display().to_string()),
+        config_dir: Some(account.display().to_string()),
         ..cas_mux::WorkerSpec::builtin_default()
     };
     let request_id = open_spawn_queue_store(&cas_dir)
@@ -1777,6 +1778,12 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
     assert_eq!(verification.request_id, Some(request_id));
     assert_eq!(daemon.app.harness_for(NAME), cli);
     assert_eq!(daemon.app.mux.effective_worker_spec(NAME, None), spec);
+    if register_replacement && cli == cas_mux::SupervisorCli::Codex {
+        // SessionStart runs while the predecessor's lease has been released,
+        // before the replacement can register or re-take it.
+        assert_eq!(crate::hooks::handlers::cleanup_orphaned_tasks(&cas_dir), 0);
+        assert_eq!(tasks.get("cas-recycled-held").unwrap().status, cas_types::TaskStatus::InProgress);
+    }
 
     // Drive the real mux output handler; the child, not the test, emits NEW.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1865,6 +1872,33 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         let mut replacement = cas_types::Agent::new(session, NAME.into());
         replacement.role = cas_types::AgentRole::Worker;
         replacement.factory_session = Some(factory_session.clone());
+        if cli == cas_mux::SupervisorCli::Codex {
+            use crate::mcp::tools::service::factory_ops::{worker_context_usage, worker_transcript_path_for_agent};
+            replacement.metadata.insert("worker_cli".into(), "codex".into());
+            replacement.metadata.insert("clone_path".into(), dir.path().display().to_string());
+            replacement.metadata.insert("worker_account_dir".into(), account.display().to_string());
+            let sessions = account.join("sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let rollout = sessions.join("rollout-retired-native.jsonl");
+            let write_usage = |input| {
+                let meta = serde_json::json!({"type":"session_meta", "payload":{
+                    "cwd":dir.path(), "source":"cli", "originator":"codex-tui"}});
+                let usage = serde_json::json!({"type":"event_msg", "payload":{"type":"token_count",
+                    "info":{"last_token_usage":{"input_tokens":input}, "model_context_window":475000}}});
+                std::fs::write(&rollout, format!("{meta}\n{usage}\n")).unwrap();
+            };
+            write_usage(426726);
+            let retired_at: std::time::SystemTime = (replacement.registered_at - chrono::Duration::seconds(10)).into();
+            std::fs::File::open(&rollout).unwrap().set_modified(retired_at).unwrap();
+            let path = worker_transcript_path_for_agent(&cas_dir, &replacement).unwrap();
+            assert_eq!(worker_context_usage(&replacement, &path), None);
+            // A kept conversation that writes after registration must still
+            // report its real occupancy; the fence cannot hide a failed reset.
+            write_usage(427372);
+            assert_eq!(worker_context_usage(&replacement, &path).unwrap().input_tokens, 427372);
+            write_usage(28000);
+            assert_eq!(worker_context_usage(&replacement, &path).unwrap().input_tokens, 28000);
+        }
         open_agent_store(&cas_dir)
             .unwrap()
             .register(&replacement)

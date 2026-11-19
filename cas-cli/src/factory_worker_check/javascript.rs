@@ -1241,27 +1241,81 @@ fn runner_config(dir: &Path, runner: &str) -> Option<PathBuf> {
         })
 }
 
+/// Whether the local Jest, run with `config`, lists `spec`: Jest's own
+/// discovery (`roots`, `projects`, `testMatch`, `testRegex`) decides ownership.
+fn jest_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> bool {
+    let Ok(jest) = runner_path(repo, dir, "jest") else { return false };
+    let Ok(output) = Command::new(jest)
+        .current_dir(dir)
+        .env("CI", "1")
+        .arg("--config")
+        .arg(config)
+        .args(["--listTests", "--json"])
+        .output()
+    else {
+        return false;
+    };
+    let (Ok(listed), Ok(spec)) = (serde_json::from_slice::<Vec<String>>(&output.stdout), spec.canonicalize()) else {
+        return false;
+    };
+    output.status.success()
+        && listed.iter().any(|path| Path::new(path).canonicalize().is_ok_and(|path| path == spec))
+}
+
+/// The repository-relative Jest config that lists `path`, when Jest can be asked.
+pub(crate) fn jest_owner(repo: &Path, path: &str) -> Option<PathBuf> {
+    let (dir, config) = runner_root(repo, path, "jest").ok()?;
+    let config = config?;
+    if !jest_config_selects(repo, &dir, &config, &repo.join(path)) {
+        return None;
+    }
+    config.strip_prefix(repo).ok().map(Path::to_path_buf)
+}
+
+/// The runner configs in `dir`, nearest default first. Jest repositories keep
+/// further configs beside it (`jest-integration.config.js`) for other specs.
+fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
+    let mut configs: Vec<PathBuf> = runner_config(dir, runner).into_iter().collect();
+    if runner == "jest" {
+        let mut extra: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.contains("jest") && name.contains(".config.") && !JEST_CONFIGS.contains(&name.as_str())
+            })
+            .map(|entry| entry.path())
+            .collect();
+        extra.sort();
+        configs.extend(extra);
+    }
+    configs
+}
+
 /// The runner's working directory and explicit config for a test file: the
 /// nearest ancestor holding that runner's config, else the nearest
 /// package.json. A nested package.json must not hide the config and its
-/// transforms (cas-1468).
+/// transforms (cas-1468). For Jest the config must select the file: a spec
+/// outside the default config's `testRegex` belongs to the config that
+/// matches it (GH #2058); with no such config the nearest one stays.
 fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
-    let mut current = repo
-        .join(path)
-        .parent()
-        .context("test parent")?
-        .to_path_buf();
-    let mut package = None;
+    let spec = repo.join(path);
+    let mut current = spec.parent().context("test parent")?.to_path_buf();
+    let (mut package, mut nearest) = (None, None);
     loop {
-        if let Some(config) = runner_config(&current, runner) {
-            return Ok((current, Some(config)));
+        for config in runner_configs(&current, runner) {
+            if runner != "jest" || jest_config_selects(repo, &current, &config, &spec) {
+                return Ok((current, Some(config)));
+            }
+            nearest.get_or_insert_with(|| (current.clone(), Some(config)));
         }
         if package.is_none() && current.join("package.json").is_file() {
             package = Some(current.clone());
         }
         if current == repo || !current.pop() {
-            return package
-                .map(|package| (package, None))
+            return nearest
+                .or_else(|| package.map(|package| (package, None)))
                 .with_context(|| format!("no package.json found for {path}"));
         }
     }
@@ -2224,6 +2278,90 @@ mod tests {
             runner_root(repo.path(), spec, "vitest").unwrap(),
             (backend.join("scripts"), None)
         );
+    }
+
+    /// GH #2058 (and #2066, #2117, #2122): an integration spec that only a
+    /// sibling Jest config selects ran under the default `.spec.ts` config and
+    /// found no tests, so no stability proof could ever be earned.
+    #[test]
+    fn jest_spec_runs_under_the_config_that_selects_it_gh_2058() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let backend = repo.path().join("apps/backend");
+        let test = backend.join("test");
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(&["init", "--quiet"]);
+        write(&repo.path().join("package.json"), "{}");
+        write(&backend.join("package.json"), "{}");
+        // The default config selects `.spec.ts`; a sibling config selects the integration spec.
+        write(&backend.join("jest.config.js"),
+            r"module.exports = { testRegex: '.*\\.spec\\.ts$' };");
+        let sibling = test.join("jest-inbox-tools.integration.config.js");
+        write(&sibling, r"module.exports = { testRegex: '.*\\.integration\\.ts$' };");
+        // A stand-in Jest: lists the files its config selects under its own directory and
+        // runs a spec only when its config lists it ("No tests found" otherwise).
+        let jest = backend.join("node_modules/.bin/jest");
+        write(&jest, r#"#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
+const config = path.resolve(at('--config')), pattern = new RegExp(require(config).testRegex);
+const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+  entry.name === 'node_modules' ? [] : entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
+const listed = walk(path.dirname(config)).filter((file) => pattern.test(file));
+if (a.includes('--listTests')) { console.log(JSON.stringify(listed)); process.exit(0); }
+const spec = a[a.indexOf('--runTestsByPath') + 1], ok = listed.includes(spec);
+fs.writeFileSync(at('--outputFile'), JSON.stringify({ success: ok, testResults: ok ? [{ name: spec, status: 'passed',
+  assertionResults: [{ fullName: 'pool drains', status: 'passed' }] }] : [] }));
+process.exit(ok ? 0 : 1);
+"#);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&jest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = "apps/backend/test/inbox-analysis-pool.integration.ts";
+        let source = |body: &str| format!("describe('pool', () => {{\n  it('drains', () => {{ {body} }});\n}});\n");
+        write(&repo.path().join(spec), &source("throw 0;"));
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        write(&repo.path().join(spec), &source(""));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        // The real path: changed-test identity, the prescribed command, five capped runs, close's receipt read.
+        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
+        assert_eq!(tests, [id(spec, "pool drains")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let config = "apps/backend/test/jest-inbox-tools.integration.config.js";
+        let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        assert_eq!(super::super::stability::missing(&passing(), &tests), tests);
+
+        // Worker-check discovers the owning config and counts the spec's tests five times.
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
+        assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
+        // The prescribed rerun names that config, and running it as printed passes the same way.
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        assert_eq!(prescribed.len(), 1);
+        assert!(prescribed[0].contains(&format!("-- jest --config {config} {spec}`")), "{prescribed:?}");
+        let args: Vec<String> = ["jest", "--config", config, spec].map(String::from).into();
+        let invocation = invocation(&args).expect("the prescribed command is a capped runner");
+        let explicit = repo.path().join(invocation.config.as_deref().unwrap());
+        execute_tests(cas_root.path(), repo.path(), &head, "jest", Some(&explicit), &tests, None, &[]).unwrap();
+        assert!(super::super::stability::missing(&passing(), &tests).is_empty());
+        assert_eq!(passing().receipts().len(), 1);
     }
 
     /// A config-free global test resolves its runner from package metadata;

@@ -288,6 +288,9 @@ fn auto_unblock_worker_target(
                     && agent.is_alive()
                     && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
             });
+        if live_assignee.is_none() && let Some((_, _, label)) = crate::cloud::peer_mailbox::notice_route(cas_root, task, assignee)? {
+            return Ok(AutoUnblockWorkerTarget::Worker(label));
+        }
         return Ok(match live_assignee {
             Some(agent) => AutoUnblockWorkerTarget::Worker(agent.name),
             None => AutoUnblockWorkerTarget::Skipped(format!(
@@ -363,29 +366,7 @@ pub(crate) fn queue_auto_unblock_worker_wake(
                 task.id, blocker_id, task.id
             );
             let summary = format!("Task unblocked: {}", task.id);
-            let factory_session = std::env::var("CAS_FACTORY_SESSION")
-                .ok()
-                .filter(|session| !session.trim().is_empty());
-            let queue = crate::store::open_prompt_queue_store(cas_root).map_err(|error| {
-                format!("prompt queue open failed for auto-unblock wake: {error}")
-            })?;
-            let result = queue
-                .enqueue_idempotent(
-                    "supervisor",
-                    &worker_name,
-                    &prompt,
-                    factory_session.as_deref(),
-                    Some(&summary),
-                    Some(cas_store::NotificationPriority::Normal),
-                    &dedupe_key,
-                    Some(&cas_store::QueueOrigin::Daemon),
-                )
-                .map_err(|error| format!("auto-unblock worker wake enqueue failed: {error}"))?;
-            let prompt_id = match result {
-                cas_store::EnqueueIdempotentResult::Created(id)
-                | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
-            };
-            crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
+            let prompt_id = enqueue_worker_notice(cas_root, task, &worker_name, |_| (dedupe_key.clone(), prompt, summary))?;
             (worker_name, prompt_id, dedupe_key)
         }
     };
@@ -611,7 +592,7 @@ pub(crate) fn queue_request_changes_notice(
         AutoUnblockWorkerTarget::Worker(worker_name) => worker_name,
         AutoUnblockWorkerTarget::Skipped(reason) => return Err(reason),
     };
-    enqueue_worker_notice(cas_root, &worker_name, |worker_name| {
+    enqueue_worker_notice(cas_root, task, &worker_name, |worker_name| {
         (
             format!(
                 "supervisor-request-changes:{}:{}:worker:{worker_name}",
@@ -670,13 +651,14 @@ fn queue_assignee_notice(
     let AutoUnblockWorkerTarget::Worker(worker_name) = auto_unblock_worker_target(cas_root, task)? else {
         return Ok(None);
     };
-    enqueue_worker_notice(cas_root, &worker_name, content).map(Some)
+    enqueue_worker_notice(cas_root, task, &worker_name, content).map(Some)
 }
 
 /// Enqueue one idempotent prompt for an already-resolved live worker.
 // gate[N-26 notice]: Worker lifecycle notices
 fn enqueue_worker_notice(
     cas_root: &Path,
+    task: &cas_types::Task,
     worker_name: &str,
     content: impl FnOnce(&str) -> (String, String, String),
 ) -> Result<i64, String> {
@@ -686,6 +668,10 @@ fn enqueue_worker_notice(
         .ok()
         .filter(|session| !session.trim().is_empty());
     let (key, prompt, summary) = content(worker_name);
+    if worker_name.contains('@') {
+        return crate::cloud::peer_mailbox::worker_notice(cas_root, task, worker_name, &key, &prompt, &summary)?
+            .ok_or_else(|| "Remote worker owner/generation is no longer current; notice remains undelivered".into());
+    }
     let result = queue.enqueue_idempotent(
         "supervisor",
         worker_name,
@@ -1122,6 +1108,30 @@ fn emit_task_lifecycle_transition_in_project(
     escalation: bool,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
+    if let Some(root) = cas_dir
+        && let Some(task) = crate::store::open_task_store_local(root).ok().and_then(|tasks| tasks.get(task_id).ok())
+        && let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(root,&task)
+        && (worker.id == actor || worker.name == actor)
+    {
+        use crate::cloud::peer_mailbox::{self,PeerScope,PeerSend};
+        // Ready is sealed and sent only after the park has released its lease.
+        if kind == LifecycleTransition::AwaitingMerge { return Ok(LifecyclePushResult::NoSupervisor); }
+        if task.status != new_status { return Ok(LifecyclePushResult::Superseded); }
+        let (recipient,label) = peer_mailbox::owned_route(root,&worker,"supervisor")?
+            .ok_or("Worker host has no current train owner route")?;
+        let key = transition_key(task_id,old_status,new_status,factory_session.as_deref(),kind,occurrence_id);
+        let prompt = build_prompt_body(kind,task_id,task_title,old_status,new_status,actor,reason,0,
+            factory_session.as_deref(),occurrence_id,branch_tip);
+        let message = PeerSend {
+            project_id:crate::cloud::resolve_canonical_id(root).ok_or("Project has no canonical identity")?,
+            sender_agent_id:worker.id, recipient_agent_id:recipient,
+            body:peer_mailbox::attach_message_intent(&prompt,Some(if kind.wakes_idle_supervisor() { "blocker" } else { "quiet" }),false)?,
+            summary:Some(format!("{}: {task_id}",kind.as_event_type())), in_reply_to:None,
+            dedupe_key:key, scope:PeerScope::Project, recipient_project_id:None,
+        };
+        return peer_mailbox::enqueue_notice(root,message,&label)
+            .map(|notification_id| LifecyclePushResult::Enqueued { notification_id });
+    }
     let Some((supervisor, recipient)) =
         lifecycle_notice_owner(agent_store, factory_session.as_deref())
     else {

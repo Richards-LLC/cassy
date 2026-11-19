@@ -106,7 +106,9 @@ pub(crate) fn pushed_delivery_tip(
         return Err(crate::gates::tag("G-91", format!("{tip} is absent from cached origin/{branch}; live publication is unknown")));
     }
     let local = super::close_ops::resolve_branch_sha(repo, &format!("refs/heads/{branch}"));
-    if !local.is_some_and(|local| local == tip || super::close_ops::git_commit_is_ancestor(repo, tip, &local)) {
+    let remote = crate::store::find_cas_root_ignoring_env(repo).ok().is_some_and(|root|
+        crate::cloud::peer_mailbox::train_parks::admitted(&root, task, branch, tip));
+    if !local.is_some_and(|local| local == tip || super::close_ops::git_commit_is_ancestor(repo, tip, &local)) && !remote {
         return Err(crate::gates::tag("G-91", format!(
             "{tip} is on cached origin/{branch} but not on {worker}'s local {branch}; this does not establish the worker's own delivery"
         )));

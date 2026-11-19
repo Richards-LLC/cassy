@@ -1023,6 +1023,7 @@ fn make_app(repo: &Path, root: &Path) -> FactoryApp {
         None,
         None,
         repo.to_path_buf(),
+        false,
     )
     .unwrap()
 }

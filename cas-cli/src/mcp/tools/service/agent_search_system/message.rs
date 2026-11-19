@@ -1314,6 +1314,11 @@ impl CasService {
                 message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
             }
         }
+        if role == "worker" && let Some(sender) = agent_from_store.as_ref()
+            && let Some(sent) = self.owned_message_send(sender, &target, &summary, &message,
+                req.in_reply_to, req.urgent.unwrap_or(false), req.kind.as_deref(),
+                req.blocker.unwrap_or(false), req.attachment.as_deref()).await?
+        { return Ok(sent); }
         // Same-epic remote workers use project-scope mail only, after local
         // caps and worker-authored authority tags have been neutralized.
         if role == "worker"

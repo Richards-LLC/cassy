@@ -484,6 +484,7 @@ impl CasCore {
         parent_branch: &str,
         head: Option<&str>,
     ) -> Option<String> {
+        if crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,task).is_some() { return None; }
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         if !qa.independent_pass {

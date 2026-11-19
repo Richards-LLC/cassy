@@ -4896,11 +4896,11 @@ impl CasCore {
         worktree.parent_branch = crate::mcp::tools::core::task::repo_context::effective_epic_ref(
             &self.cas_root, &worktree.parent_branch,
         );
-        super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
-            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
             &cas_root, &worktree.parent_branch, task_id,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        super::train_merge::admit(self, &cwd, &worktree.parent_branch, task_id, train_queue)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
         // Both stored and inferred worktrees pass here. An explicit trunk
         // override cannot move main around an open train; the release script
@@ -5161,11 +5161,11 @@ impl CasCore {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Could not acquire merge target lock: {error}")), data: None,
         })?;
-        super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
-            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
             &cas_root, &worktree.parent_branch, task_id,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        super::train_merge::admit(self, &cwd, &worktree.parent_branch, task_id, train_queue)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
         let pending_observation_recovery = if transactional_delivery.is_none() {
             has_pending_delivery_observation_recovery(
@@ -5754,43 +5754,6 @@ impl CasCore {
             } else {
                 None
             };
-            // cas-a131: a heads-up to other live supervisors delivering into
-            // this target. Fire and forget: the merge never waits for it.
-            if let Ok(caller_id) = self.get_agent_id()
-                && let Some(caller) = self
-                    .open_agent_store()
-                    .ok()
-                    .and_then(|agents| agents.get(&caller_id).ok())
-                    .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
-            {
-                let tip = parked_anchor
-                    .map(str::to_string)
-                    .or_else(|| manager.git().resolve_commit(&worktree.branch));
-                if let Some(tip) = tip {
-                    let (root, target, source) =
-                        (cas_root.clone(), worktree.parent_branch.clone(), worktree.branch.clone());
-                    let task = task_id.map(str::to_string);
-                    let merger = format!(
-                        "{}@{}",
-                        caller.name,
-                        crate::cloud::peers::machine_label_for(&cas_root)
-                    );
-                    std::thread::spawn(move || {
-                        let outcome = crate::cloud::peer_merge::announce_merge(
-                            &root,
-                            &caller.id,
-                            &crate::cloud::peer_merge::MergeIntent {
-                                target: &target,
-                                source: &source,
-                                task_id: task.as_deref(),
-                                tip: &tip,
-                                merger: &merger,
-                            },
-                        );
-                        tracing::debug!(?outcome, %target, %source, "cas-a131 merge-intent note");
-                    });
-                }
-            }
             if let Some(approval) = premerge_approval.as_ref() {
                 let current = self.open_task_store()?.get(&approval.candidate.task_id)
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;

@@ -3430,8 +3430,6 @@ mod tests {
                 "{role} factory hook must reach Slack tools and CAS proxy dispatches"
             );
 
-            assert!(regex::Regex::new(matcher).unwrap().is_match("mcp__cas__coordination"));
-
             let perm = hooks
                 .get("PermissionRequest")
                 .and_then(|v| v.as_array())

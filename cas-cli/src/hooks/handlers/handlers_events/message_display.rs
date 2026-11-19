@@ -6,33 +6,28 @@ use crate::hooks::handlers::*;
 // CC 2.1.152+ fires MessageDisplay before assistant text reaches the terminal
 // renderer. Cassy uses this to:
 //
-//   1. Label supervisor claims without same-turn evidence (always on).
-//   2. Detect and defuse React-Ink Box-in-Text crash triggers (nested fenced
+//   1. Detect and defuse React-Ink Box-in-Text crash triggers (nested fenced
 //      code blocks) — see CLAUDE.md "Output hygiene" / cas-97ba.
-//   3. Redact secret-shaped tokens from assistant text (API keys, bearer
+//   2. Redact secret-shaped tokens from assistant text (API keys, bearer
 //      tokens, etc.) when the guard is enabled.
 //
 // RISK: this hook rewrites assistant text. Fence/secret transforms are
-// DEFAULT OFF behind `[hooks] message_display_guard = true`. Supervisor
-// evidence labels operate independently of that flag.
+// DEFAULT OFF behind `[hooks] message_display_guard = true`.
 //
 // Invariants
 // ----------
 // - Never drops legitimate content: if the transform doesn't recognise a
 //   shape, it leaves the text alone.
-// - Fence/secret transforms modify offending spans; evidence labels prefix
-//   the original message.
+// - Fence/secret transforms modify offending spans.
 // - Plain text with no trigger shapes returns `HookOutput::empty()` even
 //   when the guard is on (no spurious `updatedMessage` in the output).
 
 /// Handle the MessageDisplay hook event.
 ///
 /// Returns `HookOutput::empty()` (passthrough) when:
-///   - no unverified supervisor claim needs a label, AND
 ///   - fence/secret protection is off or finds no trigger.
 ///
 /// Returns `HookOutput::with_message_display_transform(sanitized)` when:
-///   - a supervisor claim needs an evidence label, OR
 ///   - the guard is on AND a nested-fence or secret pattern was found.
 pub fn handle_message_display(
     input: &HookInput,
@@ -58,15 +53,13 @@ pub fn handle_message_display(
         .map(|cfg| cfg.hooks().message_display_guard)
         .unwrap_or(false);
 
-    let evidence_reason = crate::hooks::handlers::operator_evidence::denial(input, message);
-    if !guard_enabled && evidence_reason.is_none() {
+    if !guard_enabled {
         // Default-off: pure passthrough, zero allocations.
         return Ok(HookOutput::empty());
     }
 
-    // Evidence labels are independent of opt-in fence/secret protection.
-    let mut text = if evidence_reason.is_some() { format!("[unverified] {message}") } else { message.to_string() };
-    let mut modified = evidence_reason.is_some();
+    let mut text = message.to_string();
+    let mut modified = false;
 
     // 1. Sanitize nested fenced code blocks (Ink Box-in-Text crash trigger).
     if guard_enabled && has_nested_fence(&text) {
@@ -84,9 +77,7 @@ pub fn handle_message_display(
     }
 
     if modified {
-        let mut output = HookOutput::with_message_display_transform(text);
-        output.system_message = evidence_reason.map(|reason| crate::gates::tag("H-47", reason));
-        Ok(output)
+        Ok(HookOutput::with_message_display_transform(text))
     } else {
         // Guard on, but nothing to transform — passthrough.
         Ok(HookOutput::empty())

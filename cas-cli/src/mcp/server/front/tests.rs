@@ -247,3 +247,16 @@ async fn deferred_binary_is_not_respawned_until_install_changes_cas_81c4() {
         .expect("new install must be retried on the next tick").is_some());
     watcher.abort();
 }
+
+/// GH #2128: every backend the front starts names the front, so a worker's
+/// tools-listed record outlives a hot update that swaps the backend.
+#[cfg(unix)]
+#[test]
+fn backend_command_names_the_front_for_the_readiness_record_gh_2128() {
+    for standby in [false, true] {
+        let command = backend_command(std::path::Path::new("cas"), standby, 7);
+        let front = std::process::id().to_string();
+        let named = command.as_std().get_envs().find(|(key, _)| *key == crate::factory_tools_ready::FRONT_PID_ENV);
+        assert_eq!(named.and_then(|(_, value)| value).map(|value| value.to_string_lossy().into_owned()), Some(front), "standby={standby}");
+    }
+}

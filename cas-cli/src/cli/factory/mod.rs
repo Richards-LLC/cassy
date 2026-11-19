@@ -2744,7 +2744,6 @@ mod tests {
         use std::io::Write;
         use std::os::unix::process::CommandExt;
         const CHILD: &str = "CAS_TEST_TRAIN_DROP_CAS_DIR";
-        let _env = crate::test_support::TestEnvGuard::temp_home();
         if let Ok(cas_dir) = std::env::var(CHILD) {
             let args = FactoryArgs { command: Some(FactoryCommands::Train { command: TrainCommand::Drop {
                 tasks: vec!["cas-a".into()], reason: "ejected again".into(),
@@ -2753,6 +2752,8 @@ mod tests {
             let _ = execute(&args, &cli, Some(std::path::Path::new(&cas_dir)));
             return;
         }
+        // The wrapped child inherits this isolated home; only the parent holds the guard.
+        let _env = crate::test_support::TestEnvGuard::temp_home();
 
         let project = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
@@ -2769,6 +2770,7 @@ mod tests {
         )).unwrap();
 
         // The harness waits for its row before the wrapped `cas` runs.
+        let log = project.path().join("child.log");
         let script = r#"read go; sh -c '"$0" --exact "$1" --nocapture; true' "$0" "$1""#;
         let exe = std::env::current_exe().unwrap();
         let test_name = std::thread::current().name().unwrap().to_string();
@@ -2778,7 +2780,7 @@ mod tests {
             .env(CHILD, &cas_dir)
             .env_remove("CAS_SESSION_ID").env_remove("CAS_AGENT_ROLE").env_remove("CAS_AGENT_NAME")
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .stdout(std::fs::File::create(&log).unwrap()).stderr(std::fs::File::create(&log).unwrap())
             .spawn().unwrap();
         let mut supervisor = cas_types::Agent::new_with_role("sup-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
         supervisor.factory_session = Some("factory-session".into());
@@ -2786,7 +2788,16 @@ mod tests {
         supervisor.ppid = Some(harness.id());
         crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
         writeln!(harness.stdin.take().unwrap(), "go").unwrap();
-        assert!(harness.wait().unwrap().success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = harness.try_wait().unwrap() { break status; }
+            if std::time::Instant::now() > deadline {
+                let _ = harness.kill();
+                panic!("wrapped drop did not finish: {}", std::fs::read_to_string(&log).unwrap_or_default());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "{}", std::fs::read_to_string(&log).unwrap_or_default());
 
         let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
         assert_eq!(queue.peek("operator", 10).unwrap().len(), 1, "the drop resolved the supervisor and reported");

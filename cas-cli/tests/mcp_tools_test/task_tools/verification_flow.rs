@@ -7769,6 +7769,19 @@ async fn test_epic_close_refuses_an_epic_branch_that_never_reached_the_default_b
     epic.branch = Some("epic/cas-9452".to_string());
     // No declared target: the gate falls back to the epic's own branch.
     task_store.add(&epic).expect("persist epic fixture");
+    // The board reads the same determination: merged-to-epic is not shipped.
+    let epic_status = || async {
+        let request: cas_mcp::types::FactoryRequest = serde_json::from_value(
+            serde_json::json!({"action": "epic_status", "id": epic.id}),
+        )
+        .expect("a valid epic_status request");
+        extract_text(
+            CasService::new(cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None), None)
+                .factory_request(Parameters(request))
+                .await
+                .expect("epic_status returns"),
+        )
+    };
     let close = |reason: &str| {
         service.cas_task_close(Parameters(TaskCloseRequest {
             no_delivery: None,
@@ -7789,9 +7802,14 @@ async fn test_epic_close_refuses_an_epic_branch_that_never_reached_the_default_b
         TaskStatus::Closed
     );
 
+    let board = epic_status().await;
+    assert!(board.contains("epic_shipping: unshipped commits=1 default=main"), "{board}");
+
     // The merge reached the remote's default branch while the local one still
     // lags: a stale local copy must not make a shipped epic look unshipped.
     proof_boundary_git(repo, &["update-ref", "refs/remotes/origin/main", "refs/heads/epic/cas-9452"]);
+    let board = epic_status().await;
+    assert!(board.contains("epic_shipping: shipped default=main"), "{board}");
     let closed = extract_text(close("epic branch merged").await.expect("epic close returns"));
     assert!(closed.contains("Closed task:"), "a merged epic closes: {closed}");
 }

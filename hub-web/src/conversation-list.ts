@@ -68,6 +68,8 @@ export interface ConversationRow {
   needsYou?: boolean;
   operatorReason?: string;
   supervisorState?: "working" | "idle" | "needs-you" | "offline";
+  /** On standby: workers stopped, supervisor quiet until the operator resumes it (cas-94a0). */
+  standby?: boolean;
   /**
    * One of several live sessions of a project on one machine (cas-55a4). The
    * rows sit together under one heading; the most recently active one is
@@ -293,7 +295,8 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   const version = rowVersion(row);
-  const badge = version?.update ? `<span class="supervisor-version update-available" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "";
+  const standby = row.standby ? `<span class="conversation-standby" title="Workers stopped; resume to bring them back">Standby</span>` : "";
+  const badge = standby + (version?.update ? `<span class="supervisor-version update-available" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "");
   // Two sessions of one project on one machine read apart by their codename.
   // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
   const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
@@ -359,7 +362,7 @@ export class ConversationList {
    * conversation opens, and repainting into that detached list emptied the
    * live one until the next catalog poll.
    */
-  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; reload?: (row: ConversationRow) => void };
+  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; reload?: (row: ConversationRow) => void; resume?: (row: ConversationRow) => void };
   /**
    * cas-f60a: the session that just ended, said where its row was and through
    * a polite live region, until ENDED_NOTICE_MS passes or another one ends.
@@ -379,8 +382,8 @@ export class ConversationList {
   private press?: { pointerId: number; pointerType: string; key: string; x: number; y: number; released: boolean; opened?: boolean; timer?: ReturnType<typeof setTimeout> };
   /** The document whose pointer events this list follows. */
   private watched?: Document;
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>, reload?: (row: ConversationRow) => void): void {
-    this.latest = { container, rows, open, end, reload };
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>, reload?: (row: ConversationRow) => void, resume?: (row: ConversationRow) => void): void {
+    this.latest = { container, rows, open, end, reload, resume };
     const document = container.ownerDocument;
     this.watch(document);
     const ordered: HTMLElement[] = [];
@@ -466,6 +469,18 @@ export class ConversationList {
         ordered.push(control);
       }
 
+      if (resume && row.standby && !row.ended) {
+        const control = extra(`resume:${row.key}`, () => {
+          const node = document.createElement("div"); node.className = "conversation-resume";
+          node.innerHTML = '<button type="button" data-resume-standby>Resume</button>';
+          return node;
+        });
+        control.setAttribute("aria-label", `Resume ${row.supervisor} on ${machineName(row.host)} from standby`);
+        const action = control.querySelector<HTMLButtonElement>("button")!;
+        action.disabled = row.machine_online === false;
+        action.onclick = () => resume(row);
+        ordered.push(control);
+      }
     }
     for (const [key, node] of this.extras) {
       if (!extrasKept.has(key)) { node.remove(); this.extras.delete(key); }
@@ -624,7 +639,7 @@ export class ConversationList {
     const container = latest.container.isConnected || !latest.container.id
       ? latest.container
       : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
-    this.render(container, latest.rows, latest.open, latest.end, latest.reload);
+    this.render(container, latest.rows, latest.open, latest.end, latest.reload, latest.resume);
   }
 
   /** The ended row is gone; if focus went with it, land it on the nearest thing left. */

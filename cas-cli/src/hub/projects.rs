@@ -471,6 +471,7 @@ mod tests {
             ws_port: Some(1),
             liveness: DaemonLiveness::Live,
             dormant: false,
+            standby: false,
             ended: None,
             dismissed: false,
             last_activity_at: None,

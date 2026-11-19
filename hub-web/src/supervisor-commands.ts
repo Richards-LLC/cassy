@@ -1,5 +1,5 @@
 /** Fixed semantic controls; the hub and daemon independently enforce this list. */
-export type SupervisorCommand = "compact" | "clear" | "model" | "usage" | "exit" | "finish" | "mcp";
+export type SupervisorCommand = "compact" | "clear" | "model" | "usage" | "exit" | "finish" | "standby" | "mcp";
 export type CommandKey = "previous" | "next" | "select" | "cancel";
 export interface CommandReceipt {
   client_ref: string;
@@ -16,6 +16,7 @@ const commands: { id: SupervisorCommand; label: string; effect: string; confirm?
   { id: "mcp", label: "Reload Cassy", effect: "Reconnect Claude's Cassy server and read its new process and version" },
   { id: "clear", label: "Clear", effect: "Start a fresh conversation context", confirm: "Clear this supervisor's conversation context? Existing messages remain in Commander." },
   { id: "finish", label: "Finish", effect: "Run the supervisor's Finish skill", confirm: "Run Finish? The supervisor will wrap up its work and may end this session." },
+  { id: "standby", label: "Standby", effect: "Finish, stop the workers and go quiet", confirm: "Go on standby? The supervisor will finish its wrap-up, stop its workers and go quiet. Resume brings them back." },
   { id: "exit", label: "Exit", effect: "End the supervisor's harness", confirm: "Exit this supervisor? Its harness will end. Check its handoff before leaving." },
 ];
 export function commandsForHarness(harness: string | undefined): typeof commands {

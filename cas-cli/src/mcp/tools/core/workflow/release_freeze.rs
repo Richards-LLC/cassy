@@ -582,9 +582,10 @@ mod tests {
         let repo = temp.path();
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='freeze-test'\n[factory]\nepic_base_branch='main'\n").unwrap();
         let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        let supervisor = cas_types::Agent::new_with_role(
+        let mut supervisor = cas_types::Agent::new_with_role(
             "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
         );
+        supervisor.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         core.open_agent_store().unwrap().register(&supervisor).unwrap();
         core.set_agent_id_for_testing(supervisor.id.clone());
         let store = core.open_task_store().unwrap();

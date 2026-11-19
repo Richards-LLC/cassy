@@ -4449,6 +4449,11 @@ impl FactoryDaemon {
                                 tracing::error!(%task, %error, "CI rerun completion wake not armed");
                             }
                         }
+                        // cas-f823: open trains take main's new commits before
+                        // the cut notice reads their tips.
+                        if let Err(error) = crate::train_main_sync::sync_open_trains(&watch_cas_dir) {
+                            tracing::warn!(%error, "release-train main sync failed");
+                        }
                         // cas-dcc9: one "train ready to cut" notice per train
                         // state, from this same queue read; never an auto-cut.
                         let queued_trains = queue_poll

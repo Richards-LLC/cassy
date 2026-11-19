@@ -1880,7 +1880,7 @@ mod tests {
         assert_eq!(operator_replies(&queue).len(), 1, "daemon replay must not duplicate errors");
     }
 
-    /// cas-2a95 (GH #1938): H-47 blocked a supervisor's first draft at Stop
+    /// cas-2a95 (GH #1938): a Stop hook blocked a supervisor's first draft
     /// and Commander showed both the draft and the accepted rewrite. Record
     /// shapes follow the incident transcript, including a daemon poll that
     /// lands between the draft and the Stop hook's verdict.
@@ -1909,7 +1909,7 @@ mod tests {
             "message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
         let system = |subtype: &str, offset| serde_json::json!({"timestamp":at(offset),"type":"system","subtype":subtype});
         let draft = "Train is green at abc1234.";
-        let rewrite = "[unverified] Train is green.";
+        let rewrite = "Train is green.";
         let first = [
             prompt("p-earlier", earlier, 0), answer("a-earlier", "earlier answer", 1),
             system("stop_hook_summary", 1), system("turn_duration", 1),

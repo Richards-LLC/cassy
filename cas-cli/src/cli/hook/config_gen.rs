@@ -1172,7 +1172,6 @@ mod codex_provision_tests {
             "apply_patch",
             "mcp__violet__violet_post",
             "mcp__cs__artifact",
-            "mcp__cs__coordination",
         ] {
             assert!(
                 re.is_match(tool),

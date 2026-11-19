@@ -545,7 +545,7 @@ fn track_on_train(
     // reminder availability. New tasks must not join the frozen lane.
     let tasks = open_task_store(root)?;
     crate::mcp::tools::core::task::release_train::mark_cut_trains(
-        root, repo, tasks.as_ref(), &train.id, &args.commit, &expected.integration,
+        root, repo, tasks.as_ref(), &train.id, &args.commit, &expected.integration, &scope.included_task_ids,
     ).map_err(anyhow::Error::msg).context("could not persist release train cut markers")?;
     // Review gaps belong to the cut receipt even when reminders are unavailable.
     save(&path, &expected)?;

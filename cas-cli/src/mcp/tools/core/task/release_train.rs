@@ -229,13 +229,16 @@ pub(crate) fn mark_cut_trains(
     cut_id: &str,
     cut_tip: &str,
     integration: &str,
+    included: &[String],
 ) -> Result<(), String> {
     let _lock = lock_trains_blocking(cas_root).map_err(|error| error.to_string())?;
     let cut = store.get(cut_id).map_err(|error| error.to_string())?;
     let base = branch_tip(repo, integration)
         .ok_or_else(|| format!("Cannot resolve release integration branch `{integration}`."))?;
+    let mut retired = Vec::new();
     for mut train in active_trains(store, integration) {
         if is_cut_train(&train) {
+            if train.id == cut_id { retired.push(train); }
             continue;
         }
         let retire = train.id == cut_id || train.effective_epic_branch()
@@ -250,9 +253,122 @@ pub(crate) fn mark_cut_trains(
             train.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
             train.updated_at = chrono::Utc::now();
             store.update(&train).map_err(|error| error.to_string())?;
+            retired.push(train);
         }
     }
+    // With trains disabled, no successor is opened; the existing disabled-
+    // train reconciliation owns the integration target instead.
+    if enabled(repo) == Some(true) && !retired.is_empty() {
+        let successor = ensure_successor(repo, store, &cut, integration)?;
+        rollover_children(cas_root, repo, store, &retired, &successor, cut_tip, included)?;
+    }
     Ok(())
+}
+
+const SUCCESSOR_LABEL: &str = "release-train-successor:";
+const ROLLOVER_PENDING: &str = "release-train-rollover:";
+
+/// Called under the train lock. The durable link makes retries resume the
+/// same successor; following links also handles a later cut of that train.
+fn ensure_successor(repo: &Path, store: &dyn cas_store::TaskStore, train: &Task, integration: &str) -> Result<Task, String> {
+    let mut previous = store.get(&train.id).map_err(|error| error.to_string())?;
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = previous.labels.iter().find_map(|label| label.strip_prefix(SUCCESSOR_LABEL)) {
+        if !seen.insert(previous.id.clone()) { return Err("release train successor cycle".into()); }
+        let next = store.get(id).map_err(|error| error.to_string())?;
+        if !next.is_terminal() && !is_cut_train(&next) && !accepts_no_work(&next) {
+            publish_train_branch(repo, next.effective_epic_branch().ok_or("successor has no lane")?, integration)?;
+            return Ok(next);
+        }
+        previous = next;
+    }
+    let id = store.generate_id().map_err(|error| error.to_string())?;
+    let mut next = Task::new(id.clone(), RELEASE_TRAIN_TITLE.into());
+    next.task_type = TaskType::Epic;
+    next.labels.push(RELEASE_TRAIN_LABEL.into());
+    next.branch = Some(format!("epic/release-train-vnext-{id}"));
+    next.origin_project = previous.origin_project.clone();
+    next.epic_verification_owner = previous.epic_verification_owner.clone();
+    next.deliverables.work_target = previous.deliverables.work_target.clone();
+    store.add(&next).map_err(|error| error.to_string())?;
+    previous.labels.push(format!("{SUCCESSOR_LABEL}{id}"));
+    previous.updated_at = chrono::Utc::now();
+    store.update(&previous).map_err(|error| error.to_string())?;
+    publish_train_branch(repo, next.effective_epic_branch().unwrap(), integration)?;
+    Ok(next)
+}
+
+fn rollover_children(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, retired: &[Task], next: &Task, cut_tip: &str, included: &[String]) -> Result<(), String> {
+    let lane = next.effective_epic_branch().ok_or("successor has no lane")?;
+    let base = branch_tip(repo, lane).ok_or("successor base missing")?;
+    let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?.list(None).map_err(|error| error.to_string())?;
+    let queue = crate::store::open_prompt_queue_store(root).map_err(|error| error.to_string())?;
+    for mut child in store.list(None).map_err(|error| error.to_string())?.into_iter().filter(|task| !task.is_terminal() && !is_release_train(task) && !included.contains(&task.id)) {
+        let parent = store.get_parent_epic(&child.id).map_err(|error| error.to_string())?;
+        let old = retired.iter().find(|train| {
+            parent.as_ref().is_some_and(|parent| parent.id == train.id)
+                || child.deliverables.work_target.as_ref().is_some_and(|target| train.effective_epic_branch() == Some(target.target_branch.as_str()))
+                || child.labels.iter().any(|label| label == &format!("{ROLLOVER_PENDING}{}", train.id))
+        });
+        let Some(old) = old else { continue };
+        let anchor = crate::qa_batch::delivery_anchor(repo, &child);
+        // Included/reachable deliveries stay for the release's ordinary
+        // bookkeeping close. A red cut may still receive its own repair.
+        if anchor.as_deref().is_some_and(|anchor| is_ancestor(repo, anchor, cut_tip))
+            || (child.labels.iter().any(|label| label == crate::mcp::tools::core::workflow::release_freeze::REPAIR_LABEL)
+                && old.effective_epic_branch().is_some_and(|lane| check_cut_merge(root, lane, Some(&child.id)).is_ok()))
+        { continue; }
+        let tip = anchor.or_else(|| child.deliverables.factory_branch_start.as_ref().and_then(|start| branch_tip(repo, &start.branch)));
+        let requires_merge = !tip.as_deref().is_some_and(|tip| is_ancestor(repo, &base, tip));
+        let was_parked = child.status == TaskStatus::AwaitingMerge;
+        if was_parked && requires_merge { child.status = TaskStatus::Open; }
+        let mut target = child.deliverables.work_target.clone().or_else(|| next.deliverables.work_target.clone()).ok_or("child has no repository target")?;
+        target.target_branch = lane.into();
+        child.deliverables.work_target = Some(target.clone());
+        // Keep the old start for an unchanged parked candidate's existing
+        // review. Resumable work follows the new target without rewriting its
+        // source branch, base SHA, anchors or any test/review receipts.
+        if !was_parked || requires_merge {
+            if let Some(start) = child.deliverables.factory_branch_start.as_mut() { start.work_target = target; }
+        }
+        let pending = format!("{ROLLOVER_PENDING}{}", old.id);
+        if !child.labels.contains(&pending) { child.labels.push(pending.clone()); }
+        child.updated_at = chrono::Utc::now();
+        store.update(&child).map_err(|error| error.to_string())?;
+        if parent.as_ref().is_some_and(|parent| parent.id != next.id) {
+            store.remove_dependency_of_type(&child.id, &parent.as_ref().unwrap().id, cas_types::DependencyType::ParentChild).map_err(|error| error.to_string())?;
+        }
+        store.add_dependency(&cas_types::Dependency::new(child.id.clone(), next.id.clone(), cas_types::DependencyType::ParentChild)).map_err(|error| error.to_string())?;
+        if let Some(assignee) = child.assignee.as_deref() {
+            let worker = agents.iter().filter(|agent| agent.name == assignee || agent.id == assignee).max_by_key(|agent| agent.registered_at);
+            let recipient = worker.map_or(assignee, |worker| worker.name.as_str());
+            let action = if requires_merge { "Merge the successor into your source branch before tests or CI, then re-park." } else { "Your source contains the successor base; keep its existing proof." };
+            let payload = serde_json::json!({"task_id":child.id,"target_train":next.id,"target_branch":lane,"requires_target_merge":requires_merge});
+            queue.enqueue_idempotent("release-train", recipient,
+                &format!("{} was cut; {} now targets {} ({lane}). {action}\n{payload}", old.id, child.id, next.id),
+                worker.and_then(|worker| worker.factory_session.as_deref()), Some("Release train target moved"),
+                Some(cas_store::NotificationPriority::High), &format!("train-rollover:{}:{}:{}", old.id,next.id,child.id), Some(&cas_store::QueueOrigin::Daemon))
+                .map_err(|error| error.to_string())?;
+        }
+        child.labels.retain(|label| label != &pending);
+        store.update(&child).map_err(|error| error.to_string())?;
+    }
+    let _ = cas_factory::notify_daemon(root);
+    Ok(())
+}
+
+/// Identity for an early close refusal. A frozen train may not have cut yet;
+/// reserve its successor under the same lock so the remedy names a real lane.
+pub(crate) fn successor_for_target(root: &Path, target: &str) -> Result<Option<Task>, String> {
+    let store = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
+    let Some(train) = store.list(None).map_err(|error| error.to_string())?.into_iter().find(|train| is_release_train(train) && train.effective_epic_branch().is_some_and(|lane| super::repo_context::effective_epic_ref(root, lane) == target)) else { return Ok(None) };
+    if let Some(id) = train.labels.iter().find_map(|label| label.strip_prefix(SUCCESSOR_LABEL)) {
+        return store.get(id).map(Some).map_err(|error| error.to_string());
+    }
+    let repo = crate::train_guardrails::train_repo_root(root, &train).map_err(|error| error.to_string())?;
+    let integration = train.deliverables.work_target.as_ref().ok_or("train has no integration target")?.target_branch.clone();
+    let _lock = lock_trains_blocking(root).map_err(|error| error.to_string())?;
+    ensure_successor(&repo, store.as_ref(), &train, &integration).map(Some)
 }
 
 /// Checked at target resolution and again under the delivery-target lock.

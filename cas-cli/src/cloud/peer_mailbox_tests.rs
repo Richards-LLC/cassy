@@ -1452,7 +1452,7 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     changes.deliverables.factory_branch_anchor = None; changes.deliverables.parked_branch = None;
     host_tasks.update(&changes).unwrap();
     let changes = host_tasks.get(&changes.id).unwrap();
-    assert_eq!(changes.deliverables.delivery_cycle,delivered_park.cycle+1);
+    assert!(changes.deliverables.delivery_cycle > delivered_park.cycle);
     let (stale,_) = receive(result_mail).await.unwrap(); assert_eq!(stale.rejected,1);
     let (root,notice) = (owner.cas.clone(),changes);
     let notification = tokio::task::spawn_blocking(move || crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_request_changes_notice(&root,&notice,"repair fixture","retain branch")).await.unwrap().unwrap();

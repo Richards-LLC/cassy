@@ -811,7 +811,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let _env = crate::test_support::TestEnvGuard::temp_home();
-    for recipient in [None, Some("recipient"), Some("worker")] {
+    for (recipient, legacy) in [(None,false), (Some("recipient"),false), (Some("worker"),false), (Some("recipient"),true)] {
         let server = MockServer::start().await;
         // Sender labels also use /api/agents once for a nonempty batch.
         let lookups = usize::from(recipient.is_some()) + usize::from(recipient == Some("worker"));
@@ -825,7 +825,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
             .expect(u64::from(recipient == Some("worker"))).mount(&server).await;
         let messages = recipient.map(|id| serde_json::json!({
             "id":"mail", "project_id":REPO, "recipient_agent_id":id,
-            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":"collision warning",
+            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":if legacy { "CAS_PEER_PREMERGE_V1 {}" } else { "collision warning" },
             "created_at":chrono::Utc::now().to_rfc3339()
         })).into_iter().collect::<Vec<_>>();
         Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
@@ -848,7 +848,10 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
         let report = tokio::task::spawn_blocking(move || PeerMailboxRuntime::start(&root, "factory-a").unwrap().tick_blocking())
             .await.unwrap();
         assert!(report.errors.is_empty(), "{recipient:?}: {report:?}");
-        if recipient == Some("worker") {
+        if legacy {
+            assert_eq!((report.delivered,report.rejected), (0,1));
+            assert!(machine.rows().is_empty(), "rejected authority must never enter the prompt queue");
+        } else if recipient == Some("worker") {
             assert_eq!((report.delivered, report.rejected), (0, 0),
                 "a recipient missing from Cloud must keep its message pending: {report:?}");
             assert!(machine.rows().is_empty());
@@ -1345,6 +1348,14 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     let request = serde_json::from_value(serde_json::json!({"id":task.id,"reason":"fixture proof"})).unwrap();
     let error = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(request)).await.err().expect("competing supervisor cannot close");
     assert!(error.message.contains("G-113"));
+    let request = serde_json::from_value(serde_json::json!({"id":task.id,"reason":"repair fixture"})).unwrap();
+    let correction = core.cas_task_request_changes(rmcp::handler::server::wrapper::Parameters(request)).await;
+    let service = crate::mcp::tools::service::CasService::new(core,
+        #[cfg(feature = "mcp-proxy")] None);
+    let request = serde_json::from_value(serde_json::json!({"action":"qa_waive","task_id":task.id,"summary":"fixture waiver"})).unwrap();
+    let waiver = service.verification(rmcp::handler::server::wrapper::Parameters(request)).await;
+    assert!(correction.err().is_some_and(|error| error.message.contains("G-113")), "only the pinned owner may return a delivery");
+    assert!(waiver.err().is_some_and(|error| error.message.contains("G-113")), "only the pinned owner may waive its delivery QA");
     assert_eq!(crate::store::open_task_store_local(&owner.cas).unwrap().get(&task.id).unwrap().status,crate::types::TaskStatus::AwaitingMerge);
     assert!(cas_store::get_latest_verification_dispatch(&owner.cas,&task.id).unwrap().is_none());
     let mut unparked = task.clone();

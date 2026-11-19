@@ -774,6 +774,11 @@ def rust_runtime_inputs(source):
         scopes = [(left, right) for left, right in ps.items()
                   if ts[left].value == '{' and left < i < right]
         left, right = max(scopes, default=(-1, len(ts)))
+        # Associated methods are not unqualified free-function bindings. Unknown
+        # item scopes (including macros) cannot grant the exemption either.
+        if left >= 0 and not (left >= 2 and ts[left - 2].value == 'mod'
+                              or any(fn[2] == left for fn in functions)):
+            continue
         helpers.setdefault(ts[i + 1].value, []).append((left, right, typed))
     # A familiar spelling alone cannot turn an unrelated/shadowed type into
     # the stability identity. Fail closed on ambiguous local declarations.

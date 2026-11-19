@@ -365,6 +365,8 @@ pub(crate) fn cleanup_orphaned_tasks(cas_root: &std::path::Path) -> usize {
     };
     let claimed_task_ids: std::collections::HashSet<_> =
         active_leases.iter().map(|l| l.task_id.as_str()).collect();
+    let spawn_queue = crate::store::open_spawn_queue_store(cas_root).ok();
+    let agents = agent_store.list(None).unwrap_or_default();
 
     let local_machine = Agent::get_or_generate_machine_id();
     let mut reopened = 0;
@@ -386,6 +388,20 @@ pub(crate) fn cleanup_orphaned_tasks(cas_root: &std::path::Path) -> usize {
         if task.assignee.as_deref().is_none_or(|assignee| {
             assignee != holder.id && assignee != holder.name
         }) || holder.machine_id.as_deref().is_some_and(|machine| machine != local_machine)
+        {
+            continue;
+        }
+        // A recycle releases the predecessor's lease before the same-name
+        // replacement can re-take it. SessionStart is part of that handoff,
+        // not evidence that its preserved assignment was abandoned.
+        if holder.role == crate::types::AgentRole::Worker
+            && let Some(session) = holder.factory_session.as_deref()
+            && (spawn_queue.as_ref().is_some_and(|queue| {
+                queue.has_pending_spawn(&holder.name, Some(session)).unwrap_or(true)
+            }) || crate::mcp::tools::service::agent_liveness::has_live_agent_named(
+                agents.iter().filter(|agent| agent.factory_session.as_deref() == Some(session)),
+                &holder.name,
+            ))
         {
             continue;
         }

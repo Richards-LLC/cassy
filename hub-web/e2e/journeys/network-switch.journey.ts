@@ -850,7 +850,7 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       for (const id of down) await hub.up(id);
       await clock.advance(10_000);
       await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
-      await expect(list.locator(outageNote)).toHaveCount(0);
+      await expect(list).not.toContainText(/last known/i);
       await expectFooter("2 conversations");
     });
   }
@@ -910,7 +910,7 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     // cas-093d F02: the command is its own code token with Copy, not prose
     // that broke mid-token when it wrapped.
     const command = "cas hub pair --origin " + new URL(page.url()).origin + " --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch";
-    await expect(dialog.locator(".pair-status code")).toHaveCount(0);
+    await expect(dialog.locator(".pair-status")).not.toContainText("cas hub pair");
     await expect(dialog.locator(".pair-command code")).toHaveText(command);
     // No line break falls between two non-space characters, at any width from
     // a phone to a wide desktop, before and after Copy relabels the button

@@ -112,10 +112,6 @@ impl RolloutTurnObserver {
     }
 
     fn fold(&mut self, row: &[u8]) {
-        if row.is_empty() {
-            return;
-        }
-        return;
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(row) else {
             return;
         };

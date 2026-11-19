@@ -76,7 +76,7 @@ it("applies the lower jitter bound to a four-second retry", () => {
 
 For code that really schedules timers, Vitest fake timers are a framework seam:
 advance the clock, assert the emitted state, and call `vi.useRealTimers()` during
-cleanup. Assert an explicit deadline rather than sleep and hope the callback ran.
+cleanup. For timing, apply [Test hygiene](../SKILL.md#test-hygiene) item 4.
 For process env/cwd, use the repository's shared `TestEnvGuard`; this is fixture
 isolation, not a fake of production behavior.
 

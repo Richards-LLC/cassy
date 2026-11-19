@@ -611,6 +611,43 @@ def test_workflow_command():
             self.assertEqual(subprocess.run(cmd+['--changed-since', base], cwd=root, capture_output=True).returncode, 0)
             self.assertEqual(subprocess.run(cmd+['--changed-since', 'missing-ref'], cwd=root, capture_output=True).returncode, 1)
 
+    def test_cli_runtime_identities_and_codes_leave_prose_rejected_cas_047d(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'runtime_tests.rs'
+            path.write_text('')
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.email', 'fixture@example.test')
+            git('config', 'user.name', 'fixture')
+            git('add', '.')
+            git('commit', '-qm', 'runtime identity fixture')
+            command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', git('rev-parse', 'HEAD')]
+            prefix = '''use super::stability::Identity;
+fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
+#[test] fn check() {
+    let source = "fixture";
+'''
+            sentence = 'The release gate should identify which component caused this failure.'
+            cases = [
+                (prefix, 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "group changed")]);', 0),
+                (prefix, 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [Identity::exact("a.test.ts", "group changed")]);', 0),
+                (prefix.replace('fn id(', 'fn selector('), 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [selector("a.test.ts", "group changed")]);', 0),
+                (prefix, f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 0),
+                (prefix, 'assert_eq!(source.code(), "source:missing");', 0),
+                (prefix, 'assert_eq!(source.code(), "E_SCOPE_DENIED");', 0),
+                (prefix, f'assert_eq!(source.message(), "{sentence}");', 1),
+                (prefix.replace('-> Identity { Identity::exact(path, name) }', '-> String { name.to_string() }'), f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
+                (prefix, f'assert_eq!((source.message(), selected), ("{sentence}", [id("a.test.ts", "group changed")]));', 1),
+                (prefix, f'fn id(path: &str, name: &str) -> String {{ name.to_string() }} assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
+            ]
+            for setup, assertion, status in cases:
+                with self.subTest(assertion=assertion, setup=setup):
+                    path.write_text(setup + assertion + '\n}\n')
+                    result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+
     def test_cli_changed_since_scans_non_rust_test_files(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

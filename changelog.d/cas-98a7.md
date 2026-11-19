@@ -1,3 +1,0 @@
-### Changed — Skills
-
-- **One rule for timing in tests** — Was: the test-writing skill said to use event barriers and not to replace synchronization with sleeps, and the reviewer guidance separately listed sleeps as a finding, so a test could still assert that a port or file was already gone, or set a wall-clock deadline tighter than the event it waited for. Now: Test hygiene item 4 states the rule once (no fixed sleeps, no instant presence or absence assertions on a port, process or file, no deadline tighter than the event; wait on the event with a generous ceiling), and the reviewer guidance links to that item instead of repeating it.

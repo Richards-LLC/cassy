@@ -1,3 +1,0 @@
-### Fixed — Hooks
-
-- **Worker file-name searches no longer blocked inside compound commands** — Was: the operator-credentials guard let a worker list file names under the home directory only as a lone command, so `ls /opt; tail install.log && rg --files ~/.local /opt -g initdb` or `find ~ -path '*SKILL.md' | head -20` was refused as credential access. Now: each statement is judged on its own, a listing stays allowed when it only feeds `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `rg` or `grep` reading stdin, and any statement that names or opens a credential file, or feeds the listing to `xargs`, `cat` or another reader, still blocks.

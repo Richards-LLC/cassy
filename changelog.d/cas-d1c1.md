@@ -1,3 +1,0 @@
-### Fixed — Close proof guard
-
-- **A source line or design revision citation in a close reason no longer reads as a missing receipt file** — Was: a close reason that cited `scripts/journeys-for-diff.py:743` or `hub-web/DESIGN.md@3c25c3fb3` next to a real artifact receipt was refused with "Cannot resolve receipt", because the guard looked for a file with that literal name. Now: a `file:line`, `file:line-line` or `file@revision` citation is neither checked as a receipt file nor accepted as one; a real receipt path that does not exist is still refused. Measured: the new test fails at the delivery base with the incident's "no file at the cited path" refusal and passes with this change.

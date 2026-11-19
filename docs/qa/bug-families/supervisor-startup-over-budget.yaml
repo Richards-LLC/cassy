@@ -1,3 +1,0 @@
-title: A large predecessor handoff and integrated-delivery list no longer push the supervisor SessionStart past the inline cap; overflow is reached by receipt path
-tasks: [cas-516f]
-journeys: [FACTORY-SUPERVISE]

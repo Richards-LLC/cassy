@@ -1,4 +1,0 @@
-title: Verifier startup waits outside client input and retains its exact dispatch through contention
-tasks: [cas-d0f6]
-journeys: [FACTORY-MERGE, FACTORY-CLOSE]
-invariants: [FACTORY-VERIFIER-CRASH-RETRY]

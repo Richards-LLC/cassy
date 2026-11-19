@@ -1,4 +1,0 @@
-title: Task start refuses a target branch that exists neither locally nor on origin, naming it, instead of passing an empty start point to git
-tasks: [cas-8bc4]
-journeys: [FACTORY-SPAWN]
-invariants: [FACTORY-DETACHED-SUCCESSOR]

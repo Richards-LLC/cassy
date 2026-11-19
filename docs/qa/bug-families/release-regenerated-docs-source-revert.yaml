@@ -1,4 +1,0 @@
-title: Regenerated release docs preserve shipped source evidence without hiding a source revert
-tasks: [cas-895d3]
-journeys: [CLI-RELEASE]
-invariants: [FACTORY-RELEASE-CLOSEOUT]

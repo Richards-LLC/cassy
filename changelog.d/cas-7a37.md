@@ -1,3 +1,0 @@
-### Fixed — Capacity notice
-
-- **The disk-pressure notice counts verifier review scratch as reclaimable** — Was: the notice listed only target caches, so with finished review walks still holding their build output it reported "Reclaimable target caches: none found" while that output filled the disk. Now: the reclaimable total includes the build output of finished review walks and output already queued for deletion, measured through the same guarded review inventory as `gc_report` (a walk a guard retains counts nothing), and the notice lists it on its own line. Measured: with a finished review walk holding 11 bytes of build output, the new test fails at the delivery base with a total of 0 against the expected 11 and passes with this change.

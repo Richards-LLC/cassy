@@ -4896,7 +4896,7 @@ impl CasCore {
         worktree.parent_branch = crate::mcp::tools::core::task::repo_context::effective_epic_ref(
             &self.cas_root, &worktree.parent_branch,
         );
-        super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
+        super::train_merge::admit(self, &cwd, &worktree.parent_branch, task_id, train_queue)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
             &cas_root, &worktree.parent_branch, task_id,
@@ -5161,7 +5161,7 @@ impl CasCore {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Could not acquire merge target lock: {error}")), data: None,
         })?;
-        super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
+        super::train_merge::admit(self, &cwd, &worktree.parent_branch, task_id, train_queue)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
             &cas_root, &worktree.parent_branch, task_id,

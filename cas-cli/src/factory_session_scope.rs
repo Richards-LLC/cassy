@@ -31,6 +31,29 @@ use chrono::{DateTime, Utc};
 use crate::factory_supervisor_overlap::live_supervisor_sessions;
 use crate::types::{Agent, AgentRole, Task};
 
+/// The canonical owner identity is also the train's authority generation.
+/// Restart keeps that pinned identity through authenticated predecessor claims;
+/// assigning a different owner invalidates queued admissions.
+pub(crate) fn train_owner_generation(epic: &Task) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let owner = epic.epic_verification_owner.as_deref().filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| crate::gates::tag("G-113", format!("Train {} has no owner; assign epic_verification_owner before merging", epic.id)))?;
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&(&epic.id, owner)).unwrap())))
+}
+
+pub(crate) fn require_train_owner(root: &Path, epic: &Task, actor: &Agent) -> Result<String, String> {
+    let generation = train_owner_generation(epic)?;
+    let owner = epic.epic_verification_owner.as_deref().unwrap();
+    if actor.role != AgentRole::Supervisor
+        || !crate::cloud::peer_mailbox::owns_recipient(root, actor, owner)
+    {
+        return Err(crate::gates::tag("G-113", format!(
+            "Train {} is owned by {owner}; only that owner may verify, merge or close its deliveries. An unavailable owner holds the train.", epic.id
+        )));
+    }
+    Ok(generation)
+}
+
 /// The session that owns a target the caller may not mutate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignOwner {

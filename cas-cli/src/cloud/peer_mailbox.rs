@@ -1052,6 +1052,20 @@ fn live_supervisor(agent: &crate::types::Agent) -> bool {
         .is_live()
 }
 
+/// Reuse the mailbox's machine/session/retirement checks for owner restart.
+/// A matching name or a dead heartbeat alone never transfers authority.
+pub(crate) fn owns_recipient(root: &Path, actor: &crate::types::Agent, recipient: &str) -> bool {
+    if actor.id == recipient {
+        return true;
+    }
+    let Some(session) = actor.factory_session.as_deref() else { return false };
+    let Ok(history) = retired_recipients(root, session) else { return false };
+    let Ok(all) = crate::store::open_agent_store(root).and_then(|store| store.list(None).map_err(Into::into)) else { return false };
+    let live = all.iter().filter(|agent| live_supervisor(agent)).collect::<Vec<_>>();
+    recipient_routes(&all, &live, &history.verified, session).0.get(recipient)
+        .is_some_and(|successor| successor.id == actor.id)
+}
+
 fn recipient_routes<'a>(
     all: &'a [crate::types::Agent],
     live: &[&'a crate::types::Agent],

@@ -24,6 +24,8 @@ struct Queue {
     repo: PathBuf,
     target: String,
     supervisor: String,
+    #[serde(default)]
+    owner_generation: String,
     session: String,
     entries: Vec<Entry>,
     next: usize,
@@ -93,14 +95,41 @@ fn save(path: &Path, queue: &Queue) -> Result<()> {
 /// merge already in flight cannot slip between reservation and publication.
 // gate[G-101 merge-admission integrity]: Train merge active reservation
 pub(crate) fn admit(
-    root: &Path,
+    core: &CasCore,
     repo: &Path,
     target: &str,
     task: Option<&str>,
     permit: Option<&str>,
 ) -> Result<()> {
+    let root = &core.cas_root;
+    let tasks = core.open_task_store().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let common = GitOperations::new(repo.to_path_buf()).canonical_repo_key()?;
+    for epic in tasks.list(None)?.into_iter().filter(|epic|
+        epic.task_type == TaskType::Epic && !epic.is_terminal()
+            && epic.effective_epic_branch() == Some(target)
+            && (epic.epic_verification_owner.is_some()
+                || super::super::task::release_train::is_release_train(epic)))
+    {
+        let declared = match epic.deliverables.work_target.as_ref() {
+            Some(work) => super::super::task::repo_context::resolve_repo_context(root, work)
+                .map_err(anyhow::Error::msg)?.git_common_dir,
+            None => GitOperations::new(root.parent().context("project repository missing")?.to_path_buf())
+                .canonical_repo_key()?,
+        };
+        if declared != common { continue; }
+        let actor = core.resolve_live_supervisor_authority()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
+    }
     let queue = read(&path(root, repo, target)?)?;
     if let Some(queue) = queue.filter(Queue::active) {
+        let epic = tasks.get(&queue.train)?;
+        let actor = core.resolve_live_supervisor_authority()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
+        ensure!(crate::cloud::peer_mailbox::owns_recipient(root, &actor, &queue.supervisor)
+            && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
+            crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
         ensure!(
             permit == Some(queue.id.as_str())
                 && task == Some(queue.entries[queue.next].task.as_str()),
@@ -173,6 +202,8 @@ impl CasCore {
             epic.task_type == TaskType::Epic && !epic.is_terminal(),
             crate::gates::tag("G-113", "train_merge requires an open epic")
         );
+        let generation = crate::factory_session_scope::require_train_owner(&self.cas_root, &epic, &actor)
+            .map_err(anyhow::Error::msg)?;
         let target = epic
             .effective_epic_branch()
             .context(crate::gates::tag("G-113", "train has no branch"))?
@@ -198,18 +229,11 @@ impl CasCore {
         let path = path(&self.cas_root, &repo, &target)?;
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
-            if queue.supervisor != actor.id {
-                let agents = self
-                    .open_agent_store()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                ensure!(
-                    !agents.get(&queue.supervisor).is_ok_and(|a| {
-                        crate::mcp::tools::service::agent_liveness::agent_registration_is_live(&a)
-                    }),
-                    crate::gates::tag("G-113", "another live supervisor owns this train merge")
-                );
-                queue.supervisor = actor.id.clone();
-            }
+            ensure!(crate::cloud::peer_mailbox::owns_recipient(&self.cas_root, &actor, &queue.supervisor)
+                && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
+                crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
+            queue.supervisor = actor.id.clone();
+            queue.owner_generation = generation.clone();
             // GH #1819: entries already merged or closed need no daemon pass.
             settle(&self.cas_root, &path, &mut queue, &*tasks)?;
             let prior_override = queue.ci_override.clone();
@@ -312,6 +336,7 @@ impl CasCore {
             repo: repo.clone(),
             target: target.clone(),
             supervisor: actor.id,
+            owner_generation: generation,
             session: session.into(),
             entries,
             next: 0,
@@ -511,6 +536,10 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         let tasks = core
             .open_task_store()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let generation = crate::factory_session_scope::require_train_owner(root, &tasks.get(&queue.train)?, &actor)
+            .map_err(anyhow::Error::msg)?;
+        ensure!(queue.owner_generation.is_empty() || queue.owner_generation == generation,
+            crate::gates::tag("G-113", "train merge owner generation changed"));
         loop {
             // Settled entries advance even while CI holds the next merge.
             settle(root, &path, &mut queue, &*tasks)?;
@@ -901,7 +930,7 @@ mod tests {
             .unwrap();
         assert!(!queue.active(), "{}", queue.render());
         assert_eq!(queue.outcomes.len(), 3, "{:?}", queue.outcomes);
-        admit(&fixture.root, fixture._repo.path(), "epic/train", Some("cas-later"), None)
+        admit(&fixture.core, fixture._repo.path(), "epic/train", Some("cas-later"), None)
             .unwrap();
     }
 

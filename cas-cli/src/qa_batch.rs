@@ -1197,8 +1197,6 @@ pub(crate) fn satisfying_deferred_receipt(
 }
 
 /// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
-// gate-audit[author_override]: selector Read-only validation of issued QA evidence; the accepting batch-receipt producer records G-116, not coverage replays.
-// gate-audit[release_author_waiver]: selector Read-only replay of release-bound evidence; verification_batch_receipt records G-116 when issuing evidence under that waiver.
 fn covering_receipt(
     root: &Path,
     task: &Task,
@@ -1220,6 +1218,8 @@ fn covering_receipt(
 /// Judge each recorded receipt against the delivery in order, handing the
 /// visitor the receipt and the first reason it does not cover (`None`: it
 /// covers). The visitor stops the walk by returning true.
+// gate-audit[author_override]: selector Read-only validation of issued QA evidence; the accepting batch-receipt producer records G-116, not coverage replays.
+// gate-audit[release_author_waiver]: selector Read-only replay of release-bound evidence; verification_batch_receipt records G-116 when issuing evidence under that waiver.
 fn walk_receipts(
     root: &Path,
     task: &Task,
@@ -1390,6 +1390,7 @@ pub(crate) fn debt_refusal(root: &Path, task: &Task, repo: &Path, target: &str, 
 
 /// Why a recorded QA round does not satisfy deferred debt (`COVERS`: it does,
 /// so the debt is on the head's integration, not the round).
+// gate-audit[author_override]: selector Read-only diagnosis of recorded QA rounds replays operator authorization; no new approval or delivery accepted.
 fn pass_gap(root: &Path, task: &Task, repo: &Path, anchor: Option<&str>, pass: &cas_types::QaPass) -> &'static str {
     if pass.state != cas_types::QaPassState::Passed {
         return "QA_PASS_NOT_PASSED";

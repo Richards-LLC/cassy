@@ -915,37 +915,88 @@ mod tests {
 
     #[test]
     fn failed_launch_is_retried_unless_permanent_cas_d824() {
+        let refusal = |retry, message: &str| LaunchError { retry, message: message.into() };
         let calls = std::cell::Cell::new(0);
         let transient = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
-            if calls.get() < 3 { Err("verifier_factory_launch: store wait budget spent".into()) } else { Ok(()) }
+            if calls.get() < 3 { Err(refusal(Retry::Backoff, "verifier_factory_launch: busy")) } else { Ok(()) }
         });
         assert_eq!((transient, calls.get()), (Ok(()), 3));
         calls.set(0);
         let permanent = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
-            Err("verifier_factory_scope: not this session".into())
+            Err(refusal(Retry::Never, "verifier_factory_scope: not this session"))
         });
         assert_eq!((permanent.is_err(), calls.get()), (true, 1));
         calls.set(0);
         let exhausted = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
-            Err("verifier_factory_launch: busy".into())
+            Err(refusal(Retry::Backoff, "verifier_factory_launch: busy"))
         });
         assert_eq!((exhausted.map_err(|(attempts, _)| attempts), calls.get()), (Err(4), 4));
-        // GH #2148: six store refusals still leave the first launch attempt
-        // available. An exact-dispatch ownership/state mismatch is terminal.
-        for refusal in ["verifier_factory_store_busy", "database is locked", "wait budget is spent",
-            "verifier_factory_launch_dropped", "QueuedDroppedOldest"] {
-            calls.set(0);
-            let result = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::from_secs(5), || {
-                calls.set(calls.get() + 1);
-                if calls.get() <= 6 { Err(refusal.into()) }
-                else { Err("verifier_handoff_not_active: vdispatch-test".into()) }
-            });
-            assert_eq!((result.map_err(|(attempts, _)| attempts), calls.get()), (Err(1), 7));
-        }
+    }
 
+    /// cas-4fd6: the retry class comes from the code the daemon names, read
+    /// through the real request, not from words in the message. A NotLive owner
+    /// and an old daemon are never retried; six contention refusals still leave
+    /// the first attempt, then an exact-dispatch mismatch is terminal; a
+    /// transient failure whose text merely mentions a permanent code is retried.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_retry_class_is_the_daemons_code_not_its_text_cas_4fd6() {
+        use crate::ui::factory::{
+            ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, PROTOCOL_VERSION, SessionState,
+            decode_length, encode_message, gui_socket_path, local_gui_capabilities,
+        };
+        use std::io::{Read, Write};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let owner = "verifier_factory_owner: live registered supervisor required (agent a is supervisor with status Shutdown)";
+        let busy = "verifier_factory_store_busy: held";
+        let mut cases: Vec<(&str, Vec<Option<&str>>, Result<(), u32>)> = vec![
+            ("owner", vec![Some(owner)], Err(1)),
+            ("old-daemon", vec![None], Err(1)),
+            ("text-only", vec![Some("verifier_factory_launch_failed: see verifier_factory_scope"); 4], Err(4)),
+        ];
+        let mut contended = vec![Some(busy); 6];
+        contended.push(Some("verifier_handoff_not_active: vdispatch-test"));
+        cases.push(("contended", contended, Err(1)));
+        for (session, replies, expected) in cases {
+            let socket = gui_socket_path(session);
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let connections = replies.len();
+            let daemon = std::thread::spawn(move || {
+                for reply in replies {
+                    let (mut client, _) = listener.accept().unwrap();
+                    let capabilities = if reply.is_some() { local_gui_capabilities() } else { vec![] };
+                    client.write_all(&encode_message(&DaemonMessage::Welcome {
+                        session_name: session.into(),
+                        state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                            epic_title: None, cols: 80, rows: 24 },
+                        scrollback: None, protocol_version: PROTOCOL_VERSION,
+                        capabilities, pane_bootstrap: vec![],
+                    }).unwrap()).unwrap();
+                    let Some(message) = reply else { continue };
+                    let mut header = [0; FRAME_HEADER_SIZE];
+                    client.read_exact(&mut header).unwrap();
+                    let mut body = vec![0; decode_length(&header)];
+                    client.read_exact(&mut body).unwrap();
+                    let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                    else { panic!("unexpected factory control") };
+                    client.write_all(&encode_message(&DaemonMessage::Error {
+                        message: message.into(), client_ref: Some(dispatch_id),
+                    }).unwrap()).unwrap();
+                }
+            });
+            let attempts = std::cell::Cell::new(0);
+            let result = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::from_secs(5), || {
+                attempts.set(attempts.get() + 1);
+                super::factory_launch::request(session, "vdispatch-test")
+            });
+            assert_eq!(result.map_err(|(spent, _)| spent), expected, "{session}");
+            assert_eq!(attempts.get() as usize, connections, "{session}: one connection per attempt");
+            daemon.join().unwrap();
+        }
     }
 
     #[test]

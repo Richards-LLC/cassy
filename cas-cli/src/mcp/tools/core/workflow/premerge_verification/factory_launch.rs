@@ -252,6 +252,57 @@ mod authority_tests {
         let holder_site = refused.split_whitespace().find_map(|field| field.strip_prefix("holder_site="));
         assert_eq!(holder_site, Some(format!("{}:{}", file!(), site).as_str()));
     }
+
+    /// cas-4fd6: a supervisor row still marked active whose process is gone
+    /// is not a live owner; the status alone said it was.
+    #[test]
+    fn owner_whose_process_is_gone_cannot_launch_cas_4fd6() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut harness = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        owner.pid = Some(harness.id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut owner, harness.id());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal)
+            .unwrap();
+        owner_authority(&core).expect("an owner whose process runs is live");
+        harness.kill().unwrap();
+        harness.wait().unwrap();
+        let refused = owner_authority(&core).unwrap_err();
+        assert!(refused.starts_with("verifier_factory_owner:"), "{refused}");
+    }
+
+    /// cas-4fd6: the refusal named the whole agent row with Debug, putting its
+    /// metadata and account paths in the attention notice.
+    #[test]
+    fn refused_owner_is_named_by_id_not_by_its_whole_row_cas_4fd6() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        owner.metadata.insert("account_dir".into(), "/accounts/unique-4fd6-secret".into());
+        let agents = core.open_agent_store().unwrap();
+        agents.register(&owner).unwrap();
+        agents.graceful_shutdown(&owner.id).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal)
+            .unwrap();
+        let refused = owner_authority(&core).unwrap_err();
+        assert!(refused.starts_with("verifier_factory_owner:"), "{refused}");
+        assert!(refused.contains(&owner.id), "{refused}");
+        assert!(!refused.contains("unique-4fd6-secret"), "{refused}");
+    }
 }
 
 #[cfg(test)]

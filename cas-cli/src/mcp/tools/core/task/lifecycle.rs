@@ -254,7 +254,15 @@ fn foreign_task_branch_start_refusal(
 /// Keep the resolved SHA immutable across branch preparation and checkout.
 fn worker_start_target_base(git: &GitOperations, target: &str) -> Result<String, String> {
     let fresh = git.resolve_fresh_base(target).map_err(|error| error.to_string())?;
-    Ok(git.resolve_commit(&format!("refs/remotes/origin/{target}")).unwrap_or(fresh.sha))
+    let base = git.resolve_commit(&format!("refs/remotes/origin/{target}")).unwrap_or(fresh.sha);
+    // cas-8bc4: resolve_fresh_base reports an absent branch as an empty sha;
+    // never hand git an empty start point.
+    if base.is_empty() {
+        return Err(format!(
+            "target branch `{target}` exists neither locally nor on origin; ask the supervisor to create or push it from the project base, then retry task start"
+        ));
+    }
+    Ok(base)
 }
 
 fn checkout_task_beside_parked_delivery(

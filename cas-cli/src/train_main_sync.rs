@@ -129,7 +129,8 @@ fn notify_deliveries(
     main_sha: &str,
     tip: &str,
 ) {
-    let (Ok(children), Ok(agents)) = (tasks.get_subtasks(&train.id), crate::store::open_agent_store(cas_dir).and_then(|s| s.list(None))) else {
+    let Ok(children) = tasks.get_subtasks(&train.id) else { return };
+    let Ok(agents) = crate::store::open_agent_store(cas_dir).map_err(anyhow::Error::from).and_then(|s| Ok(s.list(None)?)) else {
         return;
     };
     let detail = format!(

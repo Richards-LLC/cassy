@@ -900,7 +900,8 @@ large_artifact_dir = \"before\"\n",
         let inside = project.join("scratch");
         std::fs::create_dir_all(&inside).unwrap();
         let both = format!("{},{}", parent.display(), inside.display());
-        set_project_write_roots(&both, &user, PANE_CGROUP).unwrap();
+        // The real user store, the one the getter and the hook read.
+        set_project_write_roots(&both, &crate::config::host_config_dir(), PANE_CGROUP).unwrap();
         let report = write_roots_report(&project).unwrap();
         let ignored = report["ignored_roots"].as_array().expect("the getter reports ignored roots");
         assert_eq!(ignored.len(), 1, "{report}");

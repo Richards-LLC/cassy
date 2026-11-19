@@ -230,9 +230,8 @@ pub(crate) fn set_project_write_roots(
     Ok(WriteRootsChange { previous, stored, migrated, dropped })
 }
 
-/// `cas config get factory.write_roots`: the config.toml value, plus a
-/// note on stderr for roots still honoured from the cas-3147 operator policy file.
-pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+/// What the write-roots getter reports for one project.
+pub(crate) fn write_roots_report(cas_root: &Path) -> anyhow::Result<serde_json::Value> {
     let config = crate::config::Config::load(cas_root)?;
     let roots = config.factory().write_roots;
     let legacy: Vec<String> = load_operator_policy(cas_root)
@@ -249,18 +248,28 @@ pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Res
     .map(|root| root.display().to_string())
     .filter(|root| !roots.contains(root))
     .collect();
+    Ok(serde_json::json!({
+        "key": "factory.write_roots",
+        "value": roots,
+        "legacy_operator_policy_roots": legacy,
+        "every_project_roots": every_project,
+    }))
+}
+
+/// The getter for the write roots: the config.toml value, plus a
+/// note on stderr for roots still honoured from the cas-3147 operator policy file.
+pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    let report = write_roots_report(cas_root)?;
     if cli.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "key": "factory.write_roots",
-                "value": roots,
-                "legacy_operator_policy_roots": legacy,
-                "every_project_roots": every_project,
-            })
-        );
+        println!("{report}");
         return Ok(());
     }
+    let strings = |key: &str| -> Vec<String> {
+        report[key].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect()
+    };
+    let roots = strings("value");
+    let every_project = strings("every_project_roots");
+    let legacy = strings("legacy_operator_policy_roots");
     println!("{}", roots.join(","));
     if !every_project.is_empty() {
         eprintln!("note: user-level, Downloads and Claude memory roots also apply:");
@@ -868,6 +877,20 @@ large_artifact_dir = \"before\"\n",
         assert!(effective.contains(&parent), "configured user parent disappeared from the project get/hook view");
         let cli = <Cli as clap::Parser>::parse_from(["cas", "--json", "config", "get", "factory.write_roots"]);
         execute_get_write_roots(&cli, &project).unwrap();
+
+        // A user-level root inside this project's Cassy directory is accepted
+        // when set from the user store, but enforcement ignores it here:
+        // the getter must list it, with its reason, not hide it.
+        let inside = project.join("scratch");
+        std::fs::create_dir_all(&inside).unwrap();
+        let both = format!("{},{}", parent.display(), inside.display());
+        set_project_write_roots(&both, &user, PANE_CGROUP).unwrap();
+        let report = write_roots_report(&project).unwrap();
+        let ignored = report["ignored_roots"].as_array().expect("the getter reports ignored roots");
+        assert_eq!(ignored.len(), 1, "{report}");
+        assert_eq!(ignored[0]["root"], inside.display().to_string(), "{report}");
+        assert!(ignored[0]["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{report}");
+        assert!(report["every_project_roots"].as_array().unwrap().iter().any(|root| root == &parent.display().to_string()), "{report}");
     }
 
     /// GH #1182: setting roots refuses inside a factory worker (or server)

@@ -3139,7 +3139,6 @@ fn issue_server_verifier_handoff_with_conn(
             "verifier handoff requires the exact active owned dispatch".to_string(),
         ));
     }
-
     let issued_at = now;
     // The work deadline can elapse while a bound verifier is still reviewing.
     // Keep credential lifetime separate, with its original hard 30-minute cap.
@@ -5088,6 +5087,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn replacement_handoff_claims_a_pending_dispatch_past_its_deadline_gh_2135() {
+        let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-expired",
+            "owner",
+            "owner",
+            Utc::now() - Duration::minutes(5),
+        )
+        .expect("dispatch");
+        issue_server_verifier_handoff(dir.path(), "cas-handoff-expired", &dispatch.id, "owner", "replacement")
+            .expect("replacement handoff on an expired pending dispatch");
+        let bound = bind_server_verifier_handoff(dir.path(), "owner", "replacement-child")
+            .expect("replacement claims the exact dispatch");
+        assert_eq!(bound.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+        let claimed = get_verification_dispatch(dir.path(), &dispatch.id).unwrap();
+        assert_eq!(claimed.state, VerificationDispatchState::Claimed);
+        assert!(claimed.deadline_at > Utc::now());
     }
 
     #[test]

@@ -184,23 +184,34 @@ resolve_version() {
 
   info "Fetching latest release..."
   local release_url="${GITHUB_API}/repos/${REPO}/releases/latest"
-  local response
+  local response github_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  local redirect_url="https://github.com/${REPO}/releases/latest"
 
-  if command -v curl &>/dev/null; then
-    response="$(curl -fsSL "$release_url" 2>/dev/null)" || {
-      error "Failed to fetch latest release from $release_url"
-      error "Check your internet connection or set CAS_VERSION manually."
-      exit 1
-    }
-  elif command -v wget &>/dev/null; then
-    response="$(wget -qO- "$release_url" 2>/dev/null)" || {
-      error "Failed to fetch latest release from $release_url"
-      exit 1
-    }
-  else
-    error "Neither curl nor wget found. Install one and try again."
+  # cas-d4ed: the unauthenticated API quota (60/hour per address) is spent on
+  # shared CI runners. Without a token the tag comes from the releases/latest
+  # redirect, which has no quota; with a token the API call is authenticated
+  # and retried, and a failure names the HTTP status and body.
+  if [ -z "$github_token" ] && command -v curl &>/dev/null; then
+    local effective
+    effective="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$redirect_url" 2>/dev/null)" || effective=""
+    case "$effective" in
+      */releases/tag/*) VERSION="${effective##*/}" ;;
+    esac
+  fi
+  if [ -n "$VERSION" ]; then
+    return
+  fi
+
+  local body_path error_path
+  body_path="$(mktemp)"
+  error_path="$(mktemp)"
+  if ! fetch_release_receipt "$release_url" "$body_path" "$error_path" "the latest release"; then
+    rm -f "$body_path" "$error_path"
+    error "Set CAS_VERSION=v2.0.0 (or your target version), or set GITHUB_TOKEN, and try again."
     exit 1
   fi
+  response="$(cat "$body_path")"
+  rm -f "$body_path" "$error_path"
 
   # Parse tag_name from JSON (works without jq)
   VERSION="$(echo "$response" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
@@ -217,7 +228,7 @@ resolve_version() {
 # ---------------------------------------------------------------------------
 
 fetch_release_receipt() {
-  local receipt_url="$1" body_path="$2" error_path="$3"
+  local receipt_url="$1" body_path="$2" error_path="$3" what="${4:-the published release receipt}"
   local github_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   local attempt status fetch_status
   # Bash 3.2 treats an empty array as unset under nounset; expand only if set.
@@ -259,7 +270,7 @@ fetch_release_receipt() {
     fi
   done
 
-  error "Failed to fetch the published release receipt: $receipt_url (HTTP status: $status)"
+  error "Failed to fetch $what: $receipt_url (HTTP status: $status)"
   if [ -s "$body_path" ]; then
     error "GitHub API response body:"
     while IFS= read -r line; do

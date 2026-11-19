@@ -9014,10 +9014,10 @@ impl CasCore {
             // branch, not the default branch. Release closes carry their own
             // batch receipt, so only a close outside one is measured here.
             let unshipped = if crate::qa_batch::release_close::target(&self.cas_root, &task.id).is_none() {
-                resolve_close_gate_default_branch(&close_project_root).ok().and_then(|default_branch| {
-                    epic_branch_commits_absent_from_default(&close_project_root, &target_branch, &default_branch)
-                        .map(|count| (default_branch, count))
-                })
+                match epic_shipping(&close_project_root, &target_branch) {
+                    EpicShipping::Unshipped { default_branch, commits } => Some((default_branch, commits)),
+                    _ => None,
+                }
             } else {
                 None
             };
@@ -19442,7 +19442,45 @@ fn epic_branch_commits_absent_from_default(
             worst = Some(worst.map_or(count, |current| current.max(count)));
         }
     }
-    worst.filter(|count| *count > 0)
+    worst
+}
+
+/// cas-9452: whether an epic's closing branch has reached the default branch.
+/// Close refuses on `Unshipped`; `epic_status` prints the same answer as a
+/// token so the board shows merged-to-epic apart from shipped before anyone
+/// tries to close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EpicShipping {
+    Shipped { default_branch: String },
+    Unshipped { default_branch: String, commits: usize },
+    Unknown,
+}
+
+pub(crate) fn epic_shipping(repo_path: &std::path::Path, target_branch: &str) -> EpicShipping {
+    let Ok(default_branch) = resolve_close_gate_default_branch(repo_path) else {
+        return EpicShipping::Unknown;
+    };
+    if target_branch == default_branch {
+        return EpicShipping::Shipped { default_branch };
+    }
+    match epic_branch_commits_absent_from_default(repo_path, target_branch, &default_branch) {
+        Some(0) => EpicShipping::Shipped { default_branch },
+        Some(commits) => EpicShipping::Unshipped { default_branch, commits },
+        None => EpicShipping::Unknown,
+    }
+}
+
+impl EpicShipping {
+    /// One machine-readable line for `epic_status`.
+    pub(crate) fn status_token(&self) -> String {
+        match self {
+            Self::Shipped { default_branch } => format!("epic_shipping: shipped default={default_branch}"),
+            Self::Unshipped { default_branch, commits } => {
+                format!("epic_shipping: unshipped commits={commits} default={default_branch}")
+            }
+            Self::Unknown => "epic_shipping: unknown".to_string(),
+        }
+    }
 }
 
 /// cas-cf64: resolve the real integration target for a non-epic task with

@@ -68,11 +68,14 @@ impl Default for DistillConfig {
 }
 
 /// What a pass did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct DistillReport {
     pub sources_scanned: usize,
     /// Sources the ledger says need (re-)distillation this pass.
     pub sources_pending: usize,
+    /// Dry-run plan: all pending paths in the same order a real pass processes
+    /// them, before applying `max_sources_per_pass`.
+    pub pending_sources: Vec<String>,
     /// Sources this pass tried to distill (successes plus failures).
     pub sources_attempted: usize,
     /// Sources distilled successfully and recorded as `ingested`. Disjoint from
@@ -244,6 +247,14 @@ fn run_distillation_inner(
     // A dry run stops here: it has classified everything (which is the useful
     // answer) without prompting, committing, or writing a ledger row.
     if config.dry_run {
+        report.pending_sources = classification
+            .to_ingest
+            .iter()
+            .map(|candidate| candidate.source.file_path.clone())
+            .collect();
+        report.sources_deferred = report
+            .sources_pending
+            .saturating_sub(config.max_sources_per_pass);
         report.notes.extend(
             classification
                 .deleted

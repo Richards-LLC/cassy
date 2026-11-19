@@ -124,7 +124,7 @@ Base URL: the fixture server playwright.config.ts starts on this checkout's own 
 
   1. From a fresh page, navigate to /?fixture=connection-failed-retry.
     - expect: The page says “Connection failed — retry available.”
-    - expect: Connection attempts lists two earlier attempts, failed Attempt 3, and “The machine did not answer its hub address.”
+    - expect: Connection attempts lists two earlier attempts, failed Attempt 3, “The machine did not answer its hub address.”, and the last successful connection (not measured in this visit).
   2. Locate and click Retry, then locate and click Diagnose.
     - expect: Both recovery controls are visible and enabled and can be activated without a page error.
     - expect: The failure explanation remains readable; the fixture stubs recovery callbacks, so no successful reconnection or diagnostic navigation is expected.

@@ -1562,6 +1562,86 @@ fn cas_bfa1_epic_for_branch_prefers_live_owner_and_bounds_lookup() {
     );
 }
 
+/// cas-ddbe: the director's per-refresh read parsed the deliverables of every closed
+/// task. A finished, non-epic task now carries them only when they say it closed as
+/// evidence-only or a negative result, which is all the board reads from them, so
+/// what counts as delivered is unchanged.
+#[test]
+fn task_heads_read_drops_finished_deliverables_the_board_never_reads_cas_ddbe() {
+    let (_temp, store) = create_test_store();
+    let batch = || cas_types::IntegrationBatchEvidence {
+        branch: "b".into(), tip: "t".into(), base: "x".into(), delivered_head: "d".into(),
+        supervisor_id: "s".into(), recorded_at: chrono::Utc::now(),
+    };
+    let mut bulky = Task::new("cas-ddbe1".into(), "Closed with receipts".into());
+    bulky.status = TaskStatus::Closed;
+    bulky.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "/r".into(), target_branch: "epic/x".into() });
+    bulky.deliverables.integration_batch = Some(batch());
+    let mut evidence = Task::new("cas-ddbe2".into(), "Closed as evidence".into());
+    evidence.status = TaskStatus::Closed;
+    evidence.deliverables.evidence_only = Some(cas_types::EvidenceOnlyEvidence {
+        artifact_path: "/a".into(), reference: "pr".into(), rationale: "r".into(), supervisor_id: "s".into(),
+        supervisor_name: "sup".into(), commit_sha: "c".into(), base_sha: "b".into(), paths: vec![],
+    });
+    let mut epic = Task::new("cas-ddbe3".into(), "Closed epic".into());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::Closed;
+    epic.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "/r".into(), target_branch: "epic/y".into() });
+    let mut open = Task::new("cas-ddbe4".into(), "Open".into());
+    open.deliverables.integration_batch = Some(batch());
+    for task in [&bulky, &evidence, &epic, &open] {
+        store.add(task).unwrap();
+    }
+    let (tasks, _, _) = store.list_heads_with_parent_deps_and_start_gates().unwrap();
+    let head = |id: &str| tasks.iter().find(|row| row.id == id).unwrap();
+    assert!(head("cas-ddbe1").deliverables.work_target.is_none() && head("cas-ddbe1").deliverables.integration_batch.is_none(), "a finished task's unread deliverables are not carried");
+    assert!(head("cas-ddbe1").counts_as_delivered(), "still counts as delivered");
+    assert!(head("cas-ddbe2").deliverables.evidence_only.is_some() && head("cas-ddbe2").counts_as_delivered(), "evidence-only survives");
+    assert!(head("cas-ddbe3").deliverables.work_target.is_some(), "an epic keeps its deliverables for its branch");
+    assert!(head("cas-ddbe4").deliverables.integration_batch.is_some(), "an open task keeps its deliverables");
+}
+
+/// cas-ddbe: the director reads every task header each refresh, but a few move
+/// between two refreshes. A repeat read takes from the table only the rows whose
+/// mutation revision moved, and returns exactly what a cold read of a second
+/// store on the same database returns.
+#[test]
+fn task_heads_read_takes_only_the_rows_that_changed_cas_ddbe() {
+    let (temp, store) = create_test_store();
+    for n in 0..30 {
+        let mut task = Task::new(format!("cas-ddbe-r{n:02}"), format!("Task {n}"));
+        task.priority = Priority(n % 3);
+        store.add(&task).unwrap();
+    }
+    let same_as_cold = |store: &SqliteTaskStore| {
+        let (warm, _, _) = store.list_heads_with_parent_deps_and_start_gates().unwrap();
+        let cold_store = SqliteTaskStore::open(temp.path()).unwrap();
+        let (cold, _, _) = cold_store.list_heads_with_parent_deps_and_start_gates().unwrap();
+        assert_eq!(warm.len(), cold.len());
+        for (a, b) in warm.iter().zip(&cold) {
+            assert_eq!((&a.id, a.status, a.priority.0, &a.title, a.updated_at), (&b.id, b.status, b.priority.0, &b.title, b.updated_at));
+        }
+        warm
+    };
+
+    same_as_cold(&store);
+    assert_eq!(store.last_heads_rows_read(), 30, "the first read takes every row");
+    same_as_cold(&store);
+    assert_eq!(store.last_heads_rows_read(), 0, "an unchanged table is not read again");
+
+    let mut moved = store.get("cas-ddbe-r07").unwrap();
+    moved.status = TaskStatus::InProgress;
+    moved.title = "Renamed".into();
+    store.update(&moved).unwrap();
+    store.add(&Task::new("cas-ddbe-new".into(), "Added later".into())).unwrap();
+    store.delete("cas-ddbe-r11").unwrap();
+    let after = same_as_cold(&store);
+    assert_eq!(store.last_heads_rows_read(), 2, "an updated row and an added row are read; a deleted one is dropped");
+    assert!(after.iter().any(|t| t.id == "cas-ddbe-r07" && t.status == TaskStatus::InProgress && t.title == "Renamed"));
+    assert!(after.iter().all(|t| t.id != "cas-ddbe-r11") && after.iter().any(|t| t.id == "cas-ddbe-new"));
+    assert!(after.windows(2).all(|w| w[0].priority.0 < w[1].priority.0 || (w[0].priority.0 == w[1].priority.0 && w[0].created_at >= w[1].created_at)), "priority, then newest first");
+}
+
 #[test]
 fn task_heads_read_carries_no_body_text_cas_5461() {
     let (_temp, store) = create_test_store();

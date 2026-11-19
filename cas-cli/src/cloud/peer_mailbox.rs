@@ -297,7 +297,7 @@ pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> R
     Ok(format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()))
 }
 
-fn split_message_intent(body: &str) -> (Option<PeerMessageKind>, &str) {
+pub(crate) fn split_message_intent(body: &str) -> (Option<PeerMessageKind>, &str) {
     let Some((line, rest)) = body.split_once('\n') else {
         return (None, body);
     };
@@ -469,16 +469,11 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         )
     };
     let attachments = render_attachments(&attachments, &message.project_id);
-    // A landing is a fact, not a question: it asks for nothing back.
-    let reply = if landing {
-        String::new()
-    } else {
-        format!(
-            "Reply with coordination action=message target={name}@{machine} summary=\"<one line>\" \
-             message=\"<reply>\" in_reply_to=<this message's notification id>.\n",
-            name = message.sender_name,
-        )
-    };
+    let reply = format!(
+        "Reply with coordination action=message target={name}@{machine} summary=\"<one line>\" \
+         message=\"<reply>\" in_reply_to=<this message's notification id>.\n",
+        name = message.sender_name,
+    );
     format!("{envelope}\n{origin}\n{reply}{attachments}\n{body}")
 }
 

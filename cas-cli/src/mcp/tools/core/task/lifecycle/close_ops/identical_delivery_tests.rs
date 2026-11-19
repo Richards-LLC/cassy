@@ -459,7 +459,7 @@ async fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             } else {
                 "imported();\nadded();\n"
             },
-            "chore: trim helper",
+            if rebound { "chore(cas-aaaa): trim helper" } else { "chore: trim helper" },
         );
         git(repo, &["checkout", "-q", "main"]);
         git(

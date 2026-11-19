@@ -248,6 +248,7 @@ struct Promotion {
 }
 
 mod peer;
+mod carryover;
 mod automatic;
 #[cfg(unix)]
 mod factory_launch;
@@ -596,7 +597,7 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub(crate) fn candidate_for_dispatch(
+fn original_candidate_for_dispatch(
     root: &Path,
     dispatch: &VerificationDispatch,
 ) -> Result<Option<Candidate>, String> {
@@ -632,6 +633,11 @@ pub(crate) fn candidate_for_dispatch(
         return Err("candidate does not match its immutable dispatch proof".into());
     }
     Ok(Some(candidate))
+}
+
+pub(crate) fn candidate_for_dispatch(root: &Path, dispatch: &VerificationDispatch) -> Result<Option<Candidate>, String> {
+    let Some(original) = original_candidate_for_dispatch(root, dispatch)? else { return Ok(None) };
+    Ok(carryover::mapped(root, dispatch, &original)?.or(Some(original)))
 }
 
 impl Candidate {
@@ -1289,6 +1295,9 @@ impl CasCore {
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
+        if let Some(approval) = carryover::reuse(self, task, repo, source, target, &digest, latest.as_ref())? {
+            return Ok(Some(approval));
+        }
         let mut inherited_supervisor_call = None;
         let mut drifted_dispatch = None;
         if let Some(dispatch) = latest.as_ref()
@@ -2036,6 +2045,13 @@ mod tests {
         let repeated = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next").unwrap().unwrap();
         assert_eq!(repeated.verdict_id, approval.verdict_id);
         assert_eq!(dispatch_count(), before);
+
+        // The carried identity must also authorize publication and close.
+        run(repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "publish carried delivery"]);
+        let landed = run(repo, &["rev-parse", "HEAD"]);
+        carried.promote(&landed).unwrap();
+        core.verify_premerge_promotion(&task, &dispatch, &approval.verdict_id).unwrap();
+        assert!(cycle::approved(&root, repo, &task, task.deliverables.factory_branch_anchor.as_deref().unwrap(), &landed).unwrap().is_some());
 
         // A new commit in reviewed code still needs a real new review.
         run(repo, &["checkout", "-q", "factory/worker"]);

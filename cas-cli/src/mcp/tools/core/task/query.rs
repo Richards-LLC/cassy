@@ -111,20 +111,22 @@ pub(super) fn task_show_notes(notes: &str, task_id: &str, clipping: &mut ReadCli
             clipping.excerpt(text, 100)
         ));
     }
+    // The newest published receipt by its own time, not by where the note
+    // landed after a sync; a receipt with no time only counts when none has one.
     if let Some(id) = notes
         .lines()
-        .rev()
         .filter_map(|line| line.strip_prefix("ARTIFACT_PROOF: "))
-        .find_map(|json| {
-            serde_json::from_str::<serde_json::Value>(json)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("id")
-                        .and_then(|id| id.as_str())
-                        .map(str::to_string)
-                })
+        .filter_map(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .filter_map(|value| {
+            let id = value.get("id")?.as_str()?.to_string();
+            let at = value
+                .get("created_at")
+                .and_then(|at| at.as_str())
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok());
+            Some((at, id))
         })
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, id)| id)
     {
         result.push_str(&format!("Latest artifact: {}\n", clipping.excerpt(&id, 80)));
     }

@@ -873,6 +873,32 @@ else: sys.exit(1)
         assert_eq!(dispatches(), before);
         assert_eq!(skipped["train_ci"]["skip_reason"], "already_dispatched");
         assert!(skipped["train_ci"]["run_url"].is_null());
+
+        // GH #2153: a repair without a run must not reuse the previous
+        // failed head's diagnostic. Build that history through the observer.
+        std::fs::remove_file(&fail_dispatch).unwrap();
+        assert!(Command::new(&gh).current_dir(repo)
+            .args(["workflow", "run", "full-validation.yml", "--ref", lane]).status().unwrap().success());
+        let mut listed: Value = serde_json::from_slice(&std::fs::read(&runs).unwrap()).unwrap();
+        let failed_run = listed.as_array_mut().unwrap().last_mut().unwrap();
+        failed_run["status"] = "completed".into();
+        failed_run["conclusion"] = "failure".into();
+        std::fs::write(&runs, listed.to_string()).unwrap();
+        observe(&root, "session").unwrap();
+        assert_eq!(read_state()["outcome"], "FAIL");
+        assert_eq!(read_state()["failure_kind"], "run_failed_before_receipt");
+        git(&["commit", "-q", "--allow-empty", "-m", "repair awaiting its run"]);
+        std::fs::write(&runs, "[]").unwrap();
+        let checked = Command::new("python3").current_dir(repo)
+            .arg(repo.join("scripts/train-ci.py"))
+            .args(["check", "--repo"]).arg(repo)
+            .args(["--branch", lane, "--out"]).arg(directory(&root, "cas-train").unwrap())
+            .arg("--gh").arg(&gh).output().unwrap();
+        assert_eq!(checked.status.code(), Some(1));
+        let pending: Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(pending["outcome"], "PENDING");
+        assert!(pending["pending_run_id"].is_null());
+        assert_eq!(pending["dispatch_command"], serde_json::json!(["gh", "workflow", "run", "full-validation.yml", "--ref", lane]));
     }
 
     #[test]

@@ -1806,6 +1806,14 @@ external status executable through `CAS_TEST_CLAUDE_BIN` in test builds.
 
 ### Factory worker account selection
 
+For a repair with recorded failing tests, `factory action=spawn_workers`
+accepts `class_audit` alongside `task_id` and `spawn_brief`. Supply a structural
+nextest selector such as `test(ui::list::) | test(ui::grid::)` covering the
+recorded failures. Cassy validates and stores the effective selector before
+enqueueing the worker; omitting it retains a previously recorded selector.
+A repair without either selector is refused, and park requires passing capped
+receipts covering the stored class.
+
 `factory action=spawn_workers` accepts an optional `config_dir` for all
 workers in the request. Claude workers use the tilde-expanded directory as
 `CLAUDE_CONFIG_DIR`; an explicit parameter wins over the requesting

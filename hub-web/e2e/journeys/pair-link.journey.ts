@@ -30,7 +30,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     const withheld = dialog.locator(".pair-withheld");
     await expect(withheld).toBeVisible();
     await expect(withheld).toBeVisible();
-    await expect(withheld).not.toContainText("cas hub");
+    await expect(withheld.locator("code")).toHaveCount(0);
     await expect(withheld).toBeInViewport({ ratio: 1 });
     // A read-only invitation cannot offer a control grant in the real bundle.
     await dialog.locator(".pair-technical > summary").click();

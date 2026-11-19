@@ -1082,6 +1082,13 @@ impl SqliteTaskStore {
     /// ~100 MB; reading them held the shared connection for 1-2 s a pass
     /// (cas-5461). Read a task's body with `get`.
     ///
+    /// A repeat read on the same store takes from the `tasks` table only the rows
+    /// whose trigger-kept mutation revision moved since the last one (cas-ddbe);
+    /// the rest come from the headers read before. In a live factory a few tasks
+    /// change between two refreshes out of thousands, so this replaced reading and
+    /// parsing every row each time. A store whose revisions cannot be read, and a
+    /// row with none, are read in full as before.
+    ///
     /// A finished task that is not an epic also drops its deliverables (cas-ddbe):
     /// parsing them for every closed row on every refresh dominated the read, and
     /// the board reads from them only whether the task closed as evidence-only or

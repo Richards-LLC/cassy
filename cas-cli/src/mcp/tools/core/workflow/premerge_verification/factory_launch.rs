@@ -41,9 +41,35 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> anyhow::Result<Daem
     Ok(serde_json::from_slice(&body)?)
 }
 
-pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
+use super::automatic::{LaunchError, Retry, retry_for_code, store_refusal};
+
+/// The daemon's answer, carried through the socket read as its own error type.
+#[derive(Debug)]
+struct Refused(String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// The daemon predates verifier launches: only an update changes that.
+#[derive(Debug)]
+struct Unsupported;
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("verifier_factory_unsupported: factory daemon lacks verifier launch support; update/relaunch the factory daemon")
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+pub(super) fn request(session: &str, dispatch: &str) -> Result<(), LaunchError> {
     let request = || -> anyhow::Result<()> {
-        let deadline = Instant::now() + VERIFIER_FACTORY_REQUEST_TIMEOUT;
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mut stream = UnixStream::connect(crate::ui::factory::gui_socket_path(session))?;
         match read_frame(&mut stream, deadline)? {
             DaemonMessage::Welcome {
@@ -52,9 +78,7 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
                 ..
             } if session_name == session
                 && capabilities.contains(&ProtocolCapability::VerifierLaunch) => {}
-            _ => anyhow::bail!(
-                "factory daemon lacks verifier launch support; update/relaunch the factory daemon"
-            ),
+            _ => return Err(Unsupported.into()),
         }
         stream.set_write_timeout(Some(deadline.saturating_duration_since(Instant::now())))?;
         stream.write_all(&encode_message(&ClientMessage::LaunchVerifier {
@@ -68,32 +92,64 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
                 DaemonMessage::Error {
                     message,
                     client_ref,
-                } if client_ref.as_deref() == Some(dispatch) => anyhow::bail!(message),
+                } if client_ref.as_deref() == Some(dispatch) => {
+                    return Err(Refused(message).into());
+                }
                 _ => {}
             }
         }
     };
-    request().map_err(|error| format!("verifier_factory_launch: {error:#}"))
+    request().map_err(|error| {
+        let retry = if let Some(Refused(message)) = error.downcast_ref::<Refused>() {
+            retry_for_code(message)
+        } else if error.is::<Unsupported>() {
+            Retry::Never
+        } else {
+            Retry::Backoff
+        };
+        LaunchError { retry, message: format!("verifier_factory_launch: {error:#}") }
+    })
 }
 
 /// The dispatch owner must be a live registered supervisor. cas-5d2e: a lookup
 /// that failed, such as on a busy store connection, keeps its own cause and
 /// code; only a caller who is not a live supervisor is reported as one.
+/// cas-4fd6: a row still marked active whose process is gone is not live, and
+/// a refusal names the agent and its status, never the whole row.
+// gate[G-158 verifier-launch]: Verifier launch owner must be a live registered supervisor with a running process
 fn owner_authority(core: &CasCore) -> Result<(), String> {
+    use crate::mcp::daemon::{LivenessOutcome, evaluate_liveness, pid_alive, pid_matches_fingerprint};
     use crate::mcp::tools::core::task::lifecycle::close_ops::SupervisorAuthorityError;
-    core.resolve_live_supervisor_authority()
-        .map(drop)
-        .map_err(|error| match &error {
-            SupervisorAuthorityError::NotLive(_) | SupervisorAuthorityError::NotRegistered { .. } => {
-                format!("verifier_factory_owner: live registered supervisor required ({error:?})")
-            }
-            SupervisorAuthorityError::StoreBusy(error) => {
-                format!("verifier_factory_store_busy: {error}")
-            }
-            SupervisorAuthorityError::Identity(error) | SupervisorAuthorityError::Store(error) => {
-                format!("verifier_factory_owner_lookup: {error}")
-            }
-        })
+    let owner = core.resolve_live_supervisor_authority().map_err(|error| match error {
+        SupervisorAuthorityError::NotLive(agent) => format!(
+            "verifier_factory_owner: live registered supervisor required (agent {} is {} with status {:?})",
+            agent.id, agent.role, agent.status
+        ),
+        SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
+            "verifier_factory_owner: live registered supervisor required (agent {caller_id} is not registered: {error})"
+        ),
+        SupervisorAuthorityError::StoreBusy(error) => format!("verifier_factory_store_busy: {error}"),
+        SupervisorAuthorityError::Identity(error) | SupervisorAuthorityError::Store(error) => {
+            format!("verifier_factory_owner_lookup: {error}")
+        }
+    })?;
+    let local = owner
+        .machine_id
+        .as_deref()
+        .is_none_or(|machine| machine == cas_types::Agent::get_or_generate_machine_id());
+    if local
+        && let LivenessOutcome::Dead { cc_pid, .. } =
+            evaluate_liveness(&owner, pid_alive, pid_matches_fingerprint)
+    {
+        return Err(crate::gates::tag(
+            "G-158",
+            format!(
+                "verifier_factory_owner: live registered supervisor required (agent {} process {cc_pid} is not running)",
+                owner.id
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// This local control carries identity only, never executable arguments or a root.
@@ -106,7 +162,7 @@ pub(crate) fn launch(
     let owner = crate::store::open_agent_store(root)
         .map_err(|e| e.to_string())?
         .get(&dispatch.owner_agent_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| store_refusal(&e))?;
     if owner.factory_session.as_deref() != Some(session)
         || cas_store::get_latest_verification_dispatch(root, &dispatch.task_id)
             .map_err(|e| e.to_string())?
@@ -185,6 +241,57 @@ mod authority_tests {
         assert!(refused.contains("holder_operation=slow_close_fixture"), "{refused}");
         let holder_site = refused.split_whitespace().find_map(|field| field.strip_prefix("holder_site="));
         assert_eq!(holder_site, Some(format!("{}:{}", file!(), site).as_str()));
+    }
+
+    /// cas-4fd6: a supervisor row still marked active whose process is gone
+    /// is not a live owner; the status alone said it was.
+    #[test]
+    fn owner_whose_process_is_gone_cannot_launch_cas_4fd6() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut harness = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        owner.pid = Some(harness.id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut owner, harness.id());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal)
+            .unwrap();
+        owner_authority(&core).expect("an owner whose process runs is live");
+        harness.kill().unwrap();
+        harness.wait().unwrap();
+        let refused = owner_authority(&core).unwrap_err();
+        assert!(refused.starts_with("verifier_factory_owner:"), "{refused}");
+    }
+
+    /// cas-4fd6: the refusal named the whole agent row with Debug, putting its
+    /// metadata and account paths in the attention notice.
+    #[test]
+    fn refused_owner_is_named_by_id_not_by_its_whole_row_cas_4fd6() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        owner.metadata.insert("account_dir".into(), "/accounts/unique-4fd6-secret".into());
+        let agents = core.open_agent_store().unwrap();
+        agents.register(&owner).unwrap();
+        agents.graceful_shutdown(&owner.id).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal)
+            .unwrap();
+        let refused = owner_authority(&core).unwrap_err();
+        assert!(refused.starts_with("verifier_factory_owner:"), "{refused}");
+        assert!(refused.contains(&owner.id), "{refused}");
+        assert!(!refused.contains("unique-4fd6-secret"), "{refused}");
     }
 }
 

@@ -147,16 +147,16 @@ fn cas_0660_a_withdrawn_director_merge_alert_is_not_surfaced() {
             let mut task = Task::new("cas-0660-hook".into(), "declined delivery".into());
             task.status = TaskStatus::AwaitingMerge;
             tasks.add(&task).unwrap();
-            let evidence = crate::ui::factory::director::MergeAlertEvidence {
-                task_id: task.id.clone(),
-                factory_branch: "factory/worker-cas-0660".into(),
-                factory_tip: "a".repeat(40),
-                unmerged_count: 1,
-                epic_sha: "b".repeat(40),
-                checked_epic_ref: "epic/train".into(),
-                ref_disagreement: None,
-                push_required: false,
-            };
+            let evidence = serde_json::json!({
+                "task_id": task.id,
+                "factory_branch": "factory/worker-cas-0660",
+                "factory_tip": "a".repeat(40),
+                "unmerged_count": 1,
+                "epic_sha": "b".repeat(40),
+                "checked_epic_ref": "epic/train",
+                "ref_disagreement": null,
+                "push_required": false,
+            });
             let context = serde_json::json!({
                 "merge_alert": evidence,
                 "retract_worker": null, "retract_task": null,

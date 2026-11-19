@@ -590,6 +590,21 @@ mod tests {
         epic.assignee = Some(supervisor.name.clone());
         epic.notes = "[2026-11-06 18:00] ✅ DECISION HOLD owner: operator; deferred desktop verification.".into();
         tasks.add(&epic).unwrap();
+        // GH #1904: a worker's older blocker note must not outrank the newer
+        // structured hold the supervisor recorded for the operator's decision.
+        let mut worker = Agent::new("worker-285a".into(), "zen-badger-285a".into());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some(SESSION.into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        let mut held = Task::new("cas-285a-held".into(), "Held delivery".into());
+        held.status = TaskStatus::Blocked;
+        held.assignee = Some(worker.name.clone());
+        held.notes = "[2026-11-06 17:00] 🚫 BLOCKER owner: worker; rebase failed.".into();
+        tasks.add(&held).unwrap();
+        let hold = |reason: &str| serde_json::json!({"blocked_hold": cas_types::TaskBlockedHold {
+            reason: reason.into(), who: supervisor.name.clone(), when: chrono::Utc::now(),
+        }});
+        tasks.patch_execution_state(&held.id, &hold("held for operator decision, do not page tonight")).unwrap();
         let mut child = Task::new("cas-e239-merged".into(), "All release work merged".into());
         child.status = TaskStatus::Closed;
         tasks.add(&child).unwrap();
@@ -608,6 +623,9 @@ mod tests {
         // operator ownership must not hide this genuine stall.
         epic.notes.push_str("\n\n[2026-11-06 18:01] 🚫 BLOCKER owner: worker; release repair has not started; operator check is complete.");
         tasks.update(&epic).unwrap();
+        // The same task held by the factory again (a newer hold naming the
+        // worker) is a stall like any other, so this episode still pages once.
+        tasks.patch_execution_state(&held.id, &hold("owner: worker; waiting on a rebase")).unwrap();
         for minutes in [181, 226, 271, 316] {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
         }

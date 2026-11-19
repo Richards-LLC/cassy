@@ -36,10 +36,10 @@ Base URL: the fixture server playwright.config.ts starts on this checkout's own 
 **Steps:**
 
   1. From a fresh page, navigate to /?fixture=conversation-ask.
-    - expect: A Waiting on you region contains the gate-run question and buttons Fix in-train and Ship with allowlist.
+    - expect: A Waiting on you region shows the gate-run question; its two option buttons, Fix in-train first and Ship with allowlist second, sit in the Question group inside the log.
     - expect: The thread contains the related blocker and attention.rs:212 evidence.
-  2. Click Fix in-train once.
-    - expect: The question in the log shows “You replied: Fix in-train”.
+  2. Click the first option (Fix in-train) once.
+    - expect: The Question group is answered: its option buttons leave and one sent reply shows the chosen option, not the other.
     - expect: A new operator turn says Fix in-train with a Sending… status.
     - expect: The pinned Waiting on you region and context attention list disappear; fail if the other option is submitted or the question remains unanswered.
 

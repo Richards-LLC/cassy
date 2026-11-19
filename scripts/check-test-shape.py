@@ -755,7 +755,17 @@ def rust_runtime_inputs(source):
     helpers = {}
     functions = []
     for i, token in enumerate(ts[:-2]):
-        if token.string or token.value != 'fn' or i + 2 not in ps:
+        if (token.string or token.value != 'fn' or ts[i + 1].string
+                or not re.fullmatch(r'[A-Za-z_]\w*', ts[i + 1].value)):
+            continue
+        scopes = [(left, right) for left, right in ps.items()
+                  if ts[left].value == '{' and left < i < right]
+        left, right = max(scopes, default=(-1, len(ts)))
+        declarations = helpers.setdefault(ts[i + 1].value, [])
+        declarations.append((left, right, False))
+        # Unsupported signatures still shadow an outer helper. They cannot
+        # disappear from binding lookup merely because they are generic.
+        if i + 2 not in ps:
             continue
         end = ps[i + 2]
         body = next((j for j in range(end + 1, len(ts))
@@ -771,15 +781,12 @@ def rust_runtime_inputs(source):
         forwarded = ''.join(t.value for t in ts[body + 1:ps[body]])
         typed = (signature == '->Identity' and len(parameters) == 2
                  and forwarded == f'Identity::exact({parameters[0]},{parameters[1]})')
-        scopes = [(left, right) for left, right in ps.items()
-                  if ts[left].value == '{' and left < i < right]
-        left, right = max(scopes, default=(-1, len(ts)))
         # Associated methods are not unqualified free-function bindings. Unknown
         # item scopes (including macros) cannot grant the exemption either.
         if left >= 0 and not (left >= 2 and ts[left - 2].value == 'mod'
                               or any(fn[2] == left for fn in functions)):
             typed = False
-        helpers.setdefault(ts[i + 1].value, []).append((left, right, typed))
+        declarations[-1] = (left, right, typed)
     # A familiar spelling alone cannot turn an unrelated/shadowed type into
     # the stability identity. Fail closed on ambiguous local declarations.
     identity_import, conflicting_identity = False, False

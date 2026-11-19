@@ -569,7 +569,11 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
     repair.status = TaskStatus::Open;
     repair.assignee = None;
     tasks.update(&repair).unwrap();
-    let service = crate::mcp::CasService::new(supervisor.clone(), None);
+    let service = crate::mcp::CasService::new(
+        supervisor.clone(),
+        #[cfg(feature = "mcp-proxy")]
+        None,
+    );
     let spawn = |class: Option<&str>| serde_json::from_value(serde_json::json!({
         "action": "spawn_workers", "count": 1, "cli": "claude", "force": true,
         "task_id": TASK, "spawn_brief": "Repair the recorded failure class.",

@@ -5124,6 +5124,32 @@ mod tests {
     }
 
     #[test]
+    fn refused_replacement_handoff_is_typed_not_a_parse_error_gh_2135() {
+        let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-foreign",
+            "owner",
+            "owner",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("dispatch");
+        let child = Agent::new_sub_agent("child".into(), "task-verifier".into(), "not-the-owner".into());
+        let error = issue_and_bind_server_verifier_handoff(
+            dir.path(),
+            "cas-handoff-foreign",
+            &dispatch.id,
+            "daemon:foreign",
+            &child,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, StoreError::VerifierHandoffNotActive { dispatch_id } if *dispatch_id == dispatch.id),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn server_handoff_cleanup_matches_only_exact_unbound_tool_use() {
         let (_store, dir) = create_test_store();
         let dispatch = create_verification_dispatch(

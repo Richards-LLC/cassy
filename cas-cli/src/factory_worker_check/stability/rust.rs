@@ -130,7 +130,14 @@ impl Inventory<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static INVENTORY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<(Vec<Test>, Vec<(String, String)>)> {
+    #[cfg(test)]
+    INVENTORY_BUILDS.set(INVENTORY_BUILDS.get() + 1);
     let tree = delivered_tree(repo, head).context("STABILITY_DELIVERY_TREE")?;
     let sources = tree.rust_sources(repo).context("STABILITY_SOURCE_READ")?;
     let mut parser = Parser::new();
@@ -339,4 +346,63 @@ mv "$count_file.initial" "$count_file" || exit $?
         if let Some(value) = value { wrapper.env(key, value); } else { wrapper.env_remove(key); }
     }
     wrapper
+}
+
+#[cfg(test)]
+mod close_latency_tests {
+    use super::*;
+
+    fn commit(repo: &Path) -> String {
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]).unwrap();
+        git(repo, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    #[test]
+    fn requirements_share_inventory_across_files_cas_bc33() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo = repo.path();
+        git(repo, &["init", "-qb", "main"]).unwrap();
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "mod a; mod b; mod c;\n").unwrap();
+        let paths: Vec<String> = ["a", "b", "c"].map(|name| format!("src/{name}.rs")).into();
+        for path in &paths {
+            std::fs::write(repo.join(path), "#[test] fn changed() { assert_eq!(1, 1); }\n").unwrap();
+        }
+        let base = commit(repo);
+        for path in &paths {
+            std::fs::write(repo.join(path), "#[test] fn changed() { assert_eq!(2, 2); }\n").unwrap();
+        }
+        let head = commit(repo);
+        let ranges = [(base.clone(), head.clone())];
+        INVENTORY_BUILDS.set(0);
+        let (tests, widened) = super::super::requirements(repo, &head, &base, &paths, Some(&ranges)).unwrap();
+        assert_eq!(tests.len(), 3);
+        assert!(widened.is_empty());
+        assert!(INVENTORY_BUILDS.get() <= 2, "inventory builds: {}", INVENTORY_BUILDS.get());
+    }
+
+    // Temporary real-incident measurement; removed after collecting both runs.
+    #[test]
+    fn c199_stability_profile_cas_bc33() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let head = "1955b2b7fe94410bf7e08acbc621320a70755aa9";
+        let target = git(repo, &["rev-parse", "598739a7d2^2"]).unwrap();
+        let ranges = [
+            (git(repo, &["rev-parse", "7b54e28b1c^1"]).unwrap(), "7b54e28b1c6557764385e5fbb0d08f171c6faa0a".into()),
+            ("598739a7d22754ce2fda5e1e7e5781542d018a27".into(), head.into()),
+        ];
+        let mut paths = BTreeSet::new();
+        for (base, tip) in &ranges {
+            paths.extend(git(repo, &["diff", "--name-only", base, tip]).unwrap().lines().map(str::to_string));
+        }
+        let paths: Vec<_> = paths.into_iter().collect();
+        INVENTORY_BUILDS.set(0);
+        let start = std::time::Instant::now();
+        let (tests, widened) = super::super::requirements(repo, head, &target, &paths, Some(&ranges)).unwrap();
+        eprintln!("G-61 changed-test discovery: elapsed={:?}; builds={}; paths={}; tests={}; widened={:?}; target={target}",
+            start.elapsed(), INVENTORY_BUILDS.get(), paths.len(), tests.len(), widened);
+        assert!(INVENTORY_BUILDS.get() <= 3, "inventory builds: {}", INVENTORY_BUILDS.get());
+    }
 }

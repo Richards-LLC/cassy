@@ -1615,10 +1615,6 @@ bug_families:
     tasks: [cas-0010]
     invariants: [FACTORY-ISOLATED-PLAYWRIGHT]
     journeys: [FACTORY-SPAWN]
-  operator-claim-evidence:
-    title: Supervisor operator claims carry current-turn tool evidence or explicit uncertainty
-    tasks: [cas-ab79]
-    journeys: [FACTORY-SUPERVISE]
   park-proof-after-checkpoint-rebase:
     title: Fresh park evaluates the measured delivery after a checkpoint rebase and ancestry restore
     tasks: [cas-28c5]
@@ -1673,11 +1669,6 @@ bug_families:
     title: Prepared train pushes and queue entries adopt full-suite proof only across verified release plumbing
     tasks: [cas-976f]
     journeys: [FACTORY-MERGE]
-  claude-visible-operator-evidence:
-    title: Claude Code supervisor replies use visible same-turn evidence without hidden tool-use IDs
-    statement: Matching numbers and SHAs pass; unsupported literals, failed or stale results, and clipboard claims without a fresh read remain refused.
-    tasks: [cas-1f5f]
-    journeys: [HUB-J5]
   deterministic-history-recovery:
     title: History recovery keeps fixed chronological timestamps and settles scroll before viewport checks
     tasks: [cas-4452f]
@@ -1997,14 +1988,6 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
-  CLI-RELEASE-EPIC-PROMOTION:
-    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
-    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and the auto-cut poll on a published lane, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
-    bug: {task: cas-e49f}
-  CI-LIGHT-RUNNER-CAPACITY:
-    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
-    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
-    bug: {task: cas-91b0}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -2814,6 +2797,14 @@ invariants:
     statement: Accounting report entries use saved ledger identities, numeric debit and credit rows, balanced totals, source-or-hypothetical amounts and visible revision changes; internal QBO IDs are never chart account numbers.
     check: Run scripts/test-accounting-journals.py through the shipped CLI with saved chart/source fixtures, including disabled or blank AcctNum, imbalance, invalid accounts, missing or mismatched sources and revised amounts. Open the generated simple and compound before-after page in light/dark desktop/phone, print and JS-disabled modes; inspect indentation, totals and memo placement.
     bug: {task: cas-b1f3}
+  CI-LIGHT-RUNNER-CAPACITY:
+    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
+    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
+    bug: {task: cas-91b0}
+  CLI-RELEASE-EPIC-PROMOTION:
+    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
+    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and the auto-cut poll on a published lane, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
+    bug: {task: cas-e49f}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS

@@ -716,6 +716,51 @@ async fn processed_shutdown_stops_idle_claude_and_codex_workers_under_a_spent_bu
     );
 }
 
+/// cas-94a0: standby stops a worker through the ordinary shutdown consumer, but
+/// the consumer must not release what the worker held: its in-progress task keeps
+/// its status and assignee so Resume can restore it. A worker that is not on
+/// standby is released exactly as before.
+#[tokio::test(flavor = "current_thread")]
+async fn a_standby_shutdown_keeps_the_held_task_and_an_ordinary_one_releases_it_cas_94a0() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let Fixture {
+        _dir,
+        mut daemon,
+        pids,
+        ..
+    } = processed_but_unexecuted_shutdown();
+    let cas_dir = daemon.app.cas_dir().to_path_buf();
+    let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+    for (id, holder) in [("cas-standby-held", "idle-claude"), ("cas-ordinary-held", "idle-codex")] {
+        let mut held = cas_types::Task::new(id.into(), format!("held by {holder}"));
+        held.assignee = Some(holder.into());
+        held.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&held).unwrap();
+    }
+    crate::factory_standby::enter(&cas_dir, &crate::factory_standby::Standby {
+        session: daemon.session_name.clone(),
+        since: chrono::Utc::now(),
+        handoff: None,
+        workers: vec![crate::factory_standby::HeldWorker {
+            name: "idle-claude".into(),
+            tasks: vec!["cas-standby-held".into()],
+            cli: None,
+        }],
+    }).unwrap();
+
+    daemon.process_pending_spawns().await;
+
+    for (name, pid) in &pids {
+        assert!(wait_until(Duration::from_secs(5), || !alive(*pid)), "{name} stops");
+    }
+    let kept = tasks.get("cas-standby-held").unwrap();
+    assert_eq!(kept.status, cas_types::TaskStatus::InProgress, "standby leaves the task in progress");
+    assert_eq!(kept.assignee.as_deref(), Some("idle-claude"), "and with its assignee");
+    let released = tasks.get("cas-ordinary-held").unwrap();
+    assert_ne!(released.assignee.as_deref(), Some("idle-codex"), "an ordinary shutdown still releases");
+    assert_ne!(released.status, cas_types::TaskStatus::InProgress);
+}
+
 /// Contention that outlasts even the shutdown's own budget must not leave
 /// the worker running: the process stops now, its retirement lands once the
 /// store frees up, and the row still reaches a terminal state.

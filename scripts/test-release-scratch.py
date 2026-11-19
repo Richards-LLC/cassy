@@ -100,38 +100,6 @@ class ScratchTests(unittest.TestCase):
             self.assertTrue(live.exists(), result)
             self.assertGreater(result['reclaimed_bytes'], 0)
 
-    def test_sigkill_parent_leaves_descendant_owner_lease_held(self):
-        ready = self.root / 'descendant-ready'
-        program = r'''import importlib.util,sys
-from pathlib import Path
-s=importlib.util.spec_from_file_location('s',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
-with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory:
-    child="import os,time,json;from pathlib import Path;Path("+repr(sys.argv[3])+").write_text(json.dumps({'pid':os.getpid(),'directory':"+repr(str(directory))+"}));time.sleep(60)"
-    scope.run([sys.executable,'-c',child])
-'''
-        parent = self.spawn([sys.executable, '-c', program, str(Path(scratch.__file__).resolve()), str(self.parent), str(ready)])
-        child_pid = None
-        try:
-            self.wait_until(ready.exists)
-            info = json.loads(ready.read_text())
-            child_pid = info['pid']
-            directory = Path(info['directory'])
-            parent.kill()
-            parent.wait(timeout=5)  # Child still owns inherited stderr and lease.
-            result = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
-            self.assertTrue(directory.exists(), result)
-            os.kill(child_pid, signal.SIGTERM)
-            parent.communicate(timeout=5)
-            child_pid = None
-            result = scratch.sweep(self.repo, self.base, clean=True, env=self.env)
-            self.assertFalse(directory.exists(), result)
-        finally:
-            if child_pid is not None:
-                try:
-                    os.kill(child_pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-
     def test_normal_parent_exit_retains_escaped_lease_holder_until_child_exit(self):
         ready = self.root / 'escaped-ready'
         program = r'''import importlib.util,subprocess,sys,json

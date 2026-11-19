@@ -651,7 +651,10 @@ pub fn import_peer_premerge_verification(
              ORDER BY created_at DESC,id DESC LIMIT 1",
             [&existing.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
         ).optional()?;
+        // The approval must also be the newer proof, or the superseded row
+        // would stay the task's latest dispatch.
         let stale_local = prior.is_none() && old_verdict.is_none() && existing.id != dispatch.id
+            && dispatch.requested_at > existing.requested_at
             && verification_dispatch_is_stale(&existing, Utc::now());
         let replaceable = stale_local || matches!(existing.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
             && existing.id != dispatch.id && dispatch.requested_at > existing.requested_at

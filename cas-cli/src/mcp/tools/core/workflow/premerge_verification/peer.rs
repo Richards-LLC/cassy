@@ -630,7 +630,7 @@ mod tests {
                 .unwrap().expect("the local dispatch passed its deadline");
             assert_eq!(timed_out.id, local.id);
             let stale = receipt(&task, &repaired, &old_sha, "stale-local");
-            let imported = ingest_peer_receipt(&root, &recipient, &message(&stale, 1)).unwrap();
+            let imported = ingest_peer_receipt(&root, &recipient, &message(&stale, 0)).unwrap();
             assert!(matches!(imported, PeerReceiptIngested::Imported), "{imported:?}");
             let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
             assert_eq!(current.id, stale.dispatch_id);

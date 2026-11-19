@@ -497,7 +497,8 @@ fn worker_edit_is_auto_approved_without_cas_root() {
 
 #[test]
 fn worker_edit_on_primary_checkout_is_denied_with_resolved_cas_root() {
-    let mut env = TestEnvGuard::new();
+    // A temp HOME keeps the host's operator write roots from covering the fixtures.
+    let mut env = TestEnvGuard::temp_home();
     set_role_env(&mut env, Some("worker"));
     env.set("CAS_FACTORY_MODE", "1");
     env.set("CAS_SESSION_ID", "registered-worker-session");
@@ -872,10 +873,10 @@ fn set_role_env(env: &mut TestEnvGuard, role: Option<&str>) {
 
 #[test]
 fn workspace_artifact_writes_are_project_scoped_and_legacy_is_read_only_cas_6ebf() {
-    let _env = TestEnvGuard::with_optional_vars(&[
-        ("CAS_AGENT_ROLE", Some("worker")),
-        ("CAS_CLONE_PATH", None),
-    ]);
+    // A temp HOME keeps the host's operator write roots from covering the fixtures.
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.remove("CAS_CLONE_PATH");
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().join("artifacts");
     let a = temp.path().join("one/project/.cas");

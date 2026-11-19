@@ -7139,6 +7139,21 @@ impl FactoryDaemon {
     /// a supervisor. Quiet acknowledgements/copies do not. QueueSelect debounces
     /// and caps directed messages; the existing pane gate protects busy turns,
     /// composers and drafts. A wake row remains pending until a handoff succeeds.
+    /// cas-94a0: on standby only the operator and CAS lifecycle events wake the
+    /// supervisor pane. Everything else stays queued in its inbox until resume.
+    fn standby_denies(&self, sender: &WakeSender, source: &str, prompt: &str) -> bool {
+        crate::factory_standby::active(self.app.cas_dir(), &self.session_name)
+            && Self::standby_wake_denied(sender, self.app.supervisor_name(), source, prompt)
+    }
+
+    /// The standby rule alone: every row except the operator's and CAS lifecycle events.
+    fn standby_wake_denied(sender: &WakeSender, supervisor_name: &str, source: &str, prompt: &str) -> bool {
+        !matches!(
+            Self::supervisor_wake_class(sender, supervisor_name, source, prompt),
+            Some(SupervisorWakeClass::Operator | SupervisorWakeClass::Lifecycle)
+        )
+    }
+
     fn row_is_supervisor_wake(
         sender: &WakeSender,
         supervisor_name: &str,
@@ -9151,6 +9166,10 @@ impl FactoryDaemon {
         let now = chrono::Utc::now();
         let recheck = chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap();
         let ready: Vec<_> = self.queue_jobs.inline_parked.iter().filter_map(|(id, (row, declined))| {
+            if row.target == "supervisor"
+                && self.standby_denies(&self.wake_sender_for(row.origin.as_ref()), &row.source, &row.prompt) {
+                return None;
+            }
             if now - *declined >= recheck {
                 return Some((*id, row.target.clone(), false)); // durable recheck is due
             }
@@ -10893,7 +10912,10 @@ impl FactoryDaemon {
                     let wake_slot_available = !supervisor_wake_sent;
                     // cas-9e81: keep the REASON, not just the verdict — it is
                     // persisted as the row's wake_attempt_detail below.
-                    let wake_decision = if inline_supervisor_body
+                    let wake_decision = if is_supervisor_target
+                        && self.standby_denies(&wake_sender, &queued.source, &queued.prompt) {
+                        WakeDecision::deny("supervisor is on standby: only the operator and CAS lifecycle events wake it")
+                    } else if inline_supervisor_body
                         && (self.app.mux.pane_inject_busy(&pane_target)
                             || self.app.mux.get(&pane_target).is_some_and(|pane| pane.is_composer_dirty())) {
                         WakeDecision::deny("inline pane has an active composer or prior inject")
@@ -17226,6 +17248,24 @@ mod tests {
     /// signal is an inbox file write, and an idle supervisor has no upcoming
     /// turn boundary at which to read it — which is why every observed merge
     /// drain came from a scheduled sweep instead of the promised push.
+    /// cas-94a0: on standby the operator and a CAS lifecycle row still wake the
+    /// pane; a peer supervisor's message and an ordinary worker row do not.
+    #[test]
+    fn standby_wakes_only_for_the_operator_and_lifecycle_cas_94a0() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, lifecycle_prompt_source,
+        };
+        let name = "cosmic-bear-43";
+        let lifecycle = lifecycle_prompt_source(LifecycleTransition::AwaitingMerge, 41);
+        let denied = |sender: &WakeSender, source: &str, prompt: &str| {
+            FactoryDaemon::standby_wake_denied(sender, name, source, prompt)
+        };
+        assert!(!denied(&WakeSender::Operator, "operator", "status?"));
+        assert!(!denied(&WakeSender::Daemon, &lifecycle, &awaiting_merge_payload("cas-f02b")));
+        assert!(denied(&supervisor_sender("peer-supervisor"), "peer", "can you merge this?"));
+        assert!(denied(&worker_sender("alice"), "alice", "done"));
+    }
+
     #[test]
     fn awaiting_merge_lifecycle_row_wakes_an_idle_supervisor_pane() {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::{

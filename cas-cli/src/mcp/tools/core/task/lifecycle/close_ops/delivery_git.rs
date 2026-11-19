@@ -21,11 +21,6 @@ pub(super) fn commit(repo: &Path, reference: &str) -> Option<String> {
     let key = (repo.to_path_buf(), reference.to_string());
     let cache = COMMITS.get_or_init(Default::default);
     if oid(reference) {
-        if FACTS.get().and_then(|facts| facts.lock().ok())
-            .is_some_and(|facts| facts.contains_key(&key))
-        {
-            return Some(reference.to_string());
-        }
         if let Some(value) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) { return Some(value); }
     }
     let value = super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"))?;

@@ -130,8 +130,12 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
                 return true;
             }
         }
-        if super::pre_tool::shell_heredoc_bodies_with_quoting(&context.command).iter().any(|(body, literal)| {
-            directories.iter().any(|cwd| script_constructs_store_path(body, cwd, *literal))
+        if super::pre_tool::shell_heredoc_bodies_with_consumer(&context.command).iter().any(|body| {
+            directories.iter().any(|cwd| {
+                script_constructs_store_path(&body.text, cwd, body.python_source)
+                    // A shell executes the body, including any substitution in it.
+                    || (body.shell_commands && shell_references_store(&body.text, cwd, depth + 1))
+            })
         }) { return true; }
     }
     false

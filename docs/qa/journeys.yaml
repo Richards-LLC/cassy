@@ -1894,6 +1894,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  CLI-RELEASE-EPIC-PROMOTION:
+    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
+    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and the auto-cut poll on a published lane, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
+    bug: {task: cas-e49f}
   CI-LIGHT-RUNNER-CAPACITY:
     statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
     check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
@@ -2771,7 +2775,7 @@ journeys:
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train, Verify the final tree, Resolve exact-SHA shipped deliveries and proof references, Preview member decisions before push and refuse unreviewed included deliveries or zero closable members, Read older-release missing-review residuals in the cut receipt, Read the release publication receipt]
   owners: [cas-cli/src/qa_batch.rs, cas-cli/src/qa_batch/release_close.rs, cas-cli/src/qa_batch/release_close_tests.rs, scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/release_reconcile.rs, crates/cas-store/src/release_reconcile_store.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs, cas-cli/src/cli/release_automation.rs, cas-cli/src/mcp/tools/core/task/release_train.rs, cas-cli/src/cli/release_notice_failure.rs, cas-cli/src/cli/release_adapters.rs, scripts/release.sh, scripts/release_changelog.py, scripts/test-release-completion.py, cas-cli/src/finding_triage.rs]
-  invariants: [CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
+  invariants: [CLI-RELEASE-EPIC-PROMOTION, CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SPAWN

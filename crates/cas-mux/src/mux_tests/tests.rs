@@ -28,6 +28,27 @@ fn private_permissions(path: &std::path::Path) {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn worker_host_starts_only_workers_and_cannot_restart_a_supervisor_cas_b674() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    let bin = home.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cli = bin.join("codex");
+    std::fs::write(&cli, "#!/bin/sh\nread line\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    env.set("PATH", &bin);
+    let mut mux = Mux::worker_host(MuxConfig {
+        cwd: home, workers: 1, worker_names: vec!["remote-worker".into()],
+        supervisor_name: "remote-owner".into(), factory_session: Some("owner-session".into()),
+        worker_cli: SupervisorCli::Codex, include_director: false, ..Default::default()
+    }).unwrap();
+    assert_eq!(mux.pane_ids(), ["remote-worker"]);
+    assert!(mux.restart_supervisor(&["remote-worker".into()], None).is_err());
+}
+
 #[test]
 fn cas_678d_round3_factory_hydration_obeys_server_and_env_denials() {
     let mut env = TestEnvGuard::temp_home();

@@ -646,12 +646,22 @@ impl Mux {
 
     /// Create a multiplexer with factory configuration
     pub fn factory(config: MuxConfig) -> Result<Self> {
+        Self::factory_with_supervisor(config, true)
+    }
+
+    /// Host workers for a supervisor running on another machine.
+    pub fn worker_host(config: MuxConfig) -> Result<Self> {
+        Self::factory_with_supervisor(config, false)
+    }
+
+    fn factory_with_supervisor(config: MuxConfig, include_supervisor: bool) -> Result<Self> {
         let mut mux = Self::configured_factory(&config);
+        if !include_supervisor { mux.supervisor_launch = None; }
 
         // Calculate pane sizes based on layout
         // Layout: [Workers] [Supervisor] [Director]
-        let num_panes = config.workers + 1 + if config.include_director { 1 } else { 0 };
-        let pane_cols = config.cols / num_panes as u16;
+        let num_panes = config.workers + usize::from(include_supervisor) + usize::from(config.include_director);
+        let pane_cols = config.cols / num_panes.max(1) as u16;
         let pane_rows = config.rows;
 
         // Create worker panes
@@ -694,6 +704,7 @@ impl Mux {
         }
 
         // Create supervisor pane (always uses main cwd)
+        if include_supervisor {
         let sup_teams = config.teams_configs.get(&config.supervisor_name);
         let supervisor = Pane::supervisor(
             &config.supervisor_name,
@@ -710,6 +721,7 @@ impl Mux {
             config.factory_session.as_deref(),
         )?;
         mux.add_pane(supervisor);
+        }
 
         // Create director pane (no PTY)
         if config.include_director {

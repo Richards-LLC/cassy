@@ -80,7 +80,7 @@ const AWAITING: &str = "awaiting";
 /// record, or one left by a server that has since exited, does not count; no
 /// record at all is a worker this daemon did not launch, whose tools are listed.
 pub(crate) fn tools_listed(cas_root: &Path, session: &str, worker: &str, pid_alive: impl Fn(u32) -> bool) -> bool {
-    let Some(record) = marker(cas_root, session, worker).and_then(|path| std::fs::read_to_string(path).ok()) else { return false };
+    let Some(record) = marker(cas_root, session, worker).and_then(|path| std::fs::read_to_string(path).ok()) else { return true };
     record.trim().parse::<u32>().is_ok_and(pid_alive)
 }
 

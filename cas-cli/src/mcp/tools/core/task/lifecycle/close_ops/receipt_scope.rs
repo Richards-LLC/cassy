@@ -155,7 +155,11 @@ pub(super) fn park_refusals(
     let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target);
     if proof_repo.join(".git").exists() {
         use crate::factory_worker_check::stability;
-        let (tests, widened) = match stability::requirements(proof_repo, head, target, changed_paths, delivery_ranges) {
+        let started = std::time::Instant::now();
+        let requirements = stability::requirements(proof_repo, head, target, changed_paths, delivery_ranges);
+        tracing::info!(task_id = %task.id, gate = "G-61", phase = "changed_test_discovery", head,
+            elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
+        let (tests, widened) = match requirements {
             Ok(requirements) => requirements,
             Err(error) => {
                 // A declared Rust test absent from every Cargo target is

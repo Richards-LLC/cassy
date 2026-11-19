@@ -164,6 +164,11 @@ pub(crate) fn proof_base(repo: &Path, target: &str, head: &str) -> Result<String
 /// on the same branch stays out).
 pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     ranges: Option<&[(String, String)]>) -> Result<Vec<Identity>> {
+    required_with_discovery(repo, head, target, paths, ranges, &mut rust::Discovery::default())
+}
+
+fn required_with_discovery(repo: &Path, head: &str, target: &str, paths: &[String],
+    ranges: Option<&[(String, String)]>, discovery: &mut rust::Discovery) -> Result<Vec<Identity>> {
     let base = proof_base(repo, target, head)?;
     let fallback = [(base.clone(), head.to_owned())];
     let owned = ranges.map(|ranges| delivery_commits(repo, ranges)).transpose()?;
@@ -172,11 +177,11 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     // After integration, keep the attributed base rather than collapsing proof
     // onto the already-landed tip. Otherwise compare with the current target.
     let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
-    let live = rust::changed(repo, net_base, head, paths)?.into_iter()
+    let live = discovery.changed(repo, net_base, head, paths)?.into_iter()
         .map(|test| test.identity).collect::<BTreeSet<_>>();
     let mut required = BTreeSet::new();
     for (from, to) in ranges {
-        required.extend(rust::changed(repo, from, to, paths)?.into_iter()
+        required.extend(discovery.changed(repo, from, to, paths)?.into_iter()
             .map(|test| test.identity).filter(|identity| live.contains(identity)));
     }
     required.extend(super::javascript::changed_tests(repo, net_base, head, paths, owned.as_ref())?);
@@ -198,8 +203,9 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
     ranges: Option<&[(String, String)]>) -> Result<(Vec<Identity>, Vec<super::widened::Scope>)> {
     let mut tests = BTreeSet::new();
     let mut widened = BTreeSet::new();
+    let mut discovery = rust::Discovery::default();
     for path in paths.iter().filter(|path| path.ends_with(".rs") || super::javascript::javascript(path)) {
-        match required(repo, head, target, std::slice::from_ref(path), ranges) {
+        match required_with_discovery(repo, head, target, std::slice::from_ref(path), ranges, &mut discovery) {
             Ok(selected) => tests.extend(selected),
             Err(error) => {
                 if error.downcast_ref::<rust::MissingTest>().is_some() { return Err(error); }

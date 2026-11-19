@@ -1353,6 +1353,76 @@ mod supervisor_handoff_tests {
 
     }
 
+    /// cas-516f: a predecessor with 100+ pending rows and 25 integrated
+    /// deliveries made the supervisor SessionStart 10-15 KB, past the harness
+    /// inline cap. Overflow must be pointed to by receipt path, not inlined.
+    #[test]
+    fn supervisor_startup_with_large_handoff_and_recovery_fits_budget() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        let mut ending = Agent::new("ending-id".into(), "ending".into());
+        ending.role = AgentRole::Supervisor;
+        ending.machine_id = Some(Agent::get_or_generate_machine_id());
+        ending.factory_session = Some("old-session".into());
+        agents.register(&ending).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(temp.path()).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(temp.path().join("feature.rs"), "delivery\n").unwrap();
+        git(&["add", "feature.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff-project'\n[qa]\nmode='batch'\n").unwrap();
+        for index in 0..25 {
+            let id = format!("cas-int-{index:02}");
+            let mut task = Task::new(id.clone(), "Merged delivery".into());
+            task.origin_project = Some("handoff-project".into());
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.parked_branch = Some(format!("factory/{id}"));
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "main".into() },
+                assignee: "ended-worker".into(), branch: format!("factory/{id}"), base_sha: base.clone(),
+            });
+            tasks.add(&task).unwrap();
+        }
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        for index in 0..120 {
+            queue.enqueue("requester", "ending", &format!("Pending ask {index}: approve delivery")).unwrap();
+        }
+        handle_session_end(
+            &HookInput { session_id: ending.id.clone(), reason: Some("compaction".into()), ..Default::default() },
+            Some(&root),
+        ).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "successor");
+        env.set("CAS_HOOK_HARNESS", "claude");
+        let output = handle_session_start(&HookInput { session_id: "successor-id".into(), ..Default::default() }, Some(&root)).unwrap();
+        let value = serde_json::to_value(&output).unwrap();
+        let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("Integrated deliveries to adopt/close (25)"), "{context}");
+        assert!(
+            context.len() <= SESSION_START_BUDGET_BYTES,
+            "supervisor SessionStart is {} bytes, over the {SESSION_START_BUDGET_BYTES}B budget",
+            context.len()
+        );
+        // The inline list is bounded; every row stays reachable by receipt path.
+        let receipt = context.lines().find_map(|l| l.strip_prefix("Recovery receipt: ")).expect("overflow must name its receipt");
+        let full = std::fs::read_to_string(receipt.trim()).unwrap();
+        for index in 0..25 {
+            assert!(full.contains(&format!("task action=close id=cas-int-{index:02} ")), "receipt lost row {index}");
+        }
+    }
+
     /// Replay a busy supervisor exiting before it sees phone or Violet mail.
     /// A successor may keep its name but starts a new factory session.
     #[test]

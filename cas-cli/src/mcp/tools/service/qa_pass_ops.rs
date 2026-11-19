@@ -636,7 +636,10 @@ impl CasService {
                 Some(id) => Some(id),
                 None => match matched(issue) {
                     Ok(existing) => existing,
-                    Err(_) => None,
+                    Err(error) => {
+                        failed.push(format!("{} ({error})", issue.problem));
+                        continue;
+                    }
                 },
             };
             if let Some(existing) = existing {

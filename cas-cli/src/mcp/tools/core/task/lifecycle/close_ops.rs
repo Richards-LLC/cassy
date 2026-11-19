@@ -16519,7 +16519,12 @@ fn anchored_delivery_content_gate_unbounded(
     // task-attributed content remains Unknown and therefore fail-closed.
     // cas-01dc: an ordinary empty checkpoint also carries its preceding
     // task delivery. Prove that attributed range, never emptiness itself.
-    let presence = if let Some(base) = crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch) {
+    let presence = if let Some((base, target)) = task_attribution::rebound_delivery_base(repo_path, parent_branch, anchor) {
+        // GH #2168: the fresh lane's first parent is already target content,
+        // not this task's delivery. A retained old start/receipt must not
+        // charge that imported history to the rebound delivery.
+        delivery_content_presence_on_target_for_paths(repo_path, anchor, &target, None, false, &[task_id], Some(&base))
+    } else if let Some(base) = crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch) {
         delivery_content_presence_from_base_on_target_for_task(repo_path, &base, anchor, anchor, parent_branch, task_id)
     } else if git_commit_parent_count(repo_path, anchor) >= 2
         || task_attribution::has_first_parent_tree_effect(repo_path, anchor) == Some(false)

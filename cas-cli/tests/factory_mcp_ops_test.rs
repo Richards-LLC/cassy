@@ -3257,7 +3257,10 @@ fn assert_respawned_on_the_held_task(env: &FactoryTestEnv) {
     assert_eq!(respawned[0].task_id.as_deref(), Some("cas-held"));
     let task = env.task_store().get("cas-held").expect("task");
     assert_eq!(task.status, TaskStatus::InProgress);
-    assert_eq!(task.assignee.as_deref(), respawned[0].worker_names.first().map(String::as_str));
+    // The replacement's name is reserved now; the daemon moves the assignment to
+    // it when it provisions the worker, and the task stays in progress until then.
+    assert_eq!(respawned[0].worker_names.len(), 1);
+    assert_ne!(respawned[0].worker_names[0], "alice", "a stopped worker's branch keeps its name");
 }
 
 /// cas-94a0 (a): standby, then Resume, on an in-progress task with a saved handoff.

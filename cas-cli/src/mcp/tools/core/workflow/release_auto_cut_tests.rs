@@ -103,6 +103,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
         if let Some(machine) = remote_owner {
             let mut remote = owner.clone();
             remote.machine_id = Some(machine.into());
+            remote.status = cas_types::AgentStatus::Active;
             open_agent_store(&peer_root).unwrap().register(&remote).unwrap();
         }
         notify_train_cuts(&peer_root, &none, now).unwrap();
@@ -112,7 +113,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
         let declined = attempt(&peer_root, &peer_train, LANE,
             &run(repo, &["rev-parse", LANE]), false, false, now).unwrap();
         let Outcome::Declined(reason) = declined else { panic!("peer auto-cut accepted") };
-        assert!(reason.contains("G-122"), "{reason}");
+        assert_eq!(crate::gates::codes_in(&reason), vec!["G-122"]);
     }
     config.set("release.auto_cut_max_per_day", "4").unwrap();
     config.save(&root).unwrap();
@@ -166,7 +167,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     poll(&none);
     poll(&none);
     assert!(frozen(), "a ready tip with fragments freezes, starting its train suite");
-    assert!(release_freeze::check_merge(&root, LANE, None).unwrap_err().contains("G-100"));
+    assert_eq!(crate::gates::codes_in(&release_freeze::check_merge(&root, LANE, None).unwrap_err()), vec!["G-100"]);
     assert!(store.get("cas-tr").unwrap().notes.contains(&crate::cloud::peers::machine_label_for(&root)));
     assert_eq!(wakes().len(), 1, "a missing notes draft wakes the supervisor once");
     let draft = notes_draft(&root, "cas-tr").unwrap();

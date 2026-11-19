@@ -267,6 +267,15 @@ pub(crate) fn mark_cut_trains(
             store.update(&row).map_err(|error| error.to_string())?;
         }
         rollover_children(cas_root, repo, store, &retired, &successor, cut_tip, included)?;
+        let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
+        for agent in agents.list(None).map_err(|error| error.to_string())? {
+            if agent.role != cas_types::AgentRole::Supervisor { continue; }
+            if let Some(session) = agent.factory_session.as_deref()
+                && crate::ops::fleet::pinned_epic(session).is_some_and(|id| retired.iter().any(|train| train.id == id))
+            {
+                crate::ops::fleet::restore_epic_focus(cas_root, session, &successor.id);
+            }
+        }
     }
     Ok(())
 }

@@ -6826,6 +6826,9 @@ impl CasCore {
         if ci_override { detail = crate::gates::override_tag("G-108", detail); }
         if dirty_override { detail = crate::gates::override_tag("G-138", detail); }
         if trunk_fallback { detail = crate::gates::override_tag("G-140", detail); }
+        if let Ok(actor) = self.get_agent_id() {
+            detail.push_str(&crate::ops::fleet::auto_focus_target(&cas_root, &actor, &worktree.parent_branch));
+        }
         Ok(Self::success(detail))
     }
 

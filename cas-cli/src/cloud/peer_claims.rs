@@ -1187,7 +1187,11 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
         .filter(|focus| !focus.trim().is_empty())
         && !targets.iter().any(|(id, _)| id == focus)
     {
-        targets.push((focus.clone(), false));
+        if owns_train_focus(cas_root, focus, agent_id) {
+            targets.push((focus.clone(), false));
+        } else {
+            release_epic_focus(cas_root, agent_id);
+        }
     }
     if let Some(keys) = me.as_ref().and_then(|agent| agent.metadata.get(META_SOURCE_CLAIMS))
         .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
@@ -1690,6 +1694,11 @@ pub fn spawn_peer_check(
 /// answer says whether a peer already works the epic; the focus is never
 /// refused. `None` when the project is not logged in.
 pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Option<Acquire> {
+    // A peer's local train pin never grants the owner's renewable Cloud claim.
+    if !owns_train_focus(cas_root, epic_id, agent_id) {
+        release_epic_focus(cas_root, agent_id);
+        return None;
+    }
     let claims = PeerClaims::for_project(cas_root)?;
     let Ok(agents) = crate::store::open_agent_store(cas_root) else {
         return Some(Acquire::Unavailable("the agent registry could not be opened".into()));
@@ -1719,6 +1728,13 @@ pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Optio
         answer => answer,
     };
     Some(answer)
+}
+
+fn owns_train_focus(root: &Path, epic_id: &str, agent_id: &str) -> bool {
+    let Some(epic) = crate::store::open_task_store(root).ok().and_then(|tasks| tasks.get(epic_id).ok()) else { return true };
+    if !crate::mcp::tools::core::task::release_train::is_release_train(&epic) { return true }
+    let Some(agent) = crate::store::open_agent_store(root).ok().and_then(|agents| agents.get(agent_id).ok()) else { return false };
+    epic.epic_verification_owner.as_deref().is_some_and(|owner| owner == agent.id || owner == agent.name)
 }
 
 /// Forget `agent_id`'s focus claim and release it in the cloud. Returns the

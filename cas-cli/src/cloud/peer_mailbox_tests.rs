@@ -998,3 +998,67 @@ async fn cas_4ac8_retry_after_blocks_later_chunks_ack_and_metadata_requests() {
         "HTTP escaped shared-client cooldown"
     );
 }
+
+/// The peer machine has a worker row, never an owner supervisor row. A released
+/// park claim must not make the owner's correction/result messages undeliverable.
+#[tokio::test]
+async fn train_owner_reaches_worker_host_without_a_local_supervisor_cas_b674() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    let machine = Machine::new();
+    let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
+    let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.epic_verification_owner = Some("remote-owner".into());
+    tasks.add(&train).unwrap();
+    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    machine.register("worker", "worker", AgentRole::Worker, "owner-session");
+    let agents = open_agent_store(&machine.cas).unwrap();
+    let mut worker = agents.get("worker").unwrap();
+    worker.machine_id = Some("prowl".into());
+    worker.parent_id = Some("remote-owner".into());
+    worker.metadata.insert("train".into(), train.id.clone());
+    worker.metadata.insert("train_owner".into(), "remote-owner".into());
+    worker.metadata.insert("train_owner_generation".into(), generation.clone());
+    agents.update(&worker).unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+    crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
+        .save_to_cas_dir(&machine.cas).unwrap();
+    // No active lease: downward corrections and final results outlive park.
+    Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"locks":[]})))
+        .mount(&server).await;
+    for (owner, stale, expected) in [("remote-owner", false, 1), ("intruder", false, 0), ("remote-owner", true, 0)] {
+        let owner_row = serde_json::json!({"id":"remote-owner", "name":"owner", "agent_type":"primary",
+            "status":"active", "machine_id":"soundwave", "last_heartbeat":chrono::Utc::now().to_rfc3339(),
+            "active_tasks":0, "user_id":"account", "metadata":{"role":"supervisor", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"soundwave"}});
+        let worker_row = serde_json::json!({"id":"worker", "name":"worker", "agent_type":"worker",
+            "status":"active", "machine_id":"prowl", "last_heartbeat":chrono::Utc::now().to_rfc3339(),
+            "active_tasks":0, "user_id":"account", "metadata":{"role":"worker", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"prowl",
+                "train":"cas-train", "train_owner":"remote-owner", "train_owner_generation":if stale {"old"} else {&generation}}});
+        let registry = Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[owner_row,worker_row]})))
+            .mount_as_scoped(&server).await;
+        let mut mail = message(&format!("{owner}-{stale}"), "worker", REPO, "result payload");
+        mail.sender_agent_id = owner.into();
+        mail.sender_session = Some("owner-session".into());
+        mail.sender_machine_id = Some("soundwave".into());
+        let mailbox = FakeMailbox { inbox:Mutex::new(vec![mail]), ..Default::default() };
+        let root = machine.cas.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            deliver_claimed_with_history(&mailbox, open_prompt_queue_store(&root).unwrap().as_ref(),
+                open_agent_store(&root).unwrap().as_ref(), REPO, &[], "owner-session", "prowl:owner-session",
+                &RecipientHistory::default(), Some((&root, "worker")), &|_,_| Ok(None), &|_,_| Ok(None), &|_,_| Ok(PeerAckOutcome::Delivered))
+        }).await.unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.delivered, expected, "owner={owner} stale={stale}: {report:?}");
+        drop(registry);
+    }
+    let rows = machine.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].target, "worker");
+    assert!(rows[0].prompt.contains("result payload"));
+    assert!(agents.list(None).unwrap().iter().all(|agent| agent.role != AgentRole::Supervisor));
+}

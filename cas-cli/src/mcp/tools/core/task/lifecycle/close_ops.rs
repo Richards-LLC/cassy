@@ -28836,8 +28836,10 @@ pub fn epic_only() {}\n";
         );
     }
 
-    // =================================================================    // cas-d0c0 (GH #144): three false-rejection mechanisms in this gate.
-    // =================================================================
+    // ========================================================================
+    // cas-d0c0 (GH #144): three false-rejection mechanisms in this gate.
+    // ========================================================================
+
     #[test]
     fn hunk_header_new_start_is_parsed() {
         assert_eq!(parse_hunk_new_start("@@ -1,3 +40,7 @@"), Some(40));
@@ -28936,13 +28938,15 @@ pub fn batch() {}
     #[test]
     fn lint_does_not_flag_section_banner_comment() {
         let banner = "\
-// =====================================================================// Distilled-knowledge index injection (EPIC cas-7d31 / cas-86b2)
+// ============================================================================
+// Distilled-knowledge index injection (EPIC cas-7d31 / cas-86b2)
 //
 // SessionStart injects the knowledge *index* and toolizes the body: page
 // titles + snippets + ids go into the prompt, prose does not. These tests pin
 // the three properties that make that shape safe — no bodies, bounded size,
 // and byte-stability for prompt caching.
-// =====================================================================pub fn tests_go_here() {}
+// ============================================================================
+pub fn tests_go_here() {}
 ";
         let dir = init_repo_with_diff_for_file("src/banner.rs", banner);
         assert!(

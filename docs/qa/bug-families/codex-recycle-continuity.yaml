@@ -1,0 +1,5 @@
+codex-recycle-continuity:
+  title: Worker recycling preserves assignments through startup and excludes predecessor context usage
+  tasks: [cas-b39fa]
+  journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  invariants: [FACTORY-RECYCLE-ASSIGNMENT-CONTINUITY, FACTORY-CONTEXT-GENERATION]

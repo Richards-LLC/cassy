@@ -6811,23 +6811,6 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         merge.retract_task = Some("t".into());
         assert!(apply_idle_liveness(&mut merge, "wolf", &observed));
         assert!(merge.text.starts_with(&observed.detail()));
-        // cas-97dc: the worker was idle since an earlier task_complete, was
-        // assigned the named task and started it (live state: in progress,
-        // nothing parked or pushed). The production consumer must suppress
-        // the relay for that task, not rewrite it as a pending delivery.
-        let mut started = tests::make_data(0);
-        started.in_progress_tasks.push(tests::task_with_status("t", Some("wolf"), TaskStatus::InProgress));
-        let stale_basis = Observation {
-            state: Liveness::WaitingForInput,
-            evidence: "task_complete 7740s ago; last write 7740s ago".into(),
-        };
-        let mut fresh = prompt.clone();
-        fresh.retract_task = Some("t".into());
-        assert!(!idle_relay_deliverable(&mut fresh, "wolf", &stale_basis, &started));
-        // The same relay with no live evidence against it is still delivered.
-        let mut parked = prompt.clone();
-        parked.retract_task = Some("t".into());
-        assert!(idle_relay_deliverable(&mut parked, "wolf", &stale_basis, &tests::make_data(0)));
         let mut ordinary = prompt.clone();
         apply_idle_liveness(&mut ordinary, "wolf", &Observation { state: Liveness::WaitingForInput, evidence: "idle".into() });
         assert_eq!(ordinary.text.lines().last(), prompt.text.lines().last());

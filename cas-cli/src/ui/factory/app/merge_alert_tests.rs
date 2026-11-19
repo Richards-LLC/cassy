@@ -410,6 +410,22 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 0);
 }
 
+/// cas-97dc: the worker finished an earlier turn (its rollout ends in
+/// task_complete), was assigned this task (claimed, in progress, nothing
+/// parked or pushed), and the delivery relay queued while the earlier
+/// delivery was still parked reaches the consumer. No pending-delivery relay
+/// may be emitted for the new task: checked by the relay's own task tag.
+#[test]
+fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() {
+    let mut f = Fixture::new();
+    let parked_relay = f.event.clone();
+    f.in_progress();
+    f.event = parked_relay;
+    f.ci(None);
+    assert!(f.relay().iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-test")),
+        "a task that is in progress again has no delivery to report");
+}
+
 #[test]
 fn cas_619c_in_progress_pushed_green_tip_without_worker_ready_is_not_merge_ready() {
     let mut f = Fixture::new();

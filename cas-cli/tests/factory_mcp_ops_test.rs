@@ -3217,6 +3217,12 @@ async fn standby_stops_every_worker_and_resume_respawns_the_ones_holding_tasks_c
     env.service.factory_request(Parameters(factory_req("standby"))).await.expect("idempotent");
     assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), queued.len());
 
+    // The daemon applies the queued shutdowns; resume refuses to respawn a
+    // worker that is still live.
+    for mut agent in env.agent_store().list(None).expect("list agents") {
+        agent.status = AgentStatus::Shutdown;
+        env.agent_store().update(&agent).expect("record the daemon's shutdown");
+    }
     let mut resume = factory_req("standby");
     resume.status = Some("resume".to_string());
     env.service.factory_request(Parameters(resume)).await.expect("resume");

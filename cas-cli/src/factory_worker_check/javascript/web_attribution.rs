@@ -2,6 +2,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+// gate[G-61 park as-of]: Focused proof: exact-tip crate receipts, blast-radius scope and web base attribution
 pub(super) fn attribute(
     cas_root: &Path,
     repo: &Path,
@@ -43,7 +44,7 @@ pub(super) fn attribute(
     let attribution: Value = serde_json::from_slice(&std::fs::read(&output)
         .context("base attribution did not produce evidence")?)?;
     if attribution["base"] != base {
-        bail!("base attribution returned a different revision");
+        bail!(crate::gates::tag("G-61", "base attribution returned a different revision"));
     }
     let tasks = crate::store::open_task_store(cas_root)?;
     let branch = crate::factory_worker_check::git(repo, &["branch", "--show-current"])?;
@@ -89,7 +90,7 @@ pub(super) fn attribute(
         eprintln!("{note}");
     }
     if !success || attribution["status"] != "inherited" || inherited.is_empty() {
-        bail!("delivery failure or unresolved base comparison; evidence={}", output.display());
+        bail!(crate::gates::tag("G-61", format!("delivery failure or unresolved base comparison; evidence={}", output.display())));
     }
     Ok((inherited, note))
 }

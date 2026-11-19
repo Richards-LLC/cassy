@@ -739,8 +739,19 @@ pub(crate) fn idle_relay_deliverable(
     prompt: &mut Prompt,
     worker: &str,
     observation: &crate::mcp::tools::service::worker_liveness::Observation,
-    _live: &DirectorData,
+    live: &DirectorData,
 ) -> bool {
+    // cas-97dc: a delivery relay names a task parked for merge. Live state
+    // showing that task in progress again (assigned or restarted after the
+    // idle basis, nothing parked or pushed for it) has no delivery to
+    // report, and the observation's idle basis belongs to an earlier turn.
+    if prompt.retract_task.as_deref().is_some_and(|id| {
+        live.in_progress_tasks
+            .iter()
+            .any(|task| task.id == id && task.status == TaskStatus::InProgress)
+    }) {
+        return false;
+    }
     apply_idle_liveness(prompt, worker, observation)
 }
 

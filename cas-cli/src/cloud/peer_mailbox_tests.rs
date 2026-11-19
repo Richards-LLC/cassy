@@ -1157,3 +1157,142 @@ async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_
     }
     assert!(open_agent_store(&host_machine.cas).unwrap().list(None).unwrap().iter().all(|agent| agent.role != AgentRole::Supervisor));
 }
+
+#[tokio::test]
+async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
+    use train_parks::{Park, TrainMail};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use sha2::{Digest, Sha256};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    let host = Machine::new();
+    let owner = Machine::new();
+    let git = |repo: &std::path::Path, args: &[&str]| -> String {
+        let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    };
+    let origin = tempfile::tempdir().unwrap();
+    git(origin.path(), &["init", "-q", "--bare"]);
+    let source = host._dir.path();
+    git(source, &["init", "-q", "-b", "main"]);
+    std::fs::write(source.join(".gitignore"), ".cas/\ntarget/\n").unwrap();
+    git(source, &["add", "."]);
+    git(source, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "base"]);
+    git(source, &["checkout", "-q", "-b", "factory/w"]);
+    std::fs::write(source.join("delivery"), "worker bytes\n").unwrap();
+    git(source, &["add", "."]);
+    git(source, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "delivery"]);
+    let tip = git(source, &["rev-parse", "HEAD"]);
+    git(source, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    git(source, &["push", "-q", "origin", "main", "factory/w"]);
+    let repo = owner._dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    git(repo, &["fetch", "-q", "origin"]);
+    git(repo, &["checkout", "-q", "-B", "main", "origin/main"]);
+    assert!(std::process::Command::new("git").args(["show-ref", "--verify", "refs/heads/factory/w"]).current_dir(repo).output().unwrap().status.code() != Some(0));
+    owner.register("owner", "owner", AgentRole::Supervisor, "owner-session");
+    host.register("worker", "w", AgentRole::Worker, "owner-session");
+    let agents = open_agent_store(&owner.cas).unwrap();
+    let mut recipient = agents.get("owner").unwrap();
+    recipient.machine_id = Some("soundwave".into());
+    agents.update(&recipient).unwrap();
+    let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.epic_verification_owner = Some("owner".into());
+    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    let bytes = b"committed portable proof\n";
+    let digest = hex::encode(Sha256::digest(bytes));
+    let artifact = cas_store::PublishedArtifact {
+        id:"art-park-proof".into(), task_id:"cas-park".into(), name:"LEDGER.md".into(), mime:"text/markdown".into(),
+        size_bytes:bytes.len() as u64, sha256:digest.clone(), cloud_artifact_id:Some("cloud-proof".into()),
+        status:"committed".into(), cloud_url:None, slack_permalink:None, created_at:chrono::Utc::now().to_rfc3339(), revocation:None,
+    };
+    let mut task = crate::types::Task::new("cas-park".into(), "Remote park".into());
+    task.status = crate::types::TaskStatus::AwaitingMerge;
+    task.assignee = Some("w".into());
+    task.deliverables.parked_branch = Some("factory/w".into());
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.work_target = Some(crate::types::WorkTarget { repo_selector:format!("project:{REPO}"), target_branch:"main".into() });
+    task.notes = format!("ARTIFACT_PROOF: {}\nEVIDENCE_SYNC: {}", serde_json::to_string(&artifact).unwrap(),
+        serde_json::json!({"machine_id":"prowl", "root":"/worker/evidence", "strict":false,
+            "files":[{"name":"LEDGER.md", "sha256":digest, "artifact_id":"art-park-proof"}]}));
+    let mut park = Park { project:REPO.into(), train:train.id.clone(), owner:"owner".into(), generation:generation.clone(),
+        worker:"worker".into(), name:"w".into(), machine:"prowl".into(), session:"owner-session".into(), task:task.id.clone(),
+        epoch:1, cycle:0, branch:"factory/w".into(), tip:tip.clone(), target:"main".into(), evidence:train_parks::evidence_key(&task).unwrap() };
+    task.notes.push_str(&format!("\n{}{}", train_parks::NOTE, serde_json::to_string(&park).unwrap()));
+    for machine in [&host, &owner] {
+        let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
+        tasks.add(&train).unwrap(); tasks.add(&task).unwrap();
+        tasks.add_dependency(&crate::types::Dependency::new(task.id.clone(), train.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+        crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }.save_to_cas_dir(&machine.cas).unwrap();
+    }
+    Mock::given(method("GET")).and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[
+            {"id":"owner", "name":"owner", "agent_type":"primary", "status":"active", "machine_id":"soundwave", "active_tasks":0,
+             "user_id":"account", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "metadata":{"role":"supervisor", "factory_session":"owner-session", "canonical_id":REPO}},
+            {"id":"worker", "name":"w", "agent_type":"worker", "status":"active", "machine_id":"prowl", "active_tasks":0,
+             "user_id":"account", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "metadata":{"role":"worker", "factory_session":"owner-session", "canonical_id":REPO,
+                 "train":"cas-train", "train_owner":"owner", "train_owner_generation":generation}}
+        ]}))).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]}))).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/artifacts/cloud-proof/url"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"artifact_id":"cloud-proof", "url":format!("{}/blob",server.uri()), "size_bytes":bytes.len()})))
+        .mount(&server).await;
+    Mock::given(method("GET")).and(path("/blob"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec())).mount(&server).await;
+    let send = |id: &str, park: &Park| {
+        let mut mail = message(id, "owner", REPO, &format!("{}{}", train_parks::TAG,
+            serde_json::to_string(&TrainMail::Ready { park:park.clone() }).unwrap()));
+        mail.sender_agent_id = "worker".into(); mail.sender_name = "w".into();
+        mail.sender_machine_id = Some("prowl".into()); mail.sender_session = Some("owner-session".into());
+        mail
+    };
+    let root = owner.cas.clone();
+    let deliver = move |mail: ClaimedPeerMessage| {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || {
+            let mailbox = FakeMailbox { inbox:Mutex::new(vec![mail]), ..Default::default() };
+            let report = deliver_claimed_with_history(&mailbox, open_prompt_queue_store(&root).unwrap().as_ref(), open_agent_store(&root).unwrap().as_ref(),
+                REPO, &[], "owner-session", "soundwave:owner-session", &RecipientHistory::default(), Some((&root,"owner")),
+                &|_,mail| Ok(train_parks::queue_key(mail)), &|recipient,mail| train_parks::ingest(&root,recipient,mail), &|_,_| Ok(PeerAckOutcome::Delivered));
+            (report, mailbox.acks.into_inner().unwrap())
+        })
+    };
+    let (report, _) = deliver(send("ready", &park)).await.unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(report.delivered, 1);
+    assert!(crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(repo, &task, "factory/w", &tip).is_ok());
+    assert!(train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
+    let evidence = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&owner.cas,&task).unwrap();
+    assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
+    let (duplicate, _) = deliver(send("same-ready-another-cloud-id", &park)).await.unwrap();
+    assert_eq!((duplicate.delivered, duplicate.duplicates), (0, 1));
+    for field in ["owner", "generation", "cycle", "epoch", "branch", "tip", "target", "evidence"] {
+        let mut changed = serde_json::to_value(&park).unwrap();
+        changed[field] = if matches!(field,"cycle"|"epoch") { 99.into() } else { "other".into() };
+        let wrong: Park = serde_json::from_value(changed).unwrap();
+        let (report, ack) = deliver(send(field, &wrong)).await.unwrap();
+        assert_eq!((report.delivered,report.rejected), (0,1), "field={field}: {report:?}");
+        assert!(matches!(ack.as_slice(), [(_,PeerAckOutcome::Rejected)]));
+    }
+    // Cached matching bytes cannot stand in for a missing committed artifact record.
+    let tasks = crate::store::open_task_store_local(&owner.cas).unwrap();
+    task.notes = task.notes.replace("art-park-proof", "art-missing");
+    task.notes = task.notes.lines().filter(|line| !line.starts_with("ARTIFACT_PROOF:") && !line.starts_with(train_parks::NOTE)).collect::<Vec<_>>().join("\n");
+    park.evidence = train_parks::evidence_key(&task).unwrap();
+    task.notes.push_str(&format!("\n{}{}",train_parks::NOTE,serde_json::to_string(&park).unwrap()));
+    tasks.update(&task).unwrap();
+    let (held, ack) = deliver(send("missing-artifact", &park)).await.unwrap();
+    assert_eq!((held.delivered,held.rejected), (0,0)); assert!(ack.is_empty());
+    assert!(!train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
+    assert_eq!(owner.rows().len(), 1);
+    task.deliverables.delivery_cycle += 1;
+    tasks.update(&task).unwrap();
+    assert!(!train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
+    assert!(open_agent_store(&host.cas).unwrap().list(None).unwrap().iter().all(|a| a.role != AgentRole::Supervisor));
+}

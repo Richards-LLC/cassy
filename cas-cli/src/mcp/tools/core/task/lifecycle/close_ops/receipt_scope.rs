@@ -993,6 +993,39 @@ mod tests {
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
     }
 
+    /// cas-bc25: a repair whose verdict recorded a test class parks only with
+    /// a passing capped receipt at the tip that runs the whole class.
+    #[test]
+    fn park_requires_a_receipt_covering_the_recorded_class_audit_cas_bc25() {
+        let repo = workspace();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let head = "e".repeat(40);
+        let mut task = blast_radius_task(&["close_ops"]);
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only receipt-gate coverage".into();
+        task.proof_targets.push("prompt_queue_store::operator_cloud".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let changed = delivered();
+        let record = |package: &str, filter: &str| {
+            crate::factory_worker_check::record_passing_test_for_tests(&root, repo.path(), &head, package, filter)
+        };
+        record("cas", "test(worker)");
+        record("cas-store", "test(worker)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
+
+        crate::store::open_task_store(&root).unwrap().patch_execution_state(
+            &task.id, &serde_json::json!({"class_audit": "test(ui::) | test(gates::)"}),
+        ).unwrap();
+        let refusal = park_refusal(&root, repo.path(), &task, &changed, &head, "main", None)
+            .expect("the recorded class has no covering receipt");
+        assert!(refusal.contains("CLASS_AUDIT_REQUIRED"), "{refusal}");
+        record("cas", "test(ui::)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_some(),
+            "half the class is not the class");
+        record("cas", "test(gates::) | test(ui::) | test(extra)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
+    }
+
     #[test]
     fn park_requires_owned_test_stability_with_shared_carry_forward_cas_9e02e() {
         use crate::factory_worker_check::stability::{self, Identity, Proof};

@@ -6046,7 +6046,7 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     assert_eq!(cas_store::get_verification_dispatch(&reviewer, &invalid_dispatch.id).unwrap().state,
         cas_types::VerificationDispatchState::Invalidated);
     let decision = "Verifier rejected the delivery; add the missing guard.";
-    core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+    core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, failing_tests: None,
         id: parked.id.clone(), reason: decision.into(),
     })).await.unwrap();
 

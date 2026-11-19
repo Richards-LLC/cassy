@@ -359,6 +359,20 @@ pub struct TaskRequest {
     #[serde(default)]
     pub reason: Option<String>,
 
+    /// request_changes: the failing tests the verdict relies on.
+    #[schemars(
+        description = "request_changes: comma-separated failing test names the verdict relies on; requires class_audit."
+    )]
+    #[serde(default)]
+    pub failing_tests: Option<String>,
+
+    /// request_changes: the whole test class to run before re-park.
+    #[schemars(
+        description = "request_changes: nextest filter for the whole test class, e.g. test(mod::) | test(other::). Park then needs a passing capped receipt covering it."
+    )]
+    #[serde(default)]
+    pub class_audit: Option<String>,
+
     /// Explicit per-attempt declaration for a helper with no Git delivery.
     #[schemars(
         description = "close: declare no delivery; needs a reason, a registered caller and proof of no delivery, task commits or unmerged lane work. Skips delivery gates only; verification still applies; excludes other close receipts."

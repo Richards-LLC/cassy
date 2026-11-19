@@ -408,6 +408,14 @@ pub struct TaskRequestChangesRequest {
         description = "Required supervisor review reason. State what prior work may remain and what must be corrected or reverted before re-delivery. To authorize an upstream release or sibling import, include merge_source=<full immutable commit SHA>; the grant stays bound to this task's declared target."
     )]
     pub reason: String,
+
+    /// Failing tests the verdict relies on; naming any requires `class_audit`.
+    #[serde(default)]
+    pub failing_tests: Option<String>,
+
+    /// Nextest filter for the whole test class the repair must run before re-park.
+    #[serde(default)]
+    pub class_audit: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -3232,7 +3232,7 @@ async fn a_backend_only_repark_withdraws_an_unreviewed_round_instead_of_re_revie
         let supervisor = supervisor_core(&cas_dir);
         let _role = SupervisorRole::enter(&mut test_env);
         supervisor
-            .cas_task_request_changes(Parameters(TaskRequestChangesRequest {
+            .cas_task_request_changes(Parameters(TaskRequestChangesRequest { class_audit: None, failing_tests: None,
                 id: task_id.clone(),
                 reason: "administrative: re-park from the backend-only cherry-pick".into(),
             }))

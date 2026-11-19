@@ -1001,7 +1001,7 @@ async fn request_changes_accepts_only_pushed_correction_api_evidence_cas_9e60() 
     let supervisor = cas_6f10_supervisor(&fx);
     env.set("CAS_AGENT_ROLE", "supervisor");
     supervisor
-        .cas_task_request_changes(Parameters(TaskRequestChangesRequest {
+        .cas_task_request_changes(Parameters(TaskRequestChangesRequest { class_audit: None,
             id: TASK.into(),
             reason: "Keep the API fix and add the required regression case before re-delivery"
                 .into(),

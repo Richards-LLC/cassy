@@ -1483,8 +1483,9 @@ impl ProxyEngine {
                 .and_then(Value::as_str).map(str::to_owned)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let supported = self.violet_request_ids_supported(caller, dispatch_kind, &request_id).await;
+            // gate[H-48 mcp]: Request-ID reconciliation requires live schema support and caller policy
             if violet_request_lookup && !supported {
-                anyhow::bail!("Violet request-ID reconciliation is unavailable in the live schema or caller policy");
+                anyhow::bail!("Violet request-ID reconciliation is unavailable in the live schema or caller policy\n\n[H-48]");
             }
             if violet_message && supported && let Some(args) = arguments.as_mut() {
                 args.entry("request_id").or_insert_with(|| Value::String(request_id));

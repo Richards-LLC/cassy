@@ -2129,6 +2129,7 @@ impl CasCore {
                 .unwrap_or_default()
             + default_target_warning.as_deref().unwrap_or_default()
             + &release_train_receipt
+            + &crate::task_assignment::test_policy_note(&task.acceptance_criteria)
             + &issue_hint_note;
 
         if let Ok(search) = self.open_search_index() {

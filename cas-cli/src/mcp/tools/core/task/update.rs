@@ -1443,6 +1443,12 @@ impl CasCore {
                 });
             }
 
+            if !proof_targets_fix && !risk_fix && !methodology_fix
+                && let Some(target) = corrected_target.as_ref()
+            {
+                self.authorize_approved_retarget(&task, target)?;
+            }
+
             // A missing lane with no recorded delivery needs only the target
             // clear; it has no source boundary to resolve or retire.
             let artifact_scope_audit = if target_repo.is_some_and(|repo| repo.trim().is_empty())
@@ -3145,6 +3151,9 @@ impl CasCore {
         let mut response = format!("Updated task {}: {}", req.id, changes.join(", "));
         if !warnings.is_empty() {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
+        }
+        if changes.contains(&"acceptance_criteria") {
+            response.push_str(&crate::task_assignment::test_policy_note(&task.acceptance_criteria));
         }
         if split_takeover.is_some() { response = crate::gates::override_tag("G-07", response); }
         if binding_override {response=crate::gates::override_tag("G-151",response);}

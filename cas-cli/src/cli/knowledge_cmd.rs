@@ -80,7 +80,7 @@ pub fn execute(
     cas_root: &Path,
 ) -> anyhow::Result<()> {
     match command {
-        KnowledgeCommands::Build(args) => execute_build(args, cas_root, cli.verbose),
+        KnowledgeCommands::Build(args) => execute_build(args, cas_root, cli.verbose, cli.json),
         KnowledgeCommands::Status => execute_status(cas_root, cli.full, cli.json),
         KnowledgeCommands::List(args) => execute_list(args, cas_root),
         KnowledgeCommands::Search(args) => execute_search(args, cas_root),
@@ -178,7 +178,7 @@ pub fn load_symbols(cas_root: &Path, limit: usize) -> SymbolLoad {
     SymbolLoad { symbols, truncated }
 }
 
-fn execute_build(args: &BuildArgs, cas_root: &Path, verbose: bool) -> anyhow::Result<()> {
+fn execute_build(args: &BuildArgs, cas_root: &Path, verbose: bool, json: bool) -> anyhow::Result<()> {
     let build_deadline = Instant::now() + Duration::from_secs(args.timeout_secs);
     let project_root = project_root_of(cas_root)?;
     let store = SqliteKnowledgeStore::open(cas_root)?;
@@ -254,10 +254,19 @@ fn execute_build(args: &BuildArgs, cas_root: &Path, verbose: bool) -> anyhow::Re
     report.notes.extend(skip_notes);
 
     if args.dry_run {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         println!("Knowledge distillation (dry run -- nothing was written)");
         println!("  sources scanned:    {}", report.sources_scanned);
         println!("  unchanged (skipped):{}", report.sources_skipped);
         println!("  would distill:      {}", report.sources_pending);
+        println!("  deferred to next pass: {}", report.sources_deferred);
+        println!("  pending sources (in distillation order):");
+        for (index, path) in report.pending_sources.iter().enumerate() {
+            println!("    {}. {path}", index + 1);
+        }
         for note in &report.notes {
             println!("  {note}");
         }

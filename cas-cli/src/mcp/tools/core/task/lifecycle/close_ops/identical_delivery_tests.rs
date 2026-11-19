@@ -407,13 +407,13 @@ fn imported_baseline_inverse_close_and_epic_reject_cas_5f0b() {
 
 #[test]
 fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
-    for remove_all in [false, true] {
+    for (rebound, remove_all) in [(false, false), (false, true), (true, false), (true, true)] {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
-        commit(repo, "shared.rs", "original();\n", "seed shared helper");
+        let start = commit(repo, "shared.rs", "original();\n", "seed shared helper");
         git(repo, &["checkout", "-qb", "factory/worker"]);
-        commit(
+        let original = commit(
             repo,
             "worker.rs",
             "task();\n",
@@ -440,7 +440,7 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             } else {
                 "imported();\nadded();\n"
             },
-            "chore: trim helper",
+            if rebound { "chore(cas-aaaa): trim helper" } else { "chore: trim helper" },
         );
         git(repo, &["checkout", "-q", "main"]);
         git(
@@ -453,11 +453,17 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
                 "integrate shared helper",
             ],
         );
-        git(repo, &["checkout", "-q", "factory/worker"]);
-        git(
-            repo,
-            &["merge", "--no-ff", "main", "-m", "sync epic (cas-test1)"],
-        );
+        let branch = if rebound {
+            // GH #2168: a carry-over is rebound onto a fresh branch cut from
+            // the moved target, retaining its original start for audit.
+            git(repo, &["checkout", "-qb", "factory/rebound", "main"]);
+            git(repo, &["merge", "--no-ff", "factory/worker", "-m", "carry over cas-test1"]);
+            "factory/rebound"
+        } else {
+            git(repo, &["checkout", "-q", "factory/worker"]);
+            git(repo, &["merge", "--no-ff", "main", "-m", "sync epic (cas-test1)"]);
+            "factory/worker"
+        };
         let anchor = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
         git(
@@ -465,7 +471,7 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             &[
                 "merge",
                 "--no-ff",
-                "factory/worker",
+                branch,
                 "-m",
                 "integrate worker",
             ],
@@ -478,21 +484,45 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
             ..Default::default()
         };
-        task.deliverables.parked_branch = Some("factory/worker".into());
-        task.deliverables.factory_branch_anchor = Some(anchor);
-        match (remove_all, close_gate(repo, &task)) {
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        if rebound {
+            let target = cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() };
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target, assignee: "worker".into(), branch: branch.into(), base_sha: start,
+            });
+            task.deliverables.historical_factory_branch_anchors.push(original);
+            assert_eq!(tree_path_blob(repo, &anchor, "shared.rs"), tree_path_blob(repo, "main", "shared.rs"));
+        }
+        if rebound {
+            commit(repo, "target.rs", "unrelated();\n", "advance target after integrating the carry-over");
+        }
+        let result = close_gate(repo, &task);
+        match (remove_all && !rebound, result) {
             (false, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)) => {
             }
             (true, MergeStateGateOutcome::Reject(message)) => assert!(
-                message.contains("DELIVERY CONTENT DROPPED") && message.contains("shared.rs"),
+                crate::gates::codes_in(&message).contains(&"G-56"),
                 "{message}"
             ),
             (_, other) => {
                 panic!("side-parent attributed effect remove_all={remove_all}: {other:?}")
             }
         }
-        let row = epic_row(repo, &task);
-        assert_eq!(row.blocks_epic_close(), remove_all, "{row:?}");
+        if rebound {
+            // Real loss of this delivery still fails, even with identical
+            // inherited baseline blobs and a stale original start.
+            git(repo, &["rm", "worker.rs"]);
+            git(repo, &["commit", "-qm", "discard worker delivery"]);
+            match close_gate(repo, &task) {
+                MergeStateGateOutcome::Reject(message) => assert!(crate::gates::codes_in(&message).contains(&"G-56"), "{message}"),
+                other => panic!("dropped carry-over must refuse: {other:?}"),
+            }
+        } else {
+            let row = epic_row(repo, &task);
+            assert_eq!(row.blocks_epic_close(), remove_all, "{row:?}");
+        }
     }
 }
 

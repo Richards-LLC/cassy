@@ -1938,8 +1938,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
             std::fs::File::open(&rollout).unwrap().set_modified(retired_at).unwrap();
             let path = worker_transcript_path_for_agent(&cas_dir, &replacement).unwrap();
             assert_eq!(worker_context_usage(&cas_dir, &replacement, &path), None);
-            // A kept conversation that writes after registration must still
-            // report its real occupancy; the fence cannot hide a failed reset.
+            // Valid current-session usage can precede CAS registration.
             write_usage(427372);
             let current_at: std::time::SystemTime = (boundary + (replacement.registered_at - boundary) / 2).into();
             std::fs::File::open(&rollout).unwrap().set_modified(current_at).unwrap();

@@ -13102,11 +13102,24 @@ fn context_notice_key(root: &std::path::Path, agent: &cas_types::Agent) -> Strin
 }
 
 pub(crate) fn worker_context_usage(
-    _root: &std::path::Path,
+    root: &std::path::Path,
     agent: &cas_types::Agent,
     path: &std::path::Path,
 ) -> Option<ContextUsage> {
-    read_context_usage_from_tail_for_cli(path, worker_cli_from_agent(agent))
+    let cli = worker_cli_from_agent(agent);
+    if cli == cas_mux::SupervisorCli::Codex
+        && let Some(boundary) = agent.factory_session.as_deref().and_then(|session| {
+            crate::factory_context_reset::worker_recycle_boundary(root, session, &agent.name)
+        })
+    {
+        // Registration can follow a valid current-session usage record.
+        // Only an actual stop/relaunch makes an older rollout predecessor data.
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        if chrono::DateTime::<chrono::Utc>::from(modified) < boundary {
+            return None;
+        }
+    }
+    read_context_usage_from_tail_for_cli(path, cli)
 }
 
 fn context_notice_buckets() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {

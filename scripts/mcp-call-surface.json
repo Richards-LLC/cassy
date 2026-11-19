@@ -575,6 +575,7 @@
         "blocks_origin_task_id",
         "branch",
         "brief",
+        "class_audit",
         "commit_receipt",
         "completion_receipt",
         "confirm_warning",

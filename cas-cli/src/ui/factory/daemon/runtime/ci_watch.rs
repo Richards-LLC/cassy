@@ -1436,6 +1436,9 @@ pub(crate) fn read_github(
         .into_iter()
         .map(|ejection| {
             let job = lookups.failing_job(&transport, ejection.failed_run_id);
+            // cas-bc25: keep the failing tests as data, so the repair verdict must name their class.
+            crate::mcp::tools::core::task::repair_class::record_failing_tests(
+                cas_dir, &ejection.task_id, &lookups.failing_test_names(ejection.failed_run_id));
             let group_mate = lookups.ahead_may_be_cause(&transport, ejection.failed_run_id, ejection.ahead);
             (ejection, job, group_mate)
         })

@@ -405,8 +405,27 @@ fn imported_baseline_inverse_close_and_epic_reject_cas_5f0b() {
     }
 }
 
-#[test]
-fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
+#[tokio::test]
+async fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
+    async fn receipt_close(repo: &Path, task: &Task) -> MergeStateGateOutcome {
+        let target = git(repo, &["rev-parse", "main"]);
+        let receipt = cas_store::QaBatchReceipt {
+            schema_version: cas_store::QA_BATCH_RECEIPT_SCHEMA,
+            id: "fixture-receipt".into(), project_id: "fixture".into(),
+            ledger_artifact_id: "fixture-ledger".into(), ledger_path: "fixture.md".into(),
+            ledger_sha256: "a".repeat(64), ledger_size_bytes: 1,
+            staging_sha: target.clone(),
+            task_heads: [(task.id.clone(), task.deliverables.factory_branch_anchor.clone().unwrap())].into(),
+            recorder_agent_id: "supervisor".into(), recorded_at: chrono::Utc::now().to_rfc3339(),
+            release_tag: None, ledger_author_id: None, ledger_author_role: None,
+            author_overrides: Default::default(), imported: false,
+        };
+        crate::qa_batch::release_close::ReleaseClose::for_receipt(&repo.join(".cas"), repo, task, &receipt)
+            .scope(async { run_factory_branch_merge_gate(task, &TaskCloseRequest {
+                id: task.id.clone(), no_delivery: None, reason: None, supervisor_override: None,
+                search_manifest: None, commit_receipt: None, stranded_branch_override: None,
+            }, &target, repo) }).await
+    }
     for (rebound, remove_all) in [(false, false), (false, true), (true, false), (true, true)] {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
@@ -495,7 +514,8 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             task.deliverables.historical_factory_branch_anchors.push(original);
             assert_eq!(tree_path_blob(repo, &anchor, "shared.rs"), tree_path_blob(repo, "main", "shared.rs"));
         }
-        match (remove_all && !rebound, close_gate(repo, &task)) {
+        let result = if rebound { receipt_close(repo, &task).await } else { close_gate(repo, &task) };
+        match (remove_all && !rebound, result) {
             (false, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)) => {
             }
             (true, MergeStateGateOutcome::Reject(message)) => assert!(
@@ -511,7 +531,7 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             // inherited baseline blobs and a stale original start.
             git(repo, &["rm", "worker.rs"]);
             git(repo, &["commit", "-qm", "discard worker delivery"]);
-            match close_gate(repo, &task) {
+            match receipt_close(repo, &task).await {
                 MergeStateGateOutcome::Reject(message) => assert!(crate::gates::codes_in(&message).contains(&"G-56"), "{message}"),
                 other => panic!("dropped carry-over must refuse: {other:?}"),
             }

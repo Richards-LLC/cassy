@@ -593,12 +593,16 @@ mod tests {
         // structured hold the supervisor recorded for the operator's decision.
         let mut worker = Agent::new("worker-285a".into(), "zen-badger-285a".into());
         worker.role = AgentRole::Worker;
+        // The incident had no live worker: its worker was already shut down.
+        worker.status = AgentStatus::Shutdown;
         worker.factory_session = Some(SESSION.into());
         crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
         let mut held = Task::new("cas-285a-held".into(), "Held delivery".into());
         held.status = TaskStatus::Blocked;
         held.assignee = Some(worker.name.clone());
-        held.notes = "[2026-11-06 17:00] 🚫 BLOCKER owner: worker; rebase failed.".into();
+        // The common sequence: the worker blocks, and the supervisor's hold
+        // follows within the same minute.
+        held.notes = format!("[{}] 🚫 BLOCKER owner: worker; rebase failed.", chrono::Utc::now().format("%Y-%m-%d %H:%M"));
         tasks.add(&held).unwrap();
         let hold = |reason: &str| serde_json::json!({"blocked_hold": cas_types::TaskBlockedHold {
             reason: reason.into(), who: supervisor.name.clone(), when: chrono::Utc::now(),
@@ -633,6 +637,8 @@ mod tests {
             "a genuine local stall must keep waking the supervisor: {rows:?}");
         assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1,
             "a genuine local stall must still page once: {rows:?}");
+        assert!(rows.iter().filter(|row| row.target == "supervisor").all(|row| row.prompt.contains(&held.id)),
+            "the wake must name the held task once ownership returns to the worker: {rows:?}");
     }
 
     #[test]

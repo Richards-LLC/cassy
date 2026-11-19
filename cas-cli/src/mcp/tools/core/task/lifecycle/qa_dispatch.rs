@@ -417,6 +417,7 @@ impl CasCore {
         qa_task: &Task,
         pass: &QaPass,
     ) -> Option<crate::qa_pass::preflight::PreflightReport> {
+        if crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,task).is_some() { return None; }
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         let repo_root = super::close_ops::resolve_close_gate_repo_root(&self.cas_root)

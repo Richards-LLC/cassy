@@ -548,7 +548,8 @@ pub(crate) fn publish_routed_evidence(
 ) -> Result<(), String> {
     let source = crate::factory_build_routing::routed_from(task);
     let machine_id = cas_types::Agent::get_or_generate_machine_id();
-    let routed = source.as_deref().is_some_and(|source| source != machine_id);
+    let routed = source.as_deref().is_some_and(|source| source != machine_id)
+        || crate::cloud::peer_mailbox::train_parks::host_worker(cas_root,task).is_some();
     let dir = evidence_dir(cas_root, task).map_err(|error| error.to_string())?;
     let fail = |detail: String| format!(
         "EVIDENCE PUBLICATION INCOMPLETE: {detail}. Task {} has local evidence in {}; publish it before a peer reviews the delivery.",
@@ -612,7 +613,7 @@ pub(crate) fn publish_routed_evidence(
     // Every park records where each evidence file sits under the task evidence
     // directory, so the merge owner can restore nested captures at the paths
     // the ledger cites (GH #2079). Only a routed build makes it strict.
-    let audience = if routed { source.unwrap_or_default() } else { "the merge owner".into() };
+    let audience = if routed { source.unwrap_or_else(|| "the merge owner".into()) } else { "the merge owner".into() };
     let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files, strict: routed };
     let note = format!(
         "[{}] Evidence synced for review on {audience}\n{EVIDENCE_SYNC}{}",

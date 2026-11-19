@@ -120,6 +120,63 @@ pub(crate) fn admitted(root: &Path, task: &Task, branch: &str, tip: &str) -> boo
             .and_then(|bytes| serde_json::from_slice::<Park>(&bytes).ok()).as_ref() == Some(&park)
 }
 
-pub(crate) fn publish_ready(_root: &Path, _task: &Task, _worker: &Agent) -> Result<Option<i64>, String> {
-    Ok(None)
+pub(crate) fn host_worker(root: &Path, task: &Task) -> Option<Agent> {
+    let agents = crate::store::open_agent_store(root).ok()?;
+    let assignee = task.assignee.as_deref()?;
+    agents.get(assignee).ok().or_else(|| agents.list(None).ok()?.into_iter()
+        .filter(|agent| agent.name.eq_ignore_ascii_case(assignee)).max_by_key(|agent| agent.registered_at))
+        .filter(|agent| agent.role == AgentRole::Worker && agent.metadata.contains_key("train_owner"))
+}
+
+pub(crate) fn owner_train(root: &Path, task: &Task) -> Result<Option<Task>, String> {
+    Ok(crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
+        .get_parent_epic(&task.id).map_err(|e| e.to_string())?.filter(|train| train.epic_verification_owner.is_some()))
+}
+
+pub(crate) fn authorize(root: &Path, task: &Task, actor: &Agent) -> Result<(), String> {
+    if let Some(train) = owner_train(root, task)? { crate::factory_session_scope::require_train_owner(root, &train, actor)?; }
+    Ok(())
+}
+
+pub(crate) fn require_admitted(root: &Path, task: &Task) -> Result<(), String> {
+    if let Some(park) = parked(task)? {
+        if !admitted(root, task, &park.branch, &park.tip) {
+            return Err(crate::gates::tag("G-113", "Remote delivery is not a current admitted owner park"));
+        }
+        crate::artifacts::proof::materialize_peer_evidence(root, task)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn publish_ready(root: &Path, task: &Task, worker: &Agent) -> Result<Option<i64>, String> {
+    if worker.role != AgentRole::Worker || !worker.metadata.contains_key("train_owner") { return Ok(None); }
+    let host = crate::factory_session_scope::WorkerHost::current(root, worker.factory_session.as_deref())?
+        .ok_or("Worker host has no current train binding")?;
+    if worker.metadata.get("train_owner") != Some(&host.owner) || worker.metadata.get("train_owner_generation") != Some(&host.generation) {
+        return Err("Worker registration belongs to a different owner generation".into());
+    }
+    let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let task = tasks.get(&task.id).map_err(|e| e.to_string())?;
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    if task.status != crate::types::TaskStatus::AwaitingMerge || agents.get_lease(&task.id).map_err(|e| e.to_string())?.is_some() {
+        return Err("Ready publication requires a parked delivery and a released local claim".into());
+    }
+    let history = agents.get_lease_history(&task.id,Some(1)).map_err(|e| e.to_string())?;
+    let epoch = history.first().filter(|entry| entry.agent_id == worker.id).ok_or("Park lease identity is unavailable")?.epoch;
+    let park = Park { project:crate::cloud::resolve_canonical_id(root).ok_or("Project has no canonical identity")?,
+        train:host.train, owner:host.owner, generation:host.generation, worker:worker.id.clone(), name:worker.name.clone(),
+        machine:worker.machine_id.clone().ok_or("Worker machine identity is missing")?, session:host.session,
+        task:task.id.clone(), epoch, cycle:task.deliverables.delivery_cycle,
+        branch:task.deliverables.parked_branch.clone().ok_or("Park branch is missing")?,
+        tip:task.deliverables.factory_branch_anchor.clone().ok_or("Park tip is missing")?,
+        target:task.deliverables.work_target.as_ref().ok_or("Park target is missing")?.target_branch.clone(), evidence:evidence_key(&task)? };
+    let note = format!("{NOTE}{}",serde_json::to_string(&park).map_err(|e| e.to_string())?);
+    let mut sealed = task.clone(); sealed.notes.push_str(&format!("\n{note}"));
+    if !park.current(root,&sealed)? { return Err("Park binding no longer matches the worker delivery".into()); }
+    if parked(&task)?.as_ref() != Some(&park) { tasks.append_trusted_note(&task.id,&note).map_err(|e| e.to_string())?; }
+    let encoded = serde_json::to_string(&TrainMail::Ready { park:park.clone() }).map_err(|e| e.to_string())?;
+    let message = PeerSend { project_id:park.project, sender_agent_id:worker.id.clone(), recipient_agent_id:park.owner,
+        body:attach_message_intent(&format!("{TAG}{encoded}"),Some("ready"),false)?, summary:Some(format!("Parked delivery: {}",task.id)),
+        in_reply_to:None, dedupe_key:format!("train:{}",hex::encode(Sha256::digest(encoded.as_bytes()))), scope:PeerScope::Project, recipient_project_id:None };
+    outbox::enqueue_notice(root,message,&host.name).map(Some)
 }

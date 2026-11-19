@@ -569,6 +569,10 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(b"cas-premerge-candidate-v2-regenerated\0");
     hash_plan_context(root, task, &mut hash)?;
+    if let Some(train) = crate::cloud::peer_mailbox::train_parks::owner_train(root,task)? {
+        hash.update(crate::factory_session_scope::train_owner_generation(&train)?.as_bytes());
+    }
+    crate::cloud::peer_mailbox::train_parks::require_admitted(root,task)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
         "{}:{:?}",
@@ -1227,6 +1231,11 @@ impl CasCore {
         // A target/context change must not buy another review of an unchanged
         // rejected delivery. The replicated receipt survives dispatch invalidation.
         let current = self.open_task_store()?.get(&task.id).map_err(fail)?;
+        if crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root,&current).map_err(fail)?.is_some() {
+            let actor = self.open_agent_store()?.get(&self.get_agent_id()?).map_err(fail)?;
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&current,&actor).map_err(fail)?;
+        }
+        crate::cloud::peer_mailbox::train_parks::require_admitted(&self.cas_root,&current).map_err(fail)?;
         if let Some(receipt) = &current.deliverables.premerge_repair
             && receipt.repair_cycle == current.deliverables.delivery_cycle
             && git(repo, &["rev-parse", source]).map_err(fail)? == receipt.rejected_anchor

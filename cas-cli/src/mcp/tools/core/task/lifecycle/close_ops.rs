@@ -8054,6 +8054,11 @@ impl CasCore {
             data: None,
         })?;
 
+        if let Ok(id) = self.get_registered_agent_id_read_only()
+            && let Ok(actor) = self.open_agent_store()?.get(&id) && actor.role != cas_types::AgentRole::Worker {
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
+                .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
+        }
         if let Err(message) = crate::qa_batch::release_close::validate_task(&self.cas_root, &task) {
             return Ok(Self::tool_error(message));
         }
@@ -9944,6 +9949,7 @@ impl CasCore {
                         ) {
                             if crate::factory_build_routing::routed_from(&task)
                                 .is_some_and(|source| source != cas_types::Agent::get_or_generate_machine_id())
+                                || crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task).is_some()
                             { gate_refusals.push(warning); }
                             else {
                                 publication_warning = format!("\nWARNING (non-blocking): {warning}");
@@ -10013,6 +10019,12 @@ impl CasCore {
                         keep_fresh_test_receipts(task_store.as_ref(), &task.id, portable);
                     }
 
+                    if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {
+                        if self.get_agent_id()? != worker.id { return Err(Self::error(ErrorCode::INVALID_REQUEST,"Only the registered host worker may publish its park")); }
+                        if let Err(error) = crate::cloud::peer_mailbox::train_parks::publish_ready(&self.cas_root,&task,&worker) {
+                            return Ok(Self::tool_error(format!("Delivery is parked, but its owner notification is not durable: {error}. Retry close for {}.",task.id)));
+                        }
+                    }
                     // cas-619f: a user-facing delivery needs an independent
                     // QA pass before it may merge. Open (or re-find) the
                     // round for this exact tip and tell the worker where it
@@ -12237,6 +12249,12 @@ impl CasCore {
             ));
         }
 
+        if crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root,&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some()
+            || crate::cloud::peer_mailbox::train_parks::parked(&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some() {
+            let actor = self.open_agent_store()?.get(&self.get_agent_id()?).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e.to_string()))?;
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?;
+            crate::cloud::peer_mailbox::train_parks::require_admitted(&self.cas_root,&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?;
+        }
         // Proceed with close
         let now = chrono::Utc::now();
         // cas-062d: capture pre-close status for durable lifecycle push identity.

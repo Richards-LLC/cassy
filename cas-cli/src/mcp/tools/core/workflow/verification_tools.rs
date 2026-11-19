@@ -306,6 +306,10 @@ impl CasCore {
             });
         }
 
+        if caller.role == cas_types::AgentRole::Supervisor {
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&caller)
+                .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
+        }
         let uses_verifier_capability = req.verifier_capability.is_some();
         let supervisor_direct = caller.role == cas_types::AgentRole::Supervisor
             && self.has_server_internal_identity(&caller_id)

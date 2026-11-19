@@ -120,6 +120,7 @@ pub fn handle_user_prompt_submit(
             input.submitted_prompt().unwrap_or_default(),
         );
     }
+    let mut standby_resumed = String::new();
     if is_supervisor {
         if let (Some(root), Some(prompt), Ok(session)) = (
             cas_root,
@@ -131,6 +132,10 @@ pub fn handle_user_prompt_submit(
                 && !prompt.is_empty()
                 && is_operator_terminal_prompt(input, prompt)
             {
+                // cas-94a0: the operator's first message brings a standby session back.
+                if let Some(report) = crate::factory_standby::resume_for_operator_message(root, &session) {
+                    standby_resumed = format!("\n{report}\n");
+                }
                 if let Ok(queue) = crate::store::open_prompt_queue_store(root) {
                     if let Some(id) = input.prompt_id.as_deref() {
                         let _ = queue.record_terminal_transcript_turn(
@@ -143,7 +148,7 @@ pub fn handle_user_prompt_submit(
             }
         }
         // Supervisors still skip attribution capture — they don't write code.
-        return Ok(HookOutput::with_user_prompt_context(factory_context));
+        return Ok(HookOutput::with_user_prompt_context(format!("{factory_context}{standby_resumed}")));
     }
 
     // Attribution capture genuinely needs prompt text; surfacing did not.

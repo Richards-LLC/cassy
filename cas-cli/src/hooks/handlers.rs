@@ -296,7 +296,6 @@ pub use handlers_state::{
     get_session_files, handle_subagent_start, handle_subagent_stop, handle_verifier_spawn_cleanup,
 };
 
-mod operator_evidence;
 
 pub(crate) mod handlers_middle;
 #[cfg(test)]

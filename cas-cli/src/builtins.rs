@@ -215,6 +215,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/finish/SKILL.md"),
     },
     BuiltinFile {
+        path: "skills/standby/SKILL.md",
+        content: include_str!("builtins/skills/standby/SKILL.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
         content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
     },
@@ -952,6 +956,7 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-writing-tests/LICENSE", content: include_str!("builtins/skills/cas-writing-tests/LICENSE") },
     BuiltinFile { path: "skills/cas-writing-tests/references/tests.md", content: include_str!("builtins/skills/cas-writing-tests/references/tests.md") },
     BuiltinFile { path: "skills/cas-writing-tests/references/mocking.md", content: include_str!("builtins/skills/cas-writing-tests/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/brief-test-phrases.txt", content: include_str!("builtins/skills/cas-writing-tests/references/brief-test-phrases.txt") },
     BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
@@ -1011,6 +1016,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/finish/SKILL.md",
         content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/standby/SKILL.md",
+        content: include_str!("builtins/skills/standby/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
@@ -1733,6 +1742,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-writing-tests/LICENSE", content: include_str!("builtins/skills/cas-writing-tests/LICENSE") },
     BuiltinFile { path: "skills/cas-writing-tests/references/tests.md", content: include_str!("builtins/skills/cas-writing-tests/references/tests.md") },
     BuiltinFile { path: "skills/cas-writing-tests/references/mocking.md", content: include_str!("builtins/skills/cas-writing-tests/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/brief-test-phrases.txt", content: include_str!("builtins/skills/cas-writing-tests/references/brief-test-phrases.txt") },
     BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
@@ -1805,6 +1815,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/finish/SKILL.md",
         content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/standby/SKILL.md",
+        content: include_str!("builtins/skills/standby/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
@@ -2521,6 +2535,7 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-writing-tests/LICENSE", content: include_str!("builtins/skills/cas-writing-tests/LICENSE") },
     BuiltinFile { path: "skills/cas-writing-tests/references/tests.md", content: include_str!("builtins/skills/cas-writing-tests/references/tests.md") },
     BuiltinFile { path: "skills/cas-writing-tests/references/mocking.md", content: include_str!("builtins/skills/cas-writing-tests/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/brief-test-phrases.txt", content: include_str!("builtins/skills/cas-writing-tests/references/brief-test-phrases.txt") },
     BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
@@ -4427,6 +4442,7 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     "release-notes",
     "session-learn",
     "slack-formatting",
+    "standby",
     "verify-before-claim",
     "violet",
 ];

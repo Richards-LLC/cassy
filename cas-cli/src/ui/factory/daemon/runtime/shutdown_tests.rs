@@ -1332,7 +1332,7 @@ async fn dead_recycle_refuses_unregistered_live_replacement_cas_35f6() {
 #[tokio::test(flavor = "current_thread")]
 async fn same_name_spawn_recovers_dead_pane_cas_35f6() {
     if !run_hermetic_recycle_child("same_name_spawn_recovers_dead_pane_cas_35f6") {
-        recover_dead_worker(false, cas_types::AgentStatus::Stale).await;
+        recover_dead_worker(false, cas_types::AgentStatus::Stale, "own").await;
     }
 }
 
@@ -1359,12 +1359,14 @@ async fn recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6() {
     }
     if !run_hermetic_recycle_child("recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6") {
         for status in [cas_types::AgentStatus::Stale, cas_types::AgentStatus::Shutdown] {
-            recover_dead_worker(true, status).await;
+            for ownership in ["own", "foreign-session", "unregistered", "completed"] {
+                recover_dead_worker(true, status, ownership).await;
+            }
         }
     }
 }
 
-async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
+async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus, ownership: &str) {
     use crate::mcp::{CasCore, tools::CasService};
     use crate::worktree::{WorktreeConfig, WorktreeManager};
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -1445,7 +1447,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
         let run = crate::factory_worker_runs::register(&cas, &worker, &log, chrono::Utc::now()).unwrap().unwrap();
         let child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "ui::factory::daemon::runtime::shutdown_tests::recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6", "--test-threads=1"])
-            .env("CAS_63ED_BUILD", &cas).env("CAS_63ED_WORKTREE", &worker).env("CAS_63ED_RUN", run)
+            .env("CAS_63ED_BUILD", &cas).env("CAS_63ED_WORKTREE", &worker).env("CAS_63ED_RUN", &run)
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null())
             .spawn().unwrap();
         let mut child = Build(child);
@@ -1456,6 +1458,20 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
             }
         }).await.unwrap();
         assert_eq!(crate::factory_target_cache::owner::for_retirement(&cas, &worker).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+        // Replay holders that must remain visible instead of waiting forever.
+        let path = cas.join("worker-runs").join(format!("{run}.json"));
+        let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        match ownership {
+            "foreign-session" => record["session"] = "another-session".into(),
+            "unregistered" => record["worker_id"] = "unregistered-worker".into(),
+            "completed" => {
+                record["finished_at"] = chrono::Utc::now().to_rfc3339().into();
+                record["exit_code"] = 0.into();
+            }
+            "own" => {}
+            _ => panic!("unknown fixture ownership"),
+        }
+        std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
         Some(child)
     } else { None };
     // Kill only this fixture's child; consume its real PTY exit event.
@@ -1497,6 +1513,20 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
             .into_iter().filter(|row| row.target == supervisor).map(|row| row.id).collect::<Vec<_>>();
         let before = supervisor_rows();
         daemon.process_pending_spawns().await;
+        if ownership != "own" {
+            assert!(!daemon.pending_spawns.iter().any(|pending| matches!(pending,
+                super::super::PendingSpawn::Recycle { request_id: id, .. } if *id == request_id)));
+            assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas, request_id).0.as_deref() == Some(SpawnLifecycleState::Failed.as_str())));
+            assert!(!daemon.spawn_verifications.contains_key(name));
+            assert!(wait_until(Duration::from_secs(15), || supervisor_rows().len() == before.len() + 1));
+            use std::io::Write;
+            let child = build.as_mut().unwrap();
+            child.0.stdin.as_mut().unwrap().write_all(&[1]).unwrap();
+            assert!(child.0.wait().unwrap().success());
+            assert_eq!(git(&worker, &["rev-parse", "HEAD"]), tip);
+            assert_eq!(std::fs::read_to_string(worker.join("precious")).unwrap(), "unpublished work");
+            return;
+        }
         assert!(daemon.pending_spawns.iter().any(|pending| matches!(pending,
             super::super::PendingSpawn::Recycle { request_id: id, name: held, .. } if *id == request_id && held == name)));
         assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas, request_id).0.as_deref() == Some(SpawnLifecycleState::Provisioning.as_str())));

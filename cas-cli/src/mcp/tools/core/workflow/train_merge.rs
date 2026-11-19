@@ -107,8 +107,7 @@ pub(crate) fn admit(
     for epic in tasks.list(None)?.into_iter().filter(|epic|
         epic.task_type == TaskType::Epic && !epic.is_terminal()
             && epic.effective_epic_branch() == Some(target)
-            && (epic.epic_verification_owner.is_some()
-                || super::super::task::release_train::is_release_train(epic)))
+            && epic.epic_verification_owner.is_some())
     {
         let declared = match epic.deliverables.work_target.as_ref() {
             Some(work) => super::super::task::repo_context::resolve_repo_context(root, work)

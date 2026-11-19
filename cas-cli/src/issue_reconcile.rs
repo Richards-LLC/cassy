@@ -1034,9 +1034,16 @@ mod tests {
         let published = git(&["rev-parse", "HEAD"]);
         let log = env.home().join("gh.log");
         let gh = env.home().join("gh");
+        // cas-f162: the first close of #7 hangs, as every close did on v4.22.
+        // A hung close must be bounded on its own and retried, not spend the
+        // deadline every later close shares.
+        let hung = env.home().join("close-7-hung");
         std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" >> '{}'\n\
-            [ \"$2\" = list ] && echo '[{{\"number\":7}},{{\"number\":9}},{{\"number\":15296}}]'\nexit 0\n",
-            log.display())).unwrap();
+            [ \"$2\" = list ] && echo '[{{\"number\":7}},{{\"number\":9}},{{\"number\":15296}}]'\n\
+            if [ \"$2\" = close ] && [ \"$3\" = 7 ] && [ ! -e '{}' ]; then : > '{}'; sleep 30; fi\nexit 0\n",
+            log.display(), hung.display(), hung.display())).unwrap();
+        env.set("CAS_GH_CLOSE_CAP_MS", "300");
+        env.set("CAS_GH_CLOSE_BACKOFF_MS", "0");
         std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         env.set(GH_BIN_ENV, &gh);
 
@@ -1067,6 +1074,11 @@ mod tests {
         ]), "{outcomes:?}");
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(!calls.to_ascii_lowercase().contains("runner-images"), "{calls}");
+        assert_eq!(
+            calls.lines().filter(|line| line.starts_with("issue close 7 ")).count(),
+            2,
+            "the hung close is retried once and then succeeds: {calls}"
+        );
     }
 
     #[test]

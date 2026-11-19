@@ -1274,11 +1274,12 @@ mod tests {
         }).collect();
         let launches = broker.join().unwrap();
         // GH #2169: one resume pass started all three verifiers, and each claimed its own dispatch.
-        let mut launched: Vec<_> = launches.iter().map(|(id, state, _)| (id.clone(), *state)).collect();
+        let mut launched: Vec<_> = launches.iter().map(|(id, _, _)| id.clone()).collect();
         launched.sort();
-        let mut expected: Vec<_> = dispatches.iter().map(|d| (d.id.clone(), VerificationDispatchState::Claimed)).collect();
+        let mut expected: Vec<_> = dispatches.iter().map(|d| d.id.clone()).collect();
         expected.sort();
         assert_eq!(launched, expected);
+        assert!(launches.iter().all(|(_, state, _)| *state == VerificationDispatchState::Claimed));
         assert!(launches.iter().all(|(_, _, verifier)| verifier.as_ref().is_some_and(|id| id.starts_with("task-verifier-"))));
         assert_eq!(dispatches[0].id, pending.id);
         let operations = GitOperations::new(fixture._repo.path().to_path_buf());

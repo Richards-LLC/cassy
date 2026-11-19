@@ -811,7 +811,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let _env = crate::test_support::TestEnvGuard::temp_home();
-    for recipient in [None, Some("recipient"), Some("worker")] {
+    for (recipient, legacy) in [(None,false), (Some("recipient"),false), (Some("worker"),false), (Some("recipient"),true)] {
         let server = MockServer::start().await;
         // Sender labels also use /api/agents once for a nonempty batch.
         let lookups = usize::from(recipient.is_some()) + usize::from(recipient == Some("worker"));
@@ -825,7 +825,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
             .expect(u64::from(recipient == Some("worker"))).mount(&server).await;
         let messages = recipient.map(|id| serde_json::json!({
             "id":"mail", "project_id":REPO, "recipient_agent_id":id,
-            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":"collision warning",
+            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":if legacy { "CAS_PEER_PREMERGE_V1 {}" } else { "collision warning" },
             "created_at":chrono::Utc::now().to_rfc3339()
         })).into_iter().collect::<Vec<_>>();
         Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
@@ -848,7 +848,10 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
         let report = tokio::task::spawn_blocking(move || PeerMailboxRuntime::start(&root, "factory-a").unwrap().tick_blocking())
             .await.unwrap();
         assert!(report.errors.is_empty(), "{recipient:?}: {report:?}");
-        if recipient == Some("worker") {
+        if legacy {
+            assert_eq!((report.delivered,report.rejected), (0,1));
+            assert!(machine.rows().is_empty(), "rejected authority must never enter the prompt queue");
+        } else if recipient == Some("worker") {
             assert_eq!((report.delivered, report.rejected), (0, 0),
                 "a recipient missing from Cloud must keep its message pending: {report:?}");
             assert!(machine.rows().is_empty());
@@ -858,8 +861,8 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
         server.verify().await;
         if recipient == Some("worker") {
             // The next poll sees both live workers under the same epic. The
-            // exact message retained above must now reach the worker and both
-            // supervisors before Cloud receives its delivered acknowledgement.
+            // exact message retained above must reach only the worker before
+            // Cloud receives its delivered acknowledgement.
             let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
             let mut epic = crate::types::Task::new("cas-shared".into(), "Shared delivery".into());
             epic.task_type = crate::types::TaskType::Epic;
@@ -897,7 +900,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
                     .expect(u64::from(scope_ready)).mount(&server).await;
                 Mock::given(method("POST")).and(path("/api/peer-messages"))
                     .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"supervisor-copy", "status":"queued"})))
-                    .expect(u64::from(scope_ready)).mount(&server).await;
+                    .expect(0).mount(&server).await;
                 let root = machine.cas.clone();
                 let report = tokio::task::spawn_blocking(move || PeerMailboxRuntime::start(&root, "factory-a").unwrap().tick_blocking())
                     .await.unwrap();
@@ -905,7 +908,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
                 assert!(report.errors.is_empty(), "{report:?}");
                 let rows = machine.rows();
                 assert_eq!(rows.iter().filter(|row| row.target == "worker").count(), usize::from(scope_ready));
-                assert_eq!(rows.iter().filter(|row| row.target == "recipient").count(), usize::from(scope_ready));
+                assert_eq!(rows.iter().filter(|row| row.target == "recipient").count(), 0);
                 server.verify().await;
             }
         }
@@ -997,4 +1000,468 @@ async fn cas_4ac8_retry_after_blocks_later_chunks_ack_and_metadata_requests() {
         1,
         "HTTP escaped shared-client cooldown"
     );
+}
+
+/// The peer machine has a worker row, never an owner supervisor row. A released
+/// park claim must not make the owner's correction/result messages undeliverable.
+#[tokio::test]
+async fn train_owner_reaches_worker_host_without_a_local_supervisor_cas_b674() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    let machine = Machine::new();
+    let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
+    let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.epic_verification_owner = Some("remote-owner".into());
+    tasks.add(&train).unwrap();
+    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    machine.register("worker", "worker", AgentRole::Worker, "owner-session");
+    let agents = open_agent_store(&machine.cas).unwrap();
+    let mut worker = agents.get("worker").unwrap();
+    worker.machine_id = Some("prowl".into());
+    worker.parent_id = Some("remote-owner".into());
+    worker.metadata.insert("train".into(), train.id.clone());
+    worker.metadata.insert("train_owner".into(), "remote-owner".into());
+    worker.metadata.insert("train_owner_generation".into(), generation.clone());
+    agents.update(&worker).unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+    crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
+        .save_to_cas_dir(&machine.cas).unwrap();
+    // No active lease: downward corrections and final results outlive park.
+    Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]})))
+        .mount(&server).await;
+    for (owner, stale, expected) in [("remote-owner", false, 1), ("intruder", false, 0), ("remote-owner", true, 0)] {
+        let owner_row = serde_json::json!({"id":"remote-owner", "name":"owner", "agent_type":"primary",
+            "status":"active", "machine_id":"soundwave", "last_heartbeat":chrono::Utc::now().to_rfc3339(),
+            "active_tasks":0, "user_id":"account", "metadata":{"role":"supervisor", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"soundwave"}});
+        let worker_row = serde_json::json!({"id":"worker", "name":"worker", "agent_type":"worker",
+            "status":"active", "machine_id":"prowl", "last_heartbeat":chrono::Utc::now().to_rfc3339(),
+            "active_tasks":0, "user_id":"account", "metadata":{"role":"worker", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"prowl",
+                "train":"cas-train", "train_owner":"remote-owner", "train_owner_generation":if stale {"old"} else {&generation}}});
+        let registry = Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[owner_row,worker_row]})))
+            .mount_as_scoped(&server).await;
+        let mut mail = message(&format!("{owner}-{stale}"), "worker", REPO, "result payload");
+        mail.sender_agent_id = owner.into();
+        mail.sender_session = Some("owner-session".into());
+        mail.sender_machine_id = Some("soundwave".into());
+        let mailbox = FakeMailbox { inbox:Mutex::new(vec![mail]), ..Default::default() };
+        let root = machine.cas.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            deliver_claimed_with_history(&mailbox, open_prompt_queue_store(&root).unwrap().as_ref(),
+                open_agent_store(&root).unwrap().as_ref(), REPO, &[], "owner-session", "prowl:owner-session",
+                &RecipientHistory::default(), Some((&root, "worker")), &|_,_| Ok(None), &|_,_| Ok(None), &|_,_| Ok(PeerAckOutcome::Delivered))
+        }).await.unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.delivered, expected, "owner={owner} stale={stale}: {report:?}");
+        drop(registry);
+    }
+    let rows = machine.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].target, "worker");
+    assert!(rows[0].prompt.contains("result payload"));
+    assert!(agents.list(None).unwrap().iter().all(|agent| agent.role != AgentRole::Supervisor));
+}
+
+#[tokio::test]
+async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_cas_b674() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push;
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    let owner_machine = Machine::new();
+    let host_machine = Machine::new();
+    let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.epic_verification_owner = Some("owner".into());
+    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    let mut task = crate::types::Task::new("cas-delivery".into(), "Delivery".into());
+    task.assignee = Some("worker".into());
+    for machine in [&owner_machine, &host_machine] {
+        let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
+        tasks.add(&train).unwrap();
+        tasks.add(&task).unwrap();
+        tasks.add_dependency(&crate::types::Dependency::new(task.id.clone(), train.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+        crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
+            .save_to_cas_dir(&machine.cas).unwrap();
+    }
+    owner_machine.register("owner", "owner", AgentRole::Supervisor, "owner-session");
+    host_machine.register("worker", "worker", AgentRole::Worker, "owner-session");
+    for (machine, id, physical) in [(&owner_machine,"owner","soundwave"), (&host_machine,"worker","prowl")] {
+        let agents = open_agent_store(&machine.cas).unwrap();
+        let mut agent = agents.get(id).unwrap();
+        agent.machine_id = Some(physical.into());
+        if id == "worker" {
+            agent.parent_id = Some("owner".into());
+            agent.metadata.insert("train".into(), train.id.clone());
+            agent.metadata.insert("train_owner".into(), "owner".into());
+            agent.metadata.insert("train_owner_generation".into(), generation.clone());
+        }
+        agents.update(&agent).unwrap();
+    }
+    let mut metadata = crate::ui::factory::create_metadata("owner-session", 0, "owner", &["worker".into()],
+        Some(&train.id), Some(host_machine._dir.path().to_str().unwrap()), None);
+    metadata.worker_host = Some(crate::factory_session_scope::WorkerHost {
+        train:train.id.clone(), owner:"owner".into(), generation:generation.clone(), name:"owner".into(),
+        session:"owner-session".into(), machine:"soundwave".into(),
+    });
+    let metadata_file = crate::ui::factory::metadata_path("owner-session");
+    std::fs::create_dir_all(metadata_file.parent().unwrap()).unwrap();
+    std::fs::write(metadata_file, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let registry = [serde_json::json!({"id":"owner", "name":"owner", "agent_type":"primary", "status":"active",
+        "machine_id":"soundwave", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"account",
+        "metadata":{"role":"supervisor", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"soundwave"}}),
+        serde_json::json!({"id":"worker", "name":"worker", "agent_type":"worker", "status":"active",
+        "machine_id":"prowl", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"account",
+        "metadata":{"role":"worker", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"prowl",
+            "train":"cas-train", "train_owner":"owner", "train_owner_generation":generation}})];
+    Mock::given(method("GET")).and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":registry}))).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]}))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/peer-messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"mail", "status":"queued"})))
+        .mount(&server).await;
+    for (machine, sender, target) in [(&host_machine,"worker","supervisor"), (&owner_machine,"owner","worker@prowl")] {
+        let core = crate::mcp::CasCore::with_daemon(machine.cas.clone(), None, None);
+        core.set_agent_id_for_testing(sender.into());
+        #[cfg(feature="mcp-proxy")]
+        let service = crate::mcp::tools::CasService::new(core, None);
+        #[cfg(not(feature="mcp-proxy"))]
+        let service = crate::mcp::tools::CasService::new(core);
+        let req = serde_json::from_value(serde_json::json!({"action":"message", "target":target,
+            "summary":"delivery status", "kind":"status", "message":"caller payload"})).unwrap();
+        assert!(!service.coordination(Parameters(req)).await.unwrap().is_error.unwrap_or(false));
+        assert!(machine.rows().is_empty());
+    }
+    env.set("CAS_FACTORY_SESSION", "owner-session");
+    let lifecycle_task = task.clone();
+    let root = owner_machine.cas.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        let closed = supervisor_push::queue_cassy_merge_close_notice(&root, &task, "merged-tip").unwrap().unwrap();
+        assert_eq!(supervisor_push::queue_cassy_merge_close_notice(&root, &task, "merged-tip").unwrap(), Some(closed));
+        assert!(matches!(supervisor_push::queue_auto_unblock_worker_wake(&root, &task, "cas-blocker", "occurrence").unwrap(), supervisor_push::AutoUnblockWakeResult::Queued { .. }));
+        closed
+    }).await.unwrap();
+    assert!(id > 0);
+    assert_eq!(server.received_requests().await.unwrap().iter().filter(|request| request.method.as_str() == "POST" && request.url.path() == "/api/peer-messages").count(), 2);
+    assert!(owner_machine.rows().is_empty());
+    let connection = rusqlite::Connection::open(owner_machine.cas.join("cas.db")).unwrap();
+    let payloads = connection.prepare("SELECT payload FROM peer_message_outbox").unwrap()
+        .query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(payloads.len(), 3); // one explicit message, one result, one auto-unblock
+    for payload in payloads {
+        let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+        assert_eq!((sent.sender_agent_id.as_str(), sent.recipient_agent_id.as_str()), ("owner", "worker"));
+    }
+    let root = host_machine.cas.clone();
+    tokio::task::spawn_blocking(move || {
+        use supervisor_push::{LifecycleTransition as Transition, LifecyclePushResult};
+        let core = crate::mcp::CasCore::with_daemon(root.clone(),None,None);
+        core.set_agent_id_for_testing("worker".into());
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for (kind,old,new,occurrence) in [
+            (Transition::Started,crate::types::TaskStatus::Open,crate::types::TaskStatus::InProgress,"started"),
+            (Transition::Blocked,crate::types::TaskStatus::InProgress,crate::types::TaskStatus::Blocked,"blocked"),
+        ] {
+            let mut current = lifecycle_task.clone(); current.status = new; tasks.update(&current).unwrap();
+            let first = core.push_task_lifecycle(&current.id,&current.title,old,new,"worker",Some("fixture lifecycle"),kind,occurrence).unwrap();
+            assert!(matches!(first,LifecyclePushResult::Enqueued { .. }));
+            assert_eq!(core.push_task_lifecycle(&current.id,&current.title,old,new,"worker",Some("fixture lifecycle"),kind,occurrence).unwrap(),first);
+        }
+        let connection = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let payloads = connection.prepare("SELECT payload FROM peer_message_outbox").unwrap()
+            .query_map([],|row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(payloads.len(),3); // explicit message plus two distinct lifecycle occurrences
+        for payload in payloads {
+            let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+            assert_eq!((sent.sender_agent_id.as_str(),sent.recipient_agent_id.as_str()),("worker","owner"));
+        }
+        core.push_task_lifecycle(&lifecycle_task.id,&lifecycle_task.title,crate::types::TaskStatus::InProgress,
+            crate::types::TaskStatus::AwaitingMerge,"worker",None,Transition::AwaitingMerge,"early-ready").unwrap();
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM peer_message_outbox",[],|row| row.get::<_,i64>(0)).unwrap(),3);
+        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+    }).await.unwrap();
+    assert!(open_agent_store(&host_machine.cas).unwrap().list(None).unwrap().iter().all(|agent| agent.role != AgentRole::Supervisor));
+}
+
+#[tokio::test]
+async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
+    use train_parks::{Park, TrainMail};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use sha2::{Digest, Sha256};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    let host = Machine::new();
+    let owner = Machine::new();
+    let git = |repo: &std::path::Path, args: &[&str]| -> String {
+        let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    };
+    let origin = tempfile::tempdir().unwrap();
+    git(origin.path(), &["init", "-q", "--bare"]);
+    let source = host._dir.path();
+    git(source, &["init", "-q", "-b", "main"]);
+    std::fs::write(source.join(".gitignore"), ".cas/\ntarget/\n").unwrap();
+    git(source, &["add", "."]);
+    git(source, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "base"]);
+    git(source, &["checkout", "-q", "-b", "factory/w"]);
+    std::fs::write(source.join("delivery"), "worker bytes\n").unwrap();
+    git(source, &["add", "."]);
+    git(source, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "delivery"]);
+    let tip = git(source, &["rev-parse", "HEAD"]);
+    git(source, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    git(source, &["push", "-q", "origin", "main", "factory/w"]);
+    let repo = owner._dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    git(repo, &["fetch", "-q", "origin"]);
+    git(repo, &["checkout", "-q", "-B", "main", "origin/main"]);
+    assert!(std::process::Command::new("git").args(["show-ref", "--verify", "refs/heads/factory/w"]).current_dir(repo).output().unwrap().status.code() != Some(0));
+    owner.register("owner", "owner", AgentRole::Supervisor, "owner-session");
+    host.register("worker", "w", AgentRole::Worker, "owner-session");
+    let agents = open_agent_store(&owner.cas).unwrap();
+    let mut recipient = agents.get("owner").unwrap();
+    recipient.machine_id = Some("soundwave".into());
+    agents.update(&recipient).unwrap();
+    let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.epic_verification_owner = Some("owner".into());
+    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    let bytes = b"committed portable proof\n";
+    let digest = hex::encode(Sha256::digest(bytes));
+    let artifact = cas_store::PublishedArtifact {
+        id:"art-park-proof".into(), task_id:"cas-park".into(), name:"LEDGER.md".into(), mime:"text/markdown".into(),
+        size_bytes:bytes.len() as u64, sha256:digest.clone(), cloud_artifact_id:Some("cloud-proof".into()),
+        status:"committed".into(), cloud_url:None, slack_permalink:None, created_at:chrono::Utc::now().to_rfc3339(), revocation:None,
+    };
+    let mut task = crate::types::Task::new("cas-park".into(), "Remote park".into());
+    task.status = crate::types::TaskStatus::AwaitingMerge;
+    task.assignee = Some("w".into());
+    task.deliverables.parked_branch = Some("factory/w".into());
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.work_target = Some(crate::types::WorkTarget { repo_selector:format!("project:{REPO}"), target_branch:"main".into() });
+    task.notes = format!("ARTIFACT_PROOF: {}\nEVIDENCE_SYNC: {}", serde_json::to_string(&artifact).unwrap(),
+        serde_json::json!({"machine_id":"prowl", "root":"/worker/evidence", "strict":false,
+            "files":[{"name":"LEDGER.md", "sha256":digest, "artifact_id":"art-park-proof"}]}));
+    let mut park = Park { project:REPO.into(), train:train.id.clone(), owner:"owner".into(), generation:generation.clone(),
+        worker:"worker".into(), name:"w".into(), machine:"prowl".into(), session:"owner-session".into(), task:task.id.clone(),
+        epoch:1, cycle:0, branch:"factory/w".into(), tip:tip.clone(), target:"main".into(), evidence:train_parks::evidence_key(&task).unwrap() };
+    task.notes.push_str(&format!("\n{}{}", train_parks::NOTE, serde_json::to_string(&park).unwrap()));
+    for machine in [&host, &owner] {
+        let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
+        tasks.add(&train).unwrap();
+        let mut stored = task.clone();
+        stored.notes = task.notes.lines().filter(|line| !line.starts_with("ARTIFACT_PROOF:")).collect::<Vec<_>>().join("\n");
+        tasks.add(&stored).unwrap();
+        tasks.append_trusted_note(&task.id, &format!("ARTIFACT_PROOF: {}", serde_json::to_string(&artifact).unwrap())).unwrap();
+        tasks.add_dependency(&crate::types::Dependency::new(task.id.clone(), train.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+        crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }.save_to_cas_dir(&machine.cas).unwrap();
+    }
+    Mock::given(method("GET")).and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[
+            {"id":"owner", "name":"owner", "agent_type":"primary", "status":"active", "machine_id":"soundwave", "active_tasks":0,
+             "user_id":"account", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "metadata":{"role":"supervisor", "factory_session":"owner-session", "canonical_id":REPO}},
+            {"id":"worker", "name":"w", "agent_type":"worker", "status":"active", "machine_id":"prowl", "active_tasks":0,
+             "user_id":"account", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "metadata":{"role":"worker", "factory_session":"owner-session", "canonical_id":REPO,
+                 "train":"cas-train", "train_owner":"owner", "train_owner_generation":generation}}
+        ]}))).mount(&server).await;
+    let claim_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let active = claim_active.clone();
+    let claim = serde_json::json!({"id":"claim", "task_id":crate::cloud::peer_claims::claim_key(REPO,&task.id),
+        "agent_id":"worker", "status":"active", "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(),
+        "renewed_at":chrono::Utc::now().to_rfc3339(), "renewal_count":1, "epoch":1});
+    Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(move |_: &wiremock::Request| {
+            let locks = if active.load(std::sync::atomic::Ordering::SeqCst) { vec![claim.clone()] } else { Vec::new() };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":locks}))
+        }).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/artifacts/cloud-proof/url"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"artifact_id":"cloud-proof", "url":format!("{}/blob",server.uri()), "size_bytes":bytes.len()})))
+        .mount(&server).await;
+    Mock::given(method("GET")).and(path("/blob"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec())).mount(&server).await;
+    let host_agents = open_agent_store(&host.cas).unwrap();
+    let mut worker = host_agents.get("worker").unwrap();
+    worker.machine_id = Some("prowl".into()); worker.parent_id = Some("owner".into());
+    worker.metadata.insert("train".into(), train.id.clone());
+    worker.metadata.insert("train_owner".into(), "owner".into());
+    worker.metadata.insert("train_owner_generation".into(), park.generation.clone());
+    host_agents.update(&worker).unwrap();
+    let mut metadata = crate::ui::factory::create_metadata("owner-session",0,"owner",&["w".into()],Some(&train.id),Some(source.to_str().unwrap()),None);
+    metadata.worker_host = Some(crate::factory_session_scope::WorkerHost { train:train.id.clone(), owner:"owner".into(),
+        generation:park.generation.clone(), name:"owner".into(), session:"owner-session".into(), machine:"soundwave".into() });
+    let metadata_file = crate::ui::factory::metadata_path("owner-session");
+    std::fs::create_dir_all(metadata_file.parent().unwrap()).unwrap();
+    std::fs::write(metadata_file,serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let host_tasks = crate::store::open_task_store_local(&host.cas).unwrap();
+    let mut unsealed = host_tasks.get(&task.id).unwrap();
+    unsealed.notes = unsealed.notes.lines().filter(|line| !line.starts_with(train_parks::NOTE)).collect::<Vec<_>>().join("\n");
+    host_tasks.update(&unsealed).unwrap();
+    host_agents.try_claim(&task.id,&worker.id,1800,None).unwrap();
+    host_agents.release_lease_for_task(&task.id,"parked fixture").unwrap();
+    let (root,publishing,actor) = (host.cas.clone(),unsealed,worker);
+    let publication = tokio::task::spawn_blocking(move || train_parks::publish_ready(&root,&publishing,&actor)).await.unwrap().unwrap();
+    assert!(publication.is_some());
+    let sealed = host_tasks.get(&task.id).unwrap();
+    park = train_parks::parked(&sealed).unwrap().unwrap();
+    assert_eq!((park.worker.as_str(),park.machine.as_str(),park.tip.as_str()),("worker","prowl",tip.as_str()));
+    assert_eq!(park.epoch,host_agents.get_lease_history(&task.id,Some(1)).unwrap()[0].epoch);
+    let connection = rusqlite::Connection::open(host.cas.join("cas.db")).unwrap();
+    let payload: String = connection.query_row("SELECT payload FROM peer_message_outbox WHERE id=?1",[publication.unwrap()],|row|row.get(0)).unwrap();
+    let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+    assert_eq!((sent.sender_agent_id.as_str(),sent.recipient_agent_id.as_str()),("worker","owner"));
+    task.notes = sealed.notes;
+    crate::store::open_task_store_local(&owner.cas).unwrap().update(&task).unwrap();
+    let send = |id: &str, park: &Park| {
+        let mut mail = message(id, "owner", REPO, &format!("{}{}", train_parks::TAG,
+            serde_json::to_string(&TrainMail::Ready { park:park.clone() }).unwrap()));
+        mail.sender_agent_id = "worker".into(); mail.sender_name = "w".into();
+        mail.sender_machine_id = Some("prowl".into()); mail.sender_session = Some("owner-session".into());
+        mail
+    };
+    let root = owner.cas.clone();
+    let deliver = move |mail: ClaimedPeerMessage| {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || {
+            let mailbox = FakeMailbox { inbox:Mutex::new(vec![mail]), ..Default::default() };
+            let report = deliver_claimed_with_history(&mailbox, open_prompt_queue_store(&root).unwrap().as_ref(), open_agent_store(&root).unwrap().as_ref(),
+                REPO, &[], "owner-session", "soundwave:owner-session", &RecipientHistory::default(), Some((&root,"owner")),
+                &|_,mail| Ok(train_parks::queue_key(mail)), &|recipient,mail| train_parks::ingest(&root,recipient,mail), &|_,_| Ok(PeerAckOutcome::Delivered));
+            (report, mailbox.acks.into_inner().unwrap())
+        })
+    };
+    let (held, ack) = deliver(send("before-claim-release", &park)).await.unwrap();
+    assert_eq!((held.delivered,held.rejected), (0,0)); assert!(ack.is_empty());
+    assert!(held.errors.iter().any(|error| error.contains("TRAIN_PARK_CLAIM_ACTIVE")));
+    assert!(owner.rows().is_empty());
+    claim_active.store(false, std::sync::atomic::Ordering::SeqCst);
+    let (report, _) = deliver(send("ready", &park)).await.unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(report.delivered, 1);
+    assert!(crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(repo, &task, "factory/w", &tip).is_ok());
+    assert!(train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
+    let evidence = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&owner.cas,&task).unwrap();
+    assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
+    let delivered_task = task.clone();
+    let delivered_park = park.clone();
+    let ready_row = owner.rows()[0].clone();
+    let (root,row) = (owner.cas.clone(),ready_row.clone());
+    let selected = tokio::task::spawn_blocking(move || {
+        let now = chrono::Utc::now(); let spent = now-chrono::Duration::minutes(10);
+        let cap = crate::config::Config::load(&root).unwrap().factory().supervisor_message_wakes_per_hour.max(1);
+        for lead in 1..=cap { crate::supervisor_message_wakes::record(&root,-(lead as i64),"owner",&[format!("cloud:{REPO}:worker")],spent,spent).unwrap(); }
+        let mut rows = vec![row.clone()];
+        let mut facts = std::collections::HashMap::from([(row.id,crate::ui::factory::daemon::runtime::queue_and_events::RowFacts::default())]);
+        crate::supervisor_message_wakes::schedule(&root,"owner-session","owner",&open_agent_store(&root).unwrap().list(None).unwrap(),&mut rows,&mut facts,now).unwrap();
+        rows
+    }).await.unwrap();
+    assert!(selected.iter().any(|row| row.id == ready_row.id));
+    assert_eq!(crate::prompt_revalidation::parse_worker_action_envelope(&ready_row.prompt).unwrap().task_id.as_deref(),Some(task.id.as_str()));
+    let mut competing = Agent::new_with_role("other".into(),"other".into(),AgentRole::Supervisor);
+    competing.factory_session = Some("owner-session".into()); competing.machine_id = Some("soundwave".into());
+    agents.register(&competing).unwrap();
+    let core = crate::mcp::CasCore::with_daemon(owner.cas.clone(),None,None);
+    core.set_agent_id_for_testing(competing.id.clone());
+    let error = core.prepare_premerge_verification(&task,repo,"origin/factory/w","main").err().expect("competing supervisor cannot issue review");
+    assert!(error.message.contains("G-113"));
+    let request = serde_json::from_value(serde_json::json!({"id":task.id,"reason":"fixture proof"})).unwrap();
+    let error = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(request)).await.err().expect("competing supervisor cannot close");
+    assert!(error.message.contains("G-113"));
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let request = serde_json::from_value(serde_json::json!({"id":task.id,"reason":"repair fixture"})).unwrap();
+    let correction = core.cas_task_request_changes(rmcp::handler::server::wrapper::Parameters(request)).await;
+    let service = crate::mcp::tools::service::CasService::new(core,
+        #[cfg(feature = "mcp-proxy")] None);
+    let request = serde_json::from_value(serde_json::json!({"action":"qa_waive","task_id":task.id,"summary":"fixture waiver"})).unwrap();
+    let waiver = service.verification(rmcp::handler::server::wrapper::Parameters(request)).await;
+    assert!(correction.err().is_some_and(|error| error.message.contains("G-113")), "only the pinned owner may return a delivery");
+    assert!(waiver.err().is_some_and(|error| error.message.contains("G-113")), "only the pinned owner may waive its delivery QA");
+    assert!(cas_store::list_qa_passes(&owner.cas,&task.id).unwrap().is_empty());
+    assert_eq!(crate::store::open_task_store_local(&owner.cas).unwrap().get(&task.id).unwrap().status,crate::types::TaskStatus::AwaitingMerge);
+    assert!(cas_store::get_latest_verification_dispatch(&owner.cas,&task.id).unwrap().is_none());
+    let mut unparked = task.clone();
+    unparked.status = crate::types::TaskStatus::Open;
+    assert!(!train_parks::admitted(&owner.cas, &unparked, "factory/w", &tip));
+    assert!(crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(repo, &unparked, "factory/w", &tip).is_err());
+    let (duplicate, _) = deliver(send("same-ready-another-cloud-id", &park)).await.unwrap();
+    assert_eq!((duplicate.delivered, duplicate.duplicates), (0, 1));
+    for field in ["owner", "generation", "cycle", "epoch", "branch", "tip", "target", "evidence"] {
+        let mut changed = serde_json::to_value(&park).unwrap();
+        changed[field] = if matches!(field,"cycle"|"epoch") { 99.into() } else { "other".into() };
+        let wrong: Park = serde_json::from_value(changed).unwrap();
+        let (report, ack) = deliver(send(field, &wrong)).await.unwrap();
+        assert_eq!((report.delivered,report.rejected), (0,1), "field={field}: {report:?}");
+        assert!(matches!(ack.as_slice(), [(_,PeerAckOutcome::Rejected)]));
+    }
+    // Cached matching bytes cannot stand in for a missing committed artifact record.
+    let tasks = crate::store::open_task_store_local(&owner.cas).unwrap();
+    task.notes = task.notes.replace("art-park-proof", "art-missing");
+    task.notes = task.notes.lines().filter(|line| !line.starts_with("ARTIFACT_PROOF:") && !line.starts_with(train_parks::NOTE)).collect::<Vec<_>>().join("\n");
+    park.evidence = train_parks::evidence_key(&task).unwrap();
+    task.notes.push_str(&format!("\n{}{}",train_parks::NOTE,serde_json::to_string(&park).unwrap()));
+    tasks.update(&task).unwrap();
+    let (held, ack) = deliver(send("missing-artifact", &park)).await.unwrap();
+    assert_eq!((held.delivered,held.rejected), (0,0)); assert!(ack.is_empty());
+    assert!(!train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
+    assert_eq!(owner.rows().len(), 1);
+    task.deliverables.delivery_cycle += 1;
+    tasks.update(&task).unwrap();
+    assert!(!train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
+    let mut closed = delivered_task.clone(); closed.status = crate::types::TaskStatus::Closed;
+    let (root,notice,merge_tip) = (owner.cas.clone(),closed.clone(),tip.clone());
+    let notification = tokio::task::spawn_blocking(move || crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_cassy_merge_close_notice(&root,&notice,&merge_tip)).await.unwrap().unwrap().unwrap();
+    let connection = rusqlite::Connection::open(owner.cas.join("cas.db")).unwrap();
+    let payload: String = connection.query_row("SELECT payload FROM peer_message_outbox WHERE id=?1",[notification],|row|row.get(0)).unwrap();
+    let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+    let (_,body) = split_message_intent(&sent.body);
+    let result: serde_json::Value = serde_json::from_str(body.strip_prefix(train_parks::TAG).unwrap()).unwrap();
+    assert_eq!(result["cycle"],0); assert_eq!(result["status"],"closed");
+    let mut result_mail = message("closed-result","worker",REPO,&sent.body);
+    result_mail.sender_agent_id = "owner".into(); result_mail.sender_name = "owner".into();
+    result_mail.sender_machine_id = Some("soundwave".into()); result_mail.sender_session = Some("owner-session".into());
+    let root = host.cas.clone();
+    let receive = move |mail: ClaimedPeerMessage| {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || {
+            let mailbox = FakeMailbox { inbox:Mutex::new(vec![mail]), ..Default::default() };
+            let report = deliver_claimed_with_history(&mailbox,open_prompt_queue_store(&root).unwrap().as_ref(),open_agent_store(&root).unwrap().as_ref(),
+                REPO,&[],"owner-session","prowl:owner-session",&RecipientHistory::default(),Some((&root,"worker")),
+                &|_,mail| Ok(train_parks::queue_key(mail)),&|recipient,mail| train_parks::ingest(&root,recipient,mail),&|_,_| Ok(PeerAckOutcome::Delivered));
+            (report,mailbox.acks.into_inner().unwrap())
+        })
+    };
+    let (waiting,ack) = receive(result_mail.clone()).await.unwrap();
+    assert_eq!((waiting.delivered,waiting.rejected),(0,0)); assert!(ack.is_empty());
+    assert!(waiting.errors.iter().any(|error| error.contains("TRAIN_RESULT_STATE_PENDING")));
+    host_tasks.update(&closed).unwrap();
+    let (result,_) = receive(result_mail.clone()).await.unwrap(); assert_eq!(result.delivered,1);
+    let mut duplicate = result_mail.clone(); duplicate.id = "same-result-new-cloud-id".into();
+    let (duplicate,_) = receive(duplicate).await.unwrap(); assert_eq!(duplicate.duplicates,1);
+    let mut changes = delivered_task; changes.status = crate::types::TaskStatus::Open;
+    changes.deliverables.historical_factory_branch_anchors.push(delivered_park.tip.clone());
+    changes.deliverables.factory_branch_anchor = None; changes.deliverables.parked_branch = None;
+    host_tasks.update(&changes).unwrap();
+    let changes = host_tasks.get(&changes.id).unwrap();
+    assert!(changes.deliverables.delivery_cycle > delivered_park.cycle);
+    let (stale,_) = receive(result_mail).await.unwrap(); assert_eq!(stale.rejected,1);
+    let (root,notice) = (owner.cas.clone(),changes);
+    let notification = tokio::task::spawn_blocking(move || crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_request_changes_notice(&root,&notice,"repair fixture","retain branch")).await.unwrap().unwrap();
+    let payload: String = connection.query_row("SELECT payload FROM peer_message_outbox WHERE id=?1",[notification],|row|row.get(0)).unwrap();
+    let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+    let mut correction = message("correction-result","worker",REPO,&sent.body);
+    correction.sender_agent_id = "owner".into(); correction.sender_name = "owner".into();
+    correction.sender_machine_id = Some("soundwave".into()); correction.sender_session = Some("owner-session".into());
+    let (corrected,_) = receive(correction).await.unwrap(); assert_eq!(corrected.delivered,1,"{corrected:?}");
+    assert_eq!(host.rows().len(),2);
+    assert!(open_agent_store(&host.cas).unwrap().list(None).unwrap().iter().all(|a| a.role != AgentRole::Supervisor));
 }

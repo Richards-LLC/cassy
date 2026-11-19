@@ -27,8 +27,9 @@ use crate::types::{AgentRole, AgentStatus};
 
 mod outbox;
 mod workers;
-pub(crate) use workers::WorkerDirectory;
-pub(crate) use outbox::enqueue_feedback;
+pub(crate) mod train_parks;
+pub(crate) use workers::{WorkerDirectory, owned_route, notice_route, worker_notice};
+pub(crate) use outbox::{enqueue_feedback, enqueue_notice};
 mod runtime;
 pub mod transcript;
 pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};
@@ -296,7 +297,7 @@ pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> R
     Ok(format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()))
 }
 
-fn split_message_intent(body: &str) -> (Option<PeerMessageKind>, &str) {
+pub(crate) fn split_message_intent(body: &str) -> (Option<PeerMessageKind>, &str) {
     let Some((line, rest)) = body.split_once('\n') else {
         return (None, body);
     };
@@ -410,9 +411,9 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
         Some(PeerMessageKind::Quiet)
     } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
-    // cas-9cda: a published landing approval wakes (cas-35563) so the
-    // supervisor sees its train move, but it is status, not a question.
-    let landing = body.starts_with(crate::mcp::tools::core::workflow::premerge_verification::PEER_PREMERGE_TAG);
+    // Historical prompts retain their status intent; runtime rejects new
+    // legacy approvals before enqueueing and never imports their authority.
+    let landing = crate::mcp::tools::core::workflow::premerge_verification::legacy_peer_approval(message);
     let kind = kind.or(landing.then_some(PeerMessageKind::Status));
     // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
@@ -472,16 +473,11 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         )
     };
     let attachments = render_attachments(&attachments, &message.project_id);
-    // A landing is a fact, not a question: it asks for nothing back.
-    let reply = if landing {
-        String::new()
-    } else {
-        format!(
-            "Reply with coordination action=message target={name}@{machine} summary=\"<one line>\" \
-             message=\"<reply>\" in_reply_to=<this message's notification id>.\n",
-            name = message.sender_name,
-        )
-    };
+    let reply = if landing { String::new() } else { format!(
+        "Reply with coordination action=message target={name}@{machine} summary=\"<one line>\" \
+         message=\"<reply>\" in_reply_to=<this message's notification id>.\n",
+        name = message.sender_name,
+    ) };
     format!("{envelope}\n{origin}\n{reply}{attachments}\n{body}")
 }
 
@@ -1052,6 +1048,20 @@ fn live_supervisor(agent: &crate::types::Agent) -> bool {
         .is_live()
 }
 
+/// Reuse the mailbox's machine/session/retirement checks for owner restart.
+/// A matching name or a dead heartbeat alone never transfers authority.
+pub(crate) fn owns_recipient(root: &Path, actor: &crate::types::Agent, recipient: &str) -> bool {
+    if actor.id == recipient {
+        return true;
+    }
+    let Some(session) = actor.factory_session.as_deref() else { return false };
+    let Ok(history) = retired_recipients(root, session) else { return false };
+    let Ok(all) = crate::store::open_agent_store(root).and_then(|store| store.list(None).map_err(Into::into)) else { return false };
+    let live = all.iter().filter(|agent| live_supervisor(agent)).collect::<Vec<_>>();
+    recipient_routes(&all, &live, &history.verified, session).0.get(recipient)
+        .is_some_and(|successor| successor.id == actor.id)
+}
+
 fn recipient_routes<'a>(
     all: &'a [crate::types::Agent],
     live: &[&'a crate::types::Agent],
@@ -1251,9 +1261,10 @@ fn deliver_claimed_with_history(
     // Evaluate process/heartbeat liveness once per registry row, never per
     // historical ID. Both verified routing and legacy feedback reuse this set.
     let live: Vec<_> = all.iter().filter(|a| live_supervisor(a)).collect();
-    if !live
-        .iter()
-        .any(|a| a.factory_session.as_deref() == Some(factory_session))
+    if !live.iter().any(|a| a.factory_session.as_deref() == Some(factory_session))
+        && !workers.is_some_and(|(_, id)| all.iter().any(|a| a.id == id
+            && a.role == AgentRole::Worker && a.metadata.contains_key("train_owner")
+            && a.factory_session.as_deref() == Some(factory_session)))
     {
         report
             .errors
@@ -1440,9 +1451,12 @@ fn deliver_claimed_with_history(
             // registration, leaves the claim unacknowledged for a later poll.
             let Some(directory) = directory.as_ref().filter(|directory| directory.matches_local(recipient))
                 else { continue; };
-            let pair = directory.pair_for_receipt(&message.sender_agent_id, &recipient.id);
+            let owner_message = directory.owner_message(message, &recipient.id);
+            let pair = if owner_message { Ok(Some(())) } else {
+                directory.pair_for_receipt(&message.sender_agent_id, &recipient.id).map(|pair| pair.map(|_| ()))
+            };
             if message.scope != PeerScope::Project || !same_repo || pair.is_err()
-                || !workers::allowed_intent(&message.body)
+                || (!owner_message && !workers::allowed_intent(&message.body))
             {
                 report.rejected += 1;
                 acks.push((message.id.clone(), PeerAckOutcome::Rejected));
@@ -1467,7 +1481,7 @@ fn deliver_claimed_with_history(
                 continue; // Reply transport failure retries with the same dedupe key.
             }
         }
-        let key = match if recipient.role == AgentRole::Worker { Ok(None) } else { queue_key(recipient, message) } {
+        let key = match queue_key(recipient, message) {
             Ok(key) => key.unwrap_or_else(|| format!("peer:{}", message.id)),
             Err(error) => {
                 report.errors.push(format!("peer message {} queue identity failed: {error}", message.id));
@@ -1484,10 +1498,16 @@ fn deliver_claimed_with_history(
                 .filter(|summary| !summary.trim().is_empty())
                 .unwrap_or_else(|| message.body.chars().take(60).collect())
         );
+        let typed_prompt = train_parks::prompt(message);
+        let source = if typed_prompt.as_ref().is_some_and(|prompt| crate::prompt_revalidation::parse_worker_action_envelope(prompt).is_some()) {
+            format!("lifecycle-wake:{key}")
+        } else { format!("peer:{}@{}", message.sender_name, machine_of(message)) };
         match queue.enqueue_idempotent(
-            &format!("peer:{}@{}", message.sender_name, machine_of(message)),
+            &source,
             &recipient.name,
-            &if recipient.role == AgentRole::Worker { workers::render_worker_prompt(message) } else { render_prompt(message) },
+            &if let Some(prompt) = typed_prompt { prompt } else if recipient.role == AgentRole::Worker
+                && !directory.as_ref().is_some_and(|d| d.owner_message(message, &recipient.id))
+                { workers::render_worker_prompt(message) } else { render_prompt(message) },
             Some(factory_session),
             Some(&summary),
             Some(NotificationPriority::High),
@@ -1496,9 +1516,7 @@ fn deliver_claimed_with_history(
         ) {
             Ok(admitted) => {
                 let recorded = if recipient.role == AgentRole::Worker {
-                    let (root, _) = workers.expect("worker route was checked");
-                    directory.as_ref().expect("worker authorization was checked").copy_to_supervisors(root, queue, message)
-                        .map(|()| PeerAckOutcome::Delivered)
+                    Ok(PeerAckOutcome::Delivered)
                 } else { on_admitted(recipient, message) };
                 match recorded {
                     Ok(PeerAckOutcome::Delivered) => {}
@@ -1584,11 +1602,6 @@ pub(crate) fn send_raw(
         PeerScope::Project,
         None,
     )
-}
-
-/// Internal publication path: stable delivery identity in the existing outbox.
-pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
-    outbox::enqueue_premerge_receipt(root, message, label)
 }
 
 /// Cassy Cloud's peer-message body limit, in characters.

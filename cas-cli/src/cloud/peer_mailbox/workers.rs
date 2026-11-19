@@ -9,6 +9,9 @@ use super::*;
 
 pub(crate) struct WorkerDirectory {
     workers: Vec<peers_detail::PeerWorkerRef>,
+    owners: BTreeMap<String, BTreeSet<String>>,
+    agents: Vec<crate::cloud::AgentInfo>,
+    claims: Vec<crate::types::TaskLease>,
     epics: BTreeMap<String, BTreeMap<String, chrono::DateTime<Utc>>>,
 }
 
@@ -27,7 +30,7 @@ impl WorkerDirectory {
         let now = Utc::now();
         let mut supervisors = peers::repo_peers(&agents, &repo, &aliases, None, now);
         peers::mark_own(&mut supervisors, Some(&owner));
-        supervisors.retain(|s| s.live && s.own == Some(true));
+        supervisors.retain(|s| s.own == Some(true));
         let workers = peers_detail::live_peer_workers(&supervisors, &agents, &aliases, now)
             .into_iter().filter(|worker| agents.iter().any(|a| a.id == worker.agent_id
                 && a.user_id.as_deref() == Some(owner.as_str()))).collect::<Vec<_>>();
@@ -54,7 +57,23 @@ impl WorkerDirectory {
                 }
             }
         }
-        Ok(Self { workers, epics })
+        let mut owners = BTreeMap::new();
+        for worker in &workers {
+            let agent = agents.iter().find(|a| a.id == worker.agent_id).unwrap();
+            let Some(train) = agent.metadata.get("train").and_then(|id| tasks.get(id).ok()) else { continue };
+            let Some(owner) = train.epic_verification_owner.as_deref() else { continue };
+            if train.is_terminal() || train.task_type != TaskType::Epic
+                || owner != worker.supervisor.agent_id
+                || agent.metadata.get("train_owner").map(String::as_str) != Some(owner)
+                || agent.metadata.get("train_owner_generation") != crate::factory_session_scope::train_owner_generation(&train).ok().as_ref()
+            { continue; }
+            let mut ids = BTreeSet::from([owner.to_string()]);
+            if let peers::SlotHolder::Successor { peer, .. } = peers::slot_holder(&supervisors, &worker.supervisor, !worker.supervisor.live) {
+                ids.insert(peer.agent_id.clone());
+            }
+            owners.insert(worker.agent_id.clone(), ids);
+        }
+        Ok(Self { workers, owners, agents, claims: locks, epics })
     }
 
     pub(crate) fn matches_local(&self, local: &Agent) -> bool {
@@ -62,7 +81,27 @@ impl WorkerDirectory {
             && self.workers.iter().any(|worker| worker.agent_id == local.id
                 && worker.name == local.name
                 && worker.supervisor.session == local.factory_session
-                && worker.supervisor.machine_id == local.machine_id)
+                && worker.machine_id == local.machine_id)
+    }
+
+    /// Lifecycle authority survives a released claim, but never an owner-generation change.
+    pub(crate) fn owner_of(&self, owner: &str, worker: &str) -> bool {
+        self.owners.get(worker).is_some_and(|ids| ids.contains(owner))
+    }
+
+    pub(crate) fn owner_message(&self, message: &ClaimedPeerMessage, worker: &str) -> bool {
+        self.owner_of(&message.sender_agent_id, worker) && self.sender_matches(message)
+    }
+
+    pub(crate) fn sender_matches(&self, message: &ClaimedPeerMessage) -> bool {
+        self.agents.iter().any(|agent| agent.id == message.sender_agent_id
+            && agent.machine_id == message.sender_machine_id
+            && agent.metadata.get(peers::META_FACTORY_SESSION) == message.sender_session.as_ref())
+    }
+
+    pub(crate) fn claimed(&self, project: &str, task: &str) -> bool {
+        let key = crate::cloud::peer_claims::claim_key(project, task);
+        self.claims.iter().any(|claim| claim.expires_at > Utc::now() && (claim.task_id == task || claim.task_id == key))
     }
 
     pub(crate) fn resolve(&self, target: &str) -> Result<Option<&peers_detail::PeerWorkerRef>, String> {
@@ -84,7 +123,7 @@ impl WorkerDirectory {
         let from = self.workers.iter().find(|w| w.agent_id == sender);
         let to = self.workers.iter().find(|w| w.agent_id == recipient);
         let (Some(from), Some(to)) = (from, to) else { return Err("both worker peers must be live registered workers of your account and repository".into()); };
-        if from.agent_id == to.agent_id || from.supervisor.machine_id == to.supervisor.machine_id {
+        if from.agent_id == to.agent_id || from.machine_id == to.machine_id {
             return Err("remote worker peers must be on different machines".into());
         }
         let now = Utc::now();
@@ -96,31 +135,7 @@ impl WorkerDirectory {
         Ok(Some((from, to)))
     }
 
-    /// Record local visibility and send the other supervisor a durable quiet
-    /// copy before acking the worker message. Stable keys collapse redelivery.
-    pub(crate) fn copy_to_supervisors(&self, root: &Path, queue: &dyn PromptQueueStore, message: &ClaimedPeerMessage) -> Result<(), String> {
-        let (from, to) = self.pair(&message.sender_agent_id, &message.recipient_agent_id)?;
-        let (_, original) = split_message_intent(&message.body);
-        let copy = format!("Peer worker message copy — from {}@{} to {}@{}.\n\n{}",
-            from.name, from.machine, to.name, to.machine,
-            crate::prompt_revalidation::neutralize_worker_authored_envelope_tags(original));
-        let body = attach_message_intent(&copy, Some("receipt"), false)?;
-        let mut local = message.clone();
-        local.recipient_agent_id = to.supervisor.agent_id.clone();
-        local.body = body.clone();
-        queue.enqueue_idempotent(&format!("peer:{}@{}", from.name, from.machine), &to.supervisor.name,
-            &render_prompt(&local), to.supervisor.session.as_deref(), message.summary.as_deref(),
-            Some(NotificationPriority::Normal), &format!("peer-worker-copy:{}", message.id), Some(&QueueOrigin::Daemon))
-            .map_err(|e| e.to_string())?;
-        outbox::enqueue_and_send(root, PeerSend {
-            project_id: message.project_id.clone(), sender_agent_id: to.agent_id.clone(),
-            recipient_agent_id: from.supervisor.agent_id.clone(), body,
-            summary: message.summary.clone(), in_reply_to: None,
-            dedupe_key: format!("peer-worker-copy:{}", message.id),
-            scope: PeerScope::Project, recipient_project_id: None,
-        }, &from.supervisor.name).map_err(|e| e.to_string())?;
-        Ok(())
-    }
+
 }
 
 pub(super) fn allowed_intent(body: &str) -> bool {
@@ -137,4 +152,56 @@ pub(super) fn render_worker_prompt(message: &ClaimedPeerMessage) -> String {
     message.body = attach_message_intent(&safe, kind.map(PeerMessageKind::as_str), false)
         .expect("parsed peer kind is valid");
     render_prompt(&message).replacen("Peer supervisor ", "Peer worker (advisory only; your supervisor retains assignment authority) ", 1)
+}
+
+/// Direct train authority uses the owner's address even while its pane is offline.
+/// Advisory worker contracts continue through the separate active-claim path.
+pub(crate) fn owned_route(root: &Path, sender: &Agent, target: &str) -> Result<Option<(String, String)>, String> {
+    if sender.role == AgentRole::Worker {
+        if !target.eq_ignore_ascii_case("supervisor") || !sender.metadata.contains_key("train_owner") { return Ok(None); }
+        let host = crate::factory_session_scope::WorkerHost::current(root, sender.factory_session.as_deref())?
+            .ok_or("Worker-host registration has no current owner binding")?;
+        let directory = WorkerDirectory::load(root, &sender.id)?;
+        if !directory.matches_local(sender) || !directory.owner_of(&host.owner, &sender.id) {
+            return Err("Worker-host Cloud identity or train generation changed".into());
+        }
+        return Ok(Some((host.owner, format!("{}@{}", host.name, host.machine))));
+    }
+    if sender.role != AgentRole::Supervisor || target.starts_with("supervisor:") { return Ok(None); }
+    if !target.contains('@') && crate::store::open_agent_store(root).ok().and_then(|store| store.list(None).ok())
+        .is_some_and(|agents| agents.iter().any(|agent| agent.id == target || agent.name.eq_ignore_ascii_case(target)))
+    { return Ok(None); }
+    if !CloudConfig::load_from_cas_dir(root).is_ok_and(|config| config.is_logged_in()) { return Ok(None); }
+    // This is an optional supervisor-to-worker route. If worker authority is
+    // unavailable, ordinary peer discovery owns the target/error diagnosis.
+    let Ok(directory) = WorkerDirectory::load(root, &sender.id) else { return Ok(None) };
+    Ok(directory.resolve(target)?.filter(|worker| directory.owner_of(&sender.id, &worker.agent_id))
+        .map(|worker| (worker.agent_id.clone(), format!("{}@{}", worker.name, worker.machine))))
+}
+
+/// Internal notices use the same authenticated route and the existing durable
+/// outbox; their local id remains stable after Cloud has accepted the send.
+pub(crate) fn notice_route(root: &Path, task: &cas_types::Task, target: &str) -> Result<Option<(Agent, String, String)>, String> {
+    let Some(train) = train_parks::owner_train(root, task)? else { return Ok(None) };
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    let Some(owner) = agents.list(None).map_err(|e| e.to_string())?.into_iter()
+        .filter(|actor| actor.role == AgentRole::Supervisor && actor.is_alive()
+            && owns_recipient(root, actor, train.epic_verification_owner.as_deref().unwrap()))
+        .max_by_key(|actor| actor.registered_at) else { return Ok(None) };
+    Ok(owned_route(root, &owner, target)?.map(|(recipient, label)| (owner, recipient, label)))
+}
+
+pub(crate) fn worker_notice(root: &Path, task: &cas_types::Task, target: &str, key: &str, prompt: &str, summary: &str) -> Result<Option<i64>, String> {
+    let Some((sender, recipient, label)) = notice_route(root, task, target)? else { return Ok(None) };
+    let body = match train_parks::parked(task)? {
+        Some(park) if park.worker == recipient => format!("{}{}", train_parks::TAG,
+            serde_json::to_string(&train_parks::TrainMail::Result { park, cycle:task.deliverables.delivery_cycle,
+                status:task.status, occurrence:key.into(), body:prompt.into() }).map_err(|e| e.to_string())?),
+        _ => prompt.into(),
+    };
+    let project_id = crate::cloud::resolve_canonical_id(root).ok_or("Project has no canonical identity")?;
+    let message = PeerSend { project_id, sender_agent_id:sender.id, recipient_agent_id:recipient.clone(),
+        body:attach_message_intent(&body, Some("status"), false)?, summary:Some(summary.into()),
+        in_reply_to:None, dedupe_key:format!("{key}:{recipient}"), scope:PeerScope::Project, recipient_project_id:None };
+    outbox::enqueue_notice(root, message, &label).map(Some)
 }

@@ -117,6 +117,7 @@ fn test_config() -> FactoryConfig {
         workers: 0,
         worker_names: vec![],
         supervisor_name: Some("test-supervisor".to_string()),
+        worker_host: None,
         supervisor_cli: SupervisorCli::Claude,
         worker_cli: SupervisorCli::Claude,
         supervisor_model: None,

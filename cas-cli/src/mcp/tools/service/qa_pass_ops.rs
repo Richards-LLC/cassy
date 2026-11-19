@@ -315,6 +315,10 @@ impl CasService {
             .open_task_store()?
             .get(task_id)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Task not found: {error}")))?;
+        let actor = self.inner.open_agent_store()?.get(&supervisor)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,error.to_string()))?;
+        crate::cloud::peer_mailbox::train_parks::authorize(&self.inner.cas_root,&task,&actor)
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
         let implementer = crate::qa_pass::delivery_implementer(&self.inner.cas_root, &task);
         // cas-5c38 (GH #999): a no-code task delivers no tip; any round an
         // earlier close opened for it is withdrawn rather than waived.

@@ -258,7 +258,7 @@ pub(crate) use factory_launch::launch as launch_factory_verifier;
 pub(crate) const VERIFIER_FACTORY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) const VERIFIER_FACTORY_STORE_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
 pub(crate) mod cycle;
-pub(crate) use peer::{PeerReceiptIngested, TAG as PEER_PREMERGE_TAG, ingest_peer_receipt};
+pub(crate) use peer::legacy_peer_approval;
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
@@ -561,6 +561,7 @@ fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
 fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(b"cas-peer-premerge-plan-v1\0");
@@ -572,6 +573,10 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(b"cas-premerge-candidate-v2-regenerated\0");
     hash_plan_context(root, task, &mut hash)?;
+    if let Some(train) = crate::cloud::peer_mailbox::train_parks::owner_train(root,task)? {
+        hash.update(crate::factory_session_scope::train_owner_generation(&train)?.as_bytes());
+    }
+    crate::cloud::peer_mailbox::train_parks::require_admitted(root,task)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
         "{}:{:?}",
@@ -933,7 +938,6 @@ impl Approval {
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
         )?;
-        self.share_published();
         Ok(Some((record.landed_sha, target)))
     }
 
@@ -978,7 +982,6 @@ impl Approval {
             } else {
                 self.promote(landed)?;
             }
-            self.share_published();
             return Ok(None);
         }
         if self.promotion()?.is_some() {
@@ -1029,8 +1032,8 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         verdict_id: &str,
     ) -> Result<(), McpError> {
-        if peer::verify_peer_promotion(&self.cas_root, task, dispatch, verdict_id).map_err(fail)? {
-            return Ok(());
+        if dispatch.repository.as_ref().is_some_and(|proof| proof.peer_premerge.is_some()) {
+            return Err(fail("Legacy peer approval cannot close this delivery; the train owner must issue its own verification cycle."));
         }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         else {
@@ -1237,6 +1240,11 @@ impl CasCore {
         // A target/context change must not buy another review of an unchanged
         // rejected delivery. The replicated receipt survives dispatch invalidation.
         let current = self.open_task_store()?.get(&task.id).map_err(fail)?;
+        if crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root,&current).map_err(fail)?.is_some() {
+            let actor = self.open_agent_store()?.get(&self.get_agent_id()?).map_err(fail)?;
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&current,&actor).map_err(fail)?;
+        }
+        crate::cloud::peer_mailbox::train_parks::require_admitted(&self.cas_root,&current).map_err(fail)?;
         if let Some(receipt) = &current.deliverables.premerge_repair
             && receipt.repair_cycle == current.deliverables.delivery_cycle
             && git(repo, &["rev-parse", source]).map_err(fail)? == receipt.rejected_anchor

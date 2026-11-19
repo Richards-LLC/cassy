@@ -62,6 +62,11 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     let root = crate::store::init_cas_dir(repo).unwrap();
     let mut supervisor = Agent::new_with_role("successor-id".into(), "supervisor".into(), AgentRole::Supervisor);
     supervisor.factory_session = Some("session".into());
+    supervisor.machine_id = Some(Agent::get_or_generate_machine_id());
+    let mut owner = supervisor.clone();
+    owner.id = "sup-id".into();
+    owner.status = cas_types::AgentStatus::Shutdown;
+    open_agent_store(&root).unwrap().register(&owner).unwrap();
     open_agent_store(&root).unwrap().register(&supervisor).unwrap();
     let store = open_task_store(&root).unwrap();
     store.add(&train_task("cas-tr", &[])).unwrap();
@@ -76,6 +81,41 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     run(repo, &["checkout", "-q", LANE]);
     commit(repo, "changelog.d/cas-x.md");
     run(repo, &["checkout", "-q", "main"]);
+    // cas-3416: soundwave disables cuts, while a peer daemon has defaults.
+    // Both polls see the same landed fragment and verification-owner identity.
+    let mut config = crate::config::Config::load(&root).unwrap();
+    config.set("release.auto_cut_max_per_day", "0").unwrap();
+    config.save(&root).unwrap();
+    poll(&none);
+    assert!(!frozen());
+    release_freeze::check_merge(&root, LANE, None).unwrap();
+
+    let peer_temp = tempfile::TempDir::new().unwrap();
+    let peer_repo = peer_temp.path().join("peer");
+    run(repo, &["clone", "-q", "--no-hardlinks", &repo.to_string_lossy(), &peer_repo.to_string_lossy()]);
+    let peer_root = crate::store::init_cas_dir(&peer_repo).unwrap();
+    assert_eq!(crate::config::Config::load(&peer_root).unwrap().release.unwrap_or_default().auto_cut_max_per_day, 4);
+    let peer_store = open_task_store(&peer_root).unwrap();
+    peer_store.add(&store.get("cas-tr").unwrap()).unwrap();
+    open_agent_store(&peer_root).unwrap().register(&supervisor).unwrap();
+    for remote_owner in [None, Some("another-machine")] {
+        if let Some(machine) = remote_owner {
+            let mut remote = owner.clone();
+            remote.machine_id = Some(machine.into());
+            open_agent_store(&peer_root).unwrap().register(&remote).unwrap();
+        }
+        notify_train_cuts(&peer_root, &none, now).unwrap();
+        let peer_train = peer_store.get("cas-tr").unwrap();
+        assert!(release_freeze::freeze_of(&peer_train).is_none());
+        release_freeze::check_merge(&peer_root, LANE, None).unwrap();
+        let declined = attempt(&peer_root, &peer_train, LANE,
+            &run(repo, &["rev-parse", LANE]), false, false, now).unwrap();
+        let Outcome::Declined(reason) = declined else { panic!("peer auto-cut accepted") };
+        assert!(reason.contains("G-122"), "{reason}");
+    }
+    config.set("release.auto_cut_max_per_day", "4").unwrap();
+    config.save(&root).unwrap();
+
     set_paused(&root, "cas-tr", "operator", true).unwrap();
     poll(&none);
     assert!(!frozen(), "paused in Commander");
@@ -125,6 +165,8 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     poll(&none);
     poll(&none);
     assert!(frozen(), "a ready tip with fragments freezes, starting its train suite");
+    assert!(release_freeze::check_merge(&root, LANE, None).unwrap_err().contains("G-100"));
+    assert!(store.get("cas-tr").unwrap().notes.contains(&crate::cloud::peers::machine_label_for(&root)));
     assert_eq!(wakes().len(), 1, "a missing notes draft wakes the supervisor once");
     let draft = notes_draft(&root, "cas-tr").unwrap();
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
@@ -173,6 +215,7 @@ async fn replay_partial_train_scope(train_id: &str, lane: &str, landed: &str, re
     env.set("CAS_AGENT_ROLE", "supervisor");
     let mut supervisor = Agent::new_with_role("sup-id".into(), "supervisor".into(), AgentRole::Supervisor);
     supervisor.factory_session = Some("scope-session".into());
+    supervisor.machine_id = Some(Agent::get_or_generate_machine_id());
     open_agent_store(&root).unwrap().register(&supervisor).unwrap();
     let store = open_task_store(&root).unwrap();
     store.add(&train_task(train_id, &[])).unwrap();

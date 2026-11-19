@@ -31,6 +31,8 @@ pub(crate) enum CapacityKind {
 #[derive(Default)]
 struct ReclaimableCaches {
     caches: Vec<(PathBuf, u64)>,
+    /// cas-7a37: verifier review-scratch output queued for deletion, still on disk.
+    review_scratch_bytes: u64,
     complete: bool,
 }
 
@@ -100,6 +102,7 @@ fn reclaimable_caches(root: &Path) -> Result<ReclaimableCaches> {
     Ok(ReclaimableCaches {
         caches: report.caches.into_iter().filter(|cache| matches!(cache.disposition,
             CacheDisposition::Eligible | CacheDisposition::Selected)).map(|cache| (cache.path, cache.bytes)).collect(),
+        review_scratch_bytes: report.pending_reclaim_bytes,
         complete: report.inventory_complete,
     })
 }
@@ -661,7 +664,7 @@ mod tests {
         for repo in &repos {
             record_refusal_with_kind(&root, repo, "disk_fixture", CapacityKind::Disk, later).unwrap();
         }
-        let inventory = |bytes| Ok(ReclaimableCaches { caches: vec![(PathBuf::from("/fixture/retired-cache"), bytes)], complete: true });
+        let inventory = |bytes| Ok(ReclaimableCaches { caches: vec![(PathBuf::from("/fixture/retired-cache"), bytes)], complete: true, ..Default::default() });
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(10)).unwrap(), 1);
         assert_eq!(notices.pending_count("capacity-lead").unwrap(), 1);
         let prompts = open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap();
@@ -701,5 +704,45 @@ mod tests {
         record_refusal_with_kind(&root, &repos[0], "disk_fixture", CapacityKind::Disk, restart).unwrap();
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), restart + Duration::minutes(25), || inventory(0)).unwrap(), 1);
         assert_eq!(notices.pending_count("capacity-lead").unwrap(), 6);
+    }
+
+    /// cas-7a37: review-scratch output queued for deletion still occupies disk,
+    /// so the notice's reclaimable total counts it beside the target caches.
+    #[test]
+    fn disk_notice_counts_review_scratch_in_the_reclaimable_total_cas_7a37() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut lead = Agent::new_with_role("scratch-lead".into(), "scratch-lead".into(), AgentRole::Supervisor);
+        lead.factory_session = Some("scratch-session".into());
+        agents.register(&lead).unwrap();
+        let now = Utc::now();
+        let name = "scratch-worker";
+        let mut worker = Agent::new_with_role(name.into(), name.into(), AgentRole::Worker);
+        worker.factory_session = lead.factory_session.clone();
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-scratch-worker".into(), "capacity fixture".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(name.into());
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, name, 7200, Some("working")).unwrap();
+        let repo = root.join("worktrees").join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        record_refusal_with_kind(&root, &repo, "disk_fixture", CapacityKind::Disk, now).unwrap();
+
+        let later = now + Duration::minutes(25);
+        let inventory = ReclaimableCaches {
+            caches: vec![(PathBuf::from("/fixture/retired-cache"), 10)],
+            review_scratch_bytes: 7,
+            complete: true,
+        };
+        assert_eq!(reconcile_with_inventory(&root, Some("scratch-session"), later, || Ok(inventory)).unwrap(), 1);
+        let notice = read_pressure(&root).unwrap().into_values().next().expect("pressure episode");
+        assert_eq!(notice.reclaimable_bytes, Some(17));
     }
 }

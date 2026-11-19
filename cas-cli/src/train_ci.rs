@@ -673,7 +673,7 @@ else: sys.exit(1)
         }
         assert_eq!(dispatches(), 0, "merges into an unfrozen train start no train suite");
 
-        let frozen = core.train_freeze("cas-train", Some("release-freeze: cut")).unwrap();
+        let frozen = core.train_freeze("cas-train", Some("release-freeze: cut"), false).unwrap();
         let expected = format!("workflow run full-validation.yml --ref {lane}");
         let actual: Vec<_> = std::fs::read_to_string(&calls).unwrap().lines()
             .filter(|call| call.starts_with("workflow run ")).map(str::to_owned).collect();
@@ -681,7 +681,7 @@ else: sys.exit(1)
         let frozen: Value = serde_json::from_str(&frozen).unwrap();
         assert_eq!(frozen["train_ci"]["run_url"], "https://github.com/fixture/repo/actions/runs/100");
         let repeated: Value = serde_json::from_str(&core.train_freeze(
-            "cas-train", Some("release-freeze: same tip"),
+            "cas-train", Some("release-freeze: same tip"), false,
         ).unwrap()).unwrap();
         assert_eq!(dispatches(), 1);
         assert_eq!(repeated["train_ci"]["run_url"], frozen["train_ci"]["run_url"]);
@@ -695,7 +695,7 @@ else: sys.exit(1)
             .args(["workflow", "run", "full-validation.yml", "--ref", lane]).status().unwrap();
         assert!(by_hand.success());
         let adopted: Value = serde_json::from_str(&core.train_freeze(
-            "cas-train", Some("release-freeze: repair tip"),
+            "cas-train", Some("release-freeze: repair tip"), false,
         ).unwrap()).unwrap();
         assert_eq!(adopted["train_ci"]["run_url"], "https://github.com/fixture/repo/actions/runs/101");
         assert_eq!(dispatches(), 2);
@@ -767,7 +767,7 @@ else: sys.exit(1)
         git(&["commit", "-q", "--allow-empty", "-m", "dispatch refusal"]);
         std::fs::write(&fail_dispatch, "refuse dispatch").unwrap();
         let failed: Value = serde_json::from_str(&core.train_freeze(
-            "cas-train", Some("release-freeze: report dispatch failure"),
+            "cas-train", Some("release-freeze: report dispatch failure"), false,
         ).unwrap()).unwrap();
         assert_eq!(failed["train_ci"]["skip_reason"], "dispatch_failed");
         assert!(failed["train_ci"]["run_url"].is_null());

@@ -1919,7 +1919,7 @@ impl FactoryApp {
                     // delivered; it is never observed here, on the loop.
                     let observation = idle_liveness.get(worker).cloned().flatten();
                     if let Some(observation) = observation {
-                        if !super::director::apply_idle_liveness(&mut prompt, worker, &observation)
+                        if !super::director::apply_idle_liveness(&mut prompt, worker, &observation, false)
                         {
                             continue;
                         }

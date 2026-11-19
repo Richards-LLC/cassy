@@ -737,6 +737,7 @@ pub(crate) fn apply_idle_liveness(
     prompt: &mut Prompt,
     worker: &str,
     observation: &crate::mcp::tools::service::worker_liveness::Observation,
+    _named_task_in_progress: bool,
 ) -> bool {
     use crate::mcp::tools::service::worker_liveness::Liveness;
     // A pending merge remains actionable even if the harness starts another
@@ -6793,15 +6794,21 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
             evidence: "recorded event; pid 42 S".into(),
         };
         assert_eq!(
-            apply_idle_liveness(&mut prompt.clone(), "wolf", &observed),
+            apply_idle_liveness(&mut prompt.clone(), "wolf", &observed, false),
             state == Liveness::WaitingForInput
         );
         let mut merge = prompt.clone();
         merge.retract_task = Some("t".into());
-        assert!(apply_idle_liveness(&mut merge, "wolf", &observed));
+        assert!(apply_idle_liveness(&mut merge, "wolf", &observed, false));
         assert!(merge.text.starts_with(&observed.detail()));
+        // cas-97dc: the named task was started after the idle basis, so no
+        // delivery exists for it; the relay must not claim one.
+        let mut fresh = prompt.clone();
+        fresh.retract_task = Some("t".into());
+        assert!(!apply_idle_liveness(&mut fresh, "wolf", &observed, true));
+        assert!(!fresh.text.contains("pending delivery"));
         let mut ordinary = prompt.clone();
-        apply_idle_liveness(&mut ordinary, "wolf", &Observation { state: Liveness::WaitingForInput, evidence: "idle".into() });
+        apply_idle_liveness(&mut ordinary, "wolf", &Observation { state: Liveness::WaitingForInput, evidence: "idle".into() }, false);
         assert_eq!(ordinary.text.lines().last(), prompt.text.lines().last());
     }
 }

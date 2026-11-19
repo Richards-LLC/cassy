@@ -185,10 +185,8 @@ fn cas_0660_a_withdrawn_director_merge_alert_is_not_surfaced() {
             let shown = surfaced.as_deref().is_some_and(|text| text.contains(token));
             assert_eq!(shown, !withdrawn, "withdrawn={withdrawn} boundary={tool_boundary}: {surfaced:?}");
             if withdrawn {
-                assert_eq!(
-                    store.message_delivery_report(id).unwrap().unwrap().pending_reason,
-                    Some(cas_store::PendingReason::SupersededStale)
-                );
+                // Receipted, so the next turn does not surface it again.
+                assert_eq!(store.count_unseen_for_recipient("supervisor", Some(SESSION)).unwrap(), 0, "row {id}");
             }
         }
     }

@@ -4,10 +4,10 @@ Run `scripts/audit.py` once for all classes; it is a portable lexical inventory,
 
 | Pattern / class | Signal | Review and fix |
 | --- | --- | --- |
-| fixed-sleep / flake-prone, slow | Rust thread/Tokio sleep, JS setTimeout, Playwright waitForTimeout | Fixed readiness guesses wait on the event. Recognized fake timers and event-bounded predicate polling are excluded; aliases need review. Runtime saving is unmeasured until CI timing proves it. |
-| instant-port / flake-prone | One connection-must-fail assertion | Observe the server's shutdown/ready event; a refused attempt alone cannot establish lifecycle completion. |
-| instant-teardown / flake-prone | Kill/stop/close followed by a one-shot process/file assertion without a wait/join | Await the exact completion or cleanup event. Synchronous owned-file operations are not teardown races. |
-| tight-deadline / flake-prone | Small real-time upper bounds or event timeouts, including elapsed assertions | Review the awaited event's own budget. Test timing contracts with controlled clocks; runner timeouts are safety bounds, not event assertions. Lower bounds are not upper deadlines. |
+| fixed-sleep / flake-prone, slow | Rust thread/Tokio sleep, JS setTimeout, Playwright waitForTimeout | Apply [Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene) item 4. Recognized fake timers and event-bounded predicate polling are excluded; aliases need review. Runtime saving is unmeasured until CI timing proves it. |
+| instant-port / flake-prone | One connection-must-fail assertion | Apply [Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene) item 4; a refused attempt alone cannot establish lifecycle completion. |
+| instant-teardown / flake-prone | Kill/stop/close followed by a one-shot process/file assertion without a wait/join | Apply [Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene) item 4. Synchronous owned-file operations are not teardown races. |
+| tight-deadline / flake-prone | Small real-time upper bounds or event timeouts, including elapsed assertions | Apply [Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene) item 4. Runner timeouts are safety bounds, not event assertions. Lower bounds are not upper deadlines. |
 | shared-port, shared-path / flake-prone | Literal/global fixed listener ports; writes to shared temp paths | Use port zero with retained listener ownership or per-test temporary directories. A fixture string/pure path builder is not shared I/O. |
 | shared-state, order-dependence / flake-prone | Unguarded process environment, static mut, or mutation of a binding shared by test callbacks | Reset with a full-duration guard or allocate state per test. Helpers' local variables and existing reset hooks are not global state. |
 | unseeded-random / flake-prone | Unseeded rand/Math.random/random inputs | Inspect whether the expectation depends on the draw. Seed varying test data; random cryptographic challenge round-trips may be invariant and are not proven flakes. |
@@ -34,7 +34,7 @@ Treat every match below as a review candidate; sample 10 and retain the precisio
 | CSS/Quasar class locators | Styling structure is the primary identity | Inspect role/label/test id; retain intentional machine selector contracts |
 | Banned strictness fix: .first() | It suppresses strictness rather than testing specified order | Narrow a semantic container and prove the promised outcome |
 | Banned readiness substitute: networkidle | It substitutes connection silence for user readiness | Web-first state assertion or the required response plus UI outcome |
-| Banned completion substitute: waitForTimeout | A sleep substitutes for completion | Event/barrier; controlled clock only for time logic |
+| Banned completion substitute: waitForTimeout | A sleep substitutes for completion | Apply [Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene) item 4. |
 | .catch(() => undefined) | It swallows a required action/assertion failure | Propagate the error; preserve intentional context-close cleanup separately |
 
 The five confirmed patterns above are banned authoring fixes. Also inspect isVisible() branching, soft returns, copy/word-list assertions and retries used to mask failures. toHaveText on fixture data and accessible-name locator inputs remain valid.

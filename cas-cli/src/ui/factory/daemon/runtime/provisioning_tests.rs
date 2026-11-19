@@ -407,6 +407,7 @@ fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741(
             "supervisor",
             Some(request_id),
             "clever-panther-60",
+            None,
             reason,
         );
     }
@@ -453,4 +454,71 @@ fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741(
     assert_eq!(FactoryDaemon::supervisor_wake_class(
         &super::queue_and_events::WakeSender::Daemon, "supervisor", &notice.source, &notice.prompt,
     ), Some(super::queue_and_events::SupervisorWakeClass::Blocker));
+}
+
+/// cas-3766: a request accepted from the queue whose task-queue binding fails
+/// used to be dropped by the consumer with no terminal state and no notice
+/// (request 3368 vanished among five concurrent requests). It must end FAILED,
+/// tell the supervisor which request failed, and not stop the next request.
+#[tokio::test(flavor = "current_thread")]
+async fn accepted_request_whose_binding_fails_ends_failed_and_notifies_cas_3766() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_dir, mut daemon) = setup();
+    let queue = crate::store::open_spawn_queue_store(daemon.app.cas_dir()).unwrap();
+    let enqueue = |name: &str, task: Option<&str>| {
+        queue
+            .enqueue_spawn_with_task_queue(
+                1,
+                &[name.to_string()],
+                false,
+                None,
+                Some("provision-test"),
+                task,
+                None,
+                None,
+                &task.map(|t| vec![t.to_string()]).unwrap_or_default(),
+            )
+            .unwrap()
+    };
+    let lost = enqueue("lost-worker", Some("cas-stalled"));
+    let next = enqueue("next-worker", None);
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
+        .unwrap()
+        .execute("UPDATE spawn_task_queues SET task_ids='not json' WHERE request_id=?1", [lost])
+        .unwrap();
+
+    daemon.enqueue_spawn_requests().unwrap();
+    for _ in 0..2 {
+        daemon.process_pending_spawns().await;
+    }
+
+    let state = |id: i64| {
+        rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
+            .unwrap()
+            .query_row("SELECT spawn_state FROM spawn_queue WHERE id=?1", [id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .unwrap()
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while state(lost).as_deref() != Some("failed") && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state(lost).as_deref(), Some("failed"));
+    let request = format!("request {lost}");
+    let notices = crate::store::open_prompt_queue_store(daemon.app.cas_dir())
+        .unwrap()
+        .peek_all(20)
+        .unwrap();
+    let notice = notices
+        .iter()
+        .find(|row| row.target == daemon.app.supervisor_name() && row.prompt.contains(&request))
+        .expect("the supervisor is told which request failed");
+    let envelope = crate::prompt_revalidation::parse_blocker_envelope(&notice.prompt)
+        .expect("the notice carries a blocker envelope");
+    assert_eq!(envelope.task_id.as_deref(), Some("cas-stalled"));
+    assert_eq!(envelope.worker, "lost-worker");
+    assert_eq!(daemon.spawn_task.as_ref().map(|task| task.1), Some(Some(next)));
+    assert_eq!(daemon.app.spawning_count, 1, "only the live spawn holds a slot");
+    daemon.cancel_provisioning();
 }

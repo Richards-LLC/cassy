@@ -817,7 +817,8 @@ impl SqliteKnowledgeStore {
         Ok(store)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+    #[track_caller]
+    fn lock(&self) -> crate::shared_db::ConnectionGuard<'_> {
         crate::shared_db::lock_connection_infallible(&self.conn)
     }
 

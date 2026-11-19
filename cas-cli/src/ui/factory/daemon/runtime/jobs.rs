@@ -777,6 +777,7 @@ fn run_work<T: Send + 'static>(
     writer: Option<&Arc<dyn WriteExecutor>>,
     started: &Arc<OnceLock<Instant>>,
 ) -> Result<T, JobPanicked> {
+    let _operation = cas_store::shared_db::connection_operation(label);
     let caught = |panic: Box<dyn std::any::Any + Send>| JobPanicked {
         message: panic_message(panic.as_ref()),
     };
@@ -808,6 +809,7 @@ fn run_work<T: Send + 'static>(
                 let (sender, receiver) = mpsc::channel();
                 let started = Arc::clone(started);
                 let job = Box::new(move || {
+                    let _operation = cas_store::shared_db::connection_operation(label);
                     let _ = started.set(Instant::now());
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                         .map_err(|panic: Box<dyn std::any::Any + Send>| JobPanicked {

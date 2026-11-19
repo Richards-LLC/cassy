@@ -1030,6 +1030,11 @@ impl EmbeddedDaemon {
     pub async fn run(self: Arc<Self>) -> Result<(), CasError> {
         use tokio::sync::watch;
 
+        let root = self.config.cas_root.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::mcp::tools::service::close_continuation::recover(&root);
+        });
+
         // Create shutdown channel
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -1301,6 +1306,10 @@ impl EmbeddedDaemon {
                     // both-binaries data read as post-fix.
                     self.touch_binary_epoch();
                     self.send_agent_heartbeat().await;
+                    let root = self.config.cas_root.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::mcp::tools::service::close_continuation::recover(&root);
+                    });
                     #[cfg(not(test))]
                     {
                         let root = self.config.cas_root.clone();

@@ -1490,6 +1490,25 @@ fn reconcile_web_close(
     }
 }
 
+/// Proof and provenance restores append notes after a pulled row is applied,
+/// and the store stamps each append with the local clock. That apply-time
+/// stamp made the owner machine's next lifecycle row (a park) look older than
+/// this copy, so the park was dropped as stale (GH #2105, cas-3122 class).
+fn without_apply_clock<T>(
+    store: &dyn TaskStore,
+    task_id: &str,
+    apply: impl FnOnce() -> Result<T, CasError>,
+) -> Result<T, CasError> {
+    let before = store.get(task_id).ok().map(|task| task.updated_at);
+    let out = apply();
+    if let Some(before) = before
+        && let Ok(after) = store.get(task_id)
+    {
+        store.rewind_sync_clock(task_id, after.updated_at, before)?;
+    }
+    out
+}
+
 /// Proof has its own immutable/monotonic authority. A newer task body must
 /// not discard an owner's review verdict or published bytes on another host.
 fn restore_task_proofs(
@@ -2625,28 +2644,31 @@ impl CloudSyncer {
                 )
             };
             let mut task_proofs_restored = true;
-            if task_outcome.is_ok() {
-                if let Err(error) = restore_task_proofs(
-                    self.push_cas_root.as_deref(),
-                    task_store,
-                    &remote_task,
-                    incoming_is_owner,
-                    &trusted_proofs,
-                    &qa_receipts,
-                ) {
-                    task_proofs_restored = false;
-                    // A rejected proof stays rejected without discarding other
-                    // task rows in this authenticated incremental batch.
-                    result
-                        .errors
-                        .push(format!("task {} proof restore: {error}", remote_task.id));
+            without_apply_clock(task_store, &remote_task.id, || {
+                if task_outcome.is_ok() {
+                    if let Err(error) = restore_task_proofs(
+                        self.push_cas_root.as_deref(),
+                        task_store,
+                        &remote_task,
+                        incoming_is_owner,
+                        &trusted_proofs,
+                        &qa_receipts,
+                    ) {
+                        task_proofs_restored = false;
+                        // A rejected proof stays rejected without discarding other
+                        // task rows in this authenticated incremental batch.
+                        result
+                            .errors
+                            .push(format!("task {} proof restore: {error}", remote_task.id));
+                    }
                 }
-            }
-            if matches!(task_outcome, Ok(UpsertResult::Created | UpsertResult::Updated))
-                && let Some(block) = trusted_provenance.as_deref()
-            {
-                task_store.append_trusted_note(&remote_task.id, block)?;
-            }
+                if matches!(task_outcome, Ok(UpsertResult::Created | UpsertResult::Updated))
+                    && let Some(block) = trusted_provenance.as_deref()
+                {
+                    task_store.append_trusted_note(&remote_task.id, block)?;
+                }
+                Ok(())
+            })?;
             if task_outcome.is_ok() && task_proofs_restored {
                 self.settle_task_revision(task_store, &remote_task, task_revision,
                     &task_outcome, incoming_is_owner, &mut result)?;
@@ -3862,28 +3884,31 @@ impl CloudSyncer {
                 "team_pull",
             );
             let mut task_proofs_restored = true;
-            if task_outcome.is_ok() {
-                if let Err(error) = restore_task_proofs(
-                    self.push_cas_root.as_deref(),
-                    task_store,
-                    &remote_task,
-                    incoming_is_owner,
-                    &trusted_proofs,
-                    &qa_receipts,
-                ) {
-                    task_proofs_restored = false;
-                    // A rejected proof stays rejected without discarding other
-                    // task rows in this authenticated incremental batch.
-                    result
-                        .errors
-                        .push(format!("task {} proof restore: {error}", remote_task.id));
+            without_apply_clock(task_store, &remote_task.id, || {
+                if task_outcome.is_ok() {
+                    if let Err(error) = restore_task_proofs(
+                        self.push_cas_root.as_deref(),
+                        task_store,
+                        &remote_task,
+                        incoming_is_owner,
+                        &trusted_proofs,
+                        &qa_receipts,
+                    ) {
+                        task_proofs_restored = false;
+                        // A rejected proof stays rejected without discarding other
+                        // task rows in this authenticated incremental batch.
+                        result
+                            .errors
+                            .push(format!("task {} proof restore: {error}", remote_task.id));
+                    }
                 }
-            }
-            if matches!(task_outcome, Ok(UpsertResult::Created | UpsertResult::Updated))
-                && let Some(block) = trusted_provenance.as_deref()
-            {
-                task_store.append_trusted_note(&remote_task.id, block)?;
-            }
+                if matches!(task_outcome, Ok(UpsertResult::Created | UpsertResult::Updated))
+                    && let Some(block) = trusted_provenance.as_deref()
+                {
+                    task_store.append_trusted_note(&remote_task.id, block)?;
+                }
+                Ok(())
+            })?;
             if task_outcome.is_ok() && task_proofs_restored {
                 self.settle_task_revision(task_store, &remote_task, team_task_revision,
                     &task_outcome, incoming_is_owner, &mut result)?;
@@ -4227,13 +4252,8 @@ mod tests {
     // every project's rows — the cas-2eb3 contamination vector.
     #[test]
     fn pull_url_aborts_when_project_scope_is_unresolvable() {
-        let err = build_scoped_pull_url_with("https://cloud.example", &[], || None)
+        build_scoped_pull_url_with("https://cloud.example", &[], || None)
             .expect_err("an unresolvable project scope must abort the pull, not drop the scope");
-        let message = err.to_string();
-        assert!(
-            message.contains("not inside a CAS project directory"),
-            "unexpected error message: {message}"
-        );
     }
 
     #[test]

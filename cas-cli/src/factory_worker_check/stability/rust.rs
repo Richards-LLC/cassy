@@ -67,7 +67,9 @@ impl Inventory<'_> {
             let result = (|| -> Result<()> {
             match node.kind() {
                 "function_item" => {
-                    let attribute = regex::Regex::new(r"^#\[\s*(?:\w+::)*(test|rstest|test_case|test_matrix)\b")?;
+                    static ATTRIBUTE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
+                        regex::Regex::new(r"^#\[\s*(?:\w+::)*(test|rstest|test_case|test_matrix)\b").expect("test attribute regex"));
+                    let attribute = &*ATTRIBUTE;
                     if !attrs.iter().any(|(_, attr)| attribute.is_match(attr)) { return Ok(()); }
                     let name = node.child_by_field_name("name").context("test name missing")?;
                     let name = text(name, source);
@@ -86,7 +88,9 @@ impl Inventory<'_> {
                     if let Some(body) = node.child_by_field_name("body") {
                         self.items(body, source, path, &child_prefix, &join(directory, name)?, package, harness)?;
                     } else {
-                        let explicit = regex::Regex::new(r#"^#\[\s*path\s*=\s*("(?:[^"\\]|\\.)*")\s*\]$"#)?;
+                        static EXPLICIT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
+                            regex::Regex::new(r#"^#\[\s*path\s*=\s*("(?:[^"\\]|\\.)*")\s*\]$"#).expect("module path regex"));
+                        let explicit = &*EXPLICIT;
                         let explicit = attrs.iter().find_map(|(_, attr)| explicit.captures(attr))
                             .map(|capture| serde_json::from_str::<String>(&capture[1])).transpose()?;
                         let child = if let Some(explicit) = explicit {
@@ -130,7 +134,14 @@ impl Inventory<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static INVENTORY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<(Vec<Test>, Vec<(String, String)>)> {
+    #[cfg(test)]
+    INVENTORY_BUILDS.set(INVENTORY_BUILDS.get() + 1);
     let tree = delivered_tree(repo, head).context("STABILITY_DELIVERY_TREE")?;
     let sources = tree.rust_sources(repo).context("STABILITY_SOURCE_READ")?;
     let mut parser = Parser::new();
@@ -174,48 +185,82 @@ fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<(Vec<Test>, Ve
     Ok((inventory.tests, inventory.errors))
 }
 
-pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
-    let prior = inventory(repo, base, paths)?.0.into_iter()
-        .map(|test| ((test.identity, test.package, test.harness), test.source)).collect::<BTreeMap<_, _>>();
-    let (current, errors) = inventory(repo, head, paths)?;
-    if let Some((path, error)) = errors.iter().find(|(path, _)| paths.contains(path)) {
-        return Err(anyhow::anyhow!("{path}: {error}"));
+// One synchronous discovery owns these snapshots. Reuse neither failures nor
+// results across requests: a later close must reread its delivery and authority.
+type Snapshot = (Vec<Test>, Vec<(String, String)>);
+
+#[derive(Default)]
+pub(super) struct Discovery {
+    trees: BTreeMap<String, std::sync::Arc<DeliveredTree>>,
+    inventories: BTreeMap<(String, BTreeSet<String>), std::sync::Arc<Snapshot>>,
+}
+
+impl Discovery {
+    fn inventory(&mut self, repo: &Path, head: &str, paths: &[String]) -> Result<std::sync::Arc<Snapshot>> {
+        if !self.trees.contains_key(head) {
+            let tree = delivered_tree(repo, head).context("STABILITY_DELIVERY_TREE")?;
+            self.trees.insert(head.to_owned(), tree);
+        }
+        let manifests = paths.iter().filter(|path| path.ends_with(".rs"))
+            .filter_map(|path| self.trees[head].manifest_dir_for_source(path)).collect();
+        let key = (head.to_owned(), manifests);
+        if let Some(snapshot) = self.inventories.get(&key) {
+            return Ok(std::sync::Arc::clone(snapshot));
+        }
+        let snapshot = std::sync::Arc::new(inventory(repo, head, paths)?);
+        self.inventories.insert(key, std::sync::Arc::clone(&snapshot));
+        Ok(snapshot)
     }
-    // A new test in an unreferenced source file must not silently disappear
-    // from the gate. It either resolves through a Cargo root or needs repair.
-    let tree = delivered_tree(repo, head).context("STABILITY_DELIVERY_TREE")?;
-    let sources = tree.rust_sources(repo).context("STABILITY_SOURCE_READ")?;
-    for path in paths.iter().filter(|path| path.ends_with(".rs")) {
-        if tree.manifest_dir_for_source(path).is_none() { continue; }
-        let Some((_, source)) = sources.iter().find(|(source, _)| source == path) else { continue; };
-        let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
-        let parsed = parser.parse(source, None).context("STABILITY_RUST_PARSE")?;
-        let mut standalone = Inventory { parser, sources: BTreeMap::new(), tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new() };
-        standalone.items(parsed.root_node(), source, path, "", "", "", None)?;
-        if let Some((_, error)) = standalone.errors.first() {
+
+    pub(super) fn changed(&mut self, repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
+        let prior = self.inventory(repo, base, paths)?;
+        let prior = prior.0.iter()
+            .map(|test| ((&test.identity, &test.package, &test.harness), &test.source)).collect::<BTreeMap<_, _>>();
+        let snapshot = self.inventory(repo, head, paths)?;
+        let (current, errors) = snapshot.as_ref();
+        if let Some((path, error)) = errors.iter().find(|(path, _)| paths.contains(path)) {
             return Err(anyhow::anyhow!("{path}: {error}"));
         }
-        let source_tests = std::mem::take(&mut standalone.tests);
-        let old = git(repo, &["show", &format!("{base}:{path}")]).unwrap_or_default();
-        let parsed = standalone.parser.parse(&old, None).context("STABILITY_RUST_PARSE")?;
-        standalone.items(parsed.root_node(), &old, path, "", "", "", None)?;
-        let previous = standalone.tests.into_iter().map(|test| (test.identity.name, test.source)).collect::<BTreeMap<_, _>>();
-        for test in source_tests {
-            if previous.get(&test.identity.name) != Some(&test.source) && !current.iter().any(|resolved| resolved.identity.path == *path
-                && (resolved.identity.name == test.identity.name
-                    || resolved.identity.name.ends_with(&format!("::{}", test.identity.name))))
-            {
-                if let Some((source, error)) = errors.first() {
-                    // An uncertain module graph cannot prove a test missing.
-                    return Err(anyhow::anyhow!("{source}: {error}"));
+        // A new test in an unreferenced source file must not silently disappear
+        // from the gate. It either resolves through a Cargo root or needs repair.
+        let tree = &self.trees[head];
+        let sources = tree.rust_sources(repo).context("STABILITY_SOURCE_READ")?;
+        for path in paths.iter().filter(|path| path.ends_with(".rs")) {
+            if tree.manifest_dir_for_source(path).is_none() { continue; }
+            let Some((_, source)) = sources.iter().find(|(source, _)| source == path) else { continue; };
+            let mut parser = Parser::new();
+            parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
+            let parsed = parser.parse(source, None).context("STABILITY_RUST_PARSE")?;
+            let mut standalone = Inventory { parser, sources: BTreeMap::new(), tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new() };
+            standalone.items(parsed.root_node(), source, path, "", "", "", None)?;
+            if let Some((_, error)) = standalone.errors.first() {
+                return Err(anyhow::anyhow!("{path}: {error}"));
+            }
+            let source_tests = std::mem::take(&mut standalone.tests);
+            let old = git(repo, &["show", &format!("{base}:{path}")]).unwrap_or_default();
+            let parsed = standalone.parser.parse(&old, None).context("STABILITY_RUST_PARSE")?;
+            standalone.items(parsed.root_node(), &old, path, "", "", "", None)?;
+            let previous = standalone.tests.into_iter().map(|test| (test.identity.name, test.source)).collect::<BTreeMap<_, _>>();
+            for test in source_tests {
+                if previous.get(&test.identity.name) != Some(&test.source) && !current.iter().any(|resolved| resolved.identity.path == *path
+                    && (resolved.identity.name == test.identity.name
+                        || resolved.identity.name.ends_with(&format!("::{}", test.identity.name))))
+                {
+                    if let Some((source, error)) = errors.first() {
+                        // An uncertain module graph cannot prove a test missing.
+                        return Err(anyhow::anyhow!("{source}: {error}"));
+                    }
+                    return Err(MissingTest(path.clone(), test.identity.name).into());
                 }
-                return Err(MissingTest(path.clone(), test.identity.name).into());
             }
         }
+        Ok(current.iter().filter(|test| paths.contains(&test.identity.path)
+            && prior.get(&(&test.identity, &test.package, &test.harness)).copied() != Some(&test.source)).cloned().collect())
     }
-    Ok(current.into_iter().filter(|test| paths.contains(&test.identity.path)
-        && prior.get(&(test.identity.clone(), test.package.clone(), test.harness.clone())) != Some(&test.source)).collect())
+}
+
+pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
+    Discovery::default().changed(repo, base, head, paths)
 }
 
 /// The one changed-test model (cas-e751): Rust tests whose source differs
@@ -339,4 +384,41 @@ mv "$count_file.initial" "$count_file" || exit $?
         if let Some(value) = value { wrapper.env(key, value); } else { wrapper.env_remove(key); }
     }
     wrapper
+}
+
+#[cfg(test)]
+mod close_latency_tests {
+    use super::*;
+
+    fn commit(repo: &Path) -> String {
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]).unwrap();
+        git(repo, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    #[test]
+    fn requirements_share_inventory_across_files_cas_bc33() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo = repo.path();
+        git(repo, &["init", "-qb", "main"]).unwrap();
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "mod a; mod b; mod c;\n").unwrap();
+        let paths: Vec<String> = ["a", "b", "c"].map(|name| format!("src/{name}.rs")).into();
+        for path in &paths {
+            std::fs::write(repo.join(path), "#[test] fn changed() { assert_eq!(1, 1); }\n").unwrap();
+        }
+        let base = commit(repo);
+        for path in &paths {
+            std::fs::write(repo.join(path), "#[test] fn changed() { assert_eq!(2, 2); }\n").unwrap();
+        }
+        let head = commit(repo);
+        let ranges = [(base.clone(), head.clone())];
+        INVENTORY_BUILDS.set(0);
+        let (tests, widened) = super::super::requirements(repo, &head, &base, &paths, Some(&ranges)).unwrap();
+        assert_eq!(tests, ["a", "b", "c"].map(|name| Identity::exact(format!("src/{name}.rs"), format!("{name}::changed"))));
+        assert!(widened.is_empty());
+        assert!(INVENTORY_BUILDS.get() <= 2, "inventory builds: {}", INVENTORY_BUILDS.get());
+    }
+
 }

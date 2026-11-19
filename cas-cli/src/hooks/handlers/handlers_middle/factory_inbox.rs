@@ -74,6 +74,27 @@ fn assignment_is_stale_for_recipient(
     .is_some()
 }
 
+/// cas-0660: a Director merge alert is withdrawn once its task is neither
+/// parked nor active, because `request_changes` reopened it or a merge closed
+/// it. The daemon revalidates the alert before it types it into a pane; this
+/// is the same decision for the hook, which would otherwise render the queued
+/// text under its original heading. Anything it cannot read stays surfaced.
+fn director_merge_alert_is_withdrawn(task_store: &dyn crate::store::TaskStore, row: &QueuedPrompt) -> bool {
+    use crate::ui::factory::daemon::runtime::{delivery::parse_director_prompt, teams::DIRECTOR_AGENT_NAME};
+    if row.origin != Some(cas_store::QueueOrigin::Daemon) || row.source != DIRECTOR_AGENT_NAME {
+        return false;
+    }
+    let Some(evidence) = parse_director_prompt(&row.target, &row.prompt).and_then(|prompt| prompt.merge_alert) else {
+        return false;
+    };
+    task_store.get(&evidence.task_id).is_ok_and(|task| {
+        !matches!(
+            task.status,
+            crate::types::TaskStatus::InProgress | crate::types::TaskStatus::Blocked | crate::types::TaskStatus::AwaitingMerge
+        )
+    })
+}
+
 /// Rows surfaced into a single turn.
 ///
 /// Bounded because the injection lands in the model's context window: an agent
@@ -582,6 +603,20 @@ fn surface_factory_inbox_with_transport_delivery(
                     withheld.push(row.id);
                     continue;
                 }
+                if task_store
+                    .as_ref()
+                    .is_some_and(|store| director_merge_alert_is_withdrawn(store.as_ref(), &row))
+                {
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "suppress_withdrawn_director_alert_at_hook_surface",
+                        prompt_id = row.id,
+                        recipient = %alias,
+                        "cas-0660: withheld a Director merge alert whose task left the merge states"
+                    );
+                    withheld.push(row.id);
+                    continue;
+                }
                 // A supervisor's two aliases are two distinct recipient
                 // keys in the receipt table, so a broadcast row can come
                 // back from both. Injecting it twice into one turn is the
@@ -829,8 +864,8 @@ fn withdrawn_note(ids: &[i64]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "[withdrawn] Message {} named by this turn's CAS wake is an assignment for a task that \
-         is no longer open for you, so CAS did not show it. No action is needed.",
+        "[withdrawn] Message {} named by this turn's CAS wake is an assignment or merge alert for \
+         a task that no longer needs it, so CAS did not show it. No action is needed.",
         id_list(ids)
     ))
 }

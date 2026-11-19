@@ -153,6 +153,7 @@ jobs:
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           npm ci --no-audit --no-fund
           comparison_base="$BASE_SHA"

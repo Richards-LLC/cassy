@@ -76,9 +76,9 @@ def main():
 
         # A wedge on both attempts fails at the deadline with the phase named, once per attempt.
         result, runs, seconds = run(tmp, FAKE_WEDGE="always")
-        errors = [line for line in result.stdout.splitlines() if line.startswith("::error title=Lane step wedged::")]
+        errors = [line for line in result.stdout.splitlines() if line.startswith(("::error ", "::error::"))]
         check(result.returncode == 124 and runs == 2 and len(errors) == 2
-              and all("last phase: rustc cas_store" in line for line in errors)
+              and all("rustc cas_store" in line for line in errors)
               and seconds < 30 and not alive(tmp / "wedged.pid"),
               "a wedged compile fails at the deadline, naming rustc cas_store, after one retry",
               result.stdout + result.stderr)

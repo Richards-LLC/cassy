@@ -1062,3 +1062,96 @@ async fn train_owner_reaches_worker_host_without_a_local_supervisor_cas_b674() {
     assert!(rows[0].prompt.contains("result payload"));
     assert!(agents.list(None).unwrap().iter().all(|agent| agent.role != AgentRole::Supervisor));
 }
+
+#[tokio::test]
+async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_cas_b674() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push;
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    let owner_machine = Machine::new();
+    let host_machine = Machine::new();
+    let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.epic_verification_owner = Some("owner".into());
+    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    let mut task = crate::types::Task::new("cas-delivery".into(), "Delivery".into());
+    task.assignee = Some("worker".into());
+    for machine in [&owner_machine, &host_machine] {
+        let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
+        tasks.add(&train).unwrap();
+        tasks.add(&task).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+        crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
+            .save_to_cas_dir(&machine.cas).unwrap();
+    }
+    owner_machine.register("owner", "owner", AgentRole::Supervisor, "owner-session");
+    host_machine.register("worker", "worker", AgentRole::Worker, "owner-session");
+    for (machine, id, physical) in [(&owner_machine,"owner","soundwave"), (&host_machine,"worker","prowl")] {
+        let agents = open_agent_store(&machine.cas).unwrap();
+        let mut agent = agents.get(id).unwrap();
+        agent.machine_id = Some(physical.into());
+        if id == "worker" {
+            agent.parent_id = Some("owner".into());
+            agent.metadata.insert("train".into(), train.id.clone());
+            agent.metadata.insert("train_owner".into(), "owner".into());
+            agent.metadata.insert("train_owner_generation".into(), generation.clone());
+        }
+        agents.update(&agent).unwrap();
+    }
+    let mut metadata = crate::ui::factory::create_metadata("owner-session", 0, "owner", &["worker".into()],
+        Some(&train.id), Some(host_machine._dir.path().to_str().unwrap()), None);
+    metadata.worker_host = Some(crate::factory_session_scope::WorkerHost {
+        train:train.id.clone(), owner:"owner".into(), generation:generation.clone(), name:"owner".into(),
+        session:"owner-session".into(), machine:"soundwave".into(),
+    });
+    std::fs::write(crate::ui::factory::metadata_path("owner-session"), serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let registry = [serde_json::json!({"id":"owner", "name":"owner", "agent_type":"primary", "status":"active",
+        "machine_id":"soundwave", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"account",
+        "metadata":{"role":"supervisor", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"soundwave"}}),
+        serde_json::json!({"id":"worker", "name":"worker", "agent_type":"worker", "status":"active",
+        "machine_id":"prowl", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"account",
+        "metadata":{"role":"worker", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"prowl",
+            "train":"cas-train", "train_owner":"owner", "train_owner_generation":generation}})];
+    Mock::given(method("GET")).and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":registry}))).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]}))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/peer-messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"mail", "status":"queued"})))
+        .mount(&server).await;
+    for (machine, sender, target) in [(&host_machine,"worker","supervisor"), (&owner_machine,"owner","worker@prowl")] {
+        let core = crate::mcp::CasCore::with_daemon(machine.cas.clone(), None, None);
+        core.set_agent_id_for_testing(sender.into());
+        #[cfg(feature="mcp-proxy")]
+        let service = crate::mcp::tools::CasService::new(core, None);
+        #[cfg(not(feature="mcp-proxy"))]
+        let service = crate::mcp::tools::CasService::new(core);
+        let req = serde_json::from_value(serde_json::json!({"action":"message", "target":target,
+            "summary":"delivery status", "kind":"status", "message":"caller payload"})).unwrap();
+        assert!(!service.coordination(Parameters(req)).await.unwrap().is_error.unwrap_or(false));
+        assert!(machine.rows().is_empty());
+    }
+    env.set("CAS_FACTORY_SESSION", "owner-session");
+    let root = owner_machine.cas.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        let closed = supervisor_push::queue_cassy_merge_close_notice(&root, &task, "merged-tip").unwrap().unwrap();
+        assert_eq!(supervisor_push::queue_cassy_merge_close_notice(&root, &task, "merged-tip").unwrap(), Some(closed));
+        assert!(matches!(supervisor_push::queue_auto_unblock_worker_wake(&root, &task, "cas-blocker", "occurrence").unwrap(), supervisor_push::AutoUnblockWakeResult::Queued { .. }));
+        closed
+    }).await.unwrap();
+    assert!(id > 0);
+    assert_eq!(server.received_requests().await.unwrap().iter().filter(|request| request.method.as_str() == "POST").count(), 2);
+    assert!(owner_machine.rows().is_empty());
+    let connection = rusqlite::Connection::open(owner_machine.cas.join("cas.db")).unwrap();
+    let payloads = connection.prepare("SELECT payload FROM peer_message_outbox").unwrap()
+        .query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(payloads.len(), 3); // one explicit message, one result, one auto-unblock
+    for payload in payloads {
+        let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+        assert_eq!((sent.sender_agent_id.as_str(), sent.recipient_agent_id.as_str()), ("owner", "worker"));
+    }
+    assert!(open_agent_store(&host_machine.cas).unwrap().list(None).unwrap().iter().all(|agent| agent.role != AgentRole::Supervisor));
+}

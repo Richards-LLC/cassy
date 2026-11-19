@@ -13,6 +13,7 @@
 //! false positives are recorded the same way.
 
 pub mod facts;
+pub(crate) mod declarations;
 
 use std::collections::BTreeSet;
 

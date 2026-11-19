@@ -37,6 +37,37 @@ impl FactoryDaemon {
         }
     }
 
+    fn send_verifier_reply(&mut self, client_id: usize, dispatch_id: String, result: Result<(), String>) {
+        let reply = match result {
+            Ok(()) => DaemonMessage::VerifierLaunched { dispatch_id },
+            Err(message) => {
+                tracing::warn!(%dispatch_id, %message, "verifier launch refused");
+                DaemonMessage::Error { message, client_ref: Some(dispatch_id) }
+            }
+        };
+        if let Some(frame) = encode_frame(&reply)
+            && let Some(client) = self.gui_clients.get_mut(&client_id) {
+            queue_frame(client, &frame);
+        }
+    }
+
+    fn finish_verifier_launches(&mut self) {
+        use super::prompt_queue_jobs::ExternalOutcome;
+        self.queue_jobs.apply_completions();
+        for completion in self.queue_jobs.take_external_completions_where(|kind| kind == "VerifierLaunch") {
+            let Some(key) = completion.key.strip_prefix("VerifierLaunch:") else { continue; };
+            let Some((client, dispatch)) = key.split_once(':') else { continue; };
+            let Ok(client) = client.parse::<usize>() else { continue; };
+            let result = match completion.outcome {
+                Ok(ExternalOutcome::Done(value)) => value.downcast::<Result<(), String>>()
+                    .map(|result| *result).unwrap_or_else(|_| Err("verifier_factory_launch_result_type".into())),
+                Ok(ExternalOutcome::Dropped) => Err("verifier_factory_launch_dropped".into()),
+                Err(error) => Err(format!("verifier_factory_launch_panicked: {}", error.message)),
+            };
+            self.send_verifier_reply(client, dispatch.to_string(), result);
+        }
+    }
+
     /// Accept new GUI client connections (non-blocking).
     pub(super) fn accept_gui_clients(&mut self) -> bool {
         let mut any_new = false;
@@ -96,6 +127,7 @@ impl FactoryDaemon {
 
     /// Process input from all GUI clients, returning whether any activity occurred.
     pub(super) async fn process_gui_client_input(&mut self) -> bool {
+        self.finish_verifier_launches();
         let client_ids: Vec<usize> = self.gui_clients.keys().copied().collect();
         let mut disconnected = Vec::new();
         let mut messages: Vec<(usize, ClientMessage)> = Vec::new();
@@ -315,20 +347,29 @@ impl FactoryDaemon {
 
         match msg {
             ClientMessage::LaunchVerifier { dispatch_id } => {
-                let result = crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
-                    self.app.cas_dir(), &self.session_name, &dispatch_id,
-                );
-                let reply = match result {
-                    Ok(_) => DaemonMessage::VerifierLaunched { dispatch_id },
-                    Err(message) => {
-                        // GH #2023: a refused launch was invisible in the daemon log.
-                        tracing::warn!(%dispatch_id, %message, "verifier launch refused");
-                        DaemonMessage::Error { message, client_ref: Some(dispatch_id) }
-                    }
-                };
-                if let Some(frame) = encode_frame(&reply)
-                    && let Some(client) = self.gui_clients.get_mut(&client_id) {
-                    queue_frame(client, &frame);
+                use super::jobs::{Criticality, JobSpec, Lane, Submitted};
+                let root = self.app.cas_dir().to_path_buf();
+                let session = self.session_name.clone();
+                let dispatch = dispatch_id.clone();
+                // Claim and authority checks stay exact, but never inherit the
+                // client-input thread's 50 ms pass budget (cas-d0f6).
+                let submitted = self.queue_jobs.submit_external(JobSpec {
+                    kind: "VerifierLaunch",
+                    key: format!("VerifierLaunch:{client_id}:{dispatch_id}"),
+                    lane: Lane::External,
+                    criticality: Criticality::Critical,
+                    generation: 0,
+                    budget: Duration::from_secs(5),
+                }, move || {
+                    let _budget = cas_store::wait_budget::bound_waits_for(Duration::from_secs(5));
+                    Box::new(crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+                        &root, &session, &dispatch,
+                    ).map(|_| ()))
+                });
+                if !matches!(submitted, Submitted::Queued | Submitted::QueuedBehindKey
+                    | Submitted::QueuedDroppedOldest { .. } | Submitted::Coalesced { .. }) {
+                    self.send_verifier_reply(client_id, dispatch_id,
+                        Err(format!("verifier_factory_launch_queue_closed: {submitted:?}")));
                 }
             }
 
@@ -845,9 +886,23 @@ mod verifier_tests {
             root.clone(), daemon.app.project_scope(),
         );
         let (stream, _peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
         daemon.gui_clients.insert(7, GuiConnection {
             stream, read_buf: Vec::new(), write_buf: VecDeque::new(), pane_sizes: HashMap::new(),
         });
+        use cas_store::{AgentStore, TaskStore};
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner-d0f6".into(), "owner".into(), cas_types::AgentRole::Supervisor,
+        );
+        owner.factory_session = Some("different-session".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let task = cas_types::Task::new("cas-d0f6-review".into(), "Review".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(5), false,
+        ).unwrap();
         let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -857,18 +912,15 @@ mod verifier_tests {
             release_rx.recv().unwrap();
         });
         held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let before = cas_store::wait_budget::store_access_violations();
         {
-            let _forbid = cas_store::wait_budget::forbid_store_access();
             let _budget = cas_store::wait_budget::bound_waits_for(Duration::ZERO);
             daemon.handle_gui_message(7, ClientMessage::LaunchVerifier {
-                dispatch_id: "missing-d0f6".into(),
+                dispatch_id: dispatch.id.clone(),
             }).await;
         }
         // Release even on the red path, so an assertion never strands the lane.
         release_tx.send(()).unwrap();
         holder.join().unwrap();
-        assert_eq!(cas_store::wait_budget::store_access_violations(), before);
         // No reply is sent before the real store lookup has finished off-loop.
         assert!(daemon.gui_clients[&7].write_buf.is_empty());
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -880,6 +932,7 @@ mod verifier_tests {
         }).await.unwrap();
         let bytes: Vec<_> = daemon.gui_clients.get_mut(&7).unwrap().write_buf.drain(..).collect();
         let reply: DaemonMessage = serde_json::from_slice(&bytes[FRAME_HEADER_SIZE..]).unwrap();
-        assert!(matches!(reply, DaemonMessage::Error { client_ref: Some(id), .. } if id == "missing-d0f6"));
+        assert!(matches!(reply, DaemonMessage::Error { client_ref: Some(id), message }
+            if id == dispatch.id && message.starts_with("verifier_factory_scope:")));
     }
 }

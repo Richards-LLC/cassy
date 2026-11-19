@@ -434,7 +434,8 @@ impl SqliteAgentStore {
     /// A plain `lock()` made a budgeted caller, the factory daemon loop, wait
     /// for whatever another thread was doing on the process-wide connection:
     /// 5 s waits in the loop's agent reads under the cas-98b24 load.
-    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    #[track_caller]
+    fn lock_conn(&self) -> Result<crate::shared_db::ConnectionGuard<'_>> {
         crate::shared_db::lock_connection(&self.conn)
     }
 

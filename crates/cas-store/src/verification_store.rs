@@ -5147,6 +5147,13 @@ mod tests {
             matches!(&error, StoreError::VerifierHandoffNotActive { dispatch_id } if *dispatch_id == dispatch.id),
             "{error:?}"
         );
+        // A valid handoff can lose its active proof cycle before a child binds.
+        issue_server_verifier_handoff(dir.path(), "cas-handoff-foreign", &dispatch.id, "owner", "late-bind").unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute("UPDATE verification_dispatches SET owner_agent_id = 'new-owner' WHERE id = ?1", [&dispatch.id]).unwrap();
+        let error = bind_server_verifier_handoff(dir.path(), "owner", "late-child").unwrap_err();
+        assert!(matches!(error, StoreError::VerifierHandoffNotActive { dispatch_id } if dispatch_id == dispatch.id));
+
     }
 
     #[test]

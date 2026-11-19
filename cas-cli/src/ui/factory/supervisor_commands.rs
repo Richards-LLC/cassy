@@ -12,11 +12,12 @@ pub enum SupervisorCommand {
     ReloadCassy,
     Exit,
     Finish,
+    Standby,
 }
 
 impl SupervisorCommand {
     pub fn needs_confirmation(self) -> bool {
-        matches!(self, Self::Clear | Self::Exit | Self::Finish)
+        matches!(self, Self::Clear | Self::Exit | Self::Finish | Self::Standby)
     }
 
     /// Resolves from the daemon-owned pane's harness, never a client hint.
@@ -37,6 +38,10 @@ impl SupervisorCommand {
             // The native $skill picker consumes Enter; the supported spoken
             // invocation goes through the normal prompt path without a picker.
             (Codex, Self::Finish) => Some("finish"),
+            // Same skill-invocation split as Finish: /standby runs the finish
+            // flow by reference, then parks the session (cas-94a0).
+            (Claude, Self::Standby) => Some("/standby"),
+            (Codex, Self::Standby) => Some("standby"),
             _ => None,
         }
     }

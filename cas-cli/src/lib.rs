@@ -69,6 +69,7 @@ pub mod factory_isolation;
 pub mod factory_permission_relay;
 pub mod factory_preflight;
 pub mod factory_daemon_health;
+pub mod factory_standby;
 pub(crate) mod factory_binary_skew;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;

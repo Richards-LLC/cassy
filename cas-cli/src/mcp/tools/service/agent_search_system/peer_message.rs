@@ -75,7 +75,7 @@ impl CasService {
         }).await.map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
             .map_err(|e| Self::error(ErrorCode::INVALID_REQUEST, e))?;
         Ok(sent.map(|(label, receipt)| Self::success(format!(
-            "Sent to peer worker {label} via Cassy Cloud (peer message {}, {}). Both supervisors receive quiet copies on delivery. Check delivery with coordination action=message_status id={}.",
+            "Sent to peer worker {label} via Cassy Cloud (peer message {}, {}). Check delivery with coordination action=message_status id={}.",
             receipt.id, receipt.status, receipt.id))))
     }
 

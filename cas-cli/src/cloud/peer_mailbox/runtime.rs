@@ -184,7 +184,6 @@ impl PeerMailboxRuntime {
                             tracing::info!(message = %message.id, %why, "peer pre-merge receipt rejected");
                             return Ok(PeerAckOutcome::Rejected);
                         }
-                        PeerReceiptIngested::Imported => return Ok(PeerAckOutcome::Delivered),
                         PeerReceiptIngested::NotAReceipt => {}
                     }
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {

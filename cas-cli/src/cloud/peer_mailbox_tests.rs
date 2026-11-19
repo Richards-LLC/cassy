@@ -858,8 +858,8 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
         server.verify().await;
         if recipient == Some("worker") {
             // The next poll sees both live workers under the same epic. The
-            // exact message retained above must now reach the worker and both
-            // supervisors before Cloud receives its delivered acknowledgement.
+            // exact message retained above must reach only the worker before
+            // Cloud receives its delivered acknowledgement.
             let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
             let mut epic = crate::types::Task::new("cas-shared".into(), "Shared delivery".into());
             epic.task_type = crate::types::TaskType::Epic;
@@ -897,7 +897,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
                     .expect(u64::from(scope_ready)).mount(&server).await;
                 Mock::given(method("POST")).and(path("/api/peer-messages"))
                     .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"supervisor-copy", "status":"queued"})))
-                    .expect(u64::from(scope_ready)).mount(&server).await;
+                    .expect(0).mount(&server).await;
                 let root = machine.cas.clone();
                 let report = tokio::task::spawn_blocking(move || PeerMailboxRuntime::start(&root, "factory-a").unwrap().tick_blocking())
                     .await.unwrap();
@@ -905,7 +905,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
                 assert!(report.errors.is_empty(), "{report:?}");
                 let rows = machine.rows();
                 assert_eq!(rows.iter().filter(|row| row.target == "worker").count(), usize::from(scope_ready));
-                assert_eq!(rows.iter().filter(|row| row.target == "recipient").count(), usize::from(scope_ready));
+                assert_eq!(rows.iter().filter(|row| row.target == "recipient").count(), 0);
                 server.verify().await;
             }
         }

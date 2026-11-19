@@ -1496,9 +1496,7 @@ fn deliver_claimed_with_history(
         ) {
             Ok(admitted) => {
                 let recorded = if recipient.role == AgentRole::Worker {
-                    let (root, _) = workers.expect("worker route was checked");
-                    directory.as_ref().expect("worker authorization was checked").copy_to_supervisors(root, queue, message)
-                        .map(|()| PeerAckOutcome::Delivered)
+                    Ok(PeerAckOutcome::Delivered)
                 } else { on_admitted(recipient, message) };
                 match recorded {
                     Ok(PeerAckOutcome::Delivered) => {}
@@ -1584,11 +1582,6 @@ pub(crate) fn send_raw(
         PeerScope::Project,
         None,
     )
-}
-
-/// Internal publication path: stable delivery identity in the existing outbox.
-pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
-    outbox::enqueue_premerge_receipt(root, message, label)
 }
 
 /// Cassy Cloud's peer-message body limit, in characters.

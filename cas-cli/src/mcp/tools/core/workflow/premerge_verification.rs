@@ -557,6 +557,7 @@ fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
 fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(b"cas-peer-premerge-plan-v1\0");
@@ -924,7 +925,6 @@ impl Approval {
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
         )?;
-        self.share_published();
         Ok(Some((record.landed_sha, target)))
     }
 
@@ -969,7 +969,6 @@ impl Approval {
             } else {
                 self.promote(landed)?;
             }
-            self.share_published();
             return Ok(None);
         }
         if self.promotion()?.is_some() {
@@ -1020,8 +1019,8 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         verdict_id: &str,
     ) -> Result<(), McpError> {
-        if peer::verify_peer_promotion(&self.cas_root, task, dispatch, verdict_id).map_err(fail)? {
-            return Ok(());
+        if dispatch.repository.as_ref().is_some_and(|proof| proof.peer_premerge.is_some()) {
+            return Err(fail("Legacy peer approval cannot close this delivery; the train owner must issue its own verification cycle."));
         }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         else {

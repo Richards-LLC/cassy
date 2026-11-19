@@ -2353,12 +2353,22 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 /// Runs changed-test classification, which happens before build admission, while
 /// writing a progress line to `emit` every `interval` so the wait is never silent
 /// (GH #2121, #2082).
-fn with_classification_progress<T>(interval: std::time::Duration, package: &str, emit: impl Fn(&str) + Send + 'static, classify: impl FnOnce() -> T) -> T {
-    let package = package.to_owned();
-    let _heartbeat = stability::rust::Heartbeat::start(interval, move |elapsed| emit(&format!(
-        "worker-check: still classifying changed tests for {package} before build admission ({}s elapsed)",
-        elapsed.as_secs())));
-    classify()
+fn with_classification_progress<T>(interval: std::time::Duration, package: &str, emit: impl Fn(&str) + Send, classify: impl FnOnce() -> T) -> T {
+    std::thread::scope(|scope| {
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let heartbeat = scope.spawn(move || {
+            let started = std::time::Instant::now();
+            while stopped.recv_timeout(interval) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                emit(&format!(
+                    "worker-check: still classifying changed tests for {package} before build admission ({}s elapsed)",
+                    started.elapsed().as_secs()));
+            }
+        });
+        let result = classify();
+        drop(stop);
+        let _ = heartbeat.join();
+        result
+    })
 }
 
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
@@ -2399,7 +2409,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         let classified = with_classification_progress(
-            std::time::Duration::from_secs(stability::rust::CLASSIFICATION_HEARTBEAT_SECS),
+            std::time::Duration::from_secs(30),
             &test.package,
             |line| eprintln!("{line}"),
             || stability::rust::selected_inputs(&repo, &base, &head, test));

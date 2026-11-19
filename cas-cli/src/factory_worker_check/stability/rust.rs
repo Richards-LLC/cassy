@@ -235,37 +235,6 @@ pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
     }))
 }
 
-/// Seconds between "still classifying" lines while changed-test selection runs
-/// before the admission lock.
-pub(crate) const CLASSIFICATION_HEARTBEAT_SECS: u64 = 30;
-
-/// Prints a progress line every `interval` until dropped, so a long
-/// pre-admission classification is never a silent log (GH #2121, #2082).
-pub(crate) struct Heartbeat {
-    stop: Option<std::sync::mpsc::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Heartbeat {
-    pub(crate) fn start(interval: std::time::Duration, emit: impl Fn(std::time::Duration) + Send + 'static) -> Self {
-        let (stop, stopped) = std::sync::mpsc::channel::<()>();
-        let started = std::time::Instant::now();
-        let thread = std::thread::spawn(move || {
-            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
-                emit(started.elapsed());
-            }
-        });
-        Self { stop: Some(stop), thread: Some(thread) }
-    }
-}
-
-impl Drop for Heartbeat {
-    fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
-    }
-}
-
 pub(crate) fn selected_inputs(repo: &Path, base: &str, head: &str, test: &TargetedTest) -> Result<(Vec<Test>, bool)> {
     let (package, _) = package_selector(&test.package).context("test package")?;
     let paths = git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", base, head, "--"])

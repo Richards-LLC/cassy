@@ -1999,6 +1999,35 @@ mod tests {
         assert!(notes.contains("disk full"), "{notes}");
     }
 
+    #[tokio::test]
+    async fn late_close_continuation_loss_cas_eeda() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let root = core.cas_root.clone();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        tasks.add(&crate::types::Task::new("cas-lost".into(), "lost close".into())).unwrap();
+        let receipt = super::super::mutation_receipt::Receipt::new("task", "close", Some("cas-lost"));
+        let handler = tokio::spawn(std::future::pending());
+        let abort_handler = handler.abort_handle();
+        let watcher = service.record_late_close_outcome(
+            handler, receipt, std::time::Instant::now(), std::time::Duration::from_secs(55),
+        ).unwrap();
+        // Drop the real continuation before its first poll, as runtime
+        // retirement can do. The handler's outcome remains unknown.
+        watcher.abort();
+        assert!(watcher.await.unwrap_err().is_cancelled());
+        service.tool_work.wait_idle().await;
+        abort_handler.abort();
+        let task = tasks.get("cas-lost").unwrap();
+        assert_eq!(task.status, crate::types::TaskStatus::Open);
+        assert_eq!(task.notes.matches("CLOSE_OUTCOME:").count(), 1, "{}", task.notes);
+        let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
+        assert_eq!(queue.list_pending_prompt_outbox("operator", "supervisor_notice", 10).unwrap().len(), 1);
+    }
+
     /// cas-3b81 (GH #1142): a close still running at the deadline with
     /// nothing committed is not "UNKNOWN". It keeps running, the caller is
     /// told so, and its final outcome lands on the task as a note.

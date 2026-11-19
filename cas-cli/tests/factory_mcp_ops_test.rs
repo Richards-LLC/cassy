@@ -3207,6 +3207,7 @@ fn standby_in_progress_fixture(env: &FactoryTestEnv) -> String {
     env.create_epic("Standby Epic");
     let mut handoff = cas::types::Entry::new("2026-11-19-standby".to_string(), "STATE: cas-held in flight on alice".to_string());
     handoff.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+    cas_core::memory::handoff::HandoffLineage::for_local_machine().stamp(&mut handoff);
     cas::store::open_store(&env.cas_root).expect("open store").add(&handoff).expect("save handoff");
     handoff.id
 }

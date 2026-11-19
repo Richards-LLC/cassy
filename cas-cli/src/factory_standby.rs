@@ -69,7 +69,8 @@ pub fn clear(cas_root: &Path, session: &str) -> std::io::Result<()> {
 /// The supervisor's current handoff, the one resume tells it to reload.
 pub fn current_handoff_id(cas_root: &Path) -> Option<String> {
     let entries = crate::store::open_store(cas_root).ok()?.list().ok()?;
-    cas_core::memory::handoff::current_handoff(&entries, "supervisor", None).map(|entry| entry.id.clone())
+    use cas_core::memory::handoff::{HandoffLineage, current_handoff};
+    current_handoff(&entries, "supervisor", Some(&HandoffLineage::for_local_machine())).map(|entry| entry.id.clone())
 }
 
 /// The supervisor's first operator message after standby: bring the workers back

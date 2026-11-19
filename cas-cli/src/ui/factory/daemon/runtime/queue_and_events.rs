@@ -11724,6 +11724,23 @@ impl FactoryDaemon {
         });
     }
 
+    /// cas-3766: a dequeued request whose task-queue binding failed has no
+    /// worker and will never register. End it FAILED, tell the supervisor which
+    /// request it was, and free the slot it holds so the queue keeps draining.
+    fn fail_unbound_spawn(&mut self, request_id: i64, worker_name: &str, error: &str) {
+        let detail = format!("Task queue binding failed: {error}");
+        self.app.set_error(detail.clone());
+        report_provision_failure(
+            self.app.cas_dir(),
+            &self.session_name,
+            self.app.supervisor_name(),
+            Some(request_id),
+            worker_name,
+            &detail,
+        );
+        self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+    }
+
     pub(super) async fn process_pending_spawns(&mut self) {
         self.poll_worker_cleanup_jobs_at(Instant::now());
         // Step 1: Check if in-flight background spawn completed
@@ -12238,8 +12255,7 @@ impl FactoryDaemon {
                                     .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
                             });
                             if let Err(error) = bound {
-                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
-                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                self.fail_unbound_spawn(request_id, &worker_name, &error.to_string());
                                 return;
                             }
                         }
@@ -12335,8 +12351,7 @@ impl FactoryDaemon {
                                     .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
                             });
                             if let Err(error) = bound {
-                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
-                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                self.fail_unbound_spawn(request_id, &worker_name, &error.to_string());
                                 return;
                             }
                         }

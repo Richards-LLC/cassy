@@ -967,7 +967,9 @@ fn command_store_guard(command: &Option<Commands>) -> StoreGuard {
 /// cas-008b: with `--store here` or `--store cas-root` given, the choice is
 /// made, so the ambient "CAS_ROOT supplies the default" notice must not print.
 fn silence_notice_for_explicit_store(command: &Option<Commands>) {
-    let _ = command;
+    if matches!(command_store_guard(command), Some((_, Some(_)))) {
+        crate::store::detect::suppress_root_override_notice();
+    }
 }
 
 fn guarded_write_root(guard: StoreGuard, resolved: &Path) -> anyhow::Result<PathBuf> {

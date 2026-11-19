@@ -203,9 +203,24 @@ fn canonical_or_owned(path: &Path) -> PathBuf {
 ///
 /// The comparison itself is also done at most once: resolving the competing root
 /// walks the directory tree, and that cost should not ride on every lookup.
+/// cas-008b: an explicit `--store` choice has settled which store the command
+/// acts on, so the "CAS_ROOT supplies the default" notice would contradict it.
+static ROOT_NOTICE_SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn suppress_root_override_notice() {
+    ROOT_NOTICE_SUPPRESSED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn root_override_notice_suppressed() -> bool {
+    ROOT_NOTICE_SUPPRESSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn announce_root_override_once(env_root: &Path, start: &Path) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        if root_override_notice_suppressed() {
+            return;
+        }
         let Ok(cwd_root) = find_cas_root_ignoring_env(start) else {
             // No competing store at all — CAS_ROOT is the only candidate and
             // there is nothing for the operator to be confused about.

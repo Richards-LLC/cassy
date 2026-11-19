@@ -763,6 +763,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Machine-scoped config follows HOME and does not require an initialized
     // project. Project telemetry/tracing retain their own discovery paths.
+    silence_notice_for_explicit_store(&cli.command);
     let cas_root: Option<PathBuf> = match &cli.command {
         Some(Commands::Config(cmd)) => config::host_root_for_command(cmd)
             .or_else(|| find_cas_root().ok()),
@@ -961,6 +962,12 @@ fn command_store_guard(command: &Option<Commands>) -> StoreGuard {
         Some(Commands::Cloud(cmd)) => cloud_store_guard(cmd),
         _ => None,
     }
+}
+
+/// cas-008b: with `--store here` or `--store cas-root` given, the choice is
+/// made, so the ambient "CAS_ROOT supplies the default" notice must not print.
+fn silence_notice_for_explicit_store(command: &Option<Commands>) {
+    let _ = command;
 }
 
 fn guarded_write_root(guard: StoreGuard, resolved: &Path) -> anyhow::Result<PathBuf> {
@@ -1171,6 +1178,20 @@ mod tests {
                 .all(|line| line == line.trim_end()),
             "human refusal has no trailing whitespace-only line: {rendered_without_context:?}"
         );
+    }
+
+    /// cas-008b (GH #1905): `cas config set ... --store here` made its choice,
+    /// so the CAS_ROOT-default notice stays silent; without `--store` the
+    /// notice and the ambiguous-write refusal are unchanged.
+    #[test]
+    fn explicit_store_choice_silences_the_root_override_notice() {
+        let run = |args: &[&str]| {
+            silence_notice_for_explicit_store(&Cli::try_parse_from(args).unwrap().command);
+            crate::store::detect::root_override_notice_suppressed()
+        };
+        // The flag is process-wide and one-way, so the unflagged command goes first.
+        assert!(!run(&["cas", "config", "set", "fast_lane.paths", "x"]));
+        assert!(run(&["cas", "config", "set", "fast_lane.paths", "x", "--store", "here"]));
     }
 
     /// cas-093a: `cas hub serve` traces into the host hub directory

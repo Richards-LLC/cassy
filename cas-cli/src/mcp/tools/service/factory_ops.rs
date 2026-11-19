@@ -12624,9 +12624,9 @@ pub(crate) fn worker_liveness_for_agent(
         cli,
     );
     let mut process = super::worker_liveness::process_evidence(agent);
-    if super::worker_liveness::child_progress(agent, now)
-        .is_some_and(|at| (now - at).num_seconds() < stall_secs.max(0))
-    {
+    let owned_child_advanced = super::worker_liveness::owned_child_advancing(
+        super::worker_liveness::child_progress(agent, now), now, stall_secs);
+    if owned_child_advanced {
         process.cpu_busy = Some(true);
         process.detail.push_str("; owned child CPU/output advanced within the stall window");
     }
@@ -12656,7 +12656,10 @@ pub(crate) fn worker_liveness_for_agent(
             };
         }
     }
-    let mut observation = super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs);
+    let mut observation = super::worker_liveness::finished_turn_with_owned_child_progress(
+        super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs),
+        owned_child_advanced,
+    );
     // A recycled harness can perform authenticated work before its new
     // transcript resolves or the first CPU delta is available. Use its own
     // local activity, never heartbeat or another worker's progress, in that

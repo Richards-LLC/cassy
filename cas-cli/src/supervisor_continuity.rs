@@ -7,11 +7,13 @@ use cas_types::{Agent, AgentRole};
 
 const SOURCE: &str = "supervisor-handoff";
 const RECOVERY_SOURCE: &str = "integrated-delivery-recovery";
+/// Inline recovery rows stay under this; the rest go to a receipt file.
+const RECOVERY_INLINE_BYTES: usize = 3000;
 
 /// Project facts, rather than a predecessor's session membership, determine
 /// recovery. This is an actionable list, not the bounded historical preview.
 /// Close remains the authority: startup never adopts, resolves or closes work.
-fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
+fn integrated_recovery(root: &Path, agent_id: &str) -> anyhow::Result<String> {
     use crate::mcp::tools::core::task::{lifecycle::review_tier, task_owned_by_project};
     use cas_types::{TaskStatus, VerificationStatus};
     let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(String::new()) };
@@ -70,15 +72,36 @@ fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
             _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Approved) => "recorded approval; close gates need rechecking",
             _ => "close gates pending",
         };
-        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; review path: {review}; next: task action=close id={} commit_receipt={anchor} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
+        rows.push(format!("- {}: merged into {target}; hold: {hold}; review path: {review}; next: task action=close id={} commit_receipt={anchor} reason=\"Recover integrated delivery\"\n", task.id, task.id));
     }
     if rows.is_empty() && skipped.is_empty() { return Ok(String::new()) }
-    Ok(format!(
-        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Close still checks branch attribution, upkeep, ledger format and evidence, QA and verification; legacy receipts may need repair. Adopt only rows you own and use the immutable commit_receipt below to recheck those gates. Tier 2 still needs its own verifier and adversarial probe.\n{}",
-        rows.len(), rows.concat() + &if skipped.is_empty() { String::new() } else {
-            format!("Skipped recovery rows ({}):\n{}", skipped.len(), skipped.concat())
-        }
-    ))
+    let total = rows.len();
+    let mut lines = rows;
+    if !skipped.is_empty() {
+        lines.push(format!("Skipped recovery rows ({}):\n", skipped.len()));
+        lines.extend(skipped);
+    }
+    // cas-516f: startup carries a bounded slice; the complete list lives in a
+    // receipt so a large backlog cannot push SessionStart past the inline cap.
+    let mut shown = 0;
+    let mut used = 0;
+    for line in &lines {
+        if used + line.len() > RECOVERY_INLINE_BYTES { break }
+        used += line.len();
+        shown += 1;
+    }
+    let intro = |rows: &str| format!(
+        "Integrated deliveries to adopt/close ({total}):\nThese project deliveries have passed the read-only merge/content guard. Close still checks branch attribution, upkeep, ledger format and evidence, QA and verification; legacy receipts may need repair. Adopt only rows you own and use the immutable commit_receipt below to recheck those gates. Tier 2 still needs its own verifier and adversarial probe.\n{rows}"
+    );
+    let mut text = intro(&lines[..shown].concat());
+    if shown < lines.len() {
+        let dir = root.join("supervisor-recovery");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{agent_id}.txt"));
+        std::fs::write(&path, intro(&lines.concat()))?;
+        text.push_str(&format!("- {} more row(s) not shown.\nRecovery receipt: {}\n", lines.len() - shown, path.display()));
+    }
+    Ok(text)
 }
 
 fn preview(value: &serde_json::Value) -> serde_json::Value {
@@ -299,7 +322,7 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     let queue = crate::store::open_prompt_queue_store(root)?;
     let held = cas_store::project_hold::is_held(root);
     if agent.role == AgentRole::Supervisor && !held {
-        let recovery = integrated_recovery(root).unwrap_or_else(|error| format!(
+        let recovery = integrated_recovery(root, &agent.id).unwrap_or_else(|error| format!(
             "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
         ));
         if !recovery.is_empty() {

@@ -1412,7 +1412,7 @@ mod supervisor_handoff_tests {
         assert!(context.contains("Integrated deliveries to adopt/close (25)"), "{context}");
         assert!(
             context.len() <= SESSION_START_BUDGET_BYTES,
-            "supervisor SessionStart is {} bytes, over the {SESSION_START_BUDGET_BYTES}B budget",
+            "supervisor SessionStart is {} bytes, over the {SESSION_START_BUDGET_BYTES}B budget: {context}",
             context.len()
         );
         // The inline list is bounded; every row stays reachable by receipt path.

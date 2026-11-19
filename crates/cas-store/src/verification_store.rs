@@ -588,6 +588,18 @@ pub fn add_system_verification(cas_dir: &Path, verification: &Verification) -> R
     insert_verification_with_conn(&conn, verification)
 }
 
+/// A local dispatch nobody can still resolve: it timed out, or it is still
+/// pending or claimed past its deadline (a crashed verifier). A peer approval
+/// of the delivered tip may supersede it (GH #1913); a live or already
+/// resolved local cycle keeps its ownership.
+pub fn verification_dispatch_is_stale(dispatch: &VerificationDispatch, now: DateTime<Utc>) -> bool {
+    match dispatch.state {
+        VerificationDispatchState::TimedOut => true,
+        VerificationDispatchState::Pending | VerificationDispatchState::Claimed => dispatch.deadline_at <= now,
+        VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated => false,
+    }
+}
+
 /// Atomically admit daemon-validated peer authority into the existing proof
 /// records. Generic store writes cannot mint this provenance. A replay never
 /// updates a verdict or replaces a local verification cycle. A newer source
@@ -639,7 +651,9 @@ pub fn import_peer_premerge_verification(
              ORDER BY created_at DESC,id DESC LIMIT 1",
             [&existing.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
         ).optional()?;
-        let replaceable = matches!(existing.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+        let stale_local = prior.is_none() && old_verdict.is_none() && existing.id != dispatch.id
+            && verification_dispatch_is_stale(&existing, Utc::now());
+        let replaceable = stale_local || matches!(existing.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
             && existing.id != dispatch.id && dispatch.requested_at > existing.requested_at
             && prior.is_some_and(|prior| {
                 prior.receipt.status == VerificationStatus::Approved
@@ -659,7 +673,7 @@ pub fn import_peer_premerge_verification(
             return Err(StoreError::VerificationDispatchConflict { dispatch: Box::new(existing) });
         }
         tx.execute("UPDATE verification_dispatches SET state='invalidated' WHERE id=?1", [&existing.id])?;
-        superseded = Some(existing);
+        superseded = Some((existing, stale_local));
     }
     // Legacy local verdicts also represent an existing proof cycle.
     let has_verdict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM verifications WHERE task_id=?1)", [&expected_task.id], |row| row.get(0))?;
@@ -676,11 +690,15 @@ pub fn import_peer_premerge_verification(
     )?;
     insert_verification_with_conn(&tx, verification)?;
     record_event_with_conn(&tx, approval_event)?;
-    if let Some(prior) = superseded {
-        let event = Event::new(EventType::VerificationAdded, EventEntityType::Task, &expected_task.id,
-            "Peer approval replaced after source review of repaired delivery")
+    if let Some((prior, stale_local)) = superseded {
+        let (summary, code) = if stale_local {
+            ("Peer approval superseded a stale local verification dispatch", "peer_premerge_stale_dispatch_superseded")
+        } else {
+            ("Peer approval replaced after source review of repaired delivery", "peer_premerge_approval_replaced")
+        };
+        let event = Event::new(EventType::VerificationAdded, EventEntityType::Task, &expected_task.id, summary)
             .with_metadata(serde_json::json!({
-                "code": "peer_premerge_approval_replaced",
+                "code": code,
                 "old_dispatch_id": prior.id, "new_dispatch_id": dispatch.id,
                 "old_source_sha": prior.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref())
                     .map(|peer| peer.receipt.source_sha.as_str()),

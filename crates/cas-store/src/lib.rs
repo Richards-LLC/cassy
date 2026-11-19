@@ -269,7 +269,7 @@ pub use verification_store::{
     extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
-    has_active_verification_dispatch, import_peer_premerge_verification, inspect_bound_server_verifier_handoff,
+    has_active_verification_dispatch, import_peer_premerge_verification, verification_dispatch_is_stale, inspect_bound_server_verifier_handoff,
     inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
     invalidate_verification_dispatch_for_new_cycle, release_failed_verifier_dispatch,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,

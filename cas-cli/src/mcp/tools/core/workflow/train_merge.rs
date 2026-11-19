@@ -269,7 +269,7 @@ impl CasCore {
             save(&path, &queue)?;
             // GH #2169: appended entries' reviews start now, not at the next daemon scan.
             start_queued_reviews(self, &queue, &*tasks, queue.next);
-            let receipt = queue.render();
+            let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
             return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
                 crate::gates::override_tag("G-114", receipt)
             } else { receipt });
@@ -329,7 +329,7 @@ impl CasCore {
         // GH #2169: every queued delivery's review starts now, outside the publication lock.
         drop(target_lock);
         start_queued_reviews(self, &queue, &*tasks, 0);
-        let receipt = queue.render();
+        let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
         Ok(if queue.ci_override.is_some() { crate::gates::override_tag("G-114", receipt) } else { receipt })
     }
 }

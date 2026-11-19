@@ -94,7 +94,7 @@ pub(crate) fn ingest(root: &Path, recipient: &Agent, message: &ClaimedPeerMessag
                 || message.sender_session.as_deref() != Some(park.session.as_str())
                 || task.status != crate::types::TaskStatus::AwaitingMerge { return reject; }
             if directory.claimed(&park.project, &park.task) {
-                return Err("Worker park claim is still active; admission will retry after release".into());
+                return Err("TRAIN_PARK_CLAIM_ACTIVE: worker claim is still active; admission will retry after release".into());
             }
             crate::artifacts::proof::materialize_peer_evidence(root, &task)?;
             let path = park.path(root)?;

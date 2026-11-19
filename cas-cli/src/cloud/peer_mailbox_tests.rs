@@ -1242,8 +1242,16 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
              "user_id":"account", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "metadata":{"role":"worker", "factory_session":"owner-session", "canonical_id":REPO,
                  "train":"cas-train", "train_owner":"owner", "train_owner_generation":generation}}
         ]}))).mount(&server).await;
+    let claim_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let active = claim_active.clone();
+    let claim = serde_json::json!({"id":"claim", "task_id":crate::cloud::peer_claims::claim_key(REPO,&task.id),
+        "agent_id":"worker", "status":"active", "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(),
+        "renewed_at":chrono::Utc::now().to_rfc3339(), "renewal_count":1, "epoch":1});
     Mock::given(method("GET")).and(path("/api/agents/locks"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]}))).mount(&server).await;
+        .respond_with(move |_: &wiremock::Request| {
+            let locks = if active.load(std::sync::atomic::Ordering::SeqCst) { vec![claim.clone()] } else { Vec::new() };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":locks}))
+        }).mount(&server).await;
     Mock::given(method("GET")).and(path("/api/artifacts/cloud-proof/url"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"artifact_id":"cloud-proof", "url":format!("{}/blob",server.uri()), "size_bytes":bytes.len()})))
         .mount(&server).await;
@@ -1267,16 +1275,11 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
             (report, mailbox.acks.into_inner().unwrap())
         })
     };
-    let active = Mock::given(method("GET")).and(path("/api/agents/locks"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[{
-            "id":"claim", "task_id":crate::cloud::peer_claims::claim_key(REPO,&task.id), "agent_id":"worker", "status":"active",
-            "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(), "renewed_at":chrono::Utc::now().to_rfc3339(),
-            "renewal_count":1, "epoch":1
-        }]}))).with_priority(1).expect(1).mount_as_scoped(&server).await;
     let (held, ack) = deliver(send("before-claim-release", &park)).await.unwrap();
     assert_eq!((held.delivered,held.rejected), (0,0)); assert!(ack.is_empty());
+    assert!(held.errors.iter().any(|error| error.contains("TRAIN_PARK_CLAIM_ACTIVE")));
     assert!(owner.rows().is_empty());
-    drop(active);
+    claim_active.store(false, std::sync::atomic::Ordering::SeqCst);
     let (report, _) = deliver(send("ready", &park)).await.unwrap();
     assert!(report.errors.is_empty(), "{report:?}");
     assert_eq!(report.delivered, 1);

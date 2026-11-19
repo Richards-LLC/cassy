@@ -116,6 +116,7 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), LaunchError> 
 /// code; only a caller who is not a live supervisor is reported as one.
 /// cas-4fd6: a row still marked active whose process is gone is not live, and
 /// a refusal names the agent and its status, never the whole row.
+// gate[G-158 verifier-launch]: Verifier launch owner must be a live registered supervisor with a running process
 fn owner_authority(core: &CasCore) -> Result<(), String> {
     use crate::mcp::daemon::{LivenessOutcome, evaluate_liveness, pid_alive, pid_matches_fingerprint};
     use crate::mcp::tools::core::task::lifecycle::close_ops::SupervisorAuthorityError;
@@ -140,9 +141,12 @@ fn owner_authority(core: &CasCore) -> Result<(), String> {
         && let LivenessOutcome::Dead { cc_pid, .. } =
             evaluate_liveness(&owner, pid_alive, pid_matches_fingerprint)
     {
-        return Err(format!(
-            "verifier_factory_owner: live registered supervisor required (agent {} process {cc_pid} is not running)",
-            owner.id
+        return Err(crate::gates::tag(
+            "G-158",
+            format!(
+                "verifier_factory_owner: live registered supervisor required (agent {} process {cc_pid} is not running)",
+                owner.id
+            ),
         ));
     }
     Ok(())

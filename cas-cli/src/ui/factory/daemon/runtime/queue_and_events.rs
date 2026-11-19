@@ -7911,6 +7911,17 @@ impl FactoryDaemon {
         })
     }
 
+    /// A Codex worker whose Cassy MCP server has not listed its tools yet (GH #2128).
+    /// The supervisor, broadcasts and other harnesses are unaffected.
+    fn worker_awaits_cassy_tools(&self, pane: &str) -> bool {
+        pane != "supervisor"
+            && pane != self.app.supervisor_name()
+            && pane != "all_workers"
+            && self.app.worker_names().iter().any(|name| name == pane)
+            && self.app.harness_for(pane) == cas_mux::SupervisorCli::Codex
+            && !crate::factory_tools_ready::tools_listed(self.app.cas_dir(), &self.session_name, pane, crate::mcp::daemon::pid_alive)
+    }
+
     /// Combine off-loop transcript inputs with the pane's current vetoes.
     fn prepared_pane_wake_state(&self, pane: &str) -> PaneWakeState {
         PaneWakeState {
@@ -10613,6 +10624,21 @@ impl FactoryDaemon {
                         super::prompt_queue_jobs::QueueStamp::PendingReason {
                             reason: cas_store::PendingReason::GatedNotReady,
                             detail: pending_detail.map(str::to_string),
+                        },
+                    );
+                    continue;
+                }
+                // GH #2128: a Codex worker's first wake can arrive before its Cassy MCP
+                // server has listed its tools, so `task` and `coordination` do not exist
+                // yet. Hold the row until the worker's server reports it listed them.
+                if self.worker_awaits_cassy_tools(pane_target) {
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: Some("the worker's Cassy tools are not listed yet; if this persists, check the worker's MCP configuration with `cas factory doctor`".into()),
                         },
                     );
                     continue;

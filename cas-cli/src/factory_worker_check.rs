@@ -2348,6 +2348,27 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     execute_at_with_scope_and_environment(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, &[])
 }
 
+/// Runs changed-test classification, which happens before build admission, while
+/// writing a progress line to `emit` every `interval` so the wait is never silent
+/// (GH #2121, #2082).
+fn with_classification_progress<T>(interval: std::time::Duration, package: &str, emit: impl Fn(&str) + Send, classify: impl FnOnce() -> T) -> T {
+    std::thread::scope(|scope| {
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let heartbeat = scope.spawn(move || {
+            let started = std::time::Instant::now();
+            while stopped.recv_timeout(interval) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                emit(&format!(
+                    "worker-check: still classifying changed tests for {package} before build admission ({}s elapsed)",
+                    started.elapsed().as_secs()));
+            }
+        });
+        let result = classify();
+        drop(stop);
+        let _ = heartbeat.join();
+        result
+    })
+}
+
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if javascript::allowed_args(args) {
         validate_test_environment(args, test_env)?;
@@ -2385,7 +2406,12 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
-        match stability::rust::selected_inputs(&repo, &base, &head, test) {
+        let classified = with_classification_progress(
+            std::time::Duration::from_secs(30),
+            &test.package,
+            |line| eprintln!("{line}"),
+            || stability::rust::selected_inputs(&repo, &base, &head, test));
+        match classified {
             Ok((tests, uncertain)) => {
                 if uncertain {
                     let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
@@ -2732,6 +2758,17 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_classification_keeps_emitting_progress_before_admission_gh_2121() {
+        let (lines, received) = std::sync::mpsc::channel();
+        // The classification blocks until worker-check itself writes a progress line, so the
+        // wait is an event, not a guess; a silent worker-check times out here and fails.
+        let progress_seen = with_classification_progress(std::time::Duration::from_millis(1), "cas",
+            move |line| { let _ = lines.send(line.to_owned()); },
+            || received.recv_timeout(std::time::Duration::from_secs(10)).is_ok());
+        assert!(progress_seen, "worker-check wrote no progress line while classifying before admission");
+    }
 
     #[test]
     fn missing_supervisor_test_request_names_its_path() {

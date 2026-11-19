@@ -1,0 +1,3 @@
+### Fixed — Release
+
+- **A replacement verifier can claim a dispatch whose first verifier never started** — Was: once the first verifier's deadline passed with no verdict, every replacement launch failed with "verifier handoff requires the exact active owned dispatch" (GH #2135), so the supervisor had to record the verdict by hand. Now: issuing the replacement's handoff refreshes the still-pending dispatch's deadline in the same transaction, so the replacement claims the same dispatch.

@@ -3129,16 +3129,29 @@ fn issue_server_verifier_handoff_with_conn(
         ));
     }
 
-    let dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;
+    let mut dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;
     if dispatch.task_id != task_id
         || dispatch.owner_agent_id != issuer_agent_id
         || dispatch.state != VerificationDispatchState::Pending
-        || dispatch.deadline_at <= now
     {
         return Err(StoreError::Parse(
             "verifier handoff requires the exact active owned dispatch".to_string(),
         ));
     }
+    // A replacement is scheduled against a dispatch whose first verifier never
+    // started, so its deadline may already have passed while it is still
+    // pending. Refresh it in this transaction so the claim cannot be refused
+    // for the very expiry the replacement exists to recover from.
+    if dispatch.deadline_at <= now {
+        let deadline = now + Duration::minutes(10);
+        tx.execute(
+            "UPDATE verification_dispatches SET deadline_at = ?2
+             WHERE id = ?1 AND state = 'pending' AND verifier_agent_id IS NULL",
+            params![dispatch.id, deadline.to_rfc3339()],
+        )?;
+        dispatch.deadline_at = deadline;
+    }
+
     let issued_at = now;
     // The work deadline can elapse while a bound verifier is still reviewing.
     // Keep credential lifetime separate, with its original hard 30-minute cap.

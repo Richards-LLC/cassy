@@ -581,7 +581,7 @@ fn reconcile_with_inventory(
     }
     let inventory = inventory()?;
     let reclaimable_bytes = inventory.complete.then(|| inventory.caches.iter()
-        .fold(0u64, |total, (_, bytes)| total.saturating_add(*bytes)));
+        .fold(inventory.review_scratch_bytes, |total, (_, bytes)| total.saturating_add(*bytes)));
     let agents = open_agent_store(root)?.list(None)?;
     for (key, waits) in disk_groups {
         if waits.iter().all(|wait| now - wait.since < Duration::seconds(ESCALATE_SECONDS)) { continue; }
@@ -601,9 +601,13 @@ fn reconcile_with_inventory(
         // retry the same idempotent notice, including snapshot reversions.
         write_pressure(root, &pressure)?;
         let workers = waits.iter().map(|wait| format!("- {} ({}): {}", wait.worker_name, wait.task_id, wait.cause)).collect::<Vec<_>>().join("\n");
-        let caches = inventory.caches.iter().map(|(path, bytes)| format!("- {}: {bytes} bytes", path.display())).collect::<Vec<_>>().join("\n");
+        let mut caches = inventory.caches.iter().map(|(path, bytes)| format!("- {}: {bytes} bytes", path.display())).collect::<Vec<_>>();
+        if inventory.review_scratch_bytes > 0 {
+            caches.push(format!("- verifier review scratch queued for deletion: {} bytes", inventory.review_scratch_bytes));
+        }
+        let caches = caches.join("\n");
         let total = reclaimable_bytes.map_or_else(|| "unknown (inventory incomplete)".to_string(), |bytes| format!("{bytes} bytes"));
-        let detail = format!("Disk pressure is delaying builds. Waiting workers (cause at last refusal):\n{workers}\nNow: {}\nReclaimable target caches (logical bytes): {total}\n{}\nThis notice updates only when waiting workers or reclaimable bytes change; tasks and leases remain active.", live_admission(root), if caches.is_empty() { "- none found" } else { &caches });
+        let detail = format!("Disk pressure is delaying builds. Waiting workers (cause at last refusal):\n{workers}\nNow: {}\nReclaimable target caches and review scratch (logical bytes): {total}\n{}\nThis notice updates only when waiting workers or reclaimable bytes change; tasks and leases remain active.", live_admission(root), if caches.is_empty() { "- none found" } else { &caches });
         let recipient = crate::supervisor_notices::resolve(&agents, None, waits[0].session.as_deref());
         crate::supervisor_notices::enqueue(root, &recipient, "capacity_wait", &detail, &occurrence)?;
         pressure.get_mut(&key).expect("pressure episode").notified = true;

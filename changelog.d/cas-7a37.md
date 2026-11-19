@@ -1,0 +1,3 @@
+### Fixed — Capacity notice
+
+- **The disk-pressure notice counts verifier review scratch as reclaimable** — Was: the notice listed only target caches, so with review-scratch output queued for deletion it reported "Reclaimable target caches: none found" while that output still filled the disk. Now: the reclaimable total includes the review-scratch bytes the inventory already measures, and the notice lists them on their own line. Measured: the new test fails at the delivery base with a total of 10 bytes against the expected 17 (10 cache bytes plus 7 review-scratch bytes) and passes with this change.

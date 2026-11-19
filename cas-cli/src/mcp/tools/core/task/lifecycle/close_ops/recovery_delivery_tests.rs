@@ -559,7 +559,11 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
     }
     // cas-adca: decode the structural field and enter the real spawn handler,
     // rather than calling the class helper with an already-recorded answer.
-    crate::migration::run_migrations(&root, false).unwrap();
+    // This store-level recovery fixture needs the peer outbox used by spawn routing.
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    for sql in crate::migration::MIGRATIONS.iter().find(|m| m.id == 268).unwrap().up {
+        conn.execute_batch(sql).unwrap();
+    }
     env.remove("CAS_FACTORY_SESSION");
     let mut repair = tasks.get(TASK).unwrap();
     repair.status = TaskStatus::Open;

@@ -187,6 +187,7 @@ fn local_paths(clause: &str) -> Vec<&str> {
         for token in tokens {
             let path = super::strip_path_punctuation(token);
             if grammar().duration_percentage_ratio.is_match(path)
+                || grammar().source_citation.is_match(path)
             {
                 continue;
             }

@@ -489,7 +489,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn repaired_delivery_replaces_only_superseded_source_peer_approval_cas_d7f9() {
+    async fn peer_approval_cannot_create_an_owner_dispatch_cas_b674() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         const PROJECT: &str = "peer-repair-fixture";
@@ -562,80 +562,14 @@ mod tests {
             };
             let old = receipt(&task, &old_sha, &base, "old");
             let old_message = message(&old, 2);
-            assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Imported));
-            let old_dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-            let connection = crate::qa_batch::release_close::read_connection(&root).unwrap();
-            let original_stamp = super::super::cycle::stamp(&connection, &old.verdict_id).unwrap().unwrap();
-            assert_eq!(serde_json::to_value(original_stamp.registry_version).unwrap(), old.registry_version.clone().unwrap());
-            assert_eq!(original_stamp.approved_anchor, old.source_sha);
-            drop(connection);
-
-            assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).unwrap());
-
-            std::fs::write(source.join("delivery"), "repaired\n").unwrap();
-            git(&source, &["commit", "-qam", "reviewed repair"]).unwrap();
-            let repaired = git(&source, &["rev-parse", "HEAD"]).unwrap();
-            git(&source, &["push", "origin", "HEAD:main"]).unwrap();
-            task.deliverables.factory_branch_anchor = Some(repaired.clone());
-            tasks.update(&task).unwrap();
-            assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).is_err());
-            let fresh = receipt(&task, &repaired, &old_sha, "repair");
-            let fresh_message = message(&fresh, 1);
-            // A source approval is required; an authenticated rejected verdict
-            // and an envelope whose sender identity changed grant no recovery.
-            let mut rejected = fresh.clone();
-            rejected.status = VerificationStatus::Rejected;
-            let mut foreign = fresh_message.clone();
-            foreign.sender_machine_id = Some("foreign-machine".into());
-            let mut rebound = fresh.clone();
-            rebound.dispatch_id = old.dispatch_id.clone();
-            rebound.verdict_id = old.verdict_id.clone();
-            let mut other = fresh.clone();
-            other.supervisor_id = "other-supervisor".into();
-            let mut other_message = message(&other, 1);
-            other_message.sender_agent_id = other.supervisor_id.clone();
-            other_message.sender_machine_id = Some("other-machine".into());
-            other_message.sender_session = Some("other-session".into());
-            for invalid in [message(&rejected, 1), foreign, old_message.clone(), message(&rebound, 1), other_message] {
-                assert!(matches!(ingest_peer_receipt(&root, &recipient, &invalid).unwrap(), PeerReceiptIngested::Rejected(_)));
-                assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, old.dispatch_id);
-            }
-            let admitted = ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap();
-            assert!(matches!(admitted, PeerReceiptIngested::Imported), "{admitted:?}");
-            let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-            assert_eq!(current.id, fresh.dispatch_id);
-            assert!(verify_peer_promotion(&root, &task, &current, &fresh.verdict_id).unwrap());
-            assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap().state, VerificationDispatchState::Invalidated);
+            // A peer may supply worker evidence, but cannot mint another
+            // supervisor's authoritative verification cycle.
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Rejected(_)));
-            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Imported));
-            let events = crate::store::open_event_store(&root).unwrap()
-                .list_for_entity(cas_types::EventEntityType::Task, &task.id, 100).unwrap();
-            let replacements: Vec<_> = events.iter().filter_map(|event| event.metadata.as_ref())
-                .filter(|metadata| metadata["code"] == "peer_premerge_approval_replaced").collect();
-            assert_eq!(replacements.len(), 1);
-            assert_eq!(replacements[0]["old_dispatch_id"], old.dispatch_id);
-            assert_eq!(replacements[0]["new_dispatch_id"], fresh.dispatch_id);
-            assert_eq!(cas_store::get_verification_for_dispatch(&root, &old.dispatch_id).unwrap().unwrap().id, old.verdict_id);
-            assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap()
-                .repository.unwrap().peer_premerge.unwrap().receipt.source_sha, old_sha);
+            assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_none());
+            assert!(crate::store::open_verification_store(&root).unwrap().get_latest_for_task(&task.id).unwrap().is_none());
             let local = cas_store::create_verification_dispatch(&root, &task.id, &recipient.id, &recipient.id,
                 chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
-            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Rejected(_)));
-            assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, local.id);
-
-            // GH #1913: once that local verifier is gone (its dispatch timed
-            // out), the owner's cycle is stale and the peer's approval of the
-            // delivered tip supersedes it instead of stalling the close.
-            let timed_out = cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now() + chrono::Duration::minutes(11))
-                .unwrap().expect("the local dispatch passed its deadline");
-            assert_eq!(timed_out.id, local.id);
-            let stale = receipt(&task, &repaired, &old_sha, "stale-local");
-            let imported = ingest_peer_receipt(&root, &recipient, &message(&stale, 0)).unwrap();
-            assert!(matches!(imported, PeerReceiptIngested::Imported), "{imported:?}");
-            let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-            assert_eq!(current.id, stale.dispatch_id);
-            assert!(verify_peer_promotion(&root, &task, &current, &stale.verdict_id).unwrap());
-            assert_eq!(cas_store::get_verification_dispatch(&root, &local.id).unwrap().state, VerificationDispatchState::Invalidated);
+            assert_eq!(local.owner_agent_id, recipient.id);
         }).await.unwrap();
     }
 }

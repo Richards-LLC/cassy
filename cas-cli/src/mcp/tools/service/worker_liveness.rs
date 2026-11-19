@@ -318,8 +318,10 @@ pub(crate) fn finished_turn_with_owned_child_progress(
     mut observation: Observation,
     owned_child_advanced: bool,
 ) -> Observation {
-    let _ = owned_child_advanced;
-    observation.state = observation.state;
+    if owned_child_advanced && observation.state == Liveness::WaitingForInput {
+        observation.state = Liveness::Executing;
+        observation.evidence.push_str("; owned child CPU/output advanced within the stall window");
+    }
     observation
 }
 

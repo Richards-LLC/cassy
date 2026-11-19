@@ -691,9 +691,8 @@ def text_literals(source, path):
 
 def is_exact_text_pin(body, context):
     """Recognize long exact prose and short needles into source-like inputs."""
-    if ('/' in body and not re.search(r'\s', body)
-            or re.fullmatch(r'[A-Z][A-Z0-9_]*=[A-Za-z0-9_.-]+', body)):
-        return False  # Machine resource routes and key-value records.
+    if '{' not in body and not human_message_literal(body):
+        return False  # Share the structured machine-data policy with message assertions.
     words = re.findall(r"[A-Za-z0-9_'-]+", body)
     prose = len(body.strip()) >= 55 and len(words) >= 8 and (
         '\n' in body or re.search(r'[.!?](?:\s|$)', body) is not None
@@ -748,17 +747,64 @@ def rust_assertion_diagnostics(source):
 
 
 def rust_runtime_inputs(source):
-    """Git command arguments and Result/Option expect messages are inputs,
-    not assertions about the returned text. Keep surrounding assertions in scope.
+    """Git argv, expect diagnostics and runtime test identity constructors are
+    inputs, not assertions about rendered text. Keep adjacent operands in scope.
     """
     ts = tokens(source)
     ps = pairs(ts)
+    helpers = {}
+    functions = []
+    for i, token in enumerate(ts[:-2]):
+        if token.string or token.value != 'fn' or i + 2 not in ps:
+            continue
+        end = ps[i + 2]
+        body = next((j for j in range(end + 1, len(ts))
+                     if not ts[j].string and ts[j].value in ('{', ';')), None)
+        if body is None or ts[body].value != '{':
+            continue
+        functions.append((i + 2, end, body, ps[body]))
+        # Only a direct, typed forwarder qualifies. A helper named `id` that
+        # returns String does not make diagnostic text into machine identity.
+        parameters = [ts[j].value for j in range(i + 3, end - 1)
+                      if not ts[j].string and ts[j + 1].value == ':']
+        signature = ''.join(t.value for t in ts[end + 1:body])
+        forwarded = ''.join(t.value for t in ts[body + 1:ps[body]])
+        typed = (signature == '->Identity' and len(parameters) == 2
+                 and forwarded == f'Identity::exact({parameters[0]},{parameters[1]})')
+        scopes = [(left, right) for left, right in ps.items()
+                  if ts[left].value == '{' and left < i < right]
+        left, right = max(scopes, default=(-1, len(ts)))
+        helpers.setdefault(ts[i + 1].value, []).append((left, right, typed))
     for i, token in enumerate(ts[:-1]):
         if token.string or ts[i + 1].value != '(' or i + 1 not in ps:
             continue
+        identity = (i >= 2 and ts[i - 2].value == 'Identity' and ts[i - 1].value == '::'
+                    and token.value == 'exact')
+        local = (i == 0 or ts[i - 1].value not in ('.', '::'))
+        candidates = [entry for entry in helpers.get(token.value, []) if entry[0] < i < entry[1]]
+        if local and candidates and max(candidates)[2]:
+            owner = max((fn for fn in functions if fn[2] < i < fn[3]),
+                        key=lambda fn: fn[2], default=None)
+            shadowed = False
+            if owner:
+                shadowed = any(ts[j].value == token.value and ts[j + 1].value == ':'
+                               for j in range(owner[0] + 1, owner[1] - 1))
+                for j in range(owner[2] + 1, i):
+                    if ts[j].string or ts[j].value != 'let':
+                        continue
+                    if any(ts[left].value == '{' and left < j < right < i for left, right in ps.items()):
+                        continue  # A completed inner block cannot shadow this call.
+                    eq = next((k for k in range(j + 1, i) if ts[k].value in ('=', ';')), i)
+                    if eq == i or ts[eq].value != '=' or not any(t.value == token.value for t in ts[j + 1:eq]):
+                        continue
+                    finish = eq + 1
+                    while finish < i and ts[finish].value != ';':
+                        finish = ps.get(finish, finish) + 1
+                    shadowed |= finish < i
+            identity = not shadowed
         if token.value == 'git' or (
             token.value == 'expect' and i > 0 and ts[i - 1].value == '.'
-        ):
+        ) or identity:
             yield ts[i + 1].end, ts[ps[i + 1]].start
 
 

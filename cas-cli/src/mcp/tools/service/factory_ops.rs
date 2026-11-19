@@ -2919,6 +2919,10 @@ impl CasService {
                     ),
                 )
             })?;
+            // cas-bc25: a repair for recorded failing tests needs its class audit.
+            crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), task_id, None)
+                .map(drop)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
             preassigned_task = Some(task.clone());
             if task.is_terminal() {
                 return Err(Self::error(

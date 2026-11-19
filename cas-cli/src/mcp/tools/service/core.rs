@@ -688,6 +688,7 @@ impl CasService {
                     "reason required for request_changes — explain what must change and whether prior commits should stand or be reverted",
                 )
             })?,
+            class_audit: req.class_audit,
         };
         self.inner
             .cas_task_request_changes(Parameters(inner_req))

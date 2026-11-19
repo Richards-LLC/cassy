@@ -354,10 +354,14 @@ pub struct TaskRequest {
     /// Reason for close, cancel, request_changes, or a split takeover assignment. Close succeeds only once
     /// verification passes; the close response says what to do otherwise.
     #[schemars(
-        description = "Reason for close, cancel, request_changes or split takeover. Close succeeds only after verification passes; if close returns verification-required guidance, follow it."
+        description = "Reason for close, cancel, request_changes or split takeover. Close succeeds only after verification passes."
     )]
     #[serde(default)]
     pub reason: Option<String>,
+
+    // request_changes: nextest filter for the whole test class to run before re-park.
+    #[serde(default)]
+    pub class_audit: Option<String>,
 
     /// Explicit per-attempt declaration for a helper with no Git delivery.
     #[schemars(
@@ -1441,5 +1445,14 @@ mod worker_delivery_request_tests {
             request.negative_result_reference.as_deref(),
             Some("https://github.com/pippenz/cas/pull/242")
         );
+    }
+
+    #[test]
+    fn request_changes_class_audit_fields_are_additive_at_the_mcp_boundary_cas_bc25() {
+        let request: TaskRequest = serde_json::from_str(
+            r#"{"action":"request_changes","id":"cas-x","reason":"fix","class_audit":"test(ui::)"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.class_audit.as_deref(), Some("test(ui::)"));
     }
 }

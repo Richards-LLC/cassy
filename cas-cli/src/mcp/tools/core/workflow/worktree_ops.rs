@@ -4011,9 +4011,11 @@ impl CasCore {
         // GH #2103: a local ref left by an earlier merge attempt that is an
         // ancestor of the live origin tip is stale, not a conflicting approved
         // tip. Follow origin; a local ref with its own commits still refuses.
+        // Fetch only for a commit this checkout lacks, so a refusal over
+        // already-known objects leaves every ref untouched.
         if let Some(Some(live)) = origin_tip.as_ref()
             && *live != tip
-            && git.fetch_branch(&start.branch).is_ok()
+            && (git.resolve_commit(live).is_some() || git.fetch_branch(&start.branch).is_ok())
             && git.is_ancestor(&tip, live)
             && git.advance_local_branch(&start.branch, &tip, live).is_ok()
         {

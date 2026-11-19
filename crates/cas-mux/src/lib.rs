@@ -35,6 +35,7 @@ mod mux;
 mod opencode;
 mod pane;
 mod pty;
+pub mod readiness;
 mod render;
 mod spec;
 pub mod submit_gate;

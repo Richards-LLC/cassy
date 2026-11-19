@@ -1145,7 +1145,7 @@ async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_
         closed
     }).await.unwrap();
     assert!(id > 0);
-    assert_eq!(server.received_requests().await.unwrap().iter().filter(|request| request.method.as_str() == "POST").count(), 2);
+    assert_eq!(server.received_requests().await.unwrap().iter().filter(|request| request.method.as_str() == "POST" && request.url.path() == "/api/peer-messages").count(), 2);
     assert!(owner_machine.rows().is_empty());
     let connection = rusqlite::Connection::open(owner_machine.cas.join("cas.db")).unwrap();
     let payloads = connection.prepare("SELECT payload FROM peer_message_outbox").unwrap()

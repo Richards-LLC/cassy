@@ -286,6 +286,9 @@ fn auto_unblock_worker_target(
                     && agent.is_alive()
                     && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
             });
+        if live_assignee.is_none() && let Some((_, _, label)) = crate::cloud::peer_mailbox::notice_route(cas_root, assignee)? {
+            return Ok(AutoUnblockWorkerTarget::Worker(label));
+        }
         return Ok(match live_assignee {
             Some(agent) => AutoUnblockWorkerTarget::Worker(agent.name),
             None => AutoUnblockWorkerTarget::Skipped(format!(
@@ -361,29 +364,7 @@ pub(crate) fn queue_auto_unblock_worker_wake(
                 task.id, blocker_id, task.id
             );
             let summary = format!("Task unblocked: {}", task.id);
-            let factory_session = std::env::var("CAS_FACTORY_SESSION")
-                .ok()
-                .filter(|session| !session.trim().is_empty());
-            let queue = crate::store::open_prompt_queue_store(cas_root).map_err(|error| {
-                format!("prompt queue open failed for auto-unblock wake: {error}")
-            })?;
-            let result = queue
-                .enqueue_idempotent(
-                    "supervisor",
-                    &worker_name,
-                    &prompt,
-                    factory_session.as_deref(),
-                    Some(&summary),
-                    Some(cas_store::NotificationPriority::Normal),
-                    &dedupe_key,
-                    Some(&cas_store::QueueOrigin::Daemon),
-                )
-                .map_err(|error| format!("auto-unblock worker wake enqueue failed: {error}"))?;
-            let prompt_id = match result {
-                cas_store::EnqueueIdempotentResult::Created(id)
-                | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
-            };
-            crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
+            let prompt_id = enqueue_worker_notice(cas_root, &worker_name, |_| (dedupe_key.clone(), prompt, summary))?;
             (worker_name, prompt_id, dedupe_key)
         }
     };
@@ -684,6 +665,10 @@ fn enqueue_worker_notice(
         .ok()
         .filter(|session| !session.trim().is_empty());
     let (key, prompt, summary) = content(worker_name);
+    if worker_name.contains('@') {
+        return crate::cloud::peer_mailbox::worker_notice(cas_root, worker_name, &key, &prompt, &summary)?
+            .ok_or_else(|| "Remote worker owner/generation is no longer current; notice remains undelivered".into());
+    }
     let result = queue.enqueue_idempotent(
         "supervisor",
         worker_name,

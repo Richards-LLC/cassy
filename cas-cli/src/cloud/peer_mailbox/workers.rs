@@ -144,3 +144,45 @@ pub(super) fn render_worker_prompt(message: &ClaimedPeerMessage) -> String {
         .expect("parsed peer kind is valid");
     render_prompt(&message).replacen("Peer supervisor ", "Peer worker (advisory only; your supervisor retains assignment authority) ", 1)
 }
+
+/// Direct train authority uses the owner's address even while its pane is offline.
+/// Advisory worker contracts continue through the separate active-claim path.
+pub(crate) fn owned_route(root: &Path, sender: &Agent, target: &str) -> Result<Option<(String, String)>, String> {
+    if sender.role == AgentRole::Worker {
+        if !target.eq_ignore_ascii_case("supervisor") || !sender.metadata.contains_key("train_owner") { return Ok(None); }
+        let host = crate::factory_session_scope::WorkerHost::current(root, sender.factory_session.as_deref())?
+            .ok_or("Worker-host registration has no current owner binding")?;
+        let directory = WorkerDirectory::load(root, &sender.id)?;
+        if !directory.matches_local(sender) || !directory.owner_of(&host.owner, &sender.id) {
+            return Err("Worker-host Cloud identity or train generation changed".into());
+        }
+        return Ok(Some((host.owner, format!("{}@{}", host.name, host.machine))));
+    }
+    if sender.role != AgentRole::Supervisor || target.starts_with("supervisor:") { return Ok(None); }
+    if !target.contains('@') && crate::store::open_agent_store(root).ok().and_then(|store| store.list(None).ok())
+        .is_some_and(|agents| agents.iter().any(|agent| agent.id == target || agent.name.eq_ignore_ascii_case(target)))
+    { return Ok(None); }
+    if !CloudConfig::load_from_cas_dir(root).is_ok_and(|config| config.is_logged_in()) { return Ok(None); }
+    let directory = WorkerDirectory::load(root, &sender.id)?;
+    Ok(directory.resolve(target)?.filter(|worker| directory.owner_of(&sender.id, &worker.agent_id))
+        .map(|worker| (worker.agent_id.clone(), format!("{}@{}", worker.name, worker.machine))))
+}
+
+/// Internal notices use the same authenticated route and the existing durable
+/// outbox; their local id remains stable after Cloud has accepted the send.
+pub(crate) fn notice_route(root: &Path, target: &str) -> Result<Option<(Agent, String, String)>, String> {
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    let Some(owner) = crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
+        agents.as_ref(), crate::factory_session_scope::caller_factory_session().as_deref())
+        .and_then(|owner| agents.get(&owner.agent_id).ok()) else { return Ok(None) };
+    Ok(owned_route(root, &owner, target)?.map(|(recipient, label)| (owner, recipient, label)))
+}
+
+pub(crate) fn worker_notice(root: &Path, target: &str, key: &str, prompt: &str, summary: &str) -> Result<Option<i64>, String> {
+    let Some((sender, recipient, label)) = notice_route(root, target)? else { return Ok(None) };
+    let project_id = crate::cloud::resolve_canonical_id(root).ok_or("Project has no canonical identity")?;
+    let message = PeerSend { project_id, sender_agent_id:sender.id, recipient_agent_id:recipient.clone(),
+        body:attach_message_intent(prompt, Some("status"), false)?, summary:Some(summary.into()),
+        in_reply_to:None, dedupe_key:format!("{key}:{recipient}"), scope:PeerScope::Project, recipient_project_id:None };
+    outbox::enqueue_notice(root, message, &label).map(Some)
+}

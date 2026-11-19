@@ -115,6 +115,14 @@ pub(crate) fn enqueue_feedback(root: &Path, message: PeerSend, recipient: &str) 
     enqueue(root, message, recipient, true)
 }
 
+pub(crate) fn enqueue_notice(root: &Path, message: PeerSend, recipient: &str) -> Result<i64, String> {
+    let (sender, key) = (message.sender_agent_id.clone(), message.dedupe_key.clone());
+    enqueue_feedback(root, message, recipient).map_err(|error| error.to_string())?;
+    let conn = connection(root).map_err(|error| error.to_string())?;
+    conn.query_row("SELECT id FROM peer_message_outbox WHERE sender_agent_id=?1 AND json_extract(payload,'$.dedupe_key')=?2",
+        params![sender, key], |row| row.get(0)).map_err(|error| error.to_string())
+}
+
 fn enqueue(
     root: &Path, mut message: PeerSend, recipient: &str, defer_send: bool,
 ) -> Result<SendReceipt, PeerSendError> {

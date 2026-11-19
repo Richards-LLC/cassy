@@ -52,6 +52,8 @@ export interface HubSession {
   liveness: "live" | "stale_metadata" | "missing_endpoint";
   /** Metadata survived after its registered supervisor stopped being live. */
   dormant?: boolean;
+  /** The supervisor finished its wrap-up, stopped its workers and went quiet (cas-94a0). */
+  standby?: boolean;
   /** Browser-only retention of a destination with an in-flight message. */
   unreachable?: boolean;
   /** Browser-only: listed from a catalog past its freshness while the machine

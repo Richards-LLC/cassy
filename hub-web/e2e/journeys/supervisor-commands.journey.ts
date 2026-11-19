@@ -83,6 +83,32 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await captureReload(page, "finish-autocomplete-completed", viewport.width);
       });
     });
+    // cas-0699: /standby parks the session, the row says Standby, and Resume brings it back. The page drives
+    // the real command path; the double answers as the daemon and the supervisor's hook would.
+    test("HUB-J27 standby shows the badge and Resume clears it (cas-0699)", journeyPart, async ({ page, journey }) => {
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
+      const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
+      const row = page.locator(".conversation-row").filter({ hasText: /cas-src/ });
+      await journey.stage("Go on standby from the header menu", async () => {
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await expect(page.locator(".conversation-standby")).toHaveCount(0);
+        await openCommands(page);
+        await page.locator('[data-supervisor-command="standby"]').click();
+        await page.getByRole("alertdialog").getByRole("button", { name: "Standby", exact: true }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
+        expect(hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body).toMatchObject({ command: "standby", confirmed: true });
+        await expect(row.locator(".conversation-standby")).toBeVisible();
+        await expect(page.locator("[data-resume-standby]")).toBeVisible();
+      });
+      await journey.stage("Resume clears the badge", async () => {
+        await page.locator("[data-resume-standby]").click();
+        await expect.poll(() => hub.sends.length).toBe(1);
+        expect(hub.sends[0]!.target).toBe("supervisor");
+        await expect(page.locator(".conversation-standby")).toHaveCount(0);
+        await expect(page.locator("[data-resume-standby]")).toHaveCount(0);
+      });
+    });
     test("HUB-J27 completed Claude turn accepts commands once and shows a compact native command receipt (cas-99e7)", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN],

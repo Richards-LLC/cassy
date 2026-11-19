@@ -22,14 +22,16 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     git(&["remote", "add", "origin", "https://github.com/example/reverted.git"]);
     std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
     std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::write(repo.join(".claude/CODEMAP.md"), "Baseline codemap.\n").unwrap();
     std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"), "# Product\n\n## Core Concepts\n\nBaseline.\n").unwrap();
     std::fs::write(repo.join("docs/qa/journeys.yaml"), "version: 1\nbug_families: {}\njourneys: []\ninvariants: {}\n").unwrap();
-    git(&["add", ".gitignore", "docs"]);
+    git(&["add", ".gitignore", "docs", ".claude/CODEMAP.md"]);
     git(&["commit", "-qm", "base"]);
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
     let mut foreign = None;
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-only"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-reverted", "cas-doc-only"] {
         if id == "cas-undone" {
             std::fs::write(repo.join("shared.rs"), "fn shared() { baseline() }\n").unwrap();
             git(&["add", "shared.rs"]);
@@ -48,11 +50,14 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             std::fs::write(repo.join("shared.rs"), "fn shared() { delivered() }\n").unwrap();
             git(&["commit", "-qam", "deliver shared change"]);
         }
-        if matches!(id, "cas-doc-evolved" | "cas-doc-only") {
+        if matches!(id, "cas-doc-evolved" | "cas-doc-reverted" | "cas-doc-only") {
             std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"),
                 "# Product\n\n## Core Concepts\n\nShipped marmoset.\n").unwrap();
-            git(&["add", "docs/PRODUCT_OVERVIEW.md"]);
-            git(&["commit", "-qm", "delivery overview"]);
+            std::fs::write(repo.join(".claude/CODEMAP.md"), "Shipped marmoset codemap.\n").unwrap();
+            std::fs::write(repo.join("docs/qa/journeys.yaml"),
+                "version: 1\nbug_families: {}\njourneys: []\ninvariants: {}\n# Shipped marmoset\n").unwrap();
+            git(&["add", "docs/PRODUCT_OVERVIEW.md", ".claude/CODEMAP.md", "docs/qa/journeys.yaml"]);
+            git(&["commit", "-qm", "delivery generated docs"]);
         }
         if id == "cas-redrafted" {
             // cas-f4a2 / v4.28: 03bc's red control reverted inside its own
@@ -119,7 +124,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         git(&["checkout", "-q", "main"]);
         git(&["merge", "--no-ff", "-qm", "merge delivery", id]);
         let merge = git(&["rev-parse", "HEAD"]);
-        if matches!(id, "cas-doc-evolved" | "cas-doc-only") {
+        if matches!(id, "cas-doc-evolved" | "cas-doc-reverted" | "cas-doc-only") {
             // v4.28 cas-d725: an unrelated revert touched the generated
             // overview before release prep rewrote the delivered prose.
             let overview = repo.join("docs/PRODUCT_OVERVIEW.md");
@@ -141,6 +146,14 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             git(&["commit", "-qm", "sync train into docs sibling"]);
             git(&["checkout", "-q", "main"]);
             git(&["merge", "--no-ff", "-qm", "merge docs sibling", &sibling]);
+            std::fs::write(repo.join(".claude/CODEMAP.md"), "Regenerated zeppelin codemap.\n").unwrap();
+            std::fs::write(repo.join("docs/qa/journeys.yaml"),
+                "version: 1\nbug_families: {}\njourneys: []\ninvariants: {}\n# Regenerated zeppelin\n").unwrap();
+            git(&["commit", "-qam", "regenerate release docs"]);
+            if id == "cas-doc-reverted" {
+                // cas-895d3: generated docs cannot hide a source revert.
+                git(&["revert", "--no-edit", &first]);
+            }
         } else if id == "cas-reverted" {
             git(&["revert", "-m", "1", "--no-edit", &merge]);
         } else if id == "cas-partial" {
@@ -232,7 +245,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() },
     )).unwrap();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-resynced", "cas-foreign-cut", "cas-undone"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-resynced", "cas-foreign-cut", "cas-undone", "cas-doc-reverted"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "{id}");
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_MEMBER_REVERTED"), "{id}: {:?}", result.members.get(id));
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));
@@ -244,7 +257,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     for id in ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{id}: {:?}", result.members.get(id));
     }
-    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-only"] {
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-reverted", "cas-doc-only"] {
         let task = tasks.get(id).unwrap();
         assert_eq!(release_tag_ships_delivery(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),

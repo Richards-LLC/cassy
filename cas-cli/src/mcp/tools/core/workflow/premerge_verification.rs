@@ -1968,6 +1968,7 @@ mod tests {
         run(repo, &["config", "user.email", "fixture@example.invalid"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
         env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", repo);
         env.set("CAS_AGENT_ROLE", "supervisor");
         std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='reuse-fixture'\n[qa]\nmode = 'batch'\n[verification]\nenabled = true\n").unwrap();
@@ -1983,6 +1984,9 @@ mod tests {
         core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
         let mut task = Task::new("cas-da35c-reuse".into(), "Review approval reuse".into());
         task.depth = cas_types::TaskDepth::Deep;
+        task.assignee = Some("worker".into());
+        task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        task.deliverables.parked_branch = Some("factory/worker".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:reuse-fixture".into(), target_branch: "epic/train".into(),
@@ -2052,6 +2056,17 @@ mod tests {
         carried.promote(&landed).unwrap();
         core.verify_premerge_promotion(&task, &dispatch, &approval.verdict_id).unwrap();
         assert!(cycle::approved(&root, repo, &task, task.deliverables.factory_branch_anchor.as_deref().unwrap(), &landed).unwrap().is_some());
+        // Promotion alone missed the final close's ReviewedDelivery projection:
+        // it must consume the derived proof while retaining the original verdict.
+        let close = serde_json::from_value(serde_json::json!({
+            "id":task.id, "commit_receipt":landed, "supervisor_override":true,
+            "reason":"Reviewed carried merge; scoped proof deferred to fixture assembly",
+        })).unwrap();
+        let closed = runtime.block_on(core.cas_task_close(rmcp::handler::server::wrapper::Parameters(close)));
+        assert_eq!(store.get(&task.id).unwrap().status, cas_types::TaskStatus::Closed, "{closed:?}");
+        assert_eq!(dispatch_count(), before);
+        assert_eq!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap().id, approval.verdict_id);
+
 
         // A new commit in reviewed code still needs a real new review.
         run(repo, &["checkout", "-q", "factory/worker"]);

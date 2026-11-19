@@ -20,6 +20,7 @@ struct Grammar {
     receipt_heading: Regex,
     negated: Regex,
     duration_percentage_ratio: Regex,
+    source_citation: Regex,
 }
 
 fn grammar() -> &'static Grammar {
@@ -48,6 +49,10 @@ fn grammar() -> &'static Grammar {
             receipt_heading: re(r"^[\s(`*]*(?:receipt|evidence|proof:|run\b|run[_-]?id\b|ci\b|artifact\b|art-[a-f0-9])"),
             negated: re(r"\b(?:(?:will|shall)\s+not|not|never|hasn't|haven't|didn't|isn't)\s+(?:yet\s+)?(?:pass(?:ed|ing)?|green|verified|validated|run|complete[ds]?)\b"),
             duration_percentage_ratio: re(r"(?i)^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:ns|us|µs|ms|s|m|h|d)/[+-]?(?:\d+(?:\.\d+)?|\.\d+)%$"),
+            // cas-d1c1: `file.rs:743`, `file.rs:10-20` and `DESIGN.md@rev` cite a
+            // source line or revision. They name no receipt file, so they are
+            // neither resolved as one nor accepted as one.
+            source_citation: re(r"\.[A-Za-z0-9]+(?::[0-9]+(?:-[0-9]+)?|@[^/\s]+)$"),
         }
     })
 }
@@ -181,7 +186,8 @@ fn local_paths(clause: &str) -> Vec<&str> {
         };
         for token in tokens {
             let path = super::strip_path_punctuation(token);
-            if grammar().duration_percentage_ratio.is_match(path) {
+            if grammar().duration_percentage_ratio.is_match(path)
+            {
                 continue;
             }
             let has_path_component = |candidate: &str| {
@@ -233,5 +239,25 @@ mod tests {
             receipt_root.path(),
         )
         .expect("path-shaped local receipts remain valid");
+    }
+
+    /// cas-d1c1: a source `file:line` or `DESIGN.md@rev` citation is not a
+    /// receipt path: it neither fails resolution beside a real receipt nor
+    /// stands in for one, and a genuinely missing receipt still fails.
+    #[test]
+    fn source_citations_are_not_receipt_paths() {
+        let cas_root = tempfile::tempdir().expect("temporary Cassy root");
+        let receipt_root = tempfile::tempdir().expect("temporary receipt root");
+        std::fs::write(receipt_root.path().join("receipt.log"), "proof").expect("receipt file");
+        let check = |reason: &str| validate_claims(reason, cas_root.path(), receipt_root.path());
+
+        for citation in ["scripts/journeys-for-diff.py:743", "scripts/journeys-for-diff.py:743-760", "hub-web/DESIGN.md@3c25c3fb3"] {
+            check(&format!("CI tests passed ./receipt.log; cause {citation}"))
+                .unwrap_or_else(|error| panic!("{citation} beside a real receipt: {error}"));
+            check(&format!("CI tests passed. {citation}"))
+                .expect_err("a source citation is not a receipt for a pass claim");
+        }
+        check("CI tests passed ./missing.log; cause scripts/journeys-for-diff.py:743")
+            .expect_err("a missing receipt path is still refused");
     }
 }

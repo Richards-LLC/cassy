@@ -835,11 +835,11 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     tree.work("harness");
     let harness_only = status(after + chrono::Duration::minutes(11));
     assert_eq!(harness_only.state, Liveness::WaitingForInput, "{}", harness_only.detail());
-    // A foreign session or a reused root PID cannot borrow the owned child's advance.
+    // A new session or a reused root PID gets a cold sample, so it cannot borrow the owned child's advance.
     tree.work("write");
     let later = after + chrono::Duration::minutes(12);
     let mut foreign = tree.agent.clone();
-    foreign.factory_session = Some("another-session".into());
+    foreign.factory_session = Some("finished-turn-session".into());
     assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, later, 300).state, Liveness::Executing);
     foreign.factory_session = tree.agent.factory_session.clone();
     foreign.pid_starttime = Some(0);

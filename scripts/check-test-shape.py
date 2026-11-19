@@ -789,7 +789,7 @@ def rust_runtime_inputs(source):
                       if ts[left].value == '{' and left < i < right]
             item_bindings.append((set(names), *max(scopes, default=(-1, len(ts)))))
             if 'Identity' in names:
-                trusted = (re.fullmatch(r'(?:[A-Za-z_]\w*::)*stability::(?:Identity|\{(?:Identity|[A-Za-z_]\w*|,)+\})', ''.join(names)) is not None
+                trusted = (re.fullmatch(r'(?:(?:super::)+|crate::factory_worker_check::)stability::(?:Identity|\{(?:[A-Za-z_]\w*|,)+\})', ''.join(names)) is not None
                            and 'as' not in names)
                 identity_import |= trusted
                 conflicting_identity |= not trusted

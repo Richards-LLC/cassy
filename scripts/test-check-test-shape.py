@@ -672,6 +672,15 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 (prefix, f'assert_eq!(&selected, &(id("a.test.ts", "{sentence}")));', 0),
                 (prefix, f'assert_eq!(selected.id, id("a.test.ts", "{sentence}").id);', 0),
             ])
+            cases.extend([
+                (prefix.replace('super::stability::Identity', 'diagnostic::stability::Identity'),
+                 f'assert_eq!(source, Identity::exact("a.test.ts", "{sentence}"));', 1),
+                (prefix.replace('super::stability::Identity', 'super::stability::{Identity, Proof}'),
+                 f'assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+                (prefix.replace('fn id(', '#[cfg(any())] fn id(').replace('#[test]',
+                 'fn id(path: &str, name: &str) -> String { name.to_string() }\n#[test]'),
+                 f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1),
+            ])
             cases.append((prefix.replace('#[test] fn check() {',
                                          '#[cfg(test)] fn check<T>(id: fn(&str, &str) -> String) {'),
                           f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1))

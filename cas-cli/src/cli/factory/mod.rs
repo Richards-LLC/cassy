@@ -1312,13 +1312,6 @@ pub enum FactoryGcCommands {
     },
 }
 
-/// Core for supervisor-only CLI subcommands. A shell or wrapper sits between
-/// the harness and `cas`, so identity must be resolved from the nearest
-/// harness ancestor (`for_cli`), not the immediate parent (GH #2125, #2074).
-fn supervisor_cli_core(root: &std::path::Path) -> crate::mcp::CasCore {
-    crate::mcp::CasCore::for_cli(root.to_path_buf())
-}
-
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
@@ -1352,7 +1345,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks, supervisor_override, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
-                let core = supervisor_cli_core(root);
+                let core = crate::mcp::CasCore::for_cli(root.to_path_buf());
                 let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()), *supervisor_override, reason.as_deref())?;
                 crate::gates::facts::observe_cli_output(root, &receipt);
                 if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
@@ -1361,7 +1354,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::Train { command: TrainCommand::Drop { tasks, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train drop requires a Cassy project"))?;
-                let core = supervisor_cli_core(root);
+                let core = crate::mcp::CasCore::for_cli(root.to_path_buf());
                 let queue = crate::train_guardrails::GhTrainQueue(
                     root.parent().unwrap_or(root).to_path_buf(),
                 );
@@ -2740,10 +2733,63 @@ mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
 
+    /// GH #2125, #2074: `cas factory train drop` run from the supervisor's
+    /// shell sits behind a wrapper (harness -> shell -> cas). The drop must
+    /// resolve the registered supervisor from the harness ancestor. The effect
+    /// shows who it resolved: a train already on its one repair cycle sends its
+    /// second-ejection notice to the supervisor's factory session.
+    #[cfg(unix)]
     #[test]
-    fn supervisor_cli_core_resolves_identity_from_the_harness_ancestor() {
-        let root = std::path::Path::new("/nonexistent/.cas");
-        assert!(supervisor_cli_core(root).cli_harness.is_some());
+    fn train_drop_behind_a_shell_wrapper_resolves_the_registered_supervisor_gh_2125() {
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+        const CHILD: &str = "CAS_TEST_TRAIN_DROP_CAS_DIR";
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        if let Ok(cas_dir) = std::env::var(CHILD) {
+            let args = FactoryArgs { command: Some(FactoryCommands::Train { command: TrainCommand::Drop {
+                tasks: vec!["cas-a".into()], reason: "ejected again".into(),
+            } }), ..Default::default() };
+            let cli = <Cli as clap::Parser>::try_parse_from(["cas"]).unwrap();
+            let _ = execute(&args, &cli, Some(std::path::Path::new(&cas_dir)));
+            return;
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-tr00".into(), "Release train".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.labels = vec![crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_LABEL.into()];
+        epic.branch = Some("epic/release-train-cas-tr00".into());
+        epic.notes = format!("{} cas-a reverted; {}42", crate::train_guardrails::DROP_NOTE, crate::train_guardrails::REENQUEUED);
+        tasks.add(&epic).unwrap();
+        tasks.add(&cas_types::Task::new("cas-a".into(), "fix".into())).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(
+            "cas-a".into(), "cas-tr00".into(), cas_types::DependencyType::ParentChild,
+        )).unwrap();
+
+        // The harness waits for its row before the wrapped `cas` runs.
+        let script = r#"read go; sh -c '"$0" --exact "$1" --nocapture; true' "$0" "$1""#;
+        let exe = std::env::current_exe().unwrap();
+        let test_name = std::thread::current().name().unwrap().to_string();
+        let mut harness = std::process::Command::new("sh")
+            .arg0("claude")
+            .arg("-c").arg(script).arg(&exe).arg(&test_name)
+            .env(CHILD, &cas_dir)
+            .env_remove("CAS_SESSION_ID").env_remove("CAS_AGENT_ROLE").env_remove("CAS_AGENT_NAME")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role("sup-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        supervisor.factory_session = Some("factory-session".into());
+        supervisor.pid = Some(harness.id());
+        supervisor.ppid = Some(harness.id());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        writeln!(harness.stdin.take().unwrap(), "go").unwrap();
+        assert!(harness.wait().unwrap().success());
+
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        assert_eq!(queue.peek("operator", 10).unwrap().len(), 1, "the drop resolved the supervisor and reported");
     }
 
     #[test]

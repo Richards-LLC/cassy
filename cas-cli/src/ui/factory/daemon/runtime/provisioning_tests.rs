@@ -26,6 +26,8 @@ pub(super) async fn await_ready_fixture_pane(daemon: &mut FactoryDaemon, name: &
         .get_mut(name)
         .unwrap()
         .backdate_spawn_for_test(Duration::from_secs(6));
+    // A ready fixture worker has also listed its Cassy tools (GH #2128).
+    crate::factory_tools_ready::record_tools_listed(daemon.app.cas_dir(), &daemon.session_name, name, std::process::id()).unwrap();
     daemon.app.mux.pane_bytes_received(name).unwrap()
 }
 

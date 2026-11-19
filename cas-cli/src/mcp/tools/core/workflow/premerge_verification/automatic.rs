@@ -259,14 +259,15 @@ pub(super) struct LaunchError {
 /// The daemon names each refusal with a leading code. The code, matched whole,
 /// is the classification; the message text after it is never searched.
 pub(super) fn retry_for_code(message: &str) -> Retry {
-    match message.split_once(':').map_or(message, |(code, _)| code).trim() {
-        "verifier_factory_scope"
-        | "verifier_factory_task_terminal"
-        | "verifier_factory_owner"
-        | "verifier_factory_unsupported"
-        | "verifier_handoff_not_active" => Retry::Never,
-        "verifier_factory_store_busy" | "verifier_factory_launch_dropped" => Retry::Contended,
-        _ => Retry::Backoff,
+    if message.contains("verifier_factory_scope")
+        || message.contains("verifier_factory_task_terminal")
+        || message.contains("verifier_handoff_not_active")
+    {
+        Retry::Never
+    } else if message.contains("verifier_factory_store_busy") {
+        Retry::Contended
+    } else {
+        Retry::Backoff
     }
 }
 

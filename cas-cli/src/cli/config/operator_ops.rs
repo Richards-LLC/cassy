@@ -248,11 +248,21 @@ pub(crate) fn write_roots_report(cas_root: &Path) -> anyhow::Result<serde_json::
     .map(|root| root.display().to_string())
     .filter(|root| !roots.contains(root))
     .collect();
+    // Roots enforcement drops for this project, with the reason (cas-5245).
+    let ignored: Vec<serde_json::Value> = crate::config::operator_policy::ignored_write_roots(
+        &roots,
+        &crate::config::operator_policy::user_write_roots(),
+        cas_root,
+    )
+    .into_iter()
+    .map(|(root, reason)| serde_json::json!({"root": root, "reason": reason}))
+    .collect();
     Ok(serde_json::json!({
         "key": "factory.write_roots",
         "value": roots,
         "legacy_operator_policy_roots": legacy,
         "every_project_roots": every_project,
+        "ignored_roots": ignored,
     }))
 }
 
@@ -271,6 +281,12 @@ pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Res
     let every_project = strings("every_project_roots");
     let legacy = strings("legacy_operator_policy_roots");
     println!("{}", roots.join(","));
+    if let Some(ignored) = report["ignored_roots"].as_array().filter(|list| !list.is_empty()) {
+        eprintln!("note: configured but ignored for this project:");
+        for entry in ignored {
+            eprintln!("  {}: {}", entry["root"].as_str().unwrap_or_default(), entry["reason"].as_str().unwrap_or_default());
+        }
+    }
     if !every_project.is_empty() {
         eprintln!("note: user-level, Downloads and Claude memory roots also apply:");
         for root in &every_project {

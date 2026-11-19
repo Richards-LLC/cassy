@@ -130,11 +130,25 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
                 return true;
             }
         }
-        if super::pre_tool::shell_heredoc_bodies(&context.command).iter().any(|body| {
-            directories.iter().any(|cwd| script_constructs_store_path(body, cwd))
+        if super::pre_tool::shell_heredoc_bodies_with_consumer(&context.command).iter().any(|body| {
+            directories.iter().any(|cwd| {
+                script_constructs_store_path(&body.text, cwd, body.python_source)
+                    // A shell executes the body, including any substitution in it.
+                    || (body.shell_commands && shell_body_references_store(&body.text, cwd, depth + 1))
+            })
         }) { return true; }
     }
     false
+}
+
+/// A shell executes this heredoc body. Beyond its statements, any word naming a
+/// store path counts, wherever it sits (inside a quoted command substitution
+/// included): the shell's own parse is not trusted to surface it.
+fn shell_body_references_store(body: &str, cwd: &Path, depth: usize) -> bool {
+    body.split(|c: char| c.is_whitespace() || "\"'`()$;|&<>={}".contains(c))
+        .filter(|word| !word.is_empty())
+        .any(|word| path_references_store(word, cwd, false))
+        || shell_references_store(body, cwd, depth)
 }
 
 /// The directories that stand for `cwd`. Each unknown entry takes, per store,
@@ -253,7 +267,7 @@ fn statement_references_store(
     is_script_interpreter(&executable)
         && args
             .iter()
-            .any(|arg| script_constructs_store_path(arg, cwd))
+            .any(|arg| script_constructs_store_path(arg, cwd, true))
 }
 
 /// The directory the command runs in after its wrapper prefix: `env -C DIR`
@@ -953,9 +967,14 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
     false
 }
 
-fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
+/// `literal` is false for a heredoc body the shell expands before the
+/// interpreter reads it; only unexpanded text can be judged as source data.
+fn script_constructs_store_path(script: &str, cwd: &Path, literal: bool) -> bool {
     if script_passes_file_credential_to_child(script) {
         return true;
+    }
+    if literal && literal_python_source_edit(script, cwd) {
+        return false;
     }
     static PYTHON_GLOB_OPERAND: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| {
@@ -1243,6 +1262,177 @@ fn python_string_literal<'a>(node: tree_sitter::Node<'_>, source: &'a str) -> Op
     spelling.get(width..spelling.len().checked_sub(width)?)
 }
 
+/// Admit a bounded source-edit program by its actual file targets, rather than
+/// scanning replacement text as executable code. Every statement and call must
+/// be understood; unknown operations (including nested execution) fall back to
+/// the conservative script scan above. Never execute Python to classify it.
+fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
+    use std::collections::HashMap;
+    use tree_sitter::Node;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Value {
+        Text,
+        File,
+        Written,
+        Predicate,
+    }
+
+    fn text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
+        &source[node.byte_range()]
+    }
+
+    fn value(
+        node: Node<'_>,
+        source: &str,
+        vars: &HashMap<String, Value>,
+        cwd: &Path,
+        depth: usize,
+    ) -> Option<Value> {
+        if depth > 32 {
+            return None;
+        }
+        match node.kind() {
+            "identifier" => vars.get(text(node, source)).copied(),
+            "string" => python_string_literal(node, source).map(|_| Value::Text),
+            "parenthesized_expression" => value(node.named_child(0)?, source, vars, cwd, depth + 1),
+            "comparison_operator" => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .all(|part| value(part, source, vars, cwd, depth + 1) == Some(Value::Text))
+                    .then_some(Value::Predicate)
+            }
+            "call" => {
+                let function = node.child_by_field_name("function")?;
+                let arguments = node.child_by_field_name("arguments")?;
+                let mut cursor = arguments.walk();
+                let args: Vec<_> = arguments.named_children(&mut cursor).collect();
+                if function.kind() == "identifier"
+                    && text(function, source) == "Path"
+                    && args.len() == 1
+                {
+                    let path = python_string_literal(args[0], source)?;
+                    // Do not guess Python escapes, dynamic targets or paths
+                    // outside the checkout's working directory.
+                    return (!path.contains('\\')
+                        && lexical_absolute(Path::new(path), cwd).starts_with(cwd)
+                        && !path_references_store(path, cwd, false))
+                    .then_some(Value::File);
+                }
+                if function.kind() != "attribute" {
+                    return None;
+                }
+                let receiver = value(
+                    function.child_by_field_name("object")?,
+                    source,
+                    vars,
+                    cwd,
+                    depth + 1,
+                )?;
+                let method = text(function.child_by_field_name("attribute")?, source);
+                match (receiver, method, args.len()) {
+                    (Value::File, "read_text", 0) => Some(Value::Text),
+                    (Value::File, "write_text", 1)
+                        if value(args[0], source, vars, cwd, depth + 1) == Some(Value::Text) =>
+                    {
+                        Some(Value::Written)
+                    }
+                    (Value::Text, "replace", 2)
+                        if args.iter().all(|arg| {
+                            value(*arg, source, vars, cwd, depth + 1) == Some(Value::Text)
+                        }) =>
+                    {
+                        Some(Value::Text)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    if !source.contains("from pathlib import Path") || !source.contains("write_text") {
+        return false;
+    }
+    // The allow path is sound only if tree-sitter sees the statements CPython
+    // runs. CPython also ends a line at a bare CR, and a PEP 263 coding cookie
+    // (e.g. utf-7) can decode comment bytes into new lines. Only printable
+    // ASCII, '\n' and '\t' without a cookie read the same to both.
+    if !source.bytes().all(|byte| matches!(byte, b'\n' | b'\t' | b' '..=b'~'))
+        || source.lines().take(2).any(|line| {
+            line.trim_start().starts_with('#')
+                && (line.contains("coding:") || line.contains("coding="))
+        })
+    {
+        return false;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return false;
+    }
+    let mut imported = false;
+    let mut writes = false;
+    let mut vars = HashMap::new();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        match statement.kind() {
+            "comment" => {}
+            "import_from_statement" if text(statement, source) == "from pathlib import Path" => {
+                imported = true
+            }
+            "assert_statement"
+                if imported
+                    && statement.named_child_count() == 1
+                    && statement
+                        .named_child(0)
+                        .and_then(|node| value(node, source, &vars, cwd, 0))
+                        == Some(Value::Predicate) => {}
+            "expression_statement" if imported && statement.named_child_count() == 1 => {
+                let Some(expression) = statement.named_child(0) else {
+                    return false;
+                };
+                let result = if expression.kind() == "assignment" {
+                    let Some(left) = expression.child_by_field_name("left") else {
+                        return false;
+                    };
+                    let Some(right) = expression.child_by_field_name("right") else {
+                        return false;
+                    };
+                    if left.kind() != "identifier"
+                        || text(left, source) == "Path"
+                        || expression.child_by_field_name("type").is_some()
+                    {
+                        return false;
+                    }
+                    let Some(result) = value(right, source, &vars, cwd, 0) else {
+                        return false;
+                    };
+                    vars.insert(text(left, source).to_string(), result);
+                    result
+                } else {
+                    let Some(result) = value(expression, source, &vars, cwd, 0) else {
+                        return false;
+                    };
+                    result
+                };
+                writes |= result == Value::Written;
+            }
+            _ => return false,
+        }
+    }
+    imported && writes
+}
+
 fn quoted_strings(source: &str) -> Vec<(usize, String)> {
     let mut strings = Vec::new();
     let mut chars = source.char_indices().peekable();
@@ -1268,4 +1458,45 @@ fn quoted_strings(source: &str) -> Vec<(usize, String)> {
         }
     }
     strings
+}
+
+#[cfg(test)]
+mod source_edit_tests {
+    use super::literal_python_source_edit;
+
+    /// cas-5d392: tree-sitter's comment token runs to '\n', while CPython also
+    /// ends a line at a bare '\r'. A script whose lines the two split
+    /// differently is never a recognised literal source edit.
+    #[test]
+    fn bare_carriage_return_is_not_a_literal_source_edit_cas_5d392() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fixture.rs"), "old\n").unwrap();
+        let edit = |comment: &str| format!(
+            "from pathlib import Path\np = Path('fixture.rs')\ns = p.read_text(){comment}\np.write_text(s.replace('old', 'new'))"
+        );
+        assert!(literal_python_source_edit(&edit(""), dir.path()), "control edit is admitted");
+        assert!(!literal_python_source_edit(&edit("\n#x\rs = s"), dir.path()));
+    }
+
+    /// cas-5d392: a PEP 263 coding cookie lets CPython decode comment bytes
+    /// into statements tree-sitter never parses.
+    #[test]
+    fn coding_cookie_is_not_a_literal_source_edit_cas_5d392() {
+        let dir = tempfile::tempdir().unwrap();
+        let edit = "from pathlib import Path\np = Path('fixture.rs')\ns = p.read_text()\np.write_text(s.replace('old', 'new'))";
+        assert!(literal_python_source_edit(edit, dir.path()), "control edit is admitted");
+        assert!(!literal_python_source_edit(&format!("# coding: utf-7\n{edit}"), dir.path()));
+    }
+
+    /// cas-5d392: the shell expands an unquoted heredoc body before Python
+    /// reads it, so only a quoted delimiter's body is judged as source data.
+    #[test]
+    fn expanded_heredoc_body_is_not_a_literal_source_edit_cas_5d392() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = |delimiter: &str| format!(
+            "python3 - <<{delimiter}\nfrom pathlib import Path\np = Path('fixture.rs')\ns = p.read_text()\np.write_text(s.replace('old', '~/.config/neonctl/credentials.json'))\nPY"
+        );
+        assert!(!super::shell_references_store(&command("'PY'"), dir.path(), 0), "quoted body is data");
+        assert!(super::shell_references_store(&command("PY"), dir.path(), 0));
+    }
 }

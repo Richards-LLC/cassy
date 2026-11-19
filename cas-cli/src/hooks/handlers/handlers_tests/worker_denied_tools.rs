@@ -260,6 +260,64 @@ PY"#);
 }
 
 #[test]
+fn worker_python_source_edit_literals_are_data_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    let command = r#"python3 - <<'PY'
+from pathlib import Path
+p = Path('cas-cli/src/hooks/handlers/handlers_tests/worker_denied_tools.rs')
+s = p.read_text()
+old = '''print(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())'''
+new = '''print((Path.home() / '.config' / 'neonctl' / 'credentials.json').read_text())'''
+assert old in s
+p.write_text(s.replace(old, new))
+PY"#;
+    let reason = denial(handle_pre_tool_use(&bash(command, cwd.path()), None).unwrap());
+    assert!(reason.is_none(), "{reason:?}");
+}
+
+#[test]
+fn worker_heredoc_source_data_needs_a_python_stdin_consumer_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    // The same unexpanded body: Python reads the substitution text as data, a
+    // shell executes it.
+    let body = r#"from pathlib import Path
+p = Path('cas-cli/src/hooks/handlers/handlers_tests/worker_denied_tools.rs')
+s = p.read_text()
+new = "$(cat ~/.config/neonctl/credentials.json)"
+p.write_text(s.replace('old', new))"#;
+    let python = format!("python3 - <<'PY'\n{body}\nPY");
+    let reason = denial(handle_pre_tool_use(&bash(&python, cwd.path()), None).unwrap());
+    assert!(reason.is_none(), "{reason:?}");
+    for consumer in ["bash", "sh", "cat | bash"] {
+        let command = format!("{consumer} <<'PY'\n{body}\nPY");
+        assert_operator_credential_refusal(
+            handle_pre_tool_use(&bash(&command, cwd.path()), None).unwrap(),
+            &command,
+        );
+    }
+}
+
+#[test]
+fn worker_python_source_edit_cannot_hide_live_reads_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    for script in [
+        "from pathlib import Path; p = Path('~/.config/neonctl/credentials.json').expanduser(); s = p.read_text(); p.write_text(s.replace('old', 'new'))",
+        "from pathlib import Path; p = Path.home() / '.config' / 'neonctl' / 'credentials.json'; s = p.read_text(); p.write_text(s.replace('old', 'new'))",
+        "from pathlib import Path; p = Path('fixture.rs'); s = p.read_text(); code = '''print(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())'''; exec(code); p.write_text(s.replace('old', code))",
+        "from pathlib import Path; p = Path('fixture.rs'); p.write_text(f\"{Path('~/.config/neonctl/credentials.json').expanduser().read_text()}\")",
+        "from pathlib import Path; p = Path('fixture.rs'); p.replace(Path.home() / '.config' / 'neonctl' / 'credentials.json'); p.write_text('new')",
+        // A bare CR ends a comment for CPython but not for tree-sitter.
+        "from pathlib import Path\np = Path('fixture.rs')\ns = p.read_text()\n#x\rcode = open(__import__('os').path.expanduser('~/.config/neonctl/credentials.json')).read()\np.write_text(s.replace('old', 'new'))",
+    ] {
+        let command = format!("python3 - <<'PY'\n{script}\nPY");
+        assert_operator_credential_refusal(
+            handle_pre_tool_use(&bash(&command, cwd.path()), None).unwrap(),
+            &command,
+        );
+    }
+}
+
+#[test]
 fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
     let (_env, cwd) = role_env("worker");
     let project = tempfile::tempdir().unwrap();

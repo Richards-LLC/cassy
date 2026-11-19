@@ -23107,14 +23107,14 @@ mod stall_nudge_rework_tests {
         let resume = crate::ui::factory::enqueue_context_resume_brief(&cas_dir, "supervisor", Some(&daemon.session_name), "worker-a").unwrap()
             .expect("the fixture worker holds a task, so a resume brief is queued");
         let broadcast = queue.enqueue("supervisor", "all_workers", "a note for every worker").unwrap();
-        let rows = [spawn, resume, broadcast];
+        let rows = [("spawn handoff", spawn), ("resume brief", resume), ("broadcast", broadcast)];
 
         for _ in 0..4 {
             daemon.process_prompt_queue().await.unwrap();
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }
-        for row in rows {
-            assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_none(), "row {row} waits for the worker's tools");
+        for (name, row) in rows {
+            assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_none(), "{name} waits for the worker's tools");
         }
 
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
@@ -23127,8 +23127,8 @@ mod stall_nudge_rework_tests {
             daemon.process_prompt_queue().await.unwrap();
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }
-        for row in rows {
-            assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_some(), "row {row} goes out once the tools are listed");
+        for (name, row) in rows {
+            assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_some(), "{name} goes out once the tools are listed");
         }
     }
 

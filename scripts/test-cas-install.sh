@@ -45,7 +45,16 @@ while (($#)); do
     *) shift ;;
   esac
 done
-if [[ "$url" == */releases/tags/* ]]; then
+if [[ "$url" == https://github.com/*/releases/latest ]]; then
+  # The releases/latest redirect: the tag is in the final URL, no API quota.
+  printf '%s' 'https://github.com/fixture/cassy/releases/tag/v9.9.9'
+  exit 0
+elif [[ "$url" == https://api.github.com/repos/*/releases/latest ]]; then
+  # cas-d4ed: the unauthenticated API quota is spent on shared CI runners.
+  if [[ -n "$write_out" ]]; then printf '%s' 403; fi
+  [[ -n "$output" ]] && printf '%s\n' '{"message":"API rate limit exceeded"}' >"$output"
+  exit 22
+elif [[ "$url" == */releases/tags/* ]]; then
   attempt=1
   if [[ -n "${FIXTURE_RECEIPT_ATTEMPT_FILE:-}" ]]; then
     if [[ -f "$FIXTURE_RECEIPT_ATTEMPT_FILE" ]]; then
@@ -135,6 +144,10 @@ grep -qF 'cas hub service install' <<<"$darwin_output"
 test -x "$tmpdir/install/cas"
 grep -qF 'cas-aarch64-apple-darwin.tar.gz' "$tmpdir/curl.log"
 grep -qF -- "-d com.apple.quarantine $tmpdir/install/cas" "$tmpdir/xattr.log"
+# cas-d4ed: with the API quota spent (403) and no token, the latest release is
+# resolved from the releases/latest redirect, never the API.
+grep -qF 'https://github.com/fixture/cassy/releases/latest' "$tmpdir/curl.log"
+! grep -qF 'https://api.github.com/repos/fixture/cassy/releases/latest' "$tmpdir/curl.log"
 echo 'ok   macOS Apple Silicon installs the published Darwin asset and clears quarantine'
 
 assert_rejected_before_extraction() {

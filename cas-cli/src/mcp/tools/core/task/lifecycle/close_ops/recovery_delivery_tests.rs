@@ -489,7 +489,7 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
         let supervisor = CasCore::with_daemon(root.clone(), None, None);
         supervisor.set_agent_id_for_testing("supervisor-session".into());
         env.set("CAS_AGENT_ROLE", "supervisor");
-        supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+        supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
             id: TASK.into(), reason: "Keep the sync and rerun the named test".into(),
         })).await.unwrap();
         env.set("CAS_AGENT_ROLE", "worker");
@@ -510,11 +510,12 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
     }
 }
 
-/// cas-bc25: cas-afd2's first repair brief named two failing tests and a third
-/// test of the same class failed next. A verdict that names failing tests must
-/// carry the class to run, and the decision stores it for park.
+/// cas-bc25, replaying cas-afd2 on Nov 12: CI named two failing tests, the
+/// first repair brief named only those, and a third test of their class failed
+/// next. With the failing tests recorded as data, a decline needs the class.
 #[tokio::test]
-async fn request_changes_naming_failing_tests_requires_a_class_audit_cas_bc25() {
+async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_bc25() {
+    use crate::mcp::tools::core::task::repair_class::{record_failing_tests, require_class};
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let repo = f.dir.path();
@@ -531,33 +532,31 @@ async fn request_changes_naming_failing_tests_requires_a_class_audit_cas_bc25() 
     task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
     task.status = TaskStatus::AwaitingMerge;
     tasks.update(&task).unwrap();
+    record_failing_tests(&root, TASK, &["ui::list::sorts".into(), "ui::list::filters".into()]);
     let supervisor = CasCore::with_daemon(root.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "supervisor");
-    let request = |failed: bool, class: Option<&str>| {
+    let request = |class: Option<&str>| {
         Parameters(crate::mcp::tools::TaskRequestChangesRequest {
             id: TASK.into(),
             reason: "Keep the commits; fix the failing tests".into(),
-            tests_failed: failed.then_some(true),
             class_audit: class.map(String::from),
         })
     };
-    for class in [None, Some("not a filter")] {
-        let refused = supervisor
-            .cas_task_request_changes(request(true, class))
-            .await
-            .unwrap_err();
+    // The first brief: the two tests, no class. A class that misses them is no better.
+    for class in [None, Some("not a filter"), Some("test(gates::)")] {
+        let refused = supervisor.cas_task_request_changes(request(class)).await.unwrap_err();
         assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
         assert!(refused.message.contains("CLASS_AUDIT_REQUIRED"), "{}", refused.message);
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
     }
-    supervisor
-        .cas_task_request_changes(request(true, Some("test(ui::) | test(gates::)")))
-        .await
-        .unwrap();
+    // A repair spawn runs the same check, and refuses until a class is recorded.
+    assert!(require_class(tasks.as_ref(), TASK, None).unwrap_err().contains("CLASS_AUDIT_REQUIRED"));
+    supervisor.cas_task_request_changes(request(Some("test(ui::list::) | test(ui::grid::)"))).await.unwrap();
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Open);
     let state = tasks.get_execution_state(TASK).unwrap().unwrap();
-    assert_eq!(state["class_audit"], "test(ui::) | test(gates::)");
+    assert_eq!(state["class_audit"], "test(ui::list::) | test(ui::grid::)");
+    require_class(tasks.as_ref(), TASK, None).unwrap();
 }
 
 /// GH #1543/#1548: a supervisor-required release import may itself contain
@@ -604,7 +603,7 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "worker");
     assert!(f.core.cas_task_request_changes(Parameters(
-        crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+        crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
             id: TASK.into(),
             reason: format!("merge_source={approved}"),
         }
@@ -612,7 +611,7 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     for source in ["release/moving", ""] {
         let invalid = supervisor.cas_task_request_changes(Parameters(
-            crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+            crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
                 id: TASK.into(), reason: format!("merge_source={source}"),
             }
         )).await;
@@ -622,7 +621,7 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
         assert!(still_parked.deliverables.authorized_merge_sources.is_empty());
     }
     let decision = text(supervisor.cas_task_request_changes(Parameters(
-        crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+        crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
             id: TASK.into(),
             reason: format!("Merge the required sibling release batch; merge_source={approved}"),
         }
@@ -722,7 +721,7 @@ async fn first_park_import_grant_uses_syncing_store_cas_a7b5() {
     assert!(task_attribution::started_delivery(repo, &task).is_err());
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
-    let request = |sha: &str| Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+    let request = |sha: &str| Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
         id: TASK.into(),
         reason: format!("Reviewed epic import merge_source={sha}"),
     });
@@ -816,7 +815,7 @@ async fn merge_source_adopts_fast_forwarded_foreign_named_commit_cas_8144() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
-    supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+    supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
         id: TASK.into(),
         reason: format!("Follow-up delivers the original fix merge_source={moved}"),
     })).await.unwrap();
@@ -1258,7 +1257,7 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "supervisor");
     let verdict = text(supervisor.cas_task_request_changes(Parameters(
-        crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+        crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
             id: TASK.into(),
             reason: "Rebase the reviewed correction onto the current target and deliver the resolved content".into(),
         }
@@ -1460,7 +1459,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "supervisor");
     supervisor
-        .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+        .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
             id: TASK.into(),
             reason: "Correct the declined delivery before re-parking".into(),
         }))
@@ -1960,7 +1959,7 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
         supervisor.set_agent_id_for_testing("supervisor-session".into());
         env.set("CAS_AGENT_ROLE", "supervisor");
         supervisor
-            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
                 id: TASK.into(),
                 reason: "Address the independent QA rejection".into(),
             }))
@@ -2240,7 +2239,7 @@ async fn granted_commit_inside_no_ff_import_keeps_the_merge_gh1988() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
-    supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+    supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
         id: TASK.into(),
         reason: format!("Reuse the red test merge_source={reused}"),
     })).await.unwrap();

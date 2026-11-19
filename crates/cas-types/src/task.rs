@@ -1046,6 +1046,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "qa_impact",
     "close_refusal",
     "class_audit",
+    "failing_tests",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -1119,7 +1120,7 @@ pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
 fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(), String> {
     match field {
         "phase" | "next_step" | "blocker_ask" | "class_audit" => validate_state_string(field, value),
-        "files_touched" | "decisions" => validate_state_string_array(field, value),
+        "files_touched" | "decisions" | "failing_tests" => validate_state_string_array(field, value),
         "receipts" => {
             let receipts = value
                 .as_array()

@@ -13807,17 +13807,7 @@ impl CasCore {
         {
             return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
-        // cas-bc25: naming failing tests without the class they belong to
-        // sends the worker back to fix those tests one at a time.
         let class_audit = req.class_audit.as_deref().map(str::trim).filter(|class| !class.is_empty());
-        if req.tests_failed == Some(true)
-            && !class_audit.is_some_and(crate::factory_worker_check::named_filter)
-        {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "CLASS_AUDIT_REQUIRED: task request_changes rejected: tests_failed=true, so class_audit must name the whole test class as a nextest filter, e.g. class_audit=\"test(ui::) | test(gates::)\". Park will require a passing capped receipt that runs it.",
-            ));
-        }
 
         let task_store = self.open_task_store()?;
         let task = task_store.get(&req.id).map_err(|error| {
@@ -13856,6 +13846,11 @@ impl CasCore {
                     task.id, task.status
                 ),
             ));
+        }
+        // cas-bc25: a decline over recorded failing tests must name their class.
+        if !grant_only {
+            crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
         }
         let supervisor_id = if source_commits.is_empty() {
             self.get_agent_id().map_err(|error| {

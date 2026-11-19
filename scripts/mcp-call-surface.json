@@ -635,7 +635,6 @@
         "target_repo",
         "task_ids",
         "task_type",
-        "tests_failed",
         "title",
         "to_agent",
         "to_id",

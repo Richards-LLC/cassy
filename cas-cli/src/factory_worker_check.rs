@@ -1169,21 +1169,9 @@ impl<'a> PassingTests<'a> {
         })
     }
 
-    /// cas-bc25: whether a passing receipt at this tip runs every operand of
-    /// `class` (a named nextest filter). A receipt joined only by `|` covers
-    /// each operand it lists, so a wider run satisfies a narrower class; one
-    /// using `&` narrows the selection and counts only on an exact match.
-    pub(crate) fn covers_class(&self, class: &str) -> bool {
-        let operands = |filter: &str| -> std::collections::BTreeSet<String> {
-            filter.split('|').map(|part| part.trim().to_string()).collect()
-        };
-        let wanted = operands(class);
-        self.records().iter().any(|(_, _, test)| {
-            if test.filter.contains('&') {
-                return test.filter.trim() == class.trim();
-            }
-            wanted.is_subset(&operands(&test.filter))
-        })
+    /// cas-bc25: the filters of this tip's passing receipts.
+    pub(crate) fn filters(&self) -> Vec<String> {
+        self.records().iter().map(|(_, _, test)| test.filter.clone()).collect()
     }
 
     pub(crate) fn receipts(&self) -> Vec<String> {

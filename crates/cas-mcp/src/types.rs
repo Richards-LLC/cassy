@@ -359,11 +359,6 @@ pub struct TaskRequest {
     #[serde(default)]
     pub reason: Option<String>,
 
-    // request_changes: failing tests are named; class_audit then becomes required.
-    // Kept description-free: tools/list is byte-budgeted (cas-bc25).
-    #[serde(default, deserialize_with = "deser::option_bool")]
-    pub tests_failed: Option<bool>,
-
     // request_changes: nextest filter for the whole test class to run before re-park.
     #[serde(default)]
     pub class_audit: Option<String>,
@@ -1455,10 +1450,9 @@ mod worker_delivery_request_tests {
     #[test]
     fn request_changes_class_audit_fields_are_additive_at_the_mcp_boundary_cas_bc25() {
         let request: TaskRequest = serde_json::from_str(
-            r#"{"action":"request_changes","id":"cas-x","reason":"fix","tests_failed":true,"class_audit":"test(ui::)"}"#,
+            r#"{"action":"request_changes","id":"cas-x","reason":"fix","class_audit":"test(ui::)"}"#,
         )
         .unwrap();
-        assert_eq!(request.tests_failed, Some(true));
         assert_eq!(request.class_audit.as_deref(), Some("test(ui::)"));
     }
 }

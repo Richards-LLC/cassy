@@ -1,3 +1,3 @@
 ## Core Concepts
 
-- **Repair class audit** - A review verdict that sends a delivery back for failing tests carries `class_audit`, a nextest filter for the whole test class, alongside `tests_failed`. Cassy stores it on the task and the worker's next park needs a passing capped receipt at the tip that runs every part of that class. A verdict without failing tests needs neither field, and a later verdict without a class clears the earlier one.
+- **Repair class audit** - When a merge-queue ejection names failing tests, Cassy records them on the task. Sending that delivery back (`request_changes`) or spawning a repair worker for it then needs `class_audit`, a nextest filter for the whole test class that selects those tests. The class is stored on the task, and the worker's next park needs passing capped receipts at the tip that run every part of it. A task with no recorded failing tests is unaffected,.

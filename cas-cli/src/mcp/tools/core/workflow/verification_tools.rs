@@ -1885,7 +1885,7 @@ mod lifecycle_friction_tests {
         blocked.status = TaskStatus::Blocked;
         tasks.update(&blocked).unwrap();
         let result = core
-            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None, tests_failed: None,
+            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
                 id: task.id.clone(),
                 reason: "Fix the rejected delivery while keeping its ownership".into(),
             }))

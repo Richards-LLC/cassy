@@ -112,8 +112,8 @@ pub(super) fn park_refusal(
 
 /// The class selector the last request_changes recorded for this task.
 fn recorded_class_audit(cas_root: &Path, task_id: &str) -> Option<String> {
-    let state = crate::store::open_task_store(cas_root).ok()?.get_execution_state(task_id).ok()??;
-    state.get("class_audit")?.as_str().map(str::to_owned)
+    crate::mcp::tools::core::task::repair_class::recorded_class(
+        crate::store::open_task_store(cas_root).ok()?.as_ref(), task_id)
 }
 
 /// Every receipt-scope refusal at this tip, not just the first.
@@ -191,7 +191,7 @@ pub(super) fn park_refusals(
     // cas-bc25: a repair verdict that named failing tests also named their
     // class; park needs a passing capped run of all of it at this tip.
     if let Some(class) = recorded_class_audit(cas_root, &task.id)
-        && !passing.covers_class(&class)
+        && !crate::mcp::tools::core::task::repair_class::receipts_cover_class(&passing.filters(), &class)
     {
         refusals.push(crate::gates::tag("G-61", format!(
             "CLASS_AUDIT_REQUIRED: task {} was sent back with class audit `{class}`, and no passing capped receipt at {short} runs all of it. Run it through the capped runner (`cargo nextest run -p <crate> --lib -E '{class}'`), fix what fails, then retry park.",

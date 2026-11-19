@@ -75,6 +75,7 @@ pub(crate) fn supervisor_prs(cas_dir: &Path) -> Vec<SupervisorPr> {
 pub(crate) struct FailedRunLookups {
     jobs: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, super::ci_watch::FailedJob>>>,
     named: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>,
+    tests: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, Vec<String>>>>,
 }
 
 impl FailedRunLookups {
@@ -122,9 +123,17 @@ impl FailedRunLookups {
             let tests: Vec<_> = super::ci_watch::failing_tests(&log).take(TESTS).collect();
             if !tests.is_empty() {
                 named.push_str(&format!(" (failing tests: {})", tests.join(", ")));
+                if let Ok(mut recorded) = self.tests.lock() {
+                    recorded.insert(run_id, tests);
+                }
             }
             Some(named)
         })
+    }
+
+    /// cas-bc25: the structured names behind [`Self::failing_job`], once it ran.
+    pub(crate) fn failing_test_names(&self, run_id: Option<u64>) -> Vec<String> {
+        run_id.and_then(|id| self.tests.lock().ok()?.get(&id).cloned()).unwrap_or_default()
     }
 
     /// cas-25ce/cas-f2ea: whether the merge-group entry ahead may have caused

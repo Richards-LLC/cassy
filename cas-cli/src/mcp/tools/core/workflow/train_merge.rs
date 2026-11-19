@@ -118,14 +118,14 @@ pub(crate) fn admit(
         };
         if declared != common { continue; }
         let actor = core.resolve_live_supervisor_authority()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-113", format!("train owner authority unavailable: {error:?}"))))?;
         crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
     }
     let queue = read(&path(root, repo, target)?)?;
     if let Some(queue) = queue.filter(Queue::active) {
         let epic = tasks.get(&queue.train)?;
         let actor = core.resolve_live_supervisor_authority()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-113", format!("train owner authority unavailable: {error:?}"))))?;
         let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
         ensure!(crate::cloud::peer_mailbox::owns_recipient(root, &actor, &queue.supervisor)
             && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
@@ -1159,7 +1159,7 @@ mod tests {
         );
         assert!(operations.is_ancestor(&fixture.shas[0], "epic/train^1"));
         admit(
-            &fixture.root,
+            &fixture.core,
             fixture._repo.path(),
             "epic/train",
             None,

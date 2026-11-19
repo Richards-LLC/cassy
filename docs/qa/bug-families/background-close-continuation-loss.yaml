@@ -1,0 +1,4 @@
+title: Background close continuation loss records an outcome and wakes its supervisor
+tasks: [cas-eeda]
+journeys: [FACTORY-CLOSE]
+invariants: [FACTORY-REFUSED-CLOSE-CORRECTION]

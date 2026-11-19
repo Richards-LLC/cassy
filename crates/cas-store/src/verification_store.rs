@@ -3363,9 +3363,9 @@ fn bind_server_verifier_handoff_with_conn(
         || dispatch.state != VerificationDispatchState::Pending
         || dispatch.deadline_at <= now
     {
-        return Err(StoreError::Parse(
-            "verifier handoff exact dispatch is not active".to_string(),
-        ));
+        return Err(StoreError::VerifierHandoffNotActive {
+            dispatch_id: dispatch.id,
+        });
     }
 
     let bound_at = now;

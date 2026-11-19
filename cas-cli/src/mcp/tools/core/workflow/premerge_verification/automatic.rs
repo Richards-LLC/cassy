@@ -266,7 +266,8 @@ fn request_with_retry(
             Ok(()) => return Ok(()),
             Err(error) => {
                 let permanent = error.contains("verifier_factory_scope")
-                    || error.contains("verifier_factory_task_terminal");
+                    || error.contains("verifier_factory_task_terminal")
+                    || error.contains("verifier_handoff_not_active");
                 if !permanent && contended(&error) {
                     let pause = delay.saturating_mul(1 << waits.min(16)).min(CONTENTION_BACKOFF_CAP);
                     if started.elapsed() + pause >= window {

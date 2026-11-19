@@ -710,14 +710,31 @@ mod tests {
         assert_eq!(notices.pending_count("capacity-lead").unwrap(), 6);
     }
 
-    /// cas-7a37: review-scratch output queued for deletion still occupies disk,
-    /// so the notice's reclaimable total counts it beside the target caches.
+    /// cas-7a37: a completed review walk still holds its build output on disk,
+    /// so the notice's reclaimable total (read through the production
+    /// inventory, with no staged trash) counts it.
     #[test]
     fn disk_notice_counts_review_scratch_in_the_reclaimable_total_cas_7a37() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join(".cas");
+        let project = temp.path().canonicalize().unwrap();
+        let root = project.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(&project).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@cas"]);
+        git(&["config", "user.name", "CAS Test"]);
+        std::fs::write(project.join("README"), "initial\n").unwrap();
+        std::fs::create_dir_all(project.join(".git/info")).unwrap();
+        std::fs::write(project.join(".git/info/exclude"), "target/\n.cas/\n").unwrap();
+        git(&["add", "README"]);
+        git(&["commit", "-m", "initial"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
         let agents = open_agent_store(&root).unwrap();
         agents.init().unwrap();
         let tasks = open_task_store(&root).unwrap();
@@ -739,14 +756,19 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         record_refusal_with_kind(&root, &repo, "disk_fixture", CapacityKind::Disk, now).unwrap();
 
+        // A finished task's review walk with its build output in place and no
+        // staged trash: the verdict-time handoff has not moved it.
+        let mut reviewed = Task::new("cas-reviewed".into(), "reviewed".into());
+        reviewed.status = TaskStatus::Closed;
+        tasks.add(&reviewed).unwrap();
+        let walk = crate::factory_review_scratch::create_candidate(&root, &project, &reviewed.id, &head).unwrap();
+        std::fs::create_dir_all(walk.path.join("target/debug")).unwrap();
+        std::fs::write(walk.path.join("target/debug/output"), b"regenerable").unwrap();
+        drop(walk);
+
         let later = now + Duration::minutes(25);
-        let inventory = ReclaimableCaches {
-            caches: vec![(PathBuf::from("/fixture/retired-cache"), 10)],
-            review_scratch_bytes: 7,
-            complete: true,
-        };
-        assert_eq!(reconcile_with_inventory(&root, Some("scratch-session"), later, || Ok(inventory)).unwrap(), 1);
+        assert_eq!(reconcile(&root, Some("scratch-session"), later).unwrap(), 1);
         let notice = read_pressure(&root).unwrap().into_values().next().expect("pressure episode");
-        assert_eq!(notice.reclaimable_bytes, Some(17));
+        assert_eq!(notice.reclaimable_bytes, Some(11));
     }
 }

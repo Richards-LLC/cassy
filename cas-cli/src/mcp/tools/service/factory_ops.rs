@@ -4696,11 +4696,11 @@ impl CasService {
         use crate::store::{open_agent_store, open_task_store};
         use cas_types::{AgentRole, AgentStatus, TaskStatus};
 
-        // gate[G-158 shutdown]: Only the supervisor parks its session on standby
+        // gate[G-159 shutdown]: Only the supervisor parks its session on standby
         if !is_supervisor_from_env() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                crate::gates::tag("G-158", "standby rejected: only the supervisor may park its session"),
+                crate::gates::tag("G-159", "standby rejected: only the supervisor may park its session"),
             ));
         }
         let ctx = mcp_fleet_context();

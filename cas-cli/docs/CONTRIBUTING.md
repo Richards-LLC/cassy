@@ -43,6 +43,10 @@ with a new request ID.
 
 ## Approval registry stamps
 
+Gate codes must be unique across source declarations; `build.rs` generates the
+registry and rejects duplicates. `G-158` identifies verifier-launch owner
+liveness; `G-159` identifies supervisor-only `/standby`.
+
 Delivery-stage registry declarations use `gate[CODE stage integrity]: Title` or
 `gate[CODE stage as-of]: Title`. The generator rejects an absent or unknown
 classification at park, close-after-merge, epic-close, merge-admission and

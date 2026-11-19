@@ -59,6 +59,16 @@ pub fn active(cas_root: &Path, session: &str) -> bool {
     path(cas_root, session).is_file()
 }
 
+/// Whether any standby marker lists `worker` as parked with tasks.
+pub fn holds(cas_root: &Path, worker: &str) -> bool {
+    let Ok(markers) = std::fs::read_dir(cas_root.join("factory-standby")) else { return false };
+    markers.flatten().any(|marker| {
+        std::fs::read(marker.path()).ok()
+            .and_then(|bytes| serde_json::from_slice::<Standby>(&bytes).ok())
+            .is_some_and(|standby| standby.workers.iter().any(|held| held.name == worker))
+    })
+}
+
 pub fn clear(cas_root: &Path, session: &str) -> std::io::Result<()> {
     match std::fs::remove_file(path(cas_root, session)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),

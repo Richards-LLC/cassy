@@ -4760,10 +4760,25 @@ impl CasService {
         shutdown.id = None;
         shutdown.worker_names = None;
         shutdown.count = Some(0);
+        // The marker goes first: the daemon's shutdown consumer reads it to keep
+        // these workers' tasks (status and assignee) instead of releasing them.
+        // A refused shutdown takes it back, so a refusal changes nothing.
+        let handoff = standby::current_handoff_id(root);
+        standby::enter(
+            root,
+            &standby::Standby { session: session.clone(), since: chrono::Utc::now(), handoff: handoff.clone(), workers: held.clone() },
+        )
+        .map_err(|error| internal(format!("Could not write the standby marker: {error}")))?;
         let stopped = if workers.is_empty() {
             String::from("No workers were running.")
         } else {
-            let result = self.factory_shutdown_workers_with(&ctx, shutdown, true).await?;
+            let result = match self.factory_shutdown_workers_with(&ctx, shutdown, true).await {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = standby::clear(root, &session);
+                    return Err(error);
+                }
+            };
             serde_json::to_value(&result)
                 .ok()
                 .and_then(|value| {
@@ -4782,12 +4797,6 @@ impl CasService {
                 agents.update(&worker).map_err(|error| internal(format!("Could not record the shutdown of {}: {error}", worker.name)))?;
             }
         }
-        let handoff = standby::current_handoff_id(root);
-        standby::enter(
-            root,
-            &standby::Standby { session: session.clone(), since: chrono::Utc::now(), handoff: handoff.clone(), workers: held.clone() },
-        )
-        .map_err(|error| internal(format!("Workers were stopped but the standby marker was not written: {error}")))?;
         Ok(Self::success(format!(
             "Session '{session}' is on standby: {} worker(s) stopped, {} held task(s) kept for resume, handoff {}. The daemon now wakes this pane only for the operator and CAS lifecycle events. Post one line and go silent.\n{stopped}",
             workers.len(),

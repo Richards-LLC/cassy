@@ -2316,6 +2316,12 @@ pub(crate) fn enqueue_context_resume_brief(
 ///
 /// Best-effort: store failures are logged; returns the number of tasks cleared.
 pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_name: &str) -> usize {
+    // cas-94a0: a worker parked by /standby keeps its tasks, status and assignee
+    // for Resume. Only the standby marker's workers skip; every other shutdown
+    // and every other release path is unchanged.
+    if crate::factory_standby::holds(cas_dir, worker_name) {
+        return 0;
+    }
     let task_store = match open_task_store_cached(cas_dir) {
         Ok(s) => s,
         Err(e) => {

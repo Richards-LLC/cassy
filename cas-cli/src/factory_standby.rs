@@ -96,7 +96,7 @@ pub fn resume_for_operator_message(cas_root: &Path, session: &str) -> Option<Str
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
         runtime.block_on(async {
             let core = crate::mcp::CasCore::with_daemon(root, None, None);
-            crate::mcp::CasService::new(core, None).standby_resume_from_env(&session).await.ok()
+            crate::mcp::CasService::new(core, #[cfg(feature = "mcp-proxy")] None).standby_resume_from_env(&session).await.ok()
         })
     })
     .join()

@@ -7,6 +7,75 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.39.0] - 2026-11-19
+
+### Fixed — CLI
+
+- **`cas config set ... --store here` no longer claims CAS_ROOT wins** — Was: with CAS_ROOT naming another project, an explicit `--store here` wrote the working-directory store but still printed that CAS_ROOT supplies the default store and told you to clear the variable. Now: an explicit `--store here` or `--store cas-root` settles the choice and the notice stays silent; a command without `--store` still prints the notice and still refuses an ambiguous write.
+
+### Fixed — Test checks
+
+- **Runtime test identities pass the prose check** — Bare stability `Identity::exact(...)` values and structured machine codes can be compared as data. Helper calls, ambiguous imports or macros, and projected or rendered text retain prose checks.
+
+### Fixed — Release trains
+
+- **Start the train suite at freeze** — Freezing immediately dispatches or adopts `full-validation.yml` at the current train tip and returns its run URL or an explicit skip/failure reason. Repeated freezes share the daemon's dispatch history, and a missing run shows no ETA. Release guidance and missing-receipt errors name the same workflow and its dispatch command.
+- **Auto-cut respects the train owner's machine** — A peer daemon can no longer freeze a shared train using its own enabled defaults when the owner's project disables auto-cut. Same-machine successor recovery stays available, and freeze notes identify the machine that applied them.
+- **Move unfinished work when a train is cut** — Cutting a release opens and publishes its successor, retargets unfinished children, and tells their assigned workers the new lane. Parked tips that contain the successor base keep their anchors and proof; other tips receive one merge-then-repark instruction. Close now refuses an unmergeable cut or frozen target before proof, CI or verification work, with `G-100` and the successor identity. Published delivery bookkeeping and red release repairs remain admitted.
+
+### Fixed — Knowledge
+
+- **Preview knowledge sources in order** — `cas knowledge build --dry-run --json` now returns JSON with counts and every pending source path in distillation order. Plain dry-run output lists the same plan, so the first five sources are visible before a bounded build. Neither preview invokes a model or changes knowledge pages or source ledger rows.
+
+### Fixed — Developer tooling
+
+- **Release scratch tests no longer race a descendant's ready file** — Was: `test_sigkill_parent_leaves_descendant_owner_lease_held` read the descendant's ready file as soon as it existed, so it could parse an empty file and fail the release train (train CI run 44552948256). Now: the flaky case is deleted; the remaining scratch-lease cases, including the escaped-holder and SIGKILL-owner cases, still run.
+- **A capped named-test check on a busy host is refused in seconds** — Was: `worker-check` spent about two minutes classifying changed tests on every capacity-wait retry before it checked build admission, then refused the same retry on builder cap or memory pressure, adding load to the saturated host. Now: a saturated host (every builder slot held, or memory pressure over the guard limit) refuses the check before any classification runs; the authoritative admission check is unchanged.
+
+### Fixed — Factory verification
+
+- **Verifier launch checks the owner's process, retries by refusal code, and names the owner by id** — Was: a supervisor row still marked active whose process had exited passed the launch authority; the retry loop decided what was permanent by searching the message text, so a not-live owner or an old daemon was retried to exhaustion while a transient failure that mentioned a permanent word was not; the refusal printed the whole agent row, with its metadata and account paths, into the attention notice. Now: a gone owner process is refused at once; the daemon's leading refusal code, read whole, picks never, wait or retry, and store contention is coded at its typed source; the refusal names the agent id, role and status only. Measured: three new tests fail with the old behaviour and pass with the change.
+
+### Fixed — Tasks
+
+- **A task's start brief names the newest published artifact** — Was: after several artifacts were published for one task, `task start` and `task show` named whichever receipt note sat last in the history, so a synced or re-ordered note made it point at an older artifact (cas-8156 named the Nov 13 one after four newer ones). Now: the brief names the receipt with the latest creation time, and a receipt without a time never beats one that has it.
+
+### Fixed — Write roots
+
+- **The write-roots getter lists a configured root that enforcement ignores, with the reason** — Was: a user-level write root that the project refuses (for example one inside the project's own Cassy directory) was stored and reported as set, then dropped by the project with only a log line, so the operator found out when an agent was refused. The user-level parent-root case reported in the incident was already honoured by an earlier change. Now: `cas config get factory.write_roots` names every configured root the project drops and why, from the same rule enforcement uses (one shared resolver), in human output and in the JSON `ignored_roots` list. Measured: the extended test fails at the delivery base (no `ignored_roots` in the report) and passes with this change.
+- **Setting the user-level write roots names each registered project that will ignore a stored root** — Was: the set printed plain success for a root a project then dropped. Now: the set still stores it and prints a warning per project with the reason (JSON `ignored_in_projects`); a parent grant the projects honour is not flagged. Measured: the extended regression fails with the project check removed and passes with it.
+
+### Added — Factory
+
+- **Supervisor briefs get a testing-policy warning** — Was: a spawn brief, a `request_changes` reason or a task's acceptance criteria could ask for a test per item or for assertions on message text, which contradicts the project's testing rules, and nothing said so. Now: each of the three returns a warning code (`N-106` for message or output text assertions, `N-107` for a test per item) beside its normal receipt. It never refuses, and a negation just before the ask in the same clause ("don't add a test per item") does not trigger it. The cas-supervisor brief-fields reference also carries a required Test plan line, and the phrases the check uses live in the cas-writing-tests skill (`references/brief-test-phrases.txt`).
+- **/standby parks a supervisor session without ending it** — Was: an idle supervisor with its workers kept using memory, and `/finish` plus `/exit` threw the session away. Now: `/standby` runs the full `finish` flow, then stops every worker without force. A worker with unsaved work refuses and nothing changes; a clean, pushed worker may stop while its task stays in progress, with its status and assignee untouched by the shutdown cleanup. The session records its workers, their tasks and the saved handoff, posts one line and goes quiet, and only the operator and CAS lifecycle events wake it. `factory action=standby status=resume`, or the operator's next message, respawns a replacement for each worker that held tasks and names the handoff to reload. The Commander Standby badge and Resume button follow in a separate change.
+- **A repair for failing tests must run their whole test class** — Was: a supervisor could send a delivery back naming only the two tests CI reported, and a third test of the same class failed on the next park. Now: the daemon records the failing tests a merge-queue ejection names, `task action=request_changes` and a repair `spawn_workers task_id=...` refuse until a `class_audit` nextest filter that selects them is set, the class is stored on the task, and park refuses until a passing capped receipt at the tip runs every part of the class.
+
+### Fixed — Verification
+
+- **Keep approval across a clean carry-over** — Retargeting an approved delivery can reuse its original verdict after a merge-only target update leaves the reviewed patch unchanged. Merge, publication and close consume the same checked carry mapping. New code, conflict resolutions, changed reviewed files or a changed review scope still require review.
+
+### Fixed — Train merge
+
+- **A train merge verifies its queued deliveries at the same time and publishes them in order** — Was: only the delivery at the head of the queue got its candidate and verifier, so each later delivery waited for the one before it to finish a full review before its own started (three deliveries took about 22 minutes while the rest of the queue sat idle with green CI) (GH #2169). Now: train_merge prepares the candidate and starts the verifier for every queued delivery when it is enqueued or appended, and each pass of the daemon's train resume does the same for any behind the head, through the same launcher as before; publication still goes one at a time in queue order, and a publish that changes a later delivery's reviewed files re-reviews only that delivery.
+
+### Removed — Supervisor replies
+
+- **The operator-evidence check on supervisor replies is gone** — Was: a supervisor's message to the operator or Commander was refused, or prefixed `[unverified]`, unless each number, SHA and completion word matched a successful tool result from the same turn or carried an `[evidence:<tool-use-id>]` citation (hook gate H-47, with its delivery-completion extension), and the factory hook settings routed every coordination call through it. Now: nothing inspects reply text, no `[unverified]` or `[evidence:…]` marker exists, and the hook matcher no longer names coordination calls; settings saved by builds that carried it converge to the current matcher.
+
+### Fixed — Factory
+
+- **Worker recycle continuity** — Startup cleanup preserves assignments while a same-name replacement starts and reclaims its lease. Codex context notices and worker status exclude usage older than an actual recycle, while retaining current-session usage written before registration and usage from workers that have not recycled.
+- **A Codex worker's first wake waits for its Cassy tools** — A Codex factory worker could receive its assignment and supervisor wakes while its Cassy MCP server had not yet listed `task` and `coordination`, so the worker had no tools to act with (GH #2128). The worker's server now records when it first lists its tools, and the daemon holds that worker's wake (visible as "gated not ready" in `message_status`, with a pointer to `cas factory doctor`) until a live server has done so. The record names the stable front process, so a hot update that swaps the backend under a running worker does not hold its wakes, and a worker that is spawned or recycled starts with no record. No timer is involved. Supervisors, broadcasts and Claude workers are unchanged. Codex workers already running when this installs hold no readiness record, so their wakes wait until they are recycled.
+
+### Fixed — Close gates
+
+- **A spike that made no commits is no longer asked for Tier 2 proof and the Hub journeys** — Was: closing a spike whose lane sat at its epic's tip (no commits of its own) judged the epic's last commit as the spike's delivery, so it was refused for a missing adversarial probe on `.github/workflows/lane.yml` and for all 27 Hub journeys' QA evidence; only the no-delivery declaration got past. Now: a lane the target already contains, with no receipt, recorded delivery boundary or parked anchor, has an empty delivery and owes neither; a spike that really changes guard code is still Tier 2.
+
+### Fixed — Factory director
+
+- **The factory's board refresh no longer re-reads every task each time it runs** — Was: each two-second refresh read and parsed all ~7,900 task rows of a long-lived project (the store file changes about once a second in a live factory, so the refresh never found nothing to do), and the director snapshot was the slowest sampled read job: 235 over-budget completions and 203 s of wall time in ten minutes. Now: a refresh on the factory's long-lived store takes from the table only the tasks whose change counter moved since the last refresh and reuses the rest, and a finished task's unread receipts are no longer parsed. The board shows the same tasks in the same order. Measured on a copy of the 1.7 GB store, base and head alternated three times on a machine under load (load average 13 to 16): a whole board load on a long-lived store took a median 364 ms before (182 to 411) and 127 ms after (118 to 466); a load that opens a fresh store each time is unchanged within noise (392 ms before, 425 ms after).
+
 ## [4.38.0] - 2026-11-19
 
 ### Fixed — Release

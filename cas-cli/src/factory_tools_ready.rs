@@ -14,7 +14,8 @@ fn marker(cas_root: &Path, session: &str, worker: &str) -> Option<PathBuf> {
 
 /// Called by the worker's MCP server when it lists its tools.
 pub(crate) fn record_tools_listed(cas_root: &Path, session: &str, worker: &str, server_pid: u32) -> std::io::Result<()> {
-    let Some(path) = marker(cas_root, session, worker) else { return Ok(()) };
+    // A standby server answers tools/list before any store exists and must not create one.
+    let Some(path) = marker(cas_root, session, worker).filter(|_| cas_root.is_dir()) else { return Ok(()) };
     std::fs::create_dir_all(path.parent().expect("marker has a parent"))?;
     let staged = path.with_extension(format!("pid{server_pid}"));
     std::fs::write(&staged, server_pid.to_string())?;

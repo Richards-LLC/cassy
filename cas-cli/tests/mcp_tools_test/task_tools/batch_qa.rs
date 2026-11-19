@@ -9,15 +9,6 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[test]
-fn override_debt_documentation_cas_5129a() {
-    let guide = include_str!("../../../../docs/qa/batch-qa.md");
-    assert!(guide.contains("supervisor_override=true does not clear batch QA debt"));
-    assert!(!guide.contains(
-        "Normal supervisor override and explicit QA-request authority remain available."
-    ));
-}
-
 async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
@@ -989,6 +980,16 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
         "{refused}"
     );
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+    // The refusal carries the delivery identity, why the waiver did not count,
+    // and the one-call supervisor close, as machine-readable fields.
+    let anchor = tasks.get("cas-bq01").unwrap().deliverables.factory_branch_anchor.unwrap();
+    for field in [
+        format!("anchor={anchor}"),
+        format!("qa_pass:{}=waived:QA_PASS_NOT_PASSED", waiver.id),
+        "supervisor_close: task action=close id=cas-bq01 supervisor_override=true".to_string(),
+    ] {
+        assert!(refused.contains(&field), "{field} missing from {refused}");
+    }
     fx.record().await;
     let closed = fx.close("cas-bq01").await;
     assert_eq!(
@@ -1061,6 +1062,7 @@ async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed,
         "historical approval must not cover the new correction: {refused}");
     assert!(refused.contains("waiting for batch receipt"), "{refused}");
+    assert!(refused.contains(&format!("receipt:{}=HEAD_OUTSIDE_REVIEW", receipt.id)), "{refused}");
     git(&fx.repo, &["reset", "--hard", &fx.staging]);
     git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     let closed = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());

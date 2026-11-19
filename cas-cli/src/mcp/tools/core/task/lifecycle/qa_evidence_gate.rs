@@ -670,7 +670,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             )
         });
         if !recorded {
-            return Err(crate::qa_batch::debt_refusal(&task.id));
+            return Err(crate::qa_batch::debt_refusal(cas_root, task, repo, target_branch, Some(&head)));
         }
     }
     // Missing target refs must not turn a batch park into per-task QA.

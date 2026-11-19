@@ -211,7 +211,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     git(&["commit", "-qm", &format!("release: {tag}")]);
     let published = git(&["rev-parse", "HEAD"]);
     git(&["tag", &tag]);
-    let ledger = root.join("release-review.md");
+    let ledger = repo.join("release-review.md");
     let body = format!("{}{}{}", concat!(
         "| task | verdict |\n| --- | --- |\n",
         "| cas-compact | NOT A ROUTE: reverted, not shipped |\n",
@@ -228,18 +228,23 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         format!("| R10 | cas-superseded replaced by a later delivery | reviewed-drop: {} -- the helper moved into the shared module | terminal: superseded, shipped elsewhere | NOT A ROUTE | real-build | review/drop.txt | - |\n", removals["cas-superseded"]),
         format!("| R11 | cas-wrong-review replaced by a later delivery | reviewed-drop: {} -- the helper moved into the shared module | terminal: superseded, shipped elsewhere | NOT A ROUTE | real-build | review/drop.txt | - |\n", removals["cas-superseded"]),
     );
-    let body = body.as_str();
-    std::fs::write(&ledger, body).unwrap();
-    let review = QaBatchReceipt {
-        schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-reverted".into(),
-        project_id: "reverted".into(), ledger_artifact_id: "art-reverted".into(),
-        ledger_path: ledger.display().to_string(), ledger_sha256: format!("{:x}", Sha256::digest(body)),
-        ledger_size_bytes: body.len() as u64, staging_sha: published.clone(), task_heads: anchors.clone(),
-        recorder_agent_id: "supervisor".into(), recorded_at: chrono::Utc::now().to_rfc3339(),
-        release_tag: None, ledger_author_id: Some("reviewer".into()), ledger_author_role: Some("sub_agent".into()),
-        author_overrides: BTreeMap::new(), imported: true,
+    let member_ids: Vec<_> = anchors.keys().cloned().collect();
+    let body = format!("{body}\nMembers: {}\n", member_ids.join(", "));
+    std::fs::write(&ledger, &body).unwrap();
+    // Drive publication and receipt admission instead of injecting review state.
+    let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+    let context = crate::artifacts::PublishContext {
+        store: &artifacts,
+        roots: crate::artifacts::paths::PublishRoots::new(&root, &repo.join("artifacts"), "cas-ledger"),
+        task_id: "cas-ledger".into(), cloud: None,
     };
-    cas_store::import_qa_batch_receipt(&root, &review).unwrap();
+    let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
+    let recorder = cas_types::Agent::new_with_role(
+        "supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+    );
+    let review = prepare_receipt(&root, &recorder, "independent-reviewer", &member_ids,
+        &published, &artifact.id, &ledger, cas_store::RELEASE_VERDICT_SCHEMA).unwrap();
+    cas_store::record_qa_batch_receipt(&root, &review).unwrap();
     let scope = ReleaseScope {
         project_id: "reverted".into(), repository: "example/reverted".into(), release_id: tag.clone(),
         reviewed_sha: published.clone(), final_release_sha: published.clone(), promotion_pr: None,
@@ -288,6 +293,8 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-foreign-cut", "cas-wrong-review"] {
         assert!(prepare_release_tag_receipt(&root, &[id.into()], &tag).is_err());
     }
+    std::fs::write(&ledger, format!("{body}\nUnrecorded amendment.\n")).unwrap();
+    assert!(prepare_release_tag_receipt(&root, &["cas-superseded".into()], &tag).is_err());
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());
 }
 

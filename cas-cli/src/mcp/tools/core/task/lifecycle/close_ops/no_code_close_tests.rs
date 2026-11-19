@@ -2705,6 +2705,7 @@ async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
     git(&checkout, &["add", "own.rs"]);
     git(&checkout, &["commit", "-qm", "fix(cas-d033a): first delivery"]);
     git(&checkout, &["push", "-q", "origin", LANE]);
+    git(&checkout, &["push", "-q", "origin", "HEAD"]);
     let response = call(&f.worker, serde_json::json!({
         "action":"close", "id":first.id, "reason":"Delivered",
     })).await;

@@ -4423,6 +4423,11 @@ impl FactoryDaemon {
                         ) {
                             tracing::warn!(%error, "CI merge retry scan failed");
                         }
+                        // cas-f823: open trains take main's new commits. Before the
+                        // GitHub reads below, so an API error cannot skip the sync.
+                        if let Err(error) = crate::train_main_sync::sync_open_trains(&watch_cas_dir) {
+                            tracing::warn!(%error, "release-train main sync failed");
+                        }
                         // cas-c24e: the poll's GitHub reads, shared with
                         // `cas factory ci-watch-dry-run` so their cost is measurable.
                         let super::ci_watch::GithubPoll {

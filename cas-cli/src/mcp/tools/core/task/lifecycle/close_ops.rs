@@ -8059,11 +8059,6 @@ impl CasCore {
             data: None,
         })?;
 
-        if let Ok(id) = self.get_registered_agent_id_read_only()
-            && let Ok(actor) = self.open_agent_store()?.get(&id) && actor.role != cas_types::AgentRole::Worker {
-            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
-                .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
-        }
         // gate-audit[train_target]: G-100 Reject a dead integration target before
         // receipts, test-shape, lane CI, hooks or verifier dispatch. Published
         // ancestry is bookkeeping, and check_cut_merge retains red repairs.
@@ -8085,6 +8080,11 @@ impl CasCore {
             }
         }
 
+        if let Ok(id) = self.get_registered_agent_id_read_only()
+            && let Ok(actor) = self.open_agent_store()?.get(&id) && actor.role != cas_types::AgentRole::Worker {
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
+                .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
+        }
         if let Err(message) = crate::qa_batch::release_close::validate_task(&self.cas_root, &task) {
             return Ok(Self::tool_error(message));
         }

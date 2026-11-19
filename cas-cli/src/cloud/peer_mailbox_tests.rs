@@ -1447,10 +1447,12 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     let (result,_) = receive(result_mail.clone()).await.unwrap(); assert_eq!(result.delivered,1);
     let mut duplicate = result_mail.clone(); duplicate.id = "same-result-new-cloud-id".into();
     let (duplicate,_) = receive(duplicate).await.unwrap(); assert_eq!(duplicate.duplicates,1);
-    let mut changes = delivered_task; changes.status = crate::types::TaskStatus::Open; changes.deliverables.delivery_cycle = 1;
+    let mut changes = delivered_task; changes.status = crate::types::TaskStatus::Open;
     changes.deliverables.historical_factory_branch_anchors.push(delivered_park.tip.clone());
     changes.deliverables.factory_branch_anchor = None; changes.deliverables.parked_branch = None;
     host_tasks.update(&changes).unwrap();
+    let changes = host_tasks.get(&changes.id).unwrap();
+    assert_eq!(changes.deliverables.delivery_cycle,delivered_park.cycle+1);
     let (stale,_) = receive(result_mail).await.unwrap(); assert_eq!(stale.rejected,1);
     let (root,notice) = (owner.cas.clone(),changes);
     let notification = tokio::task::spawn_blocking(move || crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_request_changes_notice(&root,&notice,"repair fixture","retain branch")).await.unwrap().unwrap();
@@ -1459,7 +1461,7 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     let mut correction = message("correction-result","worker",REPO,&sent.body);
     correction.sender_agent_id = "owner".into(); correction.sender_name = "owner".into();
     correction.sender_machine_id = Some("soundwave".into()); correction.sender_session = Some("owner-session".into());
-    let (corrected,_) = receive(correction).await.unwrap(); assert_eq!(corrected.delivered,1);
+    let (corrected,_) = receive(correction).await.unwrap(); assert_eq!(corrected.delivered,1,"{corrected:?}");
     assert_eq!(host.rows().len(),2);
     assert!(open_agent_store(&host.cas).unwrap().list(None).unwrap().iter().all(|a| a.role != AgentRole::Supervisor));
 }

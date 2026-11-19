@@ -597,6 +597,7 @@ def web_results(root, report):
                                  "test": " ".join((*names, spec["title"])),
                                  "project": test.get("projectId", test.get("projectName", "")),
                                  "signature": hashlib.sha256(json.dumps([status, messages]).encode()).hexdigest(),
+                                 "errors": messages,
                                  "passed": status == "passed"})
             visit(suite.get("suites", []), names)
     visit(report["suites"])
@@ -680,12 +681,26 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
             # Stream output to disk throughout compilation/test execution.
             with open(log, "a") as handle:
                 process = subprocess.Popen(command, cwd=cwd or work, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+                handlers = {}
+                def stop(signum, _frame):
+                    # Worker cancellation must reach the replay's owned group,
+                    # including npm/browser descendants in their own session.
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                    raise RuntimeError(f"web replay interrupted by signal {signum}")
+                if web:
+                    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                        handlers[signum] = signal.signal(signum, stop)
                 try:
                     return process.wait(timeout=remaining())
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                     raise
+                finally:
+                    for signum, handler in handlers.items():
+                        signal.signal(signum, handler)
         finally:
             result["timings"][phase] = time.monotonic() - phase_start
             save()

@@ -16,7 +16,7 @@ pub(super) fn attribute(
     let base = crate::factory_worker_check::proof_diff_base(
         cas_root, repo, crate::config::Config::load(cas_root)?.factory().epic_base_branch.as_deref(),
     )?;
-    let key = hex::encode(Sha256::digest(serde_json::to_vec(&(repo, package, config))?));
+    let key = hex::encode(Sha256::digest(serde_json::to_vec(&(repo, package, config, report))?));
     let evidence = cas_root.join("worker-check-web-attribution").join(head).join(key);
     std::fs::create_dir_all(&evidence)?;
     let input = evidence.join("head-report.json");
@@ -67,19 +67,15 @@ pub(super) fn attribute(
                 repair.deliverables.work_target = source.deliverables.work_target.clone();
             }
             repair.description = format!(
-                "Identical Playwright failure at merge base {base} and delivery {head}.\nFailure: {failure}\nEvidence: {}",
+                "Identical Playwright failure at merge base {base} and delivery {head}.\nFailure: {failure}\nEvidence: {}\nAttribution: {attribution}",
                 output.display(),
             );
             // Concurrent deliveries can discover the same base failure. A
             // successful existing row is the same repair, never a second one.
-            if let Err(error) = tasks.add(&repair) {
+            let epic = source.as_ref().map(|source| tasks.get_parent_epic(&source.id))
+                .transpose()?.flatten().map(|epic| epic.id);
+            if let Err(error) = tasks.create_atomic(&repair, &[], epic.as_deref(), None) {
                 tasks.get(&repair_id).map_err(|_| error)?;
-            }
-            if let Some(source) = &source {
-                if let Some(epic) = tasks.get_parent_epic(&source.id)? {
-                    tasks.add_dependency(&cas_types::Dependency::new(repair_id.clone(), epic.id,
-                        cas_types::DependencyType::ParentChild))?;
-                }
             }
         }
         inherited.insert((Identity::exact(path, name), project.to_string()));

@@ -23113,8 +23113,13 @@ mod stall_nudge_rework_tests {
             daemon.process_prompt_queue().await.unwrap();
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let transported = |row: i64| -> bool {
+            let at: Option<String> = conn.query_row("SELECT transport_delivered_at FROM prompt_queue WHERE id = ?", [row], |r| r.get(0)).unwrap();
+            at.is_some()
+        };
         for (name, row) in rows {
-            assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_none(), "{name} waits for the worker's tools");
+            assert!(!transported(row), "{name} waits for the worker's tools");
         }
 
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
@@ -23128,7 +23133,7 @@ mod stall_nudge_rework_tests {
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }
         for (name, row) in rows {
-            assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_some(), "{name} goes out once the tools are listed");
+            assert!(transported(row), "{name} goes out once the tools are listed");
         }
     }
 

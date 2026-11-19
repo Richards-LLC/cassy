@@ -9014,20 +9014,24 @@ impl CasCore {
             // branch, not the default branch. Release closes carry their own
             // batch receipt, so only a close outside one is measured here.
             let unshipped = if crate::qa_batch::release_close::target(&self.cas_root, &task.id).is_none() {
-                match epic_shipping(&close_project_root, &target_branch) {
-                    EpicShipping::Unshipped { default_branch, commits } => Some((default_branch, commits)),
+                let destination = declared_repo_context.as_ref().map(|context| context.target_branch.as_str());
+                let delivery = task.branch.as_deref().or(destination.is_none().then_some(target_branch.as_str()));
+                match epic_shipping(&close_project_root, delivery, destination) {
+                    EpicShipping::Unshipped { default_branch, commits } => {
+                        Some((delivery.unwrap_or(target_branch.as_str()).to_string(), default_branch, commits))
+                    }
                     _ => None,
                 }
             } else {
                 None
             };
             let epic_gate = match unshipped {
-                Some((default_branch, count)) => EpicCloseGateOutcome::Reject(format!(
+                Some((delivery_branch, default_branch, count)) => EpicCloseGateOutcome::Reject(format!(
                     "⚠️ EPIC NOT SHIPPED\n\n\
-                     Epic {} closes against `{target_branch}`, which carries {count} commit(s) \
+                     Epic {} is delivered on `{delivery_branch}`, which carries {count} commit(s) \
                      that `{default_branch}` does not have. Its children are closed because \
                      they merged into that branch, not because the work shipped.\n\n\
-                     Merge `{target_branch}` into `{default_branch}` (or ship it in a release), \
+                     Merge `{delivery_branch}` into `{default_branch}` (or ship it in a release), \
                      then close the epic again.",
                     req.id
                 )),
@@ -19456,16 +19460,29 @@ pub(crate) enum EpicShipping {
     Unknown,
 }
 
-pub(crate) fn epic_shipping(repo_path: &std::path::Path, target_branch: &str) -> EpicShipping {
-    let Ok(default_branch) = resolve_close_gate_default_branch(repo_path) else {
-        return EpicShipping::Unknown;
+/// `delivery_branch` is the epic's own branch (where its children landed);
+/// `destination` is where it is meant to end up, the declared target or, when
+/// none is declared, the default branch. A destination alone proves nothing:
+/// an epic that names `main` is shipped only once its own branch is on it.
+/// An epic with no branch of its own delivers straight to its destination.
+pub(crate) fn epic_shipping(
+    repo_path: &std::path::Path,
+    delivery_branch: Option<&str>,
+    destination: Option<&str>,
+) -> EpicShipping {
+    let destination = match destination {
+        Some(destination) => destination.to_string(),
+        None => match resolve_close_gate_default_branch(repo_path) {
+            Ok(default_branch) => default_branch,
+            Err(_) => return EpicShipping::Unknown,
+        },
     };
-    if target_branch == default_branch {
-        return EpicShipping::Shipped { default_branch };
-    }
-    match epic_branch_commits_absent_from_default(repo_path, target_branch, &default_branch) {
-        Some(0) => EpicShipping::Shipped { default_branch },
-        Some(commits) => EpicShipping::Unshipped { default_branch, commits },
+    let Some(delivery_branch) = delivery_branch.filter(|branch| *branch != destination) else {
+        return EpicShipping::Shipped { default_branch: destination };
+    };
+    match epic_branch_commits_absent_from_default(repo_path, delivery_branch, &destination) {
+        Some(0) => EpicShipping::Shipped { default_branch: destination },
+        Some(commits) => EpicShipping::Unshipped { default_branch: destination, commits },
         None => EpicShipping::Unknown,
     }
 }

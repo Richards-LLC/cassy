@@ -8050,7 +8050,11 @@ impl CasService {
         // close refuses on, printed as one token.
         report.push_str(&format!(
             "\n{}\n",
-            crate::mcp::tools::core::task::lifecycle::close_ops::epic_shipping(&close_project_root, parent_branch).status_token()
+            crate::mcp::tools::core::task::lifecycle::close_ops::epic_shipping(
+                &close_project_root,
+                epic.branch.as_deref(),
+                declared_repo_context.as_ref().map(|context| context.target_branch.as_str()),
+            ).status_token()
         ));
         if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
             report.push_str(&gain.status_line());

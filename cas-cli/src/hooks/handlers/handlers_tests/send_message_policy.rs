@@ -202,6 +202,20 @@ fn delivery_claims_need_delivery_evidence_cas_e032() {
         (bash("ls", "Cargo.toml"), "[unverified] CI is green", false),
         (vec![], "fixed", true),
         (bash("ls", "Cargo.toml"), "fixed", false),
+        // Replay of a real unverified claim. Source: a factory worker's transcript,
+        // c7abab6b-dd3d-4cbe-bce8-a4fb6ae591ae.jsonl lines 2734-2739 (cas-ce017
+        // re-close): "green" was claimed after only a grep of a local test log.
+        (bash("grep -E \"^test: |next retry\" target/green4-store.log | cut -c1-150",
+            "test: PASS 18987f1d5663a5fab8b42821f96d6b09df663487 cas-store test(test_recycled_worker_reclaims_dead_predecessor_lease) 1"),
+            "Receipts are green for all three changed tests at the tip.", true),
+        // Adversarial provenance: a command argument, a different gh verb or file
+        // content is not delivery evidence.
+        (bash("echo git merge-base --is-ancestor abc123 origin/main", "git merge-base --is-ancestor abc123 origin/main"), "It's merged", true),
+        (bash("git merge-base --is-ancestor abc123 origin/main || true", ""), "It's merged", true),
+        (bash("gh pr view 12 --json state,statusCheckRollup", "{\"state\":\"OPEN\",\"conclusion\":\"success\"}"), "CI is green", true),
+        (ran("Read", serde_json::json!({"file_path":"notes.md"}), "the change landed on main"), "It landed", true),
+        (bash("cd repo && git -C repo merge-base --is-ancestor abc123 origin/main", ""), "It's merged", false),
+        (bash("gh run view 99 --json conclusion", "{\"conclusion\":\"success\"}"), "CI is green", false),
     ] {
         let mut records = vec![user.clone()];
         records.extend(evidence);

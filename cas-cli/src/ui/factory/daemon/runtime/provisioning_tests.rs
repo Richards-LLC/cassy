@@ -407,6 +407,7 @@ fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741(
             "supervisor",
             Some(request_id),
             "clever-panther-60",
+            None,
             reason,
         );
     }

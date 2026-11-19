@@ -1691,27 +1691,6 @@ pub(super) fn report_provision_failure(
     supervisor_name: &str,
     request_id: Option<i64>,
     worker_name: &str,
-    detail: &str,
-) {
-    report_provision_failure_for_task(
-        cas_dir,
-        factory_session,
-        supervisor_name,
-        request_id,
-        worker_name,
-        None,
-        detail,
-    );
-}
-
-/// `report_provision_failure` for a request that carries a task: the notice
-/// and its blocker envelope name that task.
-pub(super) fn report_provision_failure_for_task(
-    cas_dir: &std::path::Path,
-    factory_session: &str,
-    supervisor_name: &str,
-    request_id: Option<i64>,
-    worker_name: &str,
     task_id: Option<&str>,
     detail: &str,
 ) {
@@ -1742,7 +1721,7 @@ pub(super) fn report_provision_failure_for_task(
     let task = task_id.map(str::to_owned);
     let detail = detail.to_owned();
     super::store_worker::persist_or_defer("notify supervisor of provision failure", move || {
-        enqueue_spawn_outcome_notice_for_task(
+        enqueue_spawn_outcome_notice(
             &cas_dir,
             &supervisor,
             &session,
@@ -1826,31 +1805,6 @@ fn notify_supervisor_or_defer(
 }
 
 fn enqueue_spawn_outcome_notice(
-    cas_dir: &std::path::Path,
-    supervisor_name: &str,
-    factory_session: &str,
-    request_id: Option<i64>,
-    worker_name: &str,
-    stage: &str,
-    success: bool,
-    detail: &str,
-) -> anyhow::Result<Option<i64>> {
-    enqueue_spawn_outcome_notice_for_task(
-        cas_dir,
-        supervisor_name,
-        factory_session,
-        request_id,
-        worker_name,
-        None,
-        stage,
-        success,
-        detail,
-    )
-}
-
-/// `enqueue_spawn_outcome_notice` for a request that carries `task_id`: the
-/// message and the blocker envelope name the task the lost worker was for.
-fn enqueue_spawn_outcome_notice_for_task(
     cas_dir: &std::path::Path,
     supervisor_name: &str,
     factory_session: &str,
@@ -4806,6 +4760,7 @@ impl FactoryDaemon {
                     &session,
                     None,
                     &agent.name,
+                    None,
                     "harness_auth",
                     false,
                     &detail,
@@ -6152,6 +6107,7 @@ impl FactoryDaemon {
                     &session,
                     request_id,
                     &worker,
+                    None,
                     "register",
                     false,
                     &detail,
@@ -6858,6 +6814,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 verification.request_id,
                 &worker,
+                None,
                 "register",
                 success,
                 &detail,
@@ -6891,6 +6848,7 @@ impl FactoryDaemon {
                         &self.session_name,
                         verification.request_id,
                         &worker,
+                        None,
                         "preassign",
                         false,
                         &detail,
@@ -11611,6 +11569,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             Some(request.id),
                             "unresolved",
+                            None,
                             "validate",
                             false,
                             &detail,
@@ -11787,7 +11746,7 @@ impl FactoryDaemon {
     ) {
         let detail = format!("Task queue binding failed: {error}");
         self.app.set_error(detail.clone());
-        report_provision_failure_for_task(
+        report_provision_failure(
             self.app.cas_dir(),
             &self.session_name,
             self.app.supervisor_name(),
@@ -11870,6 +11829,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 request_id,
                 &pending_name,
+                None,
                 "provision",
                 false,
                 &detail,
@@ -12165,6 +12125,7 @@ impl FactoryDaemon {
                                 &self.session_name,
                                 request_id,
                                 &pending_name,
+                                None,
                                 "launch",
                                 false,
                                 &detail,
@@ -12220,6 +12181,7 @@ impl FactoryDaemon {
                         self.app.supervisor_name(),
                         request_id,
                         &pending_name,
+                        None,
                         &e.to_string(),
                     );
                 }
@@ -12242,6 +12204,7 @@ impl FactoryDaemon {
                         self.app.supervisor_name(),
                         request_id,
                         &pending_name,
+                        None,
                         &e.to_string(),
                     );
                 }
@@ -12371,6 +12334,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             request_id,
                             "unresolved",
+                            None,
                             stage,
                             false,
                             &detail,
@@ -12464,6 +12428,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             request_id,
                             &name,
+                            None,
                             stage,
                             false,
                             &detail,
@@ -14049,7 +14014,7 @@ mod tests {
         worker.status = cas_types::AgentStatus::Shutdown;
         crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
         assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", None,
-            &worker.name, "register", false, "boot failed").unwrap().is_none());
+            &worker.name, None, "register", false, "boot failed").unwrap().is_none());
         assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
         let spawns = crate::store::open_spawn_queue_store(&root).unwrap();
         let mut task = cas_types::Task::new("cas-replaced".into(), "replacement active".into());
@@ -14060,7 +14025,7 @@ mod tests {
             Some("factory-session"), Some(&task.id)).unwrap();
         for stage in ["register", "preassign"] {
             assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", Some(request),
-                "never-registered", stage, false, "boot failed").unwrap().is_none());
+                "never-registered", None, stage, false, "boot failed").unwrap().is_none());
         }
     }
 
@@ -19613,6 +19578,7 @@ mod tests {
             "factory-session",
             verification.request_id,
             "short-lived-worker",
+            None,
             "register",
             false,
             "Worker process exited before Cassy agent registration.",
@@ -19650,6 +19616,7 @@ mod tests {
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = || queue.peek_all(20).unwrap().into_iter().map(|row| row.summary.unwrap_or_default()).collect::<Vec<_>>();
         enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(1), "tender-owl-85",
+            None,
             "register", true, "Worker is active in the Cassy agent registry for this factory session.").unwrap();
         super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(2),
             &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
@@ -19663,6 +19630,7 @@ mod tests {
         assert!(rows().is_empty(), "nothing here asks the supervisor to act: {:?}", rows());
 
         enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(4), "happy-shark-29",
+            None,
             "provision", false, "worktree add failed").unwrap();
         super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(5),
             &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {

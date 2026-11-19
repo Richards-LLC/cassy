@@ -7,6 +7,7 @@ module uncertainty selects the affected crate, never an empty successful run.
 import argparse
 import datetime
 import io
+import hashlib
 import json
 import os
 import platform
@@ -17,11 +18,11 @@ import subprocess
 import statistics
 import sys
 import time
+import tempfile
 import tomllib
 import urllib.request
 from urllib.parse import urlparse
 import zipfile
-from rust_test_source import tokens, pairs
 
 VERSION = 1
 SAFE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
@@ -145,6 +146,7 @@ def referencing_tests(text, paths):
     """Follow explicit file literals, local helpers and constants to test bodies."""
     if not any(Path(path).name in text for path in paths):
         return set()
+    from rust_test_source import tokens, pairs
     ts = tokens(text)
     ps = pairs(ts)
     # Preserve source offsets while removing the whitespace/comment gaps
@@ -500,7 +502,8 @@ def github_fetcher():
 
 
 def failure_key(failure):
-    return failure["package"], failure["binary"], failure["test"]
+    identity = failure["package"], failure["binary"], failure["test"]
+    return identity + (failure["project"], failure["signature"]) if "signature" in failure else identity
 
 
 # cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
@@ -565,8 +568,82 @@ def base_failure_proof(base, configuration, failures):
     return list(proven.values())
 
 
+
+def web_results(root, report):
+    """Runtime identities and failure fingerprints, independent of checkout paths."""
+    if report.get("errors"):
+        raise ValueError("Playwright runner errors cannot be attributed")
+    root = root.resolve()
+    report_root = root / report.get("config", {}).get("rootDir", str(root))
+    rows = []
+    def visit(suites, ancestry=()):
+        for suite in suites:
+            names = ancestry + (suite["title"],) if ancestry or suite.get("column", 0) else ancestry
+            for spec in suite.get("specs", []):
+                path = str((report_root / spec["file"]).resolve().relative_to(root.resolve()))
+                for test in spec["tests"]:
+                    attempts = test["results"]
+                    if test.get("expectedStatus") != "passed" or len(attempts) != 1 or attempts[0].get("retry", 0):
+                        raise ValueError("Playwright skipped, retried or expected-failing result")
+                    result = attempts[0]
+                    status = result["status"]
+                    if status not in ("passed", "failed", "timedOut"):
+                        raise ValueError("Playwright did not execute the requested test")
+                    errors = result.get("errors", [result["error"]] if result.get("error") else [])
+                    messages = [strip_ansi(error.get("message", "")).replace(str(root), "<repo>") for error in errors]
+                    if status != "passed" and not any(messages):
+                        raise ValueError("Playwright failure has no comparable error")
+                    rows.append({"package": "playwright", "binary": path,
+                                 "test": " ".join((*names, spec["title"])),
+                                 "project": test.get("projectId", test.get("projectName", "")),
+                                 "signature": hashlib.sha256(json.dumps([status, messages]).encode()).hexdigest(),
+                                 "errors": messages,
+                                 "passed": status == "passed"})
+            visit(suite.get("suites", []), names)
+    visit(report["suites"])
+    if not rows:
+        raise ValueError("Playwright executed zero tests")
+    return rows
+
+
+def replay_web(checkout, failures, settings, destination, phase, run):
+    """Lane attribution's Playwright adapter: only replay the failing identities."""
+    package = checkout / settings["package"]
+    executable = checkout / settings["executable"]
+    if phase == "base":
+        install = package
+        while not (install / "package-lock.json").is_file() and install != checkout:
+            install = install.parent
+        if (install / "package-lock.json").is_file():
+            if run(["npm", "ci"], "build_seconds", Path(destination).with_suffix(".npm.log"), dict(os.environ), cwd=install):
+                raise RuntimeError("base npm install failed")
+        if not executable.is_file():
+            raise RuntimeError("base Playwright executable unavailable")
+    at_revision = set()
+    for index, failure in enumerate(failures):
+        report = Path(destination).with_suffix(f".{phase}-{index}.json")
+        log = report.with_suffix(".log")
+        args = [str(executable), "test"]
+        if settings.get("config"):
+            args += ["--config", str(checkout / settings["config"])]
+        args += ["--repeat-each", "1", "--retries", "0", "--workers", "1", "--max-failures", "0", "--reporter=json",
+                 "--output", str(report.with_suffix(".output")), "--grep", r"(?:^|\s)" + re.escape(failure["test"]) + "$",
+                 re.escape(str(checkout / failure["binary"]))]
+        if failure["project"]:
+            args += ["--project", failure["project"]]
+        env = dict(os.environ, CI="1", PLAYWRIGHT_JSON_OUTPUT_FILE=str(report))
+        status = run(args, "test_seconds" if phase == "base" else "head_test_seconds", log, env, cwd=package)
+        rows = web_results(checkout, json.loads(report.read_text()))
+        selected = [row for row in rows if (row["binary"], row["test"], row["project"]) ==
+                    (failure["binary"], failure["test"], failure["project"])]
+        if len(selected) != 1 or bool(status) != (not selected[0]["passed"]):
+            raise RuntimeError("Playwright replay did not prove the requested identity and outcome")
+        at_revision.update(failure_key(row) for row in selected if not row["passed"])
+    return at_revision
+
+
 # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
-def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base"):
+def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base", web=None):
     """Reuse exact-base failures, replay misses, and fail closed on incomplete work."""
     started = time.monotonic()
     # Twenty minutes for lookup/preparation/build/test, within the existing
@@ -581,7 +658,7 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
         write(destination, result)
     save()  # Durable even if preparation is interrupted.
     lookup = time.monotonic()
-    result["reused"] = base_failure_proof(base, configuration, failures)
+    result["reused"] = [] if web else base_failure_proof(base, configuration, failures)
     result["timings"]["lookup_seconds"] = time.monotonic() - lookup
     known = {failure_key(row["failure"]) for row in result["reused"]}
     result["inherited"] = [f for f in failures if failure_key(f) in known]
@@ -594,7 +671,8 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
             "version": VERSION, "head": base, "configuration": configuration,
             "failures": result["inherited"], "uncertain": False, "reused": result["reused"]})
     save()
-    work = Path(os.environ.get("RUNNER_TEMP") or root / "target") / "lane-impact-base"
+    temporary = tempfile.TemporaryDirectory(prefix="cas-web-base-") if web else None
+    work = Path(temporary.name) / "checkout" if temporary else Path(os.environ.get("RUNNER_TEMP") or root / "target") / "lane-impact-base"
     def remaining():
         return max(0.001, deadline - time.monotonic())
     def timed_command(command, phase, log, env, cwd=None):
@@ -603,12 +681,26 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
             # Stream output to disk throughout compilation/test execution.
             with open(log, "a") as handle:
                 process = subprocess.Popen(command, cwd=cwd or work, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+                handlers = {}
+                def stop(signum, _frame):
+                    # Worker cancellation must reach the replay's owned group,
+                    # including npm/browser descendants in their own session.
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                    raise RuntimeError(f"web replay interrupted by signal {signum}")
+                if web:
+                    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                        handlers[signum] = signal.signal(signum, stop)
                 try:
                     return process.wait(timeout=remaining())
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                     raise
+                finally:
+                    for signum, handler in handlers.items():
+                        signal.signal(signum, handler)
         finally:
             result["timings"][phase] = time.monotonic() - phase_start
             save()
@@ -626,30 +718,34 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
             finally:
                 result["timings"]["worktree_seconds"] = time.monotonic() - preparation
                 save()
-            packages = sorted({f["package"] for f in pending})
-            build = ["--workspace"] if len(packages) > 1 else ["-p", packages[0]]
-            if len(packages) == 1:
-                targets = sorted({f["binary"] for f in pending})
-                build += [arg for target in targets for arg in (["--lib"] if target == packages[0] else ["--test", target])]
-            identity = lambda f: f["package"] if f["binary"] == f["package"] else f"{f['package']}::{f['binary']}"
-            expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in pending)
-            env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
-            cargo = os.environ.get("CARGO", "cargo")
-            log = Path(destination).with_suffix(".log")
-            log.with_suffix(".build.log").write_text("")
-            # List performs the build separately so a stalled compiler and a
-            # stalled test have distinct durations in the failure receipt.
-            status = timed_command([cargo, "nextest", "list", *build, "-E", expression, "--message-format", "json"], "build_seconds", log.with_suffix(".build.log"), env)
-            if status:
-                raise RuntimeError(f"base build failed: {status}")
-            log.write_text("")
-            status = timed_command([cargo, "nextest", "run", *build, "-E", expression, "--no-fail-fast", "--no-tests=pass"], "test_seconds", log, env)
-            text = strip_ansi(log.read_text())
-            at_base = {failure_key(f) for f in parse_failures(text)}
-            if status and not at_base:
-                raise RuntimeError(f"base run failed without a test result: {status}")
+            if web:
+                at_base = replay_web(work, pending, web, destination, "base", timed_command)
+                base_configuration = None
+            else:
+                packages = sorted({f["package"] for f in pending})
+                build = ["--workspace"] if len(packages) > 1 else ["-p", packages[0]]
+                if len(packages) == 1:
+                    targets = sorted({f["binary"] for f in pending})
+                    build += [arg for target in targets for arg in (["--lib"] if target == packages[0] else ["--test", target])]
+                identity = lambda f: f["package"] if f["binary"] == f["package"] else f"{f['package']}::{f['binary']}"
+                expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in pending)
+                env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
+                cargo = os.environ.get("CARGO", "cargo")
+                log = Path(destination).with_suffix(".log")
+                log.with_suffix(".build.log").write_text("")
+                # List performs the build separately so a stalled compiler and a
+                # stalled test have distinct durations in the failure receipt.
+                status = timed_command([cargo, "nextest", "list", *build, "-E", expression, "--message-format", "json"], "build_seconds", log.with_suffix(".build.log"), env)
+                if status:
+                    raise RuntimeError(f"base build failed: {status}")
+                log.write_text("")
+                status = timed_command([cargo, "nextest", "run", *build, "-E", expression, "--no-fail-fast", "--no-tests=pass"], "test_seconds", log, env)
+                text = strip_ansi(log.read_text())
+                at_base = {failure_key(f) for f in parse_failures(text)}
+                if status and not at_base:
+                    raise RuntimeError(f"base run failed without a test result: {status}")
+                base_configuration = proof_configuration(work)
             base_failures = [f for f in pending if failure_key(f) in at_base]
-            base_configuration = proof_configuration(work)
             write(Path(destination).with_name("base-receipt.json"), {
                 "version": VERSION, "head": base, "configuration": base_configuration,
                 "failures": result["inherited"] + base_failures if base_configuration == configuration else base_failures,
@@ -661,18 +757,21 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
                 # proof, and a log cannot show a repeat (nextest prints every
                 # FAIL twice; CI runs without retries). Rerun them once at this
                 # delivery's head in the same pass: "caused" fails again there.
-                head_expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in passed_at_base)
-                head_log = Path(destination).with_suffix(".head.log")
-                head_log.write_text("")
-                status = timed_command([cargo, "nextest", "run", *build, "-E", head_expression, "--no-fail-fast", "--no-tests=pass"],
-                                       "head_test_seconds", head_log, env, cwd=root)
-                at_head = {failure_key(f) for f in parse_failures(strip_ansi(head_log.read_text()))}
-                if status and not at_head:
-                    raise RuntimeError(f"head rerun failed without a test result: {status}")
+                if web:
+                    at_head = replay_web(root, passed_at_base, web, destination, "head", timed_command)
+                else:
+                    head_expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in passed_at_base)
+                    head_log = Path(destination).with_suffix(".head.log")
+                    head_log.write_text("")
+                    status = timed_command([cargo, "nextest", "run", *build, "-E", head_expression, "--no-fail-fast", "--no-tests=pass"],
+                                           "head_test_seconds", head_log, env, cwd=root)
+                    at_head = {failure_key(f) for f in parse_failures(strip_ansi(head_log.read_text()))}
+                    if status and not at_head:
+                        raise RuntimeError(f"head rerun failed without a test result: {status}")
                 result["caused"] = [f for f in passed_at_base if failure_key(f) in at_head]
                 result["unattributed"] = [f for f in passed_at_base if failure_key(f) not in at_head]
             result["unresolved"] = []
-        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, RuntimeError) as error:
             result["error"] = str(error)
             print(f"Lane impact: unresolved base attribution: {error}", file=sys.stderr)
         finally:
@@ -680,6 +779,8 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
                 subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=15)
             except (OSError, subprocess.SubprocessError) as error:
                 result["cleanup_error"] = str(error)
+            if temporary:
+                temporary.cleanup()
     result["status"] = ("unresolved" if result["unresolved"] else "caused" if result["caused"]
                         else "unattributed" if result["unattributed"] else "inherited")
     save()
@@ -882,7 +983,9 @@ def record(plan, logs, status, elapsed, destination, role):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane"])
+    parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane", "web-attribute"])
+    parser.add_argument("--web-report")
+    parser.add_argument("--web-run")
     parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute", "overrun"], default="plan")
     parser.add_argument("--budget-minutes", type=int, default=45)
     parser.add_argument("--receipt", choices=["own", "ring"], default="own")
@@ -912,6 +1015,13 @@ def main():
         collect_history(args.history)
         return 0
     root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    if args.mode == "web-attribute":
+        report = json.loads(Path(args.web_report).read_text())
+        failures = [row for row in web_results(root, report) if row.pop("passed") is False]
+        if not failures:
+            raise ValueError("failed Playwright command has no attributable test failures")
+        return lane_attribute(root, args.base_sha, failures, Path(args.out), base_source="worker merge base",
+                              web=json.loads(Path(args.web_run).read_text()))
     if args.mode == "lane":
         return lane(root, args)
     selection = plan(root, args.base_sha, args.zero_base_ref, args.history)

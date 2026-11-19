@@ -2877,6 +2877,13 @@ Stability uses the same receipt carry-forward as crate proof: documentation or
 changelog commits preserve it when no test/build inputs change. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
 even when its name is unchanged or its product change is already on the target.
+For widened Playwright proof, a failing journey is replayed at the merge base
+through the same `scripts/ci-test-impact.py::lane_attribute` engine as lane CI.
+Only matching runtime identities and normalized failure fingerprints count as
+inherited. Their evidence and a deterministic `release-repair` task link are
+recorded with the proof. A base pass, different failure or incomplete replay
+still refuses G-61; identified changed tests retain five-pass stability.
+
 
 Detached capped runs register their worker/task, output log and PID incarnation
 before returning. Their existing worker-check command inherits a hidden

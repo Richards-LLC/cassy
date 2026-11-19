@@ -747,77 +747,47 @@ def rust_assertion_diagnostics(source):
 
 
 def rust_runtime_inputs(source):
-    """Git argv, expect diagnostics and runtime test identity constructors are
-    inputs, not assertions about rendered text. Keep adjacent operands in scope.
+    """Git argv, expect diagnostics and unambiguous bare stability constructors.
+
+    No helper-name resolution: lexical lookup cannot prove macro/import bindings.
+    Only whole Identity::exact values with atomic inputs grant literal exemptions.
     """
     ts = tokens(source)
     ps = pairs(ts)
-    helpers = {}
-    functions = []
-    for i, token in enumerate(ts[:-2]):
-        if (token.string or token.value != 'fn' or ts[i + 1].string
-                or not re.fullmatch(r'[A-Za-z_]\w*', ts[i + 1].value)):
-            continue
-        scopes = [(left, right) for left, right in ps.items()
-                  if ts[left].value == '{' and left < i < right]
-        left, right = max(scopes, default=(-1, len(ts)))
-        declarations = helpers.setdefault(ts[i + 1].value, [])
-        declarations.append((left, right, False))
-        # Unsupported signatures still shadow an outer helper. They cannot
-        # disappear from binding lookup merely because they are generic.
-        if i + 2 not in ps:
-            continue
-        end = ps[i + 2]
-        body = next((j for j in range(end + 1, len(ts))
-                     if not ts[j].string and ts[j].value in ('{', ';')), None)
-        if body is None or ts[body].value != '{':
-            continue
-        functions.append((i + 2, end, body, ps[body]))
-        # Only a direct, typed forwarder qualifies. A helper named `id` that
-        # returns String does not make diagnostic text into machine identity.
-        parameters = [ts[j].value for j in range(i + 3, end - 1)
-                      if not ts[j].string and ts[j + 1].value == ':']
-        signature = ''.join(t.value for t in ts[end + 1:body])
-        forwarded = ''.join(t.value for t in ts[body + 1:ps[body]])
-        typed = (signature == '->Identity' and len(parameters) == 2
-                 and forwarded == f'Identity::exact({parameters[0]},{parameters[1]})')
-        # Associated methods are not unqualified free-function bindings. Unknown
-        # item scopes (including macros) cannot grant the exemption either.
-        if left >= 0 and not (left >= 2 and ts[left - 2].value == 'mod'
-                              or any(fn[2] == left for fn in functions)):
-            typed = False
-        declarations[-1] = (left, right, typed)
-    # A familiar spelling alone cannot turn an unrelated/shadowed type into
-    # the stability identity. Fail closed on ambiguous local declarations.
+
+    def scope_at(index):
+        return max(((left, right) for left, right in ps.items()
+                    if ts[left].value == '{' and left < index < right),
+                   default=(-1, len(ts)))
+
+    equality_macros = {'assert_eq', 'assert_ne', 'debug_assert_eq', 'debug_assert_ne'}
     identity_import, conflicting_identity = False, False
-    item_bindings = []
+    ambiguous_scopes = []
     for i, token in enumerate(ts):
         if token.string:
             continue
         if token.value == 'use':
             end = next((j for j in range(i + 1, len(ts)) if ts[j].value == ';'), len(ts))
             names = [t.value for t in ts[i + 1:end]]
-            scopes = [(left, right) for left, right in ps.items()
-                      if ts[left].value == '{' and left < i < right]
-            item_bindings.append((set(names), *max(scopes, default=(-1, len(ts)))))
+            if '*' in names or 'as' in names:
+                ambiguous_scopes.append(scope_at(i))
             if 'Identity' in names:
-                trusted = (re.fullmatch(r'(?:(?:super::)+|crate::factory_worker_check::)stability::(?:Identity|\{(?:[A-Za-z_]\w*|,)+\})', ''.join(names)) is not None
-                           and 'as' not in names)
+                trusted = (re.fullmatch(
+                    r'(?:(?:super::)+|crate::factory_worker_check::)stability::(?:Identity|\{(?:[A-Za-z_]\w*|,)+\})',
+                    ''.join(names)) is not None and 'as' not in names)
                 identity_import |= trusted
                 conflicting_identity |= not trusted
-        if token.value in ('const', 'static') and i + 1 < len(ts):
-            name = i + 2 if ts[i + 1].value == 'mut' else i + 1
-            scopes = [(left, right) for left, right in ps.items()
-                      if ts[left].value == '{' and left < i < right]
-            item_bindings.append(({ts[name].value}, *max(scopes, default=(-1, len(ts)))))
         if token.value == 'Identity' and i:
             conflicting_identity |= (ts[i - 1].value in ('struct', 'enum', 'type', 'trait', 'mod', 'as')
                                      or i + 1 < len(ts) and ts[i + 1].value == ':')
         if token.value == 'mod' and i + 1 < len(ts) and ts[i + 1].value == 'stability':
             conflicting_identity = True
+        # Unknown macros can create an Identity binding without spelling it at
+        # the call site. They cannot contribute proof of an unambiguous type.
+        if i + 1 < len(ts) and ts[i + 1].value == '!' and token.value not in equality_macros:
+            ambiguous_scopes.append(scope_at(i))
 
     def arguments(left, right):
-        """Split delimited expressions without looking inside nested expressions."""
         start = j = left
         while j < right:
             if not ts[j].string and ts[j].value == ',':
@@ -835,56 +805,26 @@ def rust_runtime_inputs(source):
         if token.value == 'git' or (token.value == 'expect' and i > 0 and ts[i - 1].value == '.'):
             yield ts[i + 1].end, ts[close].start
             continue
-        if not identity_import or conflicting_identity:
+        if (not identity_import or conflicting_identity
+                or any(left < i < right for left, right in ambiguous_scopes)):
             continue
-        direct = (i >= 2 and ts[i - 2].value == 'Identity' and ts[i - 1].value == '::'
-                  and token.value == 'exact' and (i == 2 or ts[i - 3].value not in ('.', '::')))
-        local = (i == 0 or ts[i - 1].value not in ('.', '::', 'fn'))
-        candidates = [entry for entry in helpers.get(token.value, []) if entry[0] < i < entry[1]]
-        helper = (local and candidates and all(entry[2] for entry in candidates
-                  if entry[:2] == max(candidates)[:2])
-                  and not any(token.value in names and left < i < right
-                              for names, left, right in item_bindings))
-        if helper:
-            owner = max((fn for fn in functions if fn[2] < i < fn[3]),
-                        key=lambda fn: fn[2], default=None)
-            helper = owner is not None
-            if owner:
-                # Parameters, closures, loops, patterns and imports can all
-                # shadow a helper. Only declarations/calls preserve its binding.
-                for j in range(owner[0] + 1, i):
-                    if ts[j].string or ts[j].value != token.value or ts[j - 1].value == '.':
-                        continue
-                    if any(ts[left].value == '{' and left < j < right < i for left, right in ps.items()):
-                        continue
-                    declaration = ts[j - 1].value == 'fn'
-                    call = ts[j + 1].value == '(' and ts[j - 1].value not in ('.', '::')
-                    if not (declaration or call):
-                        helper = False
-                        break
-        if not (direct or helper):
+        if not (i >= 2 and ts[i - 2].value == 'Identity' and ts[i - 1].value == '::'
+                and token.value == 'exact' and (i == 2 or ts[i - 3].value not in ('.', '::'))):
             continue
         args = list(arguments(i + 2, close))
-        # Nested assertions or computed strings are not identity input literals.
         if len(args) != 2 or any(right != left + 1 or not (
                 ts[left].string or re.fullmatch(r'[A-Za-z_]\w*', ts[left].value))
                 for left, right in args):
             continue
-        constructors[i - 2 if direct else i] = (close + 1, [
+        constructors[i - 2] = (close + 1, [
             (ts[left].start, ts[left].end) for left, _ in args if ts[left].string])
 
     def identity_operand(left, right):
-        """Only whole identity values/collections or their machine id field.
-
-        Unknown wrappers, indexing, projections and rendering fail closed. Return
-        individual literal spans, never a range that can hide nested assertions.
-        """
+        """Whole values/collections only; no fields, indexing or rendering."""
         if left >= right:
             return None
         if ts[left].value == '&':
             return identity_operand(left + 1, right)
-        if right - left >= 3 and [t.value for t in ts[right - 2:right]] == ['.', 'id']:
-            return identity_operand(left, right - 2)
         if left in constructors and constructors[left][0] == right:
             return constructors[left][1]
         if ts[left].value in ('(', '[') and ps.get(left) == right - 1:
@@ -895,17 +835,15 @@ def rust_runtime_inputs(source):
                     return None
                 spans.extend(nested)
             return spans
-        # Bare values can accompany identities in tuples and collections.
         if right == left + 1 and re.fullmatch(r'[A-Za-z_]\w*', ts[left].value) and not ts[left].string:
             return []
         return None
 
     for i, token in enumerate(ts[:-2]):
-        if (token.string or token.value not in ('assert_eq', 'assert_ne', 'debug_assert_eq', 'debug_assert_ne')
+        if (token.string or token.value not in equality_macros
                 or ts[i + 1].value != '!' or i + 2 not in ps):
             continue
-        operands = list(arguments(i + 3, ps[i + 2]))
-        for left, right in operands[:2]:
+        for left, right in list(arguments(i + 3, ps[i + 2]))[:2]:
             yield from identity_operand(left, right) or []
 
 

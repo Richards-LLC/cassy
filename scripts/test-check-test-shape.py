@@ -631,10 +631,10 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
 '''
             sentence = 'The release gate should identify which component caused this failure.'
             cases = [
-                (prefix, 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "group changed")]);', 0),
+                (prefix, 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "group changed")]);', 1),
                 (prefix, 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [Identity::exact("a.test.ts", "group changed")]);', 0),
-                (prefix.replace('fn id(', 'fn selector('), 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [selector("a.test.ts", "group changed")]);', 0),
-                (prefix, f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 0),
+                (prefix.replace('fn id(', 'fn selector('), 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [selector("a.test.ts", "group changed")]);', 1),
+                (prefix, f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
                 (prefix, 'assert_eq!(source.code(), "source:missing");', 0),
                 (prefix, 'assert_eq!(source.code(), "E_SCOPE_DENIED");', 0),
                 (prefix, f'assert_eq!(source.message(), "{sentence}");', 1),
@@ -668,9 +668,9 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
             ]
             cases.extend((prefix, assertion, 1) for assertion in bypasses)
             cases.extend([
-                (prefix, f'assert_eq!(selected, id("a.test.ts", "{sentence}"));', 0),
-                (prefix, f'assert_eq!(&selected, &(id("a.test.ts", "{sentence}")));', 0),
-                (prefix, f'assert_eq!(selected.id, id("a.test.ts", "{sentence}").id);', 0),
+                (prefix, f'assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+                (prefix, f'assert_eq!(&selected, &(Identity::exact("a.test.ts", "{sentence}")));', 0),
+                (prefix, f'assert_eq!(selected.id, id("a.test.ts", "{sentence}").id);', 1),
             ])
             cases.extend([
                 (prefix.replace('super::stability::Identity', 'diagnostic::stability::Identity'),

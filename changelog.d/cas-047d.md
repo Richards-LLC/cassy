@@ -1,3 +1,3 @@
 ### Fixed — Test checks
 
-- **Runtime test identities pass the prose check** — Exact runner identities and structured machine codes no longer fail as diagnostic wording assertions. The checker recognizes identity constructors and typed forwarding helpers while keeping sentences, shadowed helpers and formatted prose subject to the existing checks.
+- **Runtime test identities pass the prose check** — Bare stability `Identity::exact(...)` values and structured machine codes can be compared as data. Helper calls, ambiguous imports or macros, and projected or rendered text retain prose checks.

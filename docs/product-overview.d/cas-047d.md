@@ -1,3 +1,3 @@
-## Core Concepts
+### Runtime identity assertions
 
-- Test-shape checks treat runtime test identities and structured codes as machine data. Exact test names passed to identity constructors or their typed forwarding helpers can be asserted without rewriting fixture expectations; assertions about diagnostic sentences remain rejected, including text next to identity operands and prose hidden by helper shadowing.
+The test-shape checker admits whole bare stability `Identity::exact(...)` values as machine data when their binding is unambiguous. Helper calls, field or display projections, wildcard or aliased imports, and unknown macros do not grant the exemption.

@@ -27102,7 +27102,17 @@ fn delivery_line_range_uncached(
             reason: "delivery commit or target ref is not safe to pass to Git".to_string(),
         });
     }
-    if !git_ref_exists(repo_path, delivery_commit) || !git_ref_exists(repo_path, target_ref) {
+    // The batch has already validated immutable member objects. Symbolic
+    // refs, tags and failed probes retain the original resolution/error path.
+    let known_delivery = delivery_git::oid(delivery_commit)
+        .then(|| delivery_git::commit(repo_path, delivery_commit)).flatten()
+        .filter(|sha| sha.eq_ignore_ascii_case(delivery_commit));
+    let known_target = delivery_git::oid(target_ref)
+        .then(|| delivery_git::commit(repo_path, target_ref)).flatten()
+        .filter(|sha| sha.eq_ignore_ascii_case(target_ref));
+    if (known_delivery.is_none() && !git_ref_exists(repo_path, delivery_commit))
+        || (known_target.is_none() && !git_ref_exists(repo_path, target_ref))
+    {
         return Err(DeliveryContentPresence::Unknown {
             reason: format!(
                 "delivery commit `{delivery_commit}` or target `{target_ref}` does not resolve"
@@ -27110,22 +27120,25 @@ fn delivery_line_range_uncached(
         });
     }
 
-    let Some(delivery) = resolve_branch_sha(repo_path, &format!("{delivery_commit}^{{commit}}"))
+    let Some(delivery) = known_delivery
+        .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^{{commit}}")))
     else {
         return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` does not peel to a commit"),
         });
     };
     let delivery_commit = delivery.as_str();
+    let facts = delivery_git::facts(repo_path, delivery_commit);
 
     let Some(delivery_parent) = base.map(str::to_string)
+        .or_else(|| facts.as_ref().and_then(|facts| facts.parents.first().cloned()))
         .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^1")))
     else {
         return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` has no resolvable first parent"),
         });
     };
-    let Some(target) = resolve_branch_sha(repo_path, target_ref) else {
+    let Some(target) = known_target.or_else(|| resolve_branch_sha(repo_path, target_ref)) else {
         return Err(DeliveryContentPresence::Unknown {
             reason: format!("target `{target_ref}` does not resolve to a commit"),
         });
@@ -27133,36 +27146,49 @@ fn delivery_line_range_uncached(
 
     // Match repository_proof: lifecycle-owned .cas metadata is outside the
     // repository delivery boundary, including when accidentally tracked.
-    let names = Command::new("git")
-        .args([
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "-z",
-            &delivery_parent,
-            delivery_commit,
-            "--",
-            ".",
-            ":(exclude).cas",
-            ":(exclude).cas/**",
-        ])
-        .current_dir(repo_path)
-        .measurement_output();
-    let names = match names {
-        Ok(output) if output.status.success() => output.stdout,
-        Ok(output) => {
-            return Err(DeliveryContentPresence::Unknown {
-                reason: format!(
-                    "Git could not enumerate delivery paths (exit {})",
-                    output.status
-                ),
-            });
+    let names = if let Some(facts) = facts.as_ref()
+        .filter(|facts| facts.parents.first() == Some(&delivery_parent))
+    {
+        let mut names = Vec::new();
+        for path in &facts.paths {
+            if path == ".cas" || path.starts_with(".cas/") { continue; }
+            names.extend_from_slice(path.as_bytes());
+            names.push(0);
         }
-        Err(error) => {
-            return Err(DeliveryContentPresence::Unknown {
-                reason: format!("failed to enumerate delivery paths: {error}"),
-            });
-        }
+        names
+    } else {
+        let names = Command::new("git")
+            .args([
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &delivery_parent,
+                delivery_commit,
+                "--",
+                ".",
+                ":(exclude).cas",
+                ":(exclude).cas/**",
+            ])
+            .current_dir(repo_path)
+            .measurement_output();
+        let names = match names {
+            Ok(output) if output.status.success() => output.stdout,
+            Ok(output) => {
+                return Err(DeliveryContentPresence::Unknown {
+                    reason: format!(
+                        "Git could not enumerate delivery paths (exit {})",
+                        output.status
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(DeliveryContentPresence::Unknown {
+                    reason: format!("failed to enumerate delivery paths: {error}"),
+                });
+            }
+        };
+        names
     };
     let paths = names
         .split(|byte| *byte == 0)

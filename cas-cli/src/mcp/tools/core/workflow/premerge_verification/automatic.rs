@@ -910,7 +910,8 @@ mod tests {
         assert_eq!((exhausted.map_err(|(attempts, _)| attempts), calls.get()), (Err(4), 4));
         // GH #2148: six store refusals still leave the first launch attempt
         // available. An exact-dispatch ownership/state mismatch is terminal.
-        for refusal in ["verifier_factory_store_busy", "database is locked", "wait budget is spent"] {
+        for refusal in ["verifier_factory_store_busy", "database is locked", "wait budget is spent",
+            "verifier_factory_launch_dropped", "QueuedDroppedOldest"] {
             calls.set(0);
             let result = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::from_secs(5), || {
                 calls.set(calls.get() + 1);

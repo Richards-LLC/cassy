@@ -43,7 +43,7 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> anyhow::Result<Daem
 
 pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
     let request = || -> anyhow::Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + VERIFIER_FACTORY_REQUEST_TIMEOUT;
         let mut stream = UnixStream::connect(crate::ui::factory::gui_socket_path(session))?;
         match read_frame(&mut stream, deadline)? {
             DaemonMessage::Welcome {

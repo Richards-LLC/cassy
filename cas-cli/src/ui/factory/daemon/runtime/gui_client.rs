@@ -347,6 +347,7 @@ impl FactoryDaemon {
 
         match msg {
             ClientMessage::LaunchVerifier { dispatch_id } => {
+                use crate::mcp::tools::core::workflow::premerge_verification::VERIFIER_FACTORY_STORE_BUDGET;
                 use super::jobs::{Criticality, JobSpec, Lane, Submitted};
                 let root = self.app.cas_dir().to_path_buf();
                 let session = self.session_name.clone();
@@ -359,9 +360,9 @@ impl FactoryDaemon {
                     lane: Lane::External,
                     criticality: Criticality::Critical,
                     generation: 0,
-                    budget: Duration::from_secs(5),
+                    budget: VERIFIER_FACTORY_STORE_BUDGET,
                 }, move || {
-                    let _budget = cas_store::wait_budget::bound_waits_for(Duration::from_secs(5));
+                    let _budget = cas_store::wait_budget::bound_waits_for(VERIFIER_FACTORY_STORE_BUDGET);
                     Box::new(crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
                         &root, &session, &dispatch,
                     ).map(|_| ()))
@@ -878,6 +879,10 @@ mod verifier_tests {
 
     #[tokio::test]
     async fn verifier_store_lookup_runs_outside_client_input_cas_d0f6() {
+        use crate::mcp::tools::core::workflow::premerge_verification::{
+            VERIFIER_FACTORY_REQUEST_TIMEOUT, VERIFIER_FACTORY_STORE_BUDGET,
+        };
+        assert!(VERIFIER_FACTORY_STORE_BUDGET < VERIFIER_FACTORY_REQUEST_TIMEOUT);
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();

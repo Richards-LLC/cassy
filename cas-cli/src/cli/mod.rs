@@ -1186,7 +1186,7 @@ mod tests {
     #[test]
     fn explicit_store_choice_silences_the_root_override_notice() {
         let run = |args: &[&str]| {
-            silence_notice_for_explicit_store(&Cli::try_parse_from(args).unwrap().command);
+            super::silence_notice_for_explicit_store(&Cli::try_parse_from(args).unwrap().command);
             crate::store::detect::root_override_notice_suppressed()
         };
         // The flag is process-wide and one-way, so the unflagged command goes first.

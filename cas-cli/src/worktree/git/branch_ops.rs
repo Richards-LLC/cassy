@@ -1110,6 +1110,7 @@ impl GitOperations {
 
     /// Publish a detached merge against the observed origin tip. Peer
     /// reconciliation stays detached too, and gets at most one retry.
+    // gate-audit[reconcile_peer]: selector Chooses a detached peer-reconciliation retry; both attempts run G-160 on the exact combined checkout before publication.
     pub(crate) fn publish_merge_candidate(
         &self,
         branch: &str,
@@ -1255,6 +1256,7 @@ impl GitOperations {
         self.publish_pinned_source_with_lease(branch, head, None, false, timeout)
     }
 
+    // gate-audit[proven_merge]: selector Internal publication provenance selects merge validation with G-160 versus ordinary source pre-push checks; no caller override is accepted.
     fn publish_pinned_source_with_lease(
         &self,
         branch: &str,

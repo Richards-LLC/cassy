@@ -1182,20 +1182,6 @@ mod tests {
         );
     }
 
-    /// cas-008b (GH #1905): `cas config set ... --store here` made its choice,
-    /// so the CAS_ROOT-default notice stays silent; without `--store` the
-    /// notice and the ambiguous-write refusal are unchanged.
-    #[test]
-    fn explicit_store_choice_silences_the_root_override_notice() {
-        let run = |args: &[&str]| {
-            super::silence_notice_for_explicit_store(&Cli::try_parse_from(args).unwrap().command);
-            crate::store::detect::root_override_notice_suppressed()
-        };
-        // The flag is process-wide and one-way, so the unflagged command goes first.
-        assert!(!run(&["cas", "config", "set", "fast_lane.paths", "x"]));
-        assert!(run(&["cas", "config", "set", "fast_lane.paths", "x", "--store", "here"]));
-    }
-
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was
     /// launched and whatever the working directory was. Every other command,

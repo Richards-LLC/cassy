@@ -19,8 +19,17 @@ static LITERAL: LazyLock<Regex> = LazyLock::new(|| {
 });
 static CLAIM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"(?i)\b(merged|published|saved|deleted|completed|finished|done|passed|shipped|released|clipboard)\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|half|several|few)\s+(seconds?|minutes?|hours?|days?|tasks?|branches|deliveries|tests?)\b"
+    r"(?i)\b(merged|landed|published|saved|deleted|completed|finished|done|passed|fixed|green|shipped|released|clipboard)\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|half|several|few)\s+(seconds?|minutes?|hours?|days?|tasks?|branches|deliveries|tests?)\b"
 ).unwrap()
+});
+
+/// Claims that a delivery reached its target or passed CI. Unlike the rest of
+/// `CLAIM`, an unrelated successful tool never satisfies them.
+static DELIVERY_CLAIM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(merged|landed|shipped|green)\b").unwrap());
+/// A same-turn Cassy result that records a delivery: a closed task or a merge receipt.
+static DELIVERY_RECORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)status:\s*closed|merged and closed by cassy|merge receipt|\blanded\b").unwrap()
 });
 
 #[derive(Default)]
@@ -34,6 +43,8 @@ struct Call {
     command: String,
     clipboard_read: bool,
     output: Option<String>,
+    /// The successful result is delivery evidence (see `delivery_evidence`).
+    delivery: bool,
 }
 
 /// Read a bounded tail. Without a visible user-turn boundary, no citation is
@@ -199,6 +210,7 @@ impl Turn {
                 command: command.to_owned(),
                 clipboard_read,
                 output: None,
+                delivery: false,
             },
         );
     }
@@ -217,7 +229,30 @@ impl Turn {
                 .map(str::to_owned)
                 .unwrap_or_else(|| output.to_string()),
         );
+        call.delivery = delivery_evidence(call);
     }
+}
+
+/// A successful result that proves a delivery state: git ancestry, a GitHub
+/// check or run that succeeded (nothing pending or failing), a Cassy task
+/// status that records closure, or a Cassy merge receipt.
+fn delivery_evidence(call: &Call) -> bool {
+    let output = call.output.as_deref().unwrap_or_default();
+    let words = shell_words::split(&call.command).unwrap_or_default();
+    let has = |word: &str| words.iter().any(|candidate| candidate == word);
+    if has("git") && has("merge-base") && has("--is-ancestor") {
+        return true;
+    }
+    if has("gh") && (has("run") || has("pr") || has("checks") || has("api")) {
+        let lower = output.to_ascii_lowercase();
+        return (lower.contains("success") || lower.contains("pass"))
+            && !["pending", "in_progress", "queued", "fail", "cancel"]
+                .iter()
+                .any(|state| lower.contains(state));
+    }
+    // Only a Cassy tool result (no shell command) counts; shell output that
+    // merely mentions a word never does.
+    call.command.is_empty() && DELIVERY_RECORD.is_match(output)
 }
 
 fn failed(value: &Value) -> bool {
@@ -322,12 +357,14 @@ pub(super) fn denial(input: &HookInput, text: &str) -> Option<String> {
             })
         });
         let clipboard = plain.to_ascii_lowercase().contains("clipboard");
+        let delivery_unproven = DELIVERY_CLAIM.is_match(&plain) && !evidence.iter().any(|call| call.delivery);
         if evidence.is_empty()
+            || delivery_unproven
             || !literals_match
             || (clipboard && !evidence.iter().any(|call| call.clipboard_read))
         {
             return Some(String::from(
-                "Operator claim lacks matching same-turn evidence. Numbers and SHAs must occur in successful tool results from this turn; exact commands may be named in backticks. Optional [evidence:<tool-use-id>] citations narrow the results used. Otherwise prefix the paragraph with [unverified]; calculate conversions with a tool. Clipboard claims need a wl-paste or pbpaste read after the latest overwrite.",
+                "Operator claim lacks matching same-turn evidence. Numbers and SHAs must occur in successful tool results from this turn; exact commands may be named in backticks. Optional [evidence:<tool-use-id>] citations narrow the results used. Otherwise prefix the paragraph with [unverified]; calculate conversions with a tool. Clipboard claims need a wl-paste or pbpaste read after the latest overwrite. A merged, landed, shipped or green claim needs delivery evidence from this turn: a successful `git merge-base --is-ancestor`, a successful gh check or run result, a Cassy task close or status, or a merge receipt.",
             ));
         }
     }

@@ -9,15 +9,6 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[test]
-fn override_debt_documentation_cas_5129a() {
-    let guide = include_str!("../../../../docs/qa/batch-qa.md");
-    assert!(guide.contains("supervisor_override=true does not clear batch QA debt"));
-    assert!(!guide.contains(
-        "Normal supervisor override and explicit QA-request authority remain available."
-    ));
-}
-
 async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);

@@ -31,7 +31,8 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
     let mut foreign = None;
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-reverted", "cas-doc-only"] {
+    let mut removals = BTreeMap::new();
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-reverted", "cas-doc-only", "cas-superseded", "cas-wrong-review"] {
         if id == "cas-undone" {
             std::fs::write(repo.join("shared.rs"), "fn shared() { baseline() }\n").unwrap();
             git(&["add", "shared.rs"]);
@@ -175,6 +176,13 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             // An unlabeled edit restoring the pre-delivery line is a revert.
             std::fs::write(repo.join("shared.rs"), "fn shared() { baseline() }\n").unwrap();
             git(&["commit", "-qam", "tidy shared"]);
+        } else if id == "cas-superseded" || id == "cas-wrong-review" {
+            // cas-0489 (v4.28 cas-43ab): a later task's own commit deletes the
+            // delivered file outright. That is a drop; only a reviewed-drop
+            // naming a commit that really replaced it can accept it.
+            git(&["rm", "-q", &source]);
+            git(&["commit", "-qm", "fix(cas-9f9a): replace the helper"]);
+            removals.insert(id.to_string(), git(&["rev-parse", "HEAD"]));
         }
         let mut task = Task::new(id.into(), id.into());
         task.origin_project = Some("reverted".into());
@@ -204,7 +212,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let published = git(&["rev-parse", "HEAD"]);
     git(&["tag", &tag]);
     let ledger = root.join("release-review.md");
-    let body = concat!(
+    let body = format!("{}{}{}", concat!(
         "| task | verdict |\n| --- | --- |\n",
         "| cas-compact | NOT A ROUTE: reverted, not shipped |\n",
         "| cas-retained-extra | NOT A ROUTE: reverted |\n",
@@ -213,7 +221,14 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         "| id | cell | expected | observed | verdict | label | evidence path | defect task |\n",
         "| --- | --- | --- | --- | --- | --- | --- | --- |\n",
         "| R09 | cas-ledger live working indicator | Reverted on this train and absent from the release | terminal: Reverted, not shipped | NOT A ROUTE | real-build | review/revert.txt | - |\n",
+    ),
+        // cas-0489: a supervisor-reviewed drop names the commit that replaced the
+        // delivery; the same words naming a commit that never touched the file
+        // for another member do not release it.
+        format!("| R10 | cas-superseded replaced by a later delivery | reviewed-drop: {} -- the helper moved into the shared module | terminal: superseded, shipped elsewhere | NOT A ROUTE | real-build | review/drop.txt | - |\n", removals["cas-superseded"]),
+        format!("| R11 | cas-wrong-review replaced by a later delivery | reviewed-drop: {} -- the helper moved into the shared module | terminal: superseded, shipped elsewhere | NOT A ROUTE | real-build | review/drop.txt | - |\n", removals["cas-superseded"]),
     );
+    let body = body.as_str();
     std::fs::write(&ledger, body).unwrap();
     let review = QaBatchReceipt {
         schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-reverted".into(),
@@ -245,7 +260,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() },
     )).unwrap();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-resynced", "cas-foreign-cut", "cas-undone", "cas-doc-reverted"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-resynced", "cas-foreign-cut", "cas-undone", "cas-doc-reverted", "cas-wrong-review"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "{id}");
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_MEMBER_REVERTED"), "{id}: {:?}", result.members.get(id));
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));
@@ -254,7 +269,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     assert_eq!(tasks.get("cas-doc-only").unwrap().status, TaskStatus::AwaitingMerge);
     assert!(matches!(result.members.get("cas-doc-only"), Some(CassyMergeClose::Held(reason))
         if reason == "RELEASE_CONTENT_UNPROVEN"), "{:?}", result.members.get("cas-doc-only"));
-    for id in ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved"] {
+    for id in ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved", "cas-superseded"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{id}: {:?}", result.members.get(id));
     }
     for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-reverted", "cas-doc-only"] {

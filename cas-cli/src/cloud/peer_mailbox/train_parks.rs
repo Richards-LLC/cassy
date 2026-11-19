@@ -166,6 +166,10 @@ pub(crate) fn owner_train(root: &Path, task: &Task) -> Result<Option<Task>, Stri
 }
 
 pub(crate) fn authorize(root: &Path, task: &Task, actor: &Agent) -> Result<(), String> {
+    // Release parent bookkeeping already binds independent acceptance and
+    // shipped children in a task-local context; it is not worker publication.
+    if task.task_type == cas_types::TaskType::Epic
+        && crate::qa_batch::release_close::parent_authority(root,&task.id).is_some() { return Ok(()); }
     if let Some(train) = owner_train(root, task)? { crate::factory_session_scope::require_train_owner(root, &train, actor)?; }
     Ok(())
 }

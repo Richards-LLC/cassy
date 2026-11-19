@@ -10053,7 +10053,7 @@ impl CasCore {
                     }
 
                     if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {
-                        if self.get_agent_id()? != worker.id { return Err(Self::error(ErrorCode::INVALID_REQUEST,"Only the registered host worker may publish its park")); }
+                        if self.get_agent_id()? != worker.id { return Err(Self::error(ErrorCode::INVALID_REQUEST,crate::gates::tag("G-113","Only the registered host worker may publish its park"))); }
                         if let Err(error) = crate::cloud::peer_mailbox::train_parks::publish_ready(&self.cas_root,&task,&worker) {
                             return Ok(Self::tool_error(format!("Delivery is parked, but its owner notification is not durable: {error}. Retry close for {}.",task.id)));
                         }

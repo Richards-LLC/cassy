@@ -411,6 +411,10 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
         Some(PeerMessageKind::Quiet)
     } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
+    // Historical prompts retain their status intent; runtime rejects new
+    // legacy approvals before enqueueing and never imports their authority.
+    let landing = crate::mcp::tools::core::workflow::premerge_verification::legacy_peer_approval(message);
+    let kind = kind.or(landing.then_some(PeerMessageKind::Status));
     // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {
@@ -469,11 +473,11 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         )
     };
     let attachments = render_attachments(&attachments, &message.project_id);
-    let reply = format!(
+    let reply = if landing { String::new() } else { format!(
         "Reply with coordination action=message target={name}@{machine} summary=\"<one line>\" \
          message=\"<reply>\" in_reply_to=<this message's notification id>.\n",
         name = message.sender_name,
-    );
+    ) };
     format!("{envelope}\n{origin}\n{reply}{attachments}\n{body}")
 }
 

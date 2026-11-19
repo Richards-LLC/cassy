@@ -422,8 +422,9 @@ pub(crate) fn resolve_release_inventory(
     for (delivery, measured) in members {
         if measured
             && let Some(anchor) = delivery.anchor.as_deref()
-            && let Err(code) = release_delivery_effect(
+            && let Err(code) = release_delivery_effect_reviewed(
                 repo, delivery.base_sha.as_deref(), anchor, &scope.final_release_sha, &delivery.task_id,
+                review.reviewed_drop(&delivery.task_id, Some(anchor)).as_deref(),
             )
         {
             inventory.exceptions.push(ReleaseInventoryException { task_id: delivery.task_id, code });
@@ -1104,6 +1105,16 @@ pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor
 pub(crate) fn release_delivery_effect(
     repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
 ) -> Result<(), ReleaseInventoryCode> {
+    release_delivery_effect_reviewed(repo, base, anchor, target, task_id, None)
+}
+
+/// As [`release_delivery_effect`], where a supervisor's reviewed drop may
+/// accept measured loss. The default stays held: the review must name
+/// commits that resolve, reach the target and touch the dropped paths.
+pub(crate) fn release_delivery_effect_reviewed(
+    repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
+    reviewed_drop: Option<&str>,
+) -> Result<(), ReleaseInventoryCode> {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{self, DeliveryContentPresence};
     // An explicitly empty delivery has no content that can be reverted.
     let Some((base, shipped)) = release_effect_range(repo, base, anchor, target)? else { return Ok(()) };
@@ -1124,6 +1135,9 @@ pub(crate) fn release_delivery_effect(
                     Err(ReleaseInventoryCode::UnprovenContent)
                 } else { Ok(()) }
             },
+        DeliveryContentPresence::Dropped { paths } if reviewed_drop.is_some_and(|reason| matches!(
+            close_ops::validated_delivery_drop_review(repo, anchor, target, &paths, Some(reason)),
+            Ok(Some(_)))) => Ok(()),
         DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
         DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
     }

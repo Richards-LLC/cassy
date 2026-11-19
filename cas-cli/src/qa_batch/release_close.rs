@@ -136,6 +136,21 @@ pub(crate) fn prepare(
         })
     }
 
+    /// cas-0489: the supervisor's `reviewed-drop: <SHA>[,<SHA>...] -- <why>` for
+    /// this delivery, recorded as a NOT A ROUTE row of the release review
+    /// ledger bound to the delivery's reviewed head. It is only a claim here:
+    /// the caller validates it against the commits with the same check G-56 uses.
+    pub(crate) fn reviewed_drop(&self, id: &str, anchor: Option<&str>) -> Option<String> {
+        self.reviews.iter().find_map(|(receipt, body)| {
+            receipt.task_heads.get(id).filter(|head| anchor.is_none_or(|anchor| *head == anchor))?;
+            crate::qa_ledger::parse(body, 0).rows.iter()
+                .filter(|row| row.verdict == crate::qa_ledger::Verdict::NotARoute && report_names(&row.cell, id))
+                .find_map(|row| [&row.expected, &row.observed].into_iter().find_map(|text| {
+                    text.find("reviewed-drop:").map(|at| text[at..].trim().to_string())
+                }))
+        })
+    }
+
     pub(crate) async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
         CURRENT.scope(self, future).await
     }
@@ -694,8 +709,9 @@ pub(crate) fn reconcile_members(
                 if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|current| current != anchor) {
                     return Err("RELEASE_GENERATION_CHANGED".into());
                 }
-                release_delivery_effect(repo, delivery.base_sha.as_deref(), anchor,
-                    &inventory.scope.final_release_sha, &id).map_err(|code| code.close_gate())?;
+                release_delivery_effect_reviewed(repo, delivery.base_sha.as_deref(), anchor,
+                    &inventory.scope.final_release_sha, &id, review.reviewed_drop(&id, Some(anchor)).as_deref())
+                    .map_err(|code| code.close_gate())?;
                 anchors.push(anchor);
             }
             let tier_zero = delivery.anchor.as_deref().is_some_and(|anchor| {

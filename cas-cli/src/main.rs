@@ -168,6 +168,11 @@ fn main() -> ExitCode {
         };
     }
 
+    // cas-008b: an explicit --store choice settles the store, so the
+    // CAS_ROOT-default notice must be silenced before the first store lookup
+    // (startup config notices, logging and telemetry all look up the store).
+    cli::silence_notice_for_explicit_store(&cli.command);
+
     // The updater owns retired-setting guidance through its maintenance
     // receipts. Establish that scope before the earliest config read.
     let startup = cli::validate_process_startup(&cli);

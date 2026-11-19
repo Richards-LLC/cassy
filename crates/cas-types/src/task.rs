@@ -1051,6 +1051,8 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "blocker_ask",
     "qa_impact",
     "close_refusal",
+    "class_audit",
+    "failing_tests",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -1123,8 +1125,8 @@ pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
 
 fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(), String> {
     match field {
-        "phase" | "next_step" | "blocker_ask" => validate_state_string(field, value),
-        "files_touched" | "decisions" => validate_state_string_array(field, value),
+        "phase" | "next_step" | "blocker_ask" | "class_audit" => validate_state_string(field, value),
+        "files_touched" | "decisions" | "failing_tests" => validate_state_string_array(field, value),
         "receipts" => {
             let receipts = value
                 .as_array()
@@ -1868,6 +1870,14 @@ mod tests {
             "Wait for operator decision"
         );
         assert!(validate_task_execution_state(&state).is_ok());
+        // cas-bc25: a recorded repair class is a string and a null patch clears it.
+        let audited = merge_task_execution_state_patch(
+            &state, &serde_json::json!({"class_audit": "test(ui::)"}),
+        ).unwrap();
+        assert_eq!(audited["class_audit"], "test(ui::)");
+        assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"class_audit": 7})).is_err());
+        assert!(merge_task_execution_state_patch(&audited, &serde_json::json!({"class_audit": null}))
+            .unwrap().get("class_audit").is_none());
         let answered = merge_task_execution_state_patch(&state, &serde_json::json!({
             "blocker_ask": "a".repeat(64), "answered_blocker": {
                 "worker": "worker", "supervisor": "lead", "reason": "Wait for operator decision",

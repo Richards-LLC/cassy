@@ -12827,6 +12827,9 @@ impl FactoryDaemon {
                     let _respawn_budget = cas_store::wait_budget::grant_waits_for(
                         super::store_worker::SHUTDOWN_STORE_WAIT_BUDGET,
                     );
+                    crate::factory_context_reset::record_worker_recycle_boundary(
+                        self.app.cas_dir(), &self.session_name, &name,
+                    )?;
                     let launch_floor = crate::factory_hook_canary::launch_floor();
                     self.app
                         .respawn_worker_with_spec(&name, teams_config, Some(spec))

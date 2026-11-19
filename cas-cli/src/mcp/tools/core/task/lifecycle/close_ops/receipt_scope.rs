@@ -110,6 +110,12 @@ pub(super) fn park_refusal(
     (!refusals.is_empty()).then(|| super::gate_preflight::park_reply(refusals))
 }
 
+/// The class selector the last request_changes recorded for this task.
+fn recorded_class_audit(cas_root: &Path, task_id: &str) -> Option<String> {
+    crate::mcp::tools::core::task::repair_class::recorded_class(
+        crate::store::open_task_store(cas_root).ok()?.as_ref(), task_id)
+}
+
 /// Every receipt-scope refusal at this tip, not just the first.
 pub(super) fn park_refusals(
     cas_root: &Path,
@@ -185,6 +191,16 @@ pub(super) fn park_refusals(
                 task.id, crate::factory_worker_check::widened::commands(cas_root, proof_repo, changed_paths, &missing).join("; ")
             )));
         }
+    }
+    // cas-bc25: a repair verdict that named failing tests also named their
+    // class; park needs a passing capped run of all of it at this tip.
+    if let Some(class) = recorded_class_audit(cas_root, &task.id)
+        && !crate::mcp::tools::core::task::repair_class::receipts_cover_class(&passing.filters(), &class)
+    {
+        refusals.push(crate::gates::tag("G-61", format!(
+            "CLASS_AUDIT_REQUIRED: task {} was sent back with class audit `{class}`, and no passing capped receipt at {short} runs all of it. Run it through the capped runner (`cargo nextest run -p <crate> --lib -E '{class}'`), fix what fails, then retry park.",
+            task.id,
+        )));
     }
     let tested = passing.packages();
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
@@ -995,6 +1011,49 @@ mod tests {
         let scope = park_refusal(cas_root.path(), bare.path(), &bare_task, &changed, &head, "main", None)
             .expect("undeclared modules outside a workspace");
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
+    }
+
+    /// cas-bc25: a repair whose verdict recorded a test class parks only with
+    /// a passing capped receipt at the tip that runs the whole class.
+    #[test]
+    fn park_requires_a_receipt_covering_the_recorded_class_audit_cas_bc25() {
+        let repo = workspace();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let head = "e".repeat(40);
+        let mut task = blast_radius_task(&["close_ops"]);
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only receipt-gate coverage".into();
+        task.proof_targets.push("prompt_queue_store::operator_cloud".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let changed = delivered();
+        let record = |package: &str, filter: &str| {
+            crate::factory_worker_check::record_passing_test_for_tests(&root, repo.path(), &head, package, filter)
+        };
+        record("cas", "test(worker)");
+        record("cas-store", "test(worker)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
+
+        crate::store::open_task_store(&root).unwrap().patch_execution_state(
+            &task.id, &serde_json::json!({"class_audit": "test(ui::) | test(gates::)"}),
+        ).unwrap();
+        let refusal = park_refusal(&root, repo.path(), &task, &changed, &head, "main", None)
+            .expect("the recorded class has no covering receipt");
+        assert!(refusal.contains("CLASS_AUDIT_REQUIRED"), "{refusal}");
+        record("cas", "test(ui::)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_some(),
+            "half the class is not the class");
+        record("cas", "test(gates::) | test(ui::) | test(extra)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
+
+        // An exact receipt cannot cover a substring class: auth_refresh stays uncovered.
+        crate::store::open_task_store(&root).unwrap().patch_execution_state(
+            &task.id, &serde_json::json!({"class_audit": "test(auth)"}),
+        ).unwrap();
+        record("cas", "test(=auth)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_some(),
+            "test(=auth) selects one test, not the class");
+        record("cas", "test(auth)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
     }
 
     #[test]

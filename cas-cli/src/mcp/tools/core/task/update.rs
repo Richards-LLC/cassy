@@ -1443,6 +1443,12 @@ impl CasCore {
                 });
             }
 
+            if !proof_targets_fix && !risk_fix && !methodology_fix
+                && let Some(target) = corrected_target.as_ref()
+            {
+                self.authorize_approved_retarget(&task, target)?;
+            }
+
             // A missing lane with no recorded delivery needs only the target
             // clear; it has no source boundary to resolve or retire.
             let artifact_scope_audit = if target_repo.is_some_and(|repo| repo.trim().is_empty())

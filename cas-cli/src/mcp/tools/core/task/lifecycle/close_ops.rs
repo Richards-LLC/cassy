@@ -13893,6 +13893,7 @@ impl CasCore {
         {
             return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
+        let class_audit = req.class_audit.as_deref().map(str::trim).filter(|class| !class.is_empty());
 
         let task_store = self.open_task_store()?;
         let task = task_store.get(&req.id).map_err(|error| {
@@ -13931,6 +13932,12 @@ impl CasCore {
                     task.id, task.status
                 ),
             ));
+        }
+        // cas-bc25: a decline over recorded failing tests must name their class.
+        let mut effective_class: Option<String> = None;
+        if !grant_only {
+            effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
         }
         let supervisor_id = if source_commits.is_empty() {
             self.get_agent_id().map_err(|error| {
@@ -13989,6 +13996,14 @@ impl CasCore {
             )));
         }
 
+        // Persist exactly the selector in force; never clear a stored one, and before the
+        // transition so a failed write cannot drop the obligation.
+        if let Some(class) = &effective_class {
+            task_store
+                .patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                    format!("task request_changes could not record the class audit: {error}")))?;
+        }
         // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
         // deadlocked because the recovery action refused parked tasks whose
         // proof boundary was merged, unbound, or legacy — exactly the states a

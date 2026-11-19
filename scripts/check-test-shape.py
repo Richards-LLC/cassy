@@ -691,7 +691,7 @@ def text_literals(source, path):
 
 def is_exact_text_pin(body, context):
     """Recognize long exact prose and short needles into source-like inputs."""
-    if not human_message_literal(body):
+    if '{' not in body and not human_message_literal(body):
         return False  # Share the structured machine-data policy with message assertions.
     words = re.findall(r"[A-Za-z0-9_'-]+", body)
     prose = len(body.strip()) >= 55 and len(words) >= 8 and (

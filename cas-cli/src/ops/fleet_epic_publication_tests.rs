@@ -168,6 +168,49 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             focus_epic(root, "publication-test", FocusEpic::Clear).unwrap();
             core.train_merge(&epic.id, Some(&[]), false, None).unwrap();
             assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()));
+
+            // A published transactional delivery can still owe its final
+            // close. Resume it through worktree_merge with focus cleared.
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let source = "factory/focus-held";
+            git(repo, &["branch", source, base]);
+            git(repo, &["push", "origin", source]);
+            let mut child = cas_types::Task::new("cas-focus-held".into(), "Held close".into());
+            child.status = cas_types::TaskStatus::InProgress;
+            child.risk = vec![cas_types::TaskRisk::None];
+            child.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:publication-test".into(),
+                target_branch: "epic/unpublished".into(),
+            });
+            tasks.add(&child).unwrap();
+            let receipt = cas_store::build_worker_completion_receipt(&cas_types::WorkerCompletionReceiptInput {
+                task_id: child.id.clone(),
+                worker_agent_id: "focus-worker".into(),
+                repo_selector: "project:publication-test".into(),
+                source_branch: source.into(),
+                commit_sha: base.into(),
+                merge_base_sha: base.into(),
+                target_branch: "epic/unpublished".into(),
+                target_sha: base.into(),
+                proof_reference: "fixture:published-delivery".into(),
+                scope_summary: "Resume published delivery with held close".into(),
+                artifact_path: None,
+            }, "focus-held", chrono::Utc::now());
+            cas_store::create_worker_delivery(root, &receipt, cas_types::WorkerDeliveryState::CloseReady, &owner.id).unwrap();
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            conn.execute_batch("CREATE TRIGGER hold_focus_close BEFORE UPDATE OF status ON tasks
+                WHEN NEW.id = 'cas-focus-held' AND NEW.status = 'closed'
+                BEGIN SELECT RAISE(ABORT, 'fixture held close'); END;").unwrap();
+            focus_epic(root, "publication-test", FocusEpic::Clear).unwrap();
+            let result = runtime.block_on(core.worktree_merge(source, false, Some(&child.id), false, Some(false), false, None)).unwrap();
+            assert!(!result.is_error.unwrap_or(false), "{result:?}");
+            assert_ne!(tasks.get(&child.id).unwrap().status, cas_types::TaskStatus::Closed);
+            assert_eq!(cas_store::get_latest_worker_delivery(root, &child.id).unwrap().unwrap().1.state,
+                cas_types::WorkerDeliveryState::CloseReady);
+            assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
+            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()));
+            conn.execute_batch("DROP TRIGGER hold_focus_close;").unwrap();
+
             crate::mcp::tools::core::task::release_train::mark_cut_trains(
                 root, repo, tasks.as_ref(), &epic.id, base, "main", &[],
             ).unwrap();
@@ -177,7 +220,6 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
 
             // GH #2174: a peer can pin the same train locally, but must not
             // register a renewable Cloud focus claim against its live owner.
-            let runtime = tokio::runtime::Runtime::new().unwrap();
             let server = runtime.block_on(wiremock::MockServer::start());
             let lock = cas_types::TaskLease::new("train-lock".into(), owner.id.clone(), 600);
             let mut lock_record = serde_json::to_value(&lock).unwrap();

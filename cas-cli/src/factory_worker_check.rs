@@ -307,7 +307,7 @@ fn passing_run_proves(run: &str, package: &str, harness: Option<&str>, filter: &
         && passes.iter().all(|pass| pass[1] == binary && stability::rust::filter_matches(filter, &pass[2]))
 }
 
-fn named_filter(filter: &str) -> bool {
+pub(crate) fn named_filter(filter: &str) -> bool {
     regex::Regex::new(r"^[ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\)(?:[ \t]*[|&][ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\))*[ \t]*$")
         .is_ok_and(|pattern| pattern.is_match(filter))
 }
@@ -1166,6 +1166,23 @@ impl<'a> PassingTests<'a> {
                 }
             }
             records
+        })
+    }
+
+    /// cas-bc25: whether a passing receipt at this tip runs every operand of
+    /// `class` (a named nextest filter). A receipt joined only by `|` covers
+    /// each operand it lists, so a wider run satisfies a narrower class; one
+    /// using `&` narrows the selection and counts only on an exact match.
+    pub(crate) fn covers_class(&self, class: &str) -> bool {
+        let operands = |filter: &str| -> std::collections::BTreeSet<String> {
+            filter.split('|').map(|part| part.trim().to_string()).collect()
+        };
+        let wanted = operands(class);
+        self.records().iter().any(|(_, _, test)| {
+            if test.filter.contains('&') {
+                return test.filter.trim() == class.trim();
+            }
+            wanted.is_subset(&operands(&test.filter))
         })
     }
 

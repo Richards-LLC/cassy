@@ -256,9 +256,9 @@ pub(crate) fn mark_cut_trains(
             retired.push(train);
         }
     }
-    // With trains disabled, no successor is opened; the existing disabled-
-    // train reconciliation owns the integration target instead.
-    if enabled(repo) == Some(true) && !retired.is_empty() {
+    // An explicitly cut train rolls over even when default train joining is
+    // disabled (for example an operator-promoted epic).
+    if !retired.is_empty() {
         let successor = ensure_successor(repo, store, &cut, integration)?;
         for train in retired.iter().filter(|train| train.id != cut_id) {
             let mut row = store.get(&train.id).map_err(|error| error.to_string())?;

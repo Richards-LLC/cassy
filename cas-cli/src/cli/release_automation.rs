@@ -976,6 +976,13 @@ pub(super) mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-b", "main"]).unwrap();
+        // Keep real Git publication local. Per-case rewrites of a complete
+        // URL have a longer prefix and retain their own disposable origin.
+        let origin = repo.join(".git/fixture-origin");
+        let bare = origin.join("Example/Repo.git");
+        fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["config", &format!("url.{}/.insteadOf", origin.display()), "https://github.com/"]).unwrap();
         // CI runners have no global identity; annotated tags and merges need one.
         git(repo, &["config", "user.name", "Fixture"]).unwrap();
         git(repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();

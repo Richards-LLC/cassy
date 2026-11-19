@@ -4449,10 +4449,15 @@ mod tests {
         let unavailable = HubTransportReport::ok(
             "hub is loopback-only; Tailscale Serve publication was unavailable: tailscale is not installed",
         );
-        assert_eq!(
-            render_transport_status(&unavailable),
-            "Tailscale Serve: WARN - unavailable; hub remains loopback-only"
+        // cas-f461: the cause rides on its own row; assert it is carried, not its wording.
+        let rendered = render_transport_status(&unavailable);
+        assert!(rendered.starts_with("Tailscale Serve: WARN"), "{rendered}");
+        assert!(rendered.contains("tailscale is not installed"), "cause dropped: {rendered}");
+        let retrying = HubTransportReport::ok(
+            "hub is loopback-only; Tailscale Serve publication unavailable: tailscale command timed out; publication retries automatically",
         );
+        let rendered = render_transport_status(&retrying);
+        assert!(rendered.contains("tailscale command timed out"), "cause dropped: {rendered}");
     }
 
     #[test]

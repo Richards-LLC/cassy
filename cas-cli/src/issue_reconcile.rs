@@ -35,6 +35,8 @@ use regex::Regex;
 pub const GH_BUDGET: Duration = Duration::from_secs(6);
 /// Longest one `gh issue close` attempt may run.
 const GH_CLOSE_CAP: Duration = Duration::from_secs(30);
+/// Closes in flight at once; `gh` has no batch close.
+const GH_CLOSE_WORKERS: usize = 4;
 /// Attempts per issue, with a pause that grows by this step between them.
 const GH_CLOSE_ATTEMPTS: u32 = 3;
 const GH_CLOSE_BACKOFF: Duration = Duration::from_secs(2);
@@ -685,7 +687,11 @@ fn reconcile_owned_issues(
         .map(|e| e.task_id.as_str()).collect();
     let gh = GhIssueStates::new(GH_BUDGET);
     let states = open_states(&issues.values().cloned().collect::<Vec<_>>(), &gh, default_repo);
-    issues.into_values().map(|issue| {
+    // Every ownership and task-state check runs per issue, in order, before any
+    // GitHub write. The closes that pass them are then issued by a small fixed
+    // pool, each under its own deadline (cas-f162).
+    let mut ready: Vec<(usize, IssueRef, String)> = Vec::new();
+    let mut outcomes: Vec<IssueOutcome> = issues.into_values().enumerate().map(|(index, issue)| {
         let linked: Vec<_> = tasks.values().filter(|t| references_issue(t, &issue, default_repo)).collect();
         let mut outcome = IssueOutcome {
             issue: issue.display(), action: IssueAction::Skipped, comment_or_error: String::new(),
@@ -737,15 +743,43 @@ fn reconcile_owned_issues(
         }
         outcome.comment_or_error = format!("Released in {} at commit {}.\n\nShipped tasks: {}.",
             scope.release_id, scope.final_release_sha, outcome.task_ids.join(", "));
-        match gh.close_completed(&issue, &outcome.comment_or_error) {
-            Ok(()) => outcome.action = IssueAction::Closed,
+        ready.push((index, issue, outcome.comment_or_error.clone()));
+        outcome
+    }).collect();
+    let closed = close_in_pool(&gh, &ready);
+    for ((index, _, _), result) in ready.iter().zip(closed) {
+        match result {
+            Ok(()) => outcomes[*index].action = IssueAction::Closed,
             Err(error) => {
-                outcome.action = IssueAction::Failed;
-                outcome.comment_or_error = error;
+                outcomes[*index].action = IssueAction::Failed;
+                outcomes[*index].comment_or_error = error;
             }
         }
-        outcome
-    }).collect()
+    }
+    outcomes
+}
+
+/// Close `ready` issues with at most [`GH_CLOSE_WORKERS`] calls in flight.
+/// Results come back in input order, so a report never depends on which close
+/// finished first.
+fn close_in_pool(gh: &GhIssueStates, ready: &[(usize, IssueRef, String)]) -> Vec<Result<(), String>> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<Result<(), String>>>> = Mutex::new(vec![None; ready.len()]);
+    std::thread::scope(|scope| {
+        for _ in 0..GH_CLOSE_WORKERS.min(ready.len()) {
+            scope.spawn(|| loop {
+                let slot = next.fetch_add(1, Ordering::SeqCst);
+                let Some((_, issue, comment)) = ready.get(slot) else { break };
+                let result = gh.close_completed(issue, comment);
+                results.lock().expect("close results")[slot] = Some(result);
+            });
+        }
+    });
+    results.into_inner().expect("close results").into_iter()
+        .map(|result| result.unwrap_or_else(|| Err("close was not attempted".into())))
+        .collect()
 }
 
 fn issue_key(issue: &IssueRef) -> (String, u64) {
@@ -1056,21 +1090,43 @@ mod tests {
         let published = git(&["rev-parse", "HEAD"]);
         let log = env.home().join("gh.log");
         let gh = env.home().join("gh");
-        // cas-f162: the first close of #7 hangs, as every close did on v4.22.
-        // A hung close must be bounded on its own and retried, not spend the
-        // deadline every later close shares.
+        // cas-f162: the first close of #7 hangs, as every close did on v4.22,
+        // and #110 fails every attempt until the flag is lifted. The fake keeps
+        // GitHub's state, so a second closeout pass sees what the first closed.
         let hung = env.home().join("close-7-hung");
-        std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" >> '{}'\n\
-            [ \"$2\" = list ] && echo '[{{\"number\":7}},{{\"number\":9}},{{\"number\":15296}}]'\n\
-            if [ \"$2\" = close ] && [ \"$3\" = 7 ] && [ ! -e '{}' ]; then : > '{}'; sleep 30; fi\nexit 0\n",
-            log.display(), hung.display(), hung.display())).unwrap();
+        let broken = env.home().join("close-110-broken");
+        let closed = env.home().join("closed-issues");
+        std::fs::write(&broken, "").unwrap();
+        let candidates: Vec<String> = [7, 9, 15296].into_iter().chain(101..=122).map(|n| n.to_string()).collect();
+        let script = r#"#!/bin/sh
+echo "$@" >> '@LOG@'
+if [ "$2" = list ]; then
+  out=""
+  for n in @NUMBERS@; do grep -qx "$n" '@CLOSED@' 2>/dev/null || out="$out{\"number\":$n},"; done
+  echo "[${out%,}]"
+  exit 0
+fi
+if [ "$2" = close ]; then
+  if [ "$3" = 7 ] && [ ! -e '@HUNG@' ]; then : > '@HUNG@'; sleep 30; fi
+  if [ "$3" = 110 ] && [ -e '@BROKEN@' ]; then echo "HTTP 502" >&2; exit 1; fi
+  echo "$3" >> '@CLOSED@'
+fi
+exit 0
+"#
+        .replace("@LOG@", &log.display().to_string())
+        .replace("@CLOSED@", &closed.display().to_string())
+        .replace("@HUNG@", &hung.display().to_string())
+        .replace("@BROKEN@", &broken.display().to_string())
+        .replace("@NUMBERS@", &candidates.join(" "));
+        std::fs::write(&gh, script).unwrap();
         env.set("CAS_GH_CLOSE_CAP_MS", "300");
         env.set("CAS_GH_CLOSE_BACKOFF_MS", "0");
         std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         env.set(GH_BIN_ENV, &gh);
 
         let mut fix = task("cas-5eef", TaskStatus::Closed, "GH #7: release repair");
-        fix.description = "Also routes Richards-LLC/violet_ps#9.".into();
+        fix.description = format!("Also routes Richards-LLC/violet_ps#9. Related: {}.",
+            (101..=122).map(|n| format!("example/issue-fixture#{n}")).collect::<Vec<_>>().join(", "));
         fix.external_ref = Some("https://github.com/actions/runner-images/issues/15296".into());
         fix.origin_project = Some("issue-fixture".into());
         fix.deliverables.factory_branch_anchor = Some(published.clone());
@@ -1087,20 +1143,38 @@ mod tests {
         };
         let inventory = crate::qa_batch::resolve_release_inventory(&root, &repo, &scope).unwrap();
 
+        // Pass one: 25 referenced issues, one third-party. #110 exhausts its retries.
         let outcomes = reconcile_release_issues(&root, &repo, &inventory, &BTreeMap::new());
-        let actions: BTreeMap<_, _> = outcomes.iter().map(|o| (o.issue.as_str(), &o.action)).collect();
-        assert_eq!(actions, BTreeMap::from([
-            ("actions/runner-images#15296", &IssueAction::Skipped),
-            ("Richards-LLC/violet_ps#9", &IssueAction::Closed),
-            ("example/issue-fixture#7", &IssueAction::Closed),
-        ]), "{outcomes:?}");
+        let mut expected: BTreeMap<String, IssueAction> = BTreeMap::from([
+            ("actions/runner-images#15296".into(), IssueAction::Skipped),
+            ("Richards-LLC/violet_ps#9".into(), IssueAction::Closed),
+            ("example/issue-fixture#7".into(), IssueAction::Closed),
+        ]);
+        expected.extend((101..=122).map(|n| (format!("example/issue-fixture#{n}"),
+            if n == 110 { IssueAction::Failed } else { IssueAction::Closed })));
+        let actions: BTreeMap<String, IssueAction> = outcomes.iter().map(|o| (o.issue.clone(), o.action.clone())).collect();
+        assert_eq!(actions, expected, "{outcomes:?}");
+        let pending: Vec<&IssueOutcome> = outcomes.iter().filter(|o| o.action == IssueAction::Failed).collect();
+        assert_eq!(pending.len(), 1, "exactly the exhausted close is pending: {outcomes:?}");
+        assert!(pending[0].comment_or_error.contains("example/issue-fixture#110"), "{}", pending[0].comment_or_error);
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(!calls.to_ascii_lowercase().contains("runner-images"), "{calls}");
-        assert_eq!(
-            calls.lines().filter(|line| line.starts_with("issue close 7 ")).count(),
-            2,
-            "the hung close is retried once and then succeeds: {calls}"
-        );
+        let attempts = |calls: &str, n: u32| calls.lines().filter(|line| line.starts_with(&format!("issue close {n} "))).count();
+        assert_eq!(attempts(&calls, 7), 2, "the hung close is retried once and then succeeds: {calls}");
+        assert_eq!(attempts(&calls, 110), 3, "a failing close is bounded at three attempts: {calls}");
+        assert_eq!(attempts(&calls, 101), 1, "{calls}");
+
+        // Pass two, after the fault is lifted: the pending issue closes, and
+        // nothing already closed is touched again.
+        std::fs::remove_file(&broken).unwrap();
+        let outcomes = reconcile_release_issues(&root, &repo, &inventory, &BTreeMap::new());
+        let actions: BTreeMap<String, IssueAction> = outcomes.iter().map(|o| (o.issue.clone(), o.action.clone())).collect();
+        assert_eq!(actions.get("example/issue-fixture#110"), Some(&IssueAction::Closed), "{outcomes:?}");
+        assert!(outcomes.iter().all(|o| o.action != IssueAction::Failed), "{outcomes:?}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(attempts(&calls, 110), 4, "{calls}");
+        assert_eq!(attempts(&calls, 101), 1, "closed issues are not closed again: {calls}");
+        assert_eq!(attempts(&calls, 7), 2, "{calls}");
     }
 
     #[test]

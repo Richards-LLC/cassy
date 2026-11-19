@@ -4982,6 +4982,12 @@ fn shell_command_projection(command: &str, preserve_offsets: bool) -> String {
 }
 
 pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
+    shell_heredoc_bodies_with_quoting(command).into_iter().map(|(body, _)| body).collect()
+}
+
+/// Each heredoc body with whether the shell passes it on unchanged: only a
+/// quoted delimiter stops parameter, command and arithmetic expansion.
+pub(super) fn shell_heredoc_bodies_with_quoting(command: &str) -> Vec<(String, bool)> {
     let mut pending: std::collections::VecDeque<(HeredocDelimiter, String)> =
         std::collections::VecDeque::new();
     let mut bodies = Vec::new();
@@ -4995,8 +5001,8 @@ pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
             };
             let is_delimiter = candidate == delimiter.value;
             if is_delimiter {
-                let (_, body) = pending.pop_front().expect("heredoc body is pending");
-                bodies.push(body);
+                let (delimiter, body) = pending.pop_front().expect("heredoc body is pending");
+                bodies.push((body, delimiter.literal_body));
             } else {
                 body.push_str(line);
             }

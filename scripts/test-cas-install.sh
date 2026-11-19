@@ -2,6 +2,10 @@
 # Fixture test for the portable installer. No network access or real install.
 set -euo pipefail
 
+# CI exports a token to the fast rows; the no-token scenarios must not inherit
+# it. Scenarios that need a token set their own (cas-d4ed).
+unset GITHUB_TOKEN GH_TOKEN
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/release-portable.sh
 source "$script_dir/release-portable.sh"

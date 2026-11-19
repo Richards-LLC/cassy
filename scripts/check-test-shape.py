@@ -778,7 +778,7 @@ def rust_runtime_inputs(source):
         # item scopes (including macros) cannot grant the exemption either.
         if left >= 0 and not (left >= 2 and ts[left - 2].value == 'mod'
                               or any(fn[2] == left for fn in functions)):
-            continue
+            typed = False
         helpers.setdefault(ts[i + 1].value, []).append((left, right, typed))
     # A familiar spelling alone cannot turn an unrelated/shadowed type into
     # the stability identity. Fail closed on ambiguous local declarations.

@@ -1950,6 +1950,47 @@ bug_families:
     tasks: [cas-d0f6]
     journeys: [FACTORY-MERGE, FACTORY-CLOSE]
     invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+  approved-clean-carryover:
+    title: A clean retargeted merge reuses the original approved verdict through publication and close without dispatching another verifier
+    tasks: [cas-5cfe]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  codex-recycle-continuity:
+    title: Worker recycling preserves assignments through startup and excludes predecessor context usage
+    tasks: [cas-b39fa]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+    invariants: [FACTORY-WORKER-RESPAWN]
+  cut-train-rollover:
+    title: A cut moves unfinished children to its successor and closes reject unmergeable targets before proof or dispatch
+    tasks: [cas-3d3b]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  factory-board-refresh-rereads-every-task:
+    title: The factory board's two-second refresh re-reads every task row on a long-lived project instead of only the tasks that changed
+    tasks: [cas-ddbe]
+    journeys: [FACTORY-SUPERVISE]
+  release-auto-cut-owner-machine:
+    title: Peer auto-cut defaults must not override the train owner's disabled policy
+    tasks: [cas-3416]
+    journeys: [FACTORY-SUPERVISE]
+  runtime-test-identity-prose-pin:
+    title: Test-shape checks distinguish runtime test identity data from diagnostic prose
+    tasks: [cas-047d]
+    journeys: [FACTORY-CLOSE]
+  task-brief-latest-artifact-newest-published:
+    title: The task brief names the newest published artifact, not the last note
+    tasks: [cas-50e0]
+    journeys: [FACTORY-SUPERVISE]
+  train-freeze-dispatch:
+    title: A freeze immediately starts or adopts full-validation at its current tip and exposes a run URL or explicit reason without a speculative ETA
+    tasks: [cas-1d66]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  verifier-launch-owner-liveness-and-refusal-class:
+    title: Verifier launch refuses a gone owner process and retries by typed refusal code
+    tasks: [cas-4fd6]
+    journeys: [FACTORY-MERGE, FACTORY-CLOSE]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

@@ -9242,6 +9242,7 @@ mod cas_7ce6_parked_merge_source_tests {
 mod cas_6b42_peer_delivery_tests {
     use super::StartedMergeSource;
     use crate::mcp::CasCore;
+    use cas_types::{Agent, AgentRole, Task, TaskStatus, TaskType, WorkTarget};
     use std::path::Path;
     use std::process::Command;
 
@@ -9554,29 +9555,6 @@ mod cas_6b42_peer_delivery_tests {
         assert!(refused.message.contains("[G-96]"));
         assert_eq!(git(&repo, &["rev-parse", branch]), local);
         assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
-    }
-}
-
-#[cfg(test)]
-mod cas_1184d_merge_identity_tests {
-    use crate::mcp::CasCore;
-    use cas_types::{Agent, AgentRole, Task, TaskStatus, TaskType, WorkTarget};
-    use std::path::Path;
-
-    fn git(path: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "Cassy Test")
-            .env("GIT_AUTHOR_EMAIL", "cas-test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "Cassy Test")
-            .env("GIT_COMMITTER_EMAIL", "cas-test@example.invalid")
-            .output()
-            .expect("git runs");
-        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     /// GH #1689/#1692: an epic child whose task target is the repository's

@@ -19,7 +19,7 @@ WATCHDOG = Path(__file__).resolve().parent / "ci-step-watchdog.py"
 COMMAND = r"""
 echo run >>"$RUNS"
 runs=$(wc -l <"$RUNS")
-if [[ "$FAKE_WEDGE" == always || ( "$FAKE_WEDGE" == first && $runs == 1 ) ]]; then
+if [[ "$FAKE_WEDGE" == always || ( "$FAKE_WEDGE" == first && $runs -eq 1 ) ]]; then
     echo "   Compiling cas-store v0.1.0"
     exec -a rustc bash -c 'echo $$ >"$WEDGED_PID"; sleep 600; :' --crate-name cas_store
 fi

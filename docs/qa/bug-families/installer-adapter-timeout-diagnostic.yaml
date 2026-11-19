@@ -1,4 +1,4 @@
 title: Release adapter deadlines log their phase and duration before retrying
 tasks: [cas-3e9a]
 journeys: [CLI-RELEASE]
-invariants: [CLI-INSTALLED-NOTICE-DEADLINE]
+invariants: [CLI-RELEASE-INSTALLED-RECONCILER, CLI-RELEASE-NOTICE-EXHAUSTION]

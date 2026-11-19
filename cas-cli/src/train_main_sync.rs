@@ -41,7 +41,7 @@ pub(crate) fn sync_open_trains(cas_dir: &Path) -> Result<usize> {
         if has_sync_task || release_freeze::freeze_of(train).is_some() {
             continue;
         }
-        match sync_one(cas_dir, &*tasks, &all, train, lane) {
+        match sync_one(cas_dir, &*tasks, train, lane) {
             Ok(moved) => synced += usize::from(moved),
             Err(error) => tracing::warn!(train = %train.id, %error, "train main sync deferred"),
         }
@@ -52,7 +52,6 @@ pub(crate) fn sync_open_trains(cas_dir: &Path) -> Result<usize> {
 fn sync_one(
     cas_dir: &Path,
     tasks: &dyn cas_store::TaskStore,
-    all: &[Task],
     train: &Task,
     lane: &str,
 ) -> Result<bool> {
@@ -112,7 +111,7 @@ fn sync_one(
         }
         Ok(None) => Ok(false),
         Err(GitError::MergeConflictPaths(files)) => {
-            file_sync_task(cas_dir, tasks, all, train, lane, &integration, &main_sha, &files)?;
+            file_sync_task(cas_dir, tasks, train, lane, &integration, &main_sha, &files)?;
             Ok(false)
         }
         Err(error) => Err(error.into()),
@@ -152,11 +151,9 @@ fn notify_deliveries(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn file_sync_task(
     cas_dir: &Path,
     tasks: &dyn cas_store::TaskStore,
-    _all: &[Task],
     train: &Task,
     lane: &str,
     integration: &str,

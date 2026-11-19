@@ -561,14 +561,6 @@ fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), 
     Ok(())
 }
 
-#[cfg(test)]
-fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    hash.update(b"cas-peer-premerge-plan-v1\0");
-    hash_plan_context(root, task, &mut hash)?;
-    Ok(format!("{:x}", hash.finalize()))
-}
-
 fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(b"cas-premerge-candidate-v2-regenerated\0");

@@ -810,6 +810,7 @@ async fn cas_4ac8_ack_retries_rate_limit_without_readmission() {
 async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    const LEGACY_TASK: &str = "cas-retired-peer";
     let _env = crate::test_support::TestEnvGuard::temp_home();
     for (recipient, legacy) in [(None,false), (Some("recipient"),false), (Some("worker"),false), (Some("recipient"),true)] {
         let server = MockServer::start().await;
@@ -825,7 +826,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
             .expect(u64::from(recipient == Some("worker"))).mount(&server).await;
         let messages = recipient.map(|id| serde_json::json!({
             "id":"mail", "project_id":REPO, "recipient_agent_id":id,
-            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":if legacy { "CAS_PEER_PREMERGE_V1 {}" } else { "collision warning" },
+            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":if legacy { format!("CAS_PEER_PREMERGE_V1 {{\"task_id\":\"{LEGACY_TASK}\"}}") } else { "collision warning".into() },
             "created_at":chrono::Utc::now().to_rfc3339()
         })).into_iter().collect::<Vec<_>>();
         Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
@@ -851,6 +852,9 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
         if legacy {
             assert_eq!((report.delivered,report.rejected), (0,1));
             assert!(machine.rows().is_empty(), "rejected authority must never enter the prompt queue");
+            assert!(cas_store::get_latest_verification_dispatch(&machine.cas, LEGACY_TASK).unwrap().is_none());
+            assert!(crate::store::open_verification_store(&machine.cas).unwrap()
+                .get_latest_for_task(LEGACY_TASK).unwrap().is_none());
         } else if recipient == Some("worker") {
             assert_eq!((report.delivered, report.rejected), (0, 0),
                 "a recipient missing from Cloud must keep its message pending: {report:?}");

@@ -202,7 +202,10 @@ pub(crate) fn recycle_waits_for_build(root: &Path, worker: &str, session: &str) 
         return Ok(false);
     };
     let repo = owner.metadata.get("clone_path").map(PathBuf::from)
-        .unwrap_or_else(|| root.join("worktrees").join(worker)).canonicalize()?;
+        .unwrap_or_else(|| root.join("worktrees").join(worker));
+    // Non-isolated workers need not have a conventional private checkout.
+    if !repo.exists() { return Ok(false); }
+    let repo = repo.canonicalize()?;
     if repo.parent() != root.join("worktrees").canonicalize().ok().as_deref() {
         return Ok(false);
     }

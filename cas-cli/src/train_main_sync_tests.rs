@@ -116,3 +116,24 @@ fn conflicting_main_files_one_sync_task_naming_the_files_and_changes_nothing() {
     assert_eq!(tasks.get_parent_epic(&filed[0].id).unwrap().map(|epic| epic.id), Some(EPIC.to_string()));
     assert_eq!(open_supervisor_queue_store(&cas_dir).unwrap().peek("sup-id", 10).unwrap().len(), 1);
 }
+
+#[test]
+fn timing_probe_cas_f823() {
+    let _env = TestEnvGuard::temp_home();
+    let (dir, origin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let repo = dir.path();
+    let cas_dir = next_train(repo, origin.path());
+    run(repo, &["checkout", "-q", LANE]);
+    std::fs::write(repo.join("shared.txt"), "train\n").unwrap();
+    run(repo, &["commit", "-qam", "train edit"]);
+    run(repo, &["push", "-q", "origin", LANE]);
+    run(repo, &["checkout", "-q", "main"]);
+    land_release(repo, "shared.txt", "main\n");
+    let started = std::time::Instant::now();
+    sync_open_trains(&cas_dir).unwrap();
+    let elapsed = started.elapsed();
+    use std::io::Write;
+    let mut out = std::fs::OpenOptions::new().create(true).append(true)
+        .open("/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f823/timing-delivery.txt").unwrap();
+    writeln!(out, "{elapsed:?}").unwrap();
+}

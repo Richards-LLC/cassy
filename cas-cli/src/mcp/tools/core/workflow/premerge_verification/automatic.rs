@@ -423,6 +423,10 @@ fn launch_with_preparation(
         &child,
     )
     .map_err(|e| e.to_string())?;
+    // Issuing the handoff may have refreshed an expired pending deadline; the
+    // prompt, review budget and recovery guard must use the refreshed row.
+    let live = cas_store::get_verification_dispatch(&core.cas_root, &live.id)
+        .map_err(|e| e.to_string())?;
     let worker = core.clone();
     let task = task.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {

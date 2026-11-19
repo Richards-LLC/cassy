@@ -409,9 +409,9 @@ pub struct TaskRequestChangesRequest {
     )]
     pub reason: String,
 
-    /// Failing tests the verdict relies on; naming any requires `class_audit`.
+    /// Set when the verdict rests on failing tests; requires `class_audit`.
     #[serde(default)]
-    pub failing_tests: Option<String>,
+    pub tests_failed: Option<bool>,
 
     /// Nextest filter for the whole test class the repair must run before re-park.
     #[serde(default)]

@@ -13810,12 +13810,12 @@ impl CasCore {
         // cas-bc25: naming failing tests without the class they belong to
         // sends the worker back to fix those tests one at a time.
         let class_audit = req.class_audit.as_deref().map(str::trim).filter(|class| !class.is_empty());
-        if req.failing_tests.as_deref().is_some_and(|tests| !tests.trim().is_empty())
+        if req.tests_failed == Some(true)
             && !class_audit.is_some_and(crate::factory_worker_check::named_filter)
         {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "CLASS_AUDIT_REQUIRED: task request_changes rejected: failing_tests names individual tests, so class_audit must name the whole test class as a nextest filter, e.g. class_audit=\"test(ui::) | test(gates::)\". Park will require a passing capped receipt that runs it.",
+                "CLASS_AUDIT_REQUIRED: task request_changes rejected: tests_failed=true, so class_audit must name the whole test class as a nextest filter, e.g. class_audit=\"test(ui::) | test(gates::)\". Park will require a passing capped receipt that runs it.",
             ));
         }
 

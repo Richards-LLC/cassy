@@ -1933,16 +1933,19 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
                 std::fs::write(&rollout, format!("{meta}\n{usage}\n")).unwrap();
             };
             write_usage(426726);
-            let retired_at: std::time::SystemTime = (replacement.registered_at - chrono::Duration::seconds(10)).into();
+            let boundary = crate::factory_context_reset::worker_recycle_boundary(&cas_dir, &factory_session, NAME).unwrap();
+            let retired_at: std::time::SystemTime = (boundary - chrono::Duration::seconds(10)).into();
             std::fs::File::open(&rollout).unwrap().set_modified(retired_at).unwrap();
             let path = worker_transcript_path_for_agent(&cas_dir, &replacement).unwrap();
-            assert_eq!(worker_context_usage(&replacement, &path), None);
+            assert_eq!(worker_context_usage(&cas_dir, &replacement, &path), None);
             // A kept conversation that writes after registration must still
             // report its real occupancy; the fence cannot hide a failed reset.
             write_usage(427372);
-            assert_eq!(worker_context_usage(&replacement, &path).unwrap().input_tokens, 427372);
+            let current_at: std::time::SystemTime = (boundary + (replacement.registered_at - boundary) / 2).into();
+            std::fs::File::open(&rollout).unwrap().set_modified(current_at).unwrap();
+            assert_eq!(worker_context_usage(&cas_dir, &replacement, &path).unwrap().input_tokens, 427372);
             write_usage(28000);
-            assert_eq!(worker_context_usage(&replacement, &path).unwrap().input_tokens, 28000);
+            assert_eq!(worker_context_usage(&cas_dir, &replacement, &path).unwrap().input_tokens, 28000);
         }
         open_agent_store(&cas_dir)
             .unwrap()

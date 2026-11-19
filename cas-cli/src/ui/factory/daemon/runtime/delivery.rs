@@ -75,7 +75,7 @@ impl NudgeReport {
         Self {
             outcome,
             channel: DeliveryChannel::Pty,
-            wake: WakeAttempt::NotAttempted,
+            wake: if outcome == InjectOutcome::Delivered { WakeAttempt::Fired } else { WakeAttempt::NotAttempted },
             wake_detail: Some(PTY_DELIVERY_WAKE_DETAIL.to_string()),
         }
     }

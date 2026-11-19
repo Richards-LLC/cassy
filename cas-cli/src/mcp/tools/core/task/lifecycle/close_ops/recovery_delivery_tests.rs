@@ -544,7 +544,15 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
         })
     };
     // The first brief: the two tests, no class. A class that misses them is no better.
-    for class in [None, Some("not a filter"), Some("test(gates::)")] {
+    // Also refused: an all-exact class just restates the failing names, and `&` is a
+    // class no receipt could cover (coverage understands `|` only).
+    for class in [
+        None,
+        Some("not a filter"),
+        Some("test(gates::)"),
+        Some("test(=ui::list::sorts) | test(=ui::list::filters)"),
+        Some("test(ui::list::) & test(sorts)"),
+    ] {
         let refused = supervisor.cas_task_request_changes(request(class)).await.unwrap_err();
         assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
         assert!(refused.message.contains("CLASS_AUDIT_REQUIRED"), "{}", refused.message);

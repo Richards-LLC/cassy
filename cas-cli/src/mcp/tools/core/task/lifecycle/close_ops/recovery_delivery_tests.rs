@@ -515,7 +515,7 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
 /// next. With the failing tests recorded as data, a decline needs the class.
 #[tokio::test]
 async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_bc25() {
-    use crate::mcp::tools::core::task::repair_class::{record_failing_tests, require_class};
+    use crate::mcp::tools::core::task::repair_class::record_failing_tests;
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let repo = f.dir.path();
@@ -555,16 +555,40 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
     ] {
         let refused = supervisor.cas_task_request_changes(request(class)).await.unwrap_err();
         assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
-        assert!(refused.message.contains("CLASS_AUDIT_REQUIRED"), "{}", refused.message);
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
     }
-    // A repair spawn runs the same check, and refuses until a class is recorded.
-    assert!(require_class(tasks.as_ref(), TASK, None).unwrap_err().contains("CLASS_AUDIT_REQUIRED"));
+    // cas-adca: decode the structural field and enter the real spawn handler,
+    // rather than calling the class helper with an already-recorded answer.
+    env.remove("CAS_FACTORY_SESSION");
+    let mut repair = tasks.get(TASK).unwrap();
+    repair.status = TaskStatus::Open;
+    repair.assignee = None;
+    tasks.update(&repair).unwrap();
+    let service = crate::mcp::CasService::new(supervisor.clone(), None);
+    let spawn = |class: Option<&str>| serde_json::from_value(serde_json::json!({
+        "action": "spawn_workers", "count": 1, "cli": "claude", "force": true,
+        "task_id": TASK, "spawn_brief": "Repair the recorded failure class.",
+        "class_audit": class,
+    })).unwrap();
+    let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+    let refused = service.factory_spawn_workers(spawn(None)).await.unwrap_err();
+    assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
+    assert_eq!(queue.pending_count().unwrap(), 0);
+    assert!(tasks.get_execution_state(TASK).unwrap().unwrap().get("class_audit").is_none());
+    let accepted = service.factory_spawn_workers(spawn(Some("  test(ui::list::) | test(ui::grid::)  ")))
+        .await.unwrap();
+    assert_ne!(accepted.is_error, Some(true));
+    let queued = queue.peek(10).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].task_id.as_deref(), Some(TASK));
+    assert_eq!(tasks.get_execution_state(TASK).unwrap().unwrap()["class_audit"],
+        "test(ui::list::) | test(ui::grid::)");
+    repair.status = TaskStatus::AwaitingMerge;
+    tasks.update(&repair).unwrap();
     supervisor.cas_task_request_changes(request(Some("test(ui::list::) | test(ui::grid::)"))).await.unwrap();
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Open);
     let state = tasks.get_execution_state(TASK).unwrap().unwrap();
     assert_eq!(state["class_audit"], "test(ui::list::) | test(ui::grid::)");
-    require_class(tasks.as_ref(), TASK, None).unwrap();
     // A repeat decline that omits the class keeps the stored one: the park obligation survives.
     let mut parked = tasks.get(TASK).unwrap();
     parked.status = TaskStatus::AwaitingMerge;

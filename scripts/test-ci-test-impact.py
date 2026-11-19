@@ -148,6 +148,19 @@ pub fn run() { nested::launch(); }
         self.assertEqual(command["stems"], ["alpha_test", "builtin_archive_portability_test"])
         self.assertNotIn("--lib", command["args"])
 
+    def test_builtin_agent_doc_edit_selects_the_agent_contract_without_an_import_edge(self):
+        # The byte budget lives in a contract test that reads the doc, not a
+        # Rust import, so only the embedded-asset rule can select it in a lane.
+        self.put("cas-cli/tests/agent_definition_contract_test.rs", 'use cas::gamma::other;\n')
+        self.put("cas-cli/src/builtins/agents/task-verifier.md", "verifier\n")
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        doc = self.select("cas-cli/src/builtins/agents/task-verifier.md")["commands"][0]
+        self.assertIn("agent_definition_contract_test", doc["stems"])
+        self.assertEqual(doc["reason"]["agent_definition_contract_test"], "widened:embedded-contract")
+        self.base = self.git("rev-parse", "HEAD")
+        self.assertNotIn("agent_definition_contract_test", self.select("cas-cli/src/alpha.rs")["commands"][0]["stems"])
+
     def test_shared_test_input_retains_every_integration_suite(self):
         self.put("cas-cli/tests/common/input.json", '{}\n')
         self.commit()

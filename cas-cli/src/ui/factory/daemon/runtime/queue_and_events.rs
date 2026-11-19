@@ -23018,6 +23018,35 @@ mod stall_nudge_rework_tests {
         assert!(daemon.app.mux.pane_ready_for_injection("worker-a"));
     }
 
+    /// GH #2128: a Codex worker's assignment wake must not go out while its Cassy MCP
+    /// server has not listed its tools; it goes out once the server reports it did.
+    #[tokio::test]
+    async fn a_codex_workers_first_wake_waits_for_its_cassy_tools_gh_2128() {
+        let (_root, cas_dir, _worker, _nudge) = fixture(false);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        make_worker_ready(&mut daemon).await;
+        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let wake = queue.enqueue("supervisor", "worker-a", "your next instruction").unwrap();
+
+        // A ready pane takes a queued wake within a pass or two; several passes show it is held.
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(wake).unwrap().unwrap().processed_at.is_none(), "no wake before the tools are listed");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let reason: Option<String> = conn.query_row("SELECT last_pending_reason FROM prompt_queue WHERE id = ?", [wake], |r| r.get(0)).unwrap();
+        assert_eq!(reason.as_deref(), Some("gated_not_ready"));
+
+        crate::factory_tools_ready::record_tools_listed(&cas_dir, &daemon.session_name, "worker-a", std::process::id()).unwrap();
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(wake).unwrap().unwrap().processed_at.is_some(), "the wake goes out once the tools are listed");
+    }
+
     #[tokio::test]
     async fn stalled_nudge_holds_back_off_and_spend_existing_decline_budget() {
         let (_root, cas_dir, _worker, id) = fixture(false);

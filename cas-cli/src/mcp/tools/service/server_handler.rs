@@ -202,6 +202,8 @@ impl ServerHandler for CasService {
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "MCP tools/list DONE"
             );
+            // GH #2128: the daemon holds this worker's first wake until its tools are listed.
+            crate::factory_tools_ready::record_from_environment(&self.inner.cas_root);
 
             Ok(ListToolsResult::with_all_items(tools))
         }

@@ -637,6 +637,18 @@ for line in sys.stdin:
     elif command == 'write' and child is None:
         with open(sys.argv[3], 'a') as log:
             log.write('passing test\n')
+    elif command == 'burn':
+        # Forwarded without an ack: the leaf waits, then burns CPU and writes
+        # nothing, so only its CPU can show progress.
+        if child:
+            child.stdin.write('burn\n')
+            child.stdin.flush()
+        else:
+            time.sleep(1.0)
+            end = time.process_time() + 0.3
+            while time.process_time() < end:
+                pass
+        continue
     elif command == 'exit_leaf' and child is None:
         print('done', flush=True)
         break
@@ -690,6 +702,11 @@ if child:
         use std::io::Write;
         writeln!(self.harness.stdin.as_mut().unwrap(), "{command}").unwrap();
         self.read_ack("done");
+    }
+
+    fn send(&mut self, command: &str) {
+        use std::io::Write;
+        writeln!(self.harness.stdin.as_mut().unwrap(), "{command}").unwrap();
     }
 
     fn observe(&self) -> Observation {
@@ -854,10 +871,17 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     foreign.pid_starttime = Some(0);
     assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, later, 300).state, Liveness::Executing);
     assert_eq!(status(later).state, Liveness::Executing);
-    // A child that only burns CPU, writing nothing, is advancing too; the last
-    // write is older than the stall window, so only the CPU can say so.
-    tree.work("work");
-    let busy = status(after + chrono::Duration::minutes(20));
+    // A child that only burns CPU, writing nothing, is advancing too. Forwarding
+    // the command wrote to the pipes, so read that sample first; the last
+    // advance is then older than the stall window and only the CPU can say so.
+    tree.send("burn");
+    status(after + chrono::Duration::minutes(13));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let busy = loop {
+        let got = status(after + chrono::Duration::minutes(20));
+        if got.state == Liveness::Executing || std::time::Instant::now() > deadline { break got; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     assert_eq!(busy.state, Liveness::Executing, "{}", busy.detail());
     // The child exits while the worker stays alive and inactive: once the
     // window passes with nothing advancing, it reads idle again.

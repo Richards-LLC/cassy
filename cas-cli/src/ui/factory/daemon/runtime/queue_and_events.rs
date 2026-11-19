@@ -1693,6 +1693,28 @@ pub(super) fn report_provision_failure(
     worker_name: &str,
     detail: &str,
 ) {
+    report_provision_failure_for_task(
+        cas_dir,
+        factory_session,
+        supervisor_name,
+        request_id,
+        worker_name,
+        None,
+        detail,
+    );
+}
+
+/// `report_provision_failure` for a request that carries a task: the notice
+/// and its blocker envelope name that task.
+pub(super) fn report_provision_failure_for_task(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    supervisor_name: &str,
+    request_id: Option<i64>,
+    worker_name: &str,
+    task_id: Option<&str>,
+    detail: &str,
+) {
     append_spawn_audit(
         cas_dir,
         factory_session,
@@ -1717,14 +1739,16 @@ pub(super) fn report_provision_failure(
     let supervisor = supervisor_name.to_owned();
     let session = factory_session.to_owned();
     let worker = worker_name.to_owned();
+    let task = task_id.map(str::to_owned);
     let detail = detail.to_owned();
     super::store_worker::persist_or_defer("notify supervisor of provision failure", move || {
-        enqueue_spawn_outcome_notice(
+        enqueue_spawn_outcome_notice_for_task(
             &cas_dir,
             &supervisor,
             &session,
             request_id,
             &worker,
+            task.as_deref(),
             "provision",
             false,
             &detail,
@@ -1811,6 +1835,32 @@ fn enqueue_spawn_outcome_notice(
     success: bool,
     detail: &str,
 ) -> anyhow::Result<Option<i64>> {
+    enqueue_spawn_outcome_notice_for_task(
+        cas_dir,
+        supervisor_name,
+        factory_session,
+        request_id,
+        worker_name,
+        None,
+        stage,
+        success,
+        detail,
+    )
+}
+
+/// `enqueue_spawn_outcome_notice` for a request that carries `task_id`: the
+/// message and the blocker envelope name the task the lost worker was for.
+fn enqueue_spawn_outcome_notice_for_task(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    request_id: Option<i64>,
+    worker_name: &str,
+    task_id: Option<&str>,
+    stage: &str,
+    success: bool,
+    detail: &str,
+) -> anyhow::Result<Option<i64>> {
     // cas-73fa: a verified spawn asks nothing of the supervisor; the spawn
     // audit and worker_status record it. Only a failure is sent.
     if success {
@@ -1840,6 +1890,7 @@ fn enqueue_spawn_outcome_notice(
     let request = request_id
         .map(|id| format!("request {id}"))
         .unwrap_or_else(|| "direct spawn".to_string());
+    let task = task_id.map(|id| format!(" (task {id})")).unwrap_or_default();
     let (summary, message) = if success {
         (
             format!("Worker spawn verified: {worker_name}"),
@@ -1852,7 +1903,7 @@ fn enqueue_spawn_outcome_notice(
         (
             format!("Worker spawn failed at {stage}: {worker_name}"),
             format!(
-                "Factory spawn {request} for worker '{worker_name}' failed: \
+                "Factory spawn {request} for worker '{worker_name}'{task} failed: \
                  stage={stage}. {detail}"
             ),
         )
@@ -1861,7 +1912,7 @@ fn enqueue_spawn_outcome_notice(
         queue.enqueue_urgent_with_outcome(
             "director",
             supervisor_name,
-            &crate::prompt_revalidation::attach_blocker_envelope(&message, worker_name, None),
+            &crate::prompt_revalidation::attach_blocker_envelope(&message, worker_name, task_id),
             Some(factory_session),
             Some(&summary),
             Some(cas_store::NotificationPriority::Critical),
@@ -11727,15 +11778,22 @@ impl FactoryDaemon {
     /// cas-3766: a dequeued request whose task-queue binding failed has no
     /// worker and will never register. End it FAILED, tell the supervisor which
     /// request it was, and free the slot it holds so the queue keeps draining.
-    fn fail_unbound_spawn(&mut self, request_id: i64, worker_name: &str, error: &str) {
+    fn fail_unbound_spawn(
+        &mut self,
+        request_id: i64,
+        worker_name: &str,
+        task_id: Option<&str>,
+        error: &str,
+    ) {
         let detail = format!("Task queue binding failed: {error}");
         self.app.set_error(detail.clone());
-        report_provision_failure(
+        report_provision_failure_for_task(
             self.app.cas_dir(),
             &self.session_name,
             self.app.supervisor_name(),
             Some(request_id),
             worker_name,
+            task_id,
             &detail,
         );
         self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
@@ -12255,7 +12313,7 @@ impl FactoryDaemon {
                                     .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
                             });
                             if let Err(error) = bound {
-                                self.fail_unbound_spawn(request_id, &worker_name, &error.to_string());
+                                self.fail_unbound_spawn(request_id, &worker_name, task_id.as_deref(), &error.to_string());
                                 return;
                             }
                         }
@@ -12351,7 +12409,7 @@ impl FactoryDaemon {
                                     .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
                             });
                             if let Err(error) = bound {
-                                self.fail_unbound_spawn(request_id, &worker_name, &error.to_string());
+                                self.fail_unbound_spawn(request_id, &worker_name, task_id.as_deref(), &error.to_string());
                                 return;
                             }
                         }

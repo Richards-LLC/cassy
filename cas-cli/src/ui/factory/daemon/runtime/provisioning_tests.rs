@@ -472,14 +472,14 @@ async fn accepted_request_whose_binding_fails_ends_failed_and_notifies_cas_3766(
                 false,
                 None,
                 Some("provision-test"),
-                None,
+                task,
                 None,
                 None,
                 &task.map(|t| vec![t.to_string()]).unwrap_or_default(),
             )
             .unwrap()
     };
-    let lost = enqueue("lost-worker", Some("cas-lost"));
+    let lost = enqueue("lost-worker", Some("cas-stalled"));
     let next = enqueue("next-worker", None);
     rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
         .unwrap()
@@ -509,10 +509,14 @@ async fn accepted_request_whose_binding_fails_ends_failed_and_notifies_cas_3766(
         .unwrap()
         .peek_all(20)
         .unwrap();
-    assert!(
-        notices.iter().any(|row| row.prompt.contains(&request)),
-        "the supervisor is told which request failed"
-    );
+    let notice = notices
+        .iter()
+        .find(|row| row.target == daemon.app.supervisor_name() && row.prompt.contains(&request))
+        .expect("the supervisor is told which request failed");
+    let envelope = crate::prompt_revalidation::parse_blocker_envelope(&notice.prompt)
+        .expect("the notice carries a blocker envelope");
+    assert_eq!(envelope.task_id.as_deref(), Some("cas-stalled"));
+    assert_eq!(envelope.worker, "lost-worker");
     assert_eq!(daemon.spawn_task.as_ref().map(|task| task.1), Some(Some(next)));
     assert_eq!(daemon.app.spawning_count, 1, "only the live spawn holds a slot");
     daemon.cancel_provisioning();

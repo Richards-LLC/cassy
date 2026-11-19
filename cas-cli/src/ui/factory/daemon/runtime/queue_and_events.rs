@@ -10714,6 +10714,12 @@ impl FactoryDaemon {
                         tally.notes.push(format!("{name}: pane not ready"));
                         continue;
                     }
+                    // GH #2128: the broadcast waits for a Codex worker's tools like a wake does.
+                    if self.worker_awaits_cassy_tools(name) {
+                        tally.failed += 1;
+                        tally.notes.push(format!("{name}: Cassy tools not listed yet"));
+                        continue;
+                    }
                     // The claim is taken just before the handoff, as before C3;
                     // its token lets the release drop only this claim.
                     let claim_token = match self.queue_jobs.claim_for_inject(

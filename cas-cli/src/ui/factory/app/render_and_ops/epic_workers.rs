@@ -2288,8 +2288,8 @@ pub(crate) enum StartupHandoff {
     GatedQueue,
 }
 
-pub(crate) fn startup_handoff(_cli: cas_mux::SupervisorCli) -> StartupHandoff {
-    StartupHandoff::LaunchArgument
+pub(crate) fn startup_handoff(cli: cas_mux::SupervisorCli) -> StartupHandoff {
+    if cli == cas_mux::SupervisorCli::Codex { StartupHandoff::GatedQueue } else { StartupHandoff::LaunchArgument }
 }
 
 /// Shared by daemon recycle completion and a confirmed in-place context reset.
@@ -3353,7 +3353,10 @@ impl FactoryApp {
             Some(prompt)
         });
         self.remove_exited_worker_pane(&worker_name)?;
-        self.mux.set_worker_startup_prompt(&worker_name, startup.clone());
+        let handoff = startup_handoff(effective_cli);
+        // A Codex worker launches without the actionable prompt; its assignment is
+        // enqueued below and the readiness-gated queue delivers it (GH #2128).
+        self.mux.set_worker_startup_prompt(&worker_name, startup.clone().filter(|_| handoff == StartupHandoff::LaunchArgument));
 
         if let Err(e) = self.mux.add_worker(
             &worker_name,
@@ -3412,6 +3415,9 @@ impl FactoryApp {
             let receipt = crate::task_assignment::enqueue_spawn_message(
                 self.cas_dir(), session, &worker_name, id, prompt,
             ).and_then(|row| {
+                if handoff == StartupHandoff::GatedQueue {
+                    return Ok(());
+                }
                 let queue = crate::store::open_prompt_queue_store(self.cas_dir())?;
                 queue.record_recipient_transport_delivered(row, &worker_name)?;
                 queue.mark_transport_delivered(row)?;

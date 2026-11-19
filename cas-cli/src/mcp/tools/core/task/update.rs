@@ -1626,7 +1626,9 @@ impl CasCore {
                 "Corrected proof scope for task {}. The task is Open with assignee {} preserved; no failed-review verdict was recorded. {}",
                 task.id,
                 task.assignee.as_deref().unwrap_or("unassigned"),
-                result_target,
+                format!("{result_target}{}", corrected_target.as_ref().map(|target|
+                    crate::ops::fleet::auto_focus_target(&self.cas_root, &supervisor.id, &target.target_branch)
+                ).unwrap_or_default()),
             )));
         }
         if req.status.as_deref().is_some_and(|status| {

@@ -266,7 +266,7 @@ impl CasCore {
                 }
             }
             save(&path, &queue)?;
-            let receipt = queue.render();
+            let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
             return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
                 crate::gates::override_tag("G-114", receipt)
             } else { receipt });
@@ -323,7 +323,7 @@ impl CasCore {
         let _target = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
             .context(crate::gates::tag("G-113", "target merge already in progress; retry train_merge after it finishes"))?;
         save(&path, &queue)?;
-        let receipt = queue.render();
+        let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
         Ok(if queue.ci_override.is_some() { crate::gates::override_tag("G-114", receipt) } else { receipt })
     }
 }

@@ -6112,7 +6112,7 @@ impl CasService {
                 // globbing/reading the transcript twice per worker.
                 let context_usage = transcript_path_for_worker
                         .as_deref()
-                    .and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli));
+                    .and_then(|path| worker_context_usage(&self.inner.cas_root, agent, path));
                 let context_info = context_usage
                     .map(format_context_usage)
                     .unwrap_or_default();
@@ -13075,7 +13075,7 @@ pub(crate) fn worker_context_notice(
     if agent.role != cas_types::AgentRole::Worker { return None; }
     let threshold = crate::config::Config::load(root).ok()?.factory()
         .context_recycle_threshold_percent;
-    let usage = transcript.and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli_from_agent(agent)));
+    let usage = transcript.and_then(|path| worker_context_usage(root, agent, path));
     let (bucket, text) = match usage {
         Some(ContextUsage { input_tokens, model_context_window: Some(window) }) if window > 0 => {
             let percent = input_tokens.saturating_mul(100) / window;
@@ -13099,6 +13099,27 @@ pub(crate) fn worker_context_notice(
 
 fn context_notice_key(root: &std::path::Path, agent: &cas_types::Agent) -> String {
     format!("{}|{}|{}", root.display(), agent.id, agent.cc_session_id.as_deref().unwrap_or_default())
+}
+
+pub(crate) fn worker_context_usage(
+    root: &std::path::Path,
+    agent: &cas_types::Agent,
+    path: &std::path::Path,
+) -> Option<ContextUsage> {
+    let cli = worker_cli_from_agent(agent);
+    if cli == cas_mux::SupervisorCli::Codex
+        && let Some(boundary) = agent.factory_session.as_deref().and_then(|session| {
+            crate::factory_context_reset::worker_recycle_boundary(root, session, &agent.name)
+        })
+    {
+        // Registration can follow a valid current-session usage record.
+        // Only an actual stop/relaunch makes an older rollout predecessor data.
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        if chrono::DateTime::<chrono::Utc>::from(modified) < boundary {
+            return None;
+        }
+    }
+    read_context_usage_from_tail_for_cli(path, cli)
 }
 
 fn context_notice_buckets() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {

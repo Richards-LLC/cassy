@@ -657,7 +657,9 @@ impl CasService {
                     }));
                     return Ok(answer);
                 }
-                if !matches!(
+                if tool_name == "task" && receipt.action() == "close" {
+                    self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
+                } else if !matches!(
                     (tool_name, receipt.action()),
                     ("factory", "worktree_merge")
                         | ("verification", "batch_receipt" | "add")
@@ -715,7 +717,7 @@ impl CasService {
                 if let Some(id) = &continuation_id {
                     self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
                 } else if close_unfinished {
-                    let _ = self.record_late_close_outcome(handle, receipt.clone(), start, budget);
+                    self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
                 } else if commit.is_some()
                     && matches!(
                         (tool_name, receipt.action()),
@@ -1073,18 +1075,21 @@ impl CasService {
         receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
         start: std::time::Instant,
         budget: std::time::Duration,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        let task_id = receipt.task_id()?.to_string();
+    ) -> Result<tokio::task::JoinHandle<()>, rmcp::ErrorData> {
+        let task_id = receipt.task_id().ok_or_else(|| Self::error(
+            rmcp::model::ErrorCode::INTERNAL_ERROR, "Close continuation has no task id",
+        ))?.to_string();
+        // Acquire ownership before spawning: cancellation before the first
+        // poll must retain both the journal and retirement accounting.
+        let continuation = super::close_continuation::LateClose::begin(self, &task_id)
+            .map_err(|error| Self::error(rmcp::model::ErrorCode::INTERNAL_ERROR,
+                format!("Close may still be running, but its continuation journal could not be saved: {error}. Re-query task state before retrying.")))?;
+        let disposition = if receipt.terminal.get().is_some() { "COMMITTED" } else { "IN_PROGRESS" };
         let service = self.clone();
-        Some(tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             let joined = handle.await;
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
-                let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
-                let status = store
-                    .get(&task_id)
-                    .map_err(|error| format!("{task_id}: {error}"))?
-                    .status;
                 // A checked disposition belongs to this request, unlike the row's
                 // current status or the legacy error-shaped MERGE REQUIRED reply.
                 let summary = if let Some(outcome) = receipt.outcome.get() {
@@ -1105,15 +1110,13 @@ impl CasService {
                     late_close_summary(&joined)
                 };
                 let note = format!(
-                    "[{}] 📝 PROGRESS {LATE_CLOSE_NOTE_MARKER}: a close answered IN_PROGRESS at the {:.0}s response budget finished after {:.1}s; task status now `{status}`. Result: {summary}",
-                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    "A close answered {disposition} before its handler finished (response budget {:.0}s); finished after {:.1}s. Result: {summary}. Timing (inclusive): {}",
                     budget.as_secs_f64(),
                     elapsed.as_secs_f64(),
+                    receipt.timings(),
                 );
-                store
-                    .append_note(&task_id, &note)
-                    .map(|_| task_id.clone())
-                    .map_err(|error| format!("{task_id}: {error}"))
+                continuation.finish(note, !matches!(&joined, Ok(Ok(_))))
+                    .map(|_| task_id)
             })
             .await;
             match recorded {
@@ -2002,12 +2005,26 @@ mod tests {
     #[tokio::test]
     async fn late_close_continuation_loss_cas_eeda() {
         use crate::mcp::{CasCore, CasService};
+        // A hard exit exercises the deadline path without running destructors.
+        // Only the disposable child receives this selector and CAS root.
+        if let Some(root) = std::env::var_os("CAS_EEDA_CRASH_ROOT") {
+            let _env = crate::test_support::TestEnvGuard::new();
+            let service = CasService::new(CasCore::with_daemon(root.into(), None, None),
+                #[cfg(feature = "mcp-proxy")] None);
+            let args = serde_json::json!({"action":"close", "id":"cas-crash"});
+            let error = service.call_with_deadline("task", args.as_object(),
+                std::time::Duration::from_millis(20), std::future::pending()).await.unwrap_err();
+            assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+            std::process::exit(0);
+        }
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
         std::fs::create_dir_all(&core.cas_root).unwrap();
         let tasks = core.open_task_store().unwrap();
         let root = core.cas_root.clone();
+        let owner = cas_types::Agent::new_with_role("close-owner".into(), "close-owner".into(), cas_types::AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&owner).unwrap();
         let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
         tasks.add(&crate::types::Task::new("cas-lost".into(), "lost close".into())).unwrap();
         let receipt = super::super::mutation_receipt::Receipt::new("task", "close", Some("cas-lost"));
@@ -2016,6 +2033,8 @@ mod tests {
         let watcher = service.record_late_close_outcome(
             handler, receipt, std::time::Instant::now(), std::time::Duration::from_secs(55),
         ).unwrap();
+        super::super::close_continuation::recover(&root);
+        assert!(tasks.get("cas-lost").unwrap().notes.is_empty());
         // Drop the real continuation before its first poll, as runtime
         // retirement can do. The handler's outcome remains unknown.
         watcher.abort();
@@ -2026,7 +2045,35 @@ mod tests {
         assert_eq!(task.status, crate::types::TaskStatus::Open);
         assert_eq!(task.notes.matches("CLOSE_OUTCOME:").count(), 1, "{}", task.notes);
         let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
-        assert_eq!(queue.list_pending_prompt_outbox("operator", "supervisor_notice", 10).unwrap().len(), 1);
+        assert_eq!(queue.list_pending(&owner.id).unwrap().len(), 1);
+
+        tasks.add(&crate::types::Task::new("cas-panic".into(), "panicking close".into())).unwrap();
+        let receipt = super::super::mutation_receipt::Receipt::new("task", "close", Some("cas-panic"));
+        let handler = tokio::spawn(async { panic!("injected handler loss") });
+        service.record_late_close_outcome(handler, receipt, std::time::Instant::now(),
+            std::time::Duration::from_secs(55)).unwrap().await.unwrap();
+        assert_eq!(tasks.get("cas-panic").unwrap().notes.matches("CLOSE_OUTCOME:").count(), 1);
+
+        tasks.add(&crate::types::Task::new("cas-crash".into(), "backend exit".into())).unwrap();
+        let crash_root = root.clone();
+        let child = tokio::task::spawn_blocking(move || std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "mcp::tools::service::server_handler::tests::late_close_continuation_loss_cas_eeda", "--nocapture"])
+            .env("CAS_EEDA_CRASH_ROOT", crash_root).output().unwrap()).await.unwrap();
+        assert!(child.status.success(), "{child:?}");
+        assert!(tasks.get("cas-crash").unwrap().notes.is_empty());
+        // Replay a saved pending journal after recovery, as a crash between
+        // note append and cleanup would do. Both writes must remain singular.
+        let journal_path = std::fs::read_dir(root.join("close-continuations")).unwrap()
+            .map(|e| e.unwrap().path()).find(|p| p.extension().is_some_and(|s| s == "json")).unwrap();
+        let journal = std::fs::read(&journal_path).unwrap();
+        super::super::close_continuation::recover(&root);
+        std::fs::write(journal_path, journal).unwrap();
+        super::super::close_continuation::recover(&root);
+        assert_eq!(tasks.get("cas-crash").unwrap().notes.matches("CLOSE_OUTCOME:").count(), 1);
+        assert_eq!(queue.list_pending(&owner.id).unwrap().len(), 3);
+        let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts.iter().all(|p| crate::supervisor_notices::is_action_envelope(&p.prompt)));
     }
 
     /// cas-3b81 (GH #1142): a close still running at the deadline with

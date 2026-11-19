@@ -2229,6 +2229,13 @@ continuation outcome is recorded in task notes. Receipts and tracing include
 inclusive merge-tree, push, close-gate, dispatch and note timings; `+` means a
 phase is still running and zero means no measured work in that phase yet.
 
+Background task closes hold backend retirement until their `CLOSE_OUTCOME`
+note is saved, including final inclusive phase timings. A locked local journal
+under `.cas/close-continuations/` owns each pending outcome. Cancellation records
+an unknown outcome and wakes the supervisor; daemon startup and heartbeats
+recover unlocked journals after process loss. Recovery retries note/notice
+persistence with the same continuation identity, never the close mutation.
+
 Optional resource notifications and factory recall have bounded response waits.
 Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;

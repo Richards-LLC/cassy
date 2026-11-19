@@ -900,6 +900,12 @@ esac
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         [logs] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
         self.assertIn(str(logs), refused.stderr)
+        # cas-3833: the refusal line itself, which is all a worker sees when
+        # the push output is tailed, names the failing row and the log path.
+        self.assertTrue(
+            any("ci-script-tests-changed" in line and str(logs) in line for line in refused.stderr.splitlines()),
+            refused.stderr,
+        )
         row_log = logs / "ci-script-tests-changed.log"
         original_log = row_log.read_text()
         self.assertIn("fixture diagnostic: prebuild poll expired", original_log)

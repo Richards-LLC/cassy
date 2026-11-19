@@ -93,6 +93,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     let peer_temp = tempfile::TempDir::new().unwrap();
     let peer_repo = peer_temp.path().join("peer");
     run(repo, &["clone", "-q", "--no-hardlinks", &repo.to_string_lossy(), &peer_repo.to_string_lossy()]);
+    run(&peer_repo, &["branch", LANE, &format!("origin/{LANE}")]);
     let peer_root = crate::store::init_cas_dir(&peer_repo).unwrap();
     assert_eq!(crate::config::Config::load(&peer_root).unwrap().release.unwrap_or_default().auto_cut_max_per_day, 4);
     let peer_store = open_task_store(&peer_root).unwrap();

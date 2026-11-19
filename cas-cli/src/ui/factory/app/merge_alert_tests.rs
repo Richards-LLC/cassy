@@ -438,7 +438,6 @@ fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() 
     // progress from the lane's current tip, with nothing delivered for it.
     let repo = f.repo.path();
     let mut next = Task::new("cas-9efb-next".into(), "next assignment".into());
-    next.status = TaskStatus::InProgress;
     next.assignee = Some("merge-w".into());
     next.deliverables.work_target = parked.deliverables.work_target.clone();
     next.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
@@ -448,6 +447,10 @@ fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() 
         base_sha: git(repo, &["rev-parse", "factory/merge-w"]),
     });
     store.add(&next).unwrap();
+    // Started the way Fixture::in_progress does it: the store update to
+    // InProgress is what emits TaskStarted, then the worker claims it.
+    next.status = TaskStatus::InProgress;
+    store.update(&next).unwrap();
     assert!(agents.try_claim("cas-9efb-next", "merge-w", 600, None).unwrap().is_success());
     assert_eq!(store.get("cas-9efb-test").unwrap().status, TaskStatus::AwaitingMerge);
 

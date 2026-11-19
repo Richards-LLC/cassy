@@ -640,7 +640,7 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 (prefix, f'assert_eq!(source.message(), "{sentence}");', 1),
                 (prefix.replace('-> Identity { Identity::exact(path, name) }', '-> String { name.to_string() }'), f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
                 (prefix, f'assert_eq!((source.message(), selected), ("{sentence}", [id("a.test.ts", "group changed")]));', 1),
-                (prefix, f'{{ fn id(path: &str, name: &str) -> String {{ name.to_string() }} assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]); }}', 1),
+                (prefix, f'{{ fn id<T: ToString>(path: &str, name: T) -> String {{ name.to_string() }} assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]); }}', 1),
                 (prefix, f'let id = |path: &str, name: &str| name.to_string(); assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
                 (prefix.replace('fn check() {', 'fn check(id: fn(&str, &str) -> String) {'), f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
             ]

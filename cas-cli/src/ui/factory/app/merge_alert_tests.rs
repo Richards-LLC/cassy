@@ -410,6 +410,60 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 0);
 }
 
+/// cas-97dc: the worker finished an earlier turn (its rollout ends in
+/// task_complete) and the relay queued while cas-9efb-test was parked reaches
+/// the consumer. Control: with that delivery still the worker's task, the relay
+/// is emitted, so nothing in this fixture suppresses it. Then cas-9efb-test
+/// stays parked as the PREVIOUS task and the worker is assigned a second,
+/// distinct task with no delivery, no ready declaration and no pushed work. The
+/// consumer must target that task, with no wait suppression, and emit no
+/// delivery-tagged relay for it.
+#[test]
+fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() {
+    let mut f = Fixture::new();
+    let parked_relay = f.event.clone();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let parked = store.get("cas-9efb-test").unwrap();
+    // The idle basis: the worker's own rollout ends in task_complete.
+    f.in_progress();
+    // Control: the same worker and idle basis with the delivery parked again.
+    store.update(&parked).unwrap();
+    agents.release_lease("cas-9efb-test", "merge-w").unwrap();
+    f.event = parked_relay.clone();
+    assert!(f.relay().iter().any(|prompt| prompt.retract_task.as_deref() == Some("cas-9efb-test")),
+        "the fixture must emit the parked delivery's relay, or the check below proves nothing");
+
+    // The next assignment: a distinct task, claimed by the same worker, in
+    // progress from the lane's current tip, with nothing delivered for it.
+    let repo = f.repo.path();
+    let mut next = Task::new("cas-9efb-next".into(), "next assignment".into());
+    next.assignee = Some("merge-w".into());
+    next.deliverables.work_target = parked.deliverables.work_target.clone();
+    next.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: parked.deliverables.work_target.clone().unwrap(),
+        assignee: "merge-w".into(),
+        branch: "factory/merge-w".into(),
+        base_sha: git(repo, &["rev-parse", "factory/merge-w"]),
+    });
+    store.add(&next).unwrap();
+    // Started the way Fixture::in_progress does it: the store update to
+    // InProgress is what emits TaskStarted, then the worker claims it.
+    next.status = TaskStatus::InProgress;
+    store.update(&next).unwrap();
+    assert!(agents.try_claim("cas-9efb-next", "merge-w", 600, None).unwrap().is_success());
+    assert_eq!(store.get("cas-9efb-test").unwrap().status, TaskStatus::AwaitingMerge);
+
+    let (events, prompts, _) = f.app.revalidate_and_prompt_for_delivery(std::slice::from_ref(&parked_relay));
+    let targets: Vec<_> = events.iter().filter_map(|event| match event {
+        DirectorEvent::WorkerIdle { active_task: Some(active), .. } => Some(active.task_id.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(targets, ["cas-9efb-next"], "the consumer must reach, and target, the new task: {events:?}");
+    assert!(prompts.iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-next")),
+        "a task with nothing delivered has no delivery to report");
+}
+
 #[test]
 fn cas_619c_in_progress_pushed_green_tip_without_worker_ready_is_not_merge_ready() {
     let mut f = Fixture::new();

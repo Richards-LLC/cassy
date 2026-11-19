@@ -7995,9 +7995,9 @@ mod tests {
             .prepare("SELECT transport_delivered_at FROM prompt_queue WHERE target = ?").unwrap()
             .query_map([name], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(
-            (argv.contains("cas-handoff"), delivered.len(), delivered.iter().any(Option::is_some), stale.exists()),
+            (argv.contains(cas_pty::WORKER_STARTUP_BRIEF_PREFIX.trim()), delivered.len(), delivered.iter().any(Option::is_some), stale.exists()),
             (false, 1, false, false),
-            "(launch argument names the task, spawn rows, row marked delivered, stale readiness record kept); argv: {argv}"
+            "(launched with a startup brief argument, spawn rows, row marked delivered, stale readiness record kept); argv: {argv}"
         );
     }
 

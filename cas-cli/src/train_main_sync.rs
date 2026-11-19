@@ -56,7 +56,6 @@ fn sync_one(
     train: &Task,
     lane: &str,
 ) -> Result<bool> {
-    if true { return Ok(false); } // RED-PROBE
     let repo = crate::train_guardrails::train_repo_root(cas_dir, train)?;
     let integration = train
         .deliverables

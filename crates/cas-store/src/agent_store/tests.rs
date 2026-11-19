@@ -1528,11 +1528,6 @@ fn test_lease_release_for_task_records_awaiting_merge_park_reason() {
         history[0].reason.as_deref(),
         Some("MERGE REQUIRED: parked awaiting_merge")
     );
-    assert_ne!(
-        history[0].reason.as_deref(),
-        Some("Task closed"),
-        "parked MERGE REQUIRED close rejection must not look like a successful close"
-    );
     assert_eq!(history[0].previous_agent_id, None);
 }
 

@@ -691,8 +691,14 @@ esac
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
         self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^10.0.0\n')
         self.commit()
+        common_ancestor = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        # The epic carries its own script change that main never received, so
+        # a main comparison would credit that change to the worker's lane.
+        self.write("scripts/example.py", "# epic-only script change\n")
+        self.commit()
         fork = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        command(self.repo, "git", "checkout", "-q", "--detach", common_ancestor)
         self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^9.99.0\n')
         self.commit()
         command(self.repo, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
@@ -722,6 +728,11 @@ esac
         _, path = self.receipt()
         # pin: receipts name the actual comparison commit, while the hook log names its target ref.
         self.assertIn(f"base={fork} ", path.read_text())
+        # Final-tree assembly still compares with main: this tree reverts the
+        # dependency fixture main moved on, which the lane-range base never sees.
+        assembled = self.fast_from("origin/main")
+        self.assertNotEqual(assembled.returncode, 0, assembled.stdout)
+        self.assertIn("FAIL version-literals", assembled.stdout)
         self.write("scripts/example.py", "# this branch now changes the script\n")
         self.commit()
         pushed = self.push()

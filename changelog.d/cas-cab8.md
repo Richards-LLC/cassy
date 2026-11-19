@@ -1,3 +1,0 @@
-### Fixed — Close gates
-
-- **A spike that made no commits is no longer asked for Tier 2 proof and the Hub journeys** — Was: closing a spike whose lane sat at its epic's tip (no commits of its own) judged the epic's last commit as the spike's delivery, so it was refused for a missing adversarial probe on `.github/workflows/lane.yml` and for all 27 Hub journeys' QA evidence; only the no-delivery declaration got past. Now: a lane the target already contains, with no receipt, recorded delivery boundary or parked anchor, has an empty delivery and owes neither; a spike that really changes guard code is still Tier 2.

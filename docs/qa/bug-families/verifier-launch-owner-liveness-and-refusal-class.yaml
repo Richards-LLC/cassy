@@ -1,4 +1,0 @@
-title: Verifier launch refuses a gone owner process and retries by typed refusal code
-tasks: [cas-4fd6]
-journeys: [FACTORY-MERGE, FACTORY-CLOSE]
-invariants: [FACTORY-VERIFIER-CRASH-RETRY]

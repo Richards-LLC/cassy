@@ -681,6 +681,10 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                  'fn id(path: &str, name: &str) -> String { name.to_string() }\n#[test]'),
                  f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1),
             ])
+            cases.append((prefix.replace('-> Identity { Identity::exact(path, name) }',
+                                         '-> String { name.to_string() }'),
+                          'struct Wrapper; impl Wrapper { fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) } '
+                          f'fn check() {{ let source = "fixture"; assert_eq!(source, id("a.test.ts", "{sentence}")); }} }}', 1))
             cases.append((prefix.replace('#[test] fn check() {',
                                          '#[cfg(test)] fn check<T>(id: fn(&str, &str) -> String) {'),
                           f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1))

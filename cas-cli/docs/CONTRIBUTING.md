@@ -5302,25 +5302,3 @@ excluded. These rows describe attested work, never an inferred automatic event.
 Commit-to-main unwraps release-train main landings into their individual
 integrations. The observed delivery log identifies the train; Git retains
 individual integrations even when their local observations are absent.
-
-### Supervisor operator evidence
-
-The `H-47` hook checks supervisor `coordination action=message|interrupt`
-messages to `operator` and `commander:<label>`, including their preview summary.
-Each paragraph containing numeric literals, durations or completion claims
-uses successful tool results in the current user turn, or a leading
-`[unverified]` marker. Numeric literals and SHAs must match those results.
-Exact successful command strings may be named in backticks, including their
-numeric flags. Optional `[evidence:<tool-use-id>]` citations narrow the results
-used; Claude Code replies need no hidden tool-use IDs. Use a tool to calculate
-derived durations or local times. Clipboard claims require a successful
-`wl-paste` or `pbpaste` read after the most recent clipboard write. A missing
-transcript or turn boundary refuses evidence.
-This validates provenance and numeric support, not the semantics of all prose.
-
-The same policy labels unsupported MessageDisplay replies and refuses the
-first unsupported Stop. Reentrant Stop emits an uncertainty notice instead of
-blocking repeatedly. Stop cannot retract text already streamed to the pane.
-Coordination joins the existing mandatory MCP policy matcher for Claude and
-factory-role settings. Codex installs MCP policy in its user layer; the project
-layer keeps its Bash/apply_patch matcher. No new event or optional flag is needed.

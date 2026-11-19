@@ -1615,10 +1615,6 @@ bug_families:
     tasks: [cas-0010]
     invariants: [FACTORY-ISOLATED-PLAYWRIGHT]
     journeys: [FACTORY-SPAWN]
-  operator-claim-evidence:
-    title: Supervisor operator claims carry current-turn tool evidence or explicit uncertainty
-    tasks: [cas-ab79]
-    journeys: [FACTORY-SUPERVISE]
   park-proof-after-checkpoint-rebase:
     title: Fresh park evaluates the measured delivery after a checkpoint rebase and ancestry restore
     tasks: [cas-28c5]
@@ -1673,11 +1669,6 @@ bug_families:
     title: Prepared train pushes and queue entries adopt full-suite proof only across verified release plumbing
     tasks: [cas-976f]
     journeys: [FACTORY-MERGE]
-  claude-visible-operator-evidence:
-    title: Claude Code supervisor replies use visible same-turn evidence without hidden tool-use IDs
-    statement: Matching numbers and SHAs pass; unsupported literals, failed or stale results, and clipboard claims without a fresh read remain refused.
-    tasks: [cas-1f5f]
-    journeys: [HUB-J5]
   deterministic-history-recovery:
     title: History recovery keeps fixed chronological timestamps and settles scroll before viewport checks
     tasks: [cas-4452f]

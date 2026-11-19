@@ -29749,6 +29749,21 @@ mod merge_state_gate_tests {
         );
     }
 
+    // cas-176e (GH #2136): a branch origin never had parks nothing, and the
+    // refusal names the push that creates it.
+    #[tokio::test]
+    async fn cas_176e_close_refuses_never_pushed_branch_naming_push() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        let p = fixture.dir.path();
+        git(p, &["push", "-q", "origin", "--delete", &fixture.branch]);
+        git(p, &["update-ref", "-d", &format!("refs/remotes/origin/{}", fixture.branch)]);
+        let (is_error, text) = close_text(&fixture).await;
+        assert_eq!(is_error, Some(true), "{text}");
+        assert!(text.contains(&format!("push -u origin {}", fixture.branch)), "{text}");
+        let stored = fixture.store.get(&fixture.task_id).unwrap();
+        assert_ne!(stored.status, TaskStatus::AwaitingMerge, "{text}");
+    }
+
     // cas-44e93 AC2: once an unpushed anchor was recorded, re-closing from
     // the pushed tip moves the anchor there; no request_changes needed.
     #[tokio::test]

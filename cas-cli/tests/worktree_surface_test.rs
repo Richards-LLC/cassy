@@ -4601,6 +4601,10 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let repo = GitRepo::new();
     let root = init_cas_dir(&repo.root, &mut env).unwrap();
     disable_system_a(&root);
+    std::fs::create_dir_all(repo.root.join("cas-cli/src")).unwrap();
+    std::fs::write(repo.root.join("cas-cli/build.rs"), "// registry build fixture\n").unwrap();
+    run_git(&["add", "cas-cli/build.rs"], &repo.root);
+    run_git(&["commit", "-m", "registry build fixture"], &repo.root);
     let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
     run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
@@ -4717,6 +4721,31 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
         "the merge's one origin read also serves the final close's integration proof (verification is disabled in this routing fixture): {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
+
+    // GH #2167: independently parked deliveries introduce the same gate id
+    // in disjoint files. The second clean Git merge must not publish the
+    // invalid combined registry after the first delivery advances the train.
+    for name in ["delta", "epsilon"] {
+        let mut task = Task::new(format!("task-{name}"), "Registry delivery".into());
+        task.assignee = Some(name.into());
+        tasks.create_atomic(&task, &[], Some(&epic), None).unwrap();
+        let worker = root.join("worktrees").join(name);
+        repo.add_worktree(&worker, &format!("factory/{name}"));
+        let source = worker.join(format!("cas-cli/src/{name}.rs"));
+        std::fs::write(source, "// gate[G-999 merge-admission integrity]: Fixture gate\n").unwrap();
+        run_git(&["add", "."], &worker);
+        run_git(&["commit", "-m", name], &worker);
+        park_merge_fixture(&root, &worker, name, &format!("task-{name}"));
+    }
+    let first = runtime.block_on(service.factory(Parameters(request("delta")))).unwrap();
+    assert_ne!(first.is_error, Some(true), "{}", get_text(&first));
+    let train_before = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
+    run_git(&["merge-base", "--is-ancestor", "factory/delta", &train_before], &repo.root);
+    let refused = runtime.block_on(service.factory(Parameters(request("epsilon")))).unwrap();
+    assert_eq!(refused.is_error, Some(true));
+    assert!(cas::gates::codes_in(&get_text(&refused)).contains(&"G-160"), "{}", get_text(&refused));
+    assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]), train_before);
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), train_before);
 
     // cas-d8ab: origin is unreachable, and charlie's delivery is already in
     // the local target. The merge says containment is unverified, instead of

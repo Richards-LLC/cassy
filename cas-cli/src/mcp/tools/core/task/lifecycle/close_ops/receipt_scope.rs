@@ -1326,6 +1326,81 @@ mod tests {
             assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
             assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", Some(&[(base, failed.clone())])).is_empty());
         }
+        // GH #2175: the widened Playwright producer feeds the same park reader.
+        // Only an identical failure at the immutable base may carry a repair link.
+        for inherited in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let repo = root.path().join("worktrees/web");
+            std::fs::create_dir_all(repo.join("node_modules/.bin")).unwrap();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git").current_dir(&repo)
+                    .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                    .args(args).output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            git(&["init", "-q", "-b", "main"]);
+            std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+            std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+            std::fs::write(repo.join("package.json"), "{}").unwrap();
+            std::fs::write(repo.join("playwright.config.ts"), "export default {};\n").unwrap();
+            let path = "a.spec.ts";
+            let source = "import { test } from '@playwright/test';\nconst name = ['existing'].join('');\ntest(name, () => { work(); });\n";
+            std::fs::write(repo.join(path), format!("{source}// {}\n", if inherited { "BASE_FAIL" } else { "BASE_PASS" })).unwrap();
+            let runner = repo.join("node_modules/.bin/playwright");
+            std::fs::write(&runner, r#"#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+failed = 'BASE_FAIL' in Path('a.spec.ts').read_text()
+report = {'config': {'rootDir': str(Path.cwd())}, 'errors': [], 'suites': [
+    {'title': 'a.spec.ts', 'column': 0, 'specs': [
+        {'file': 'a.spec.ts', 'title': 'existing', 'tests': [
+            {'projectId': 'journeys', 'expectedStatus': 'passed', 'results': [
+                {'status': 'failed' if failed else 'passed', 'retry': 0,
+                 'errors': [{'message': 'seeded assertion'}] if failed else []}]}]}], 'suites': []}]}
+Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_FILE']).write_text(json.dumps(report))
+raise SystemExit(1 if failed else 0)
+"#).unwrap();
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            git(&["add", "."]);
+            git(&["commit", "-qm", "base"]);
+            let base = git(&["rev-parse", "HEAD"]);
+            git(&["checkout", "-qb", "delivery"]);
+            std::fs::write(repo.join(path), format!("{source}// BASE_FAIL\n// delivery\n")).unwrap();
+            git(&["commit", "-qam", "uncertain web delivery"]);
+            let head = git(&["rev-parse", "HEAD"]);
+            let tasks = crate::store::open_task_store(root.path()).unwrap();
+            let mut task = crate::types::Task::new("cas-web".into(), "web fixture".into());
+            task.branch = Some("delivery".into());
+            tasks.add(&task).unwrap();
+            let args = ["playwright".into(), path.into()];
+            let result = javascript::execute(root.path(), &args, &repo, &[]);
+            assert_eq!(result.is_ok(), inherited, "{result:?}");
+            let scopes = [widened::Scope::File(path.into())];
+            let missing = widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes);
+            let repairs: Vec<_> = tasks.list(None).unwrap().into_iter()
+                .filter(|task| task.labels.iter().any(|label| label == "release-repair")).collect();
+            if inherited {
+                assert!(missing.is_empty());
+                assert_eq!(repairs.len(), 1);
+                assert!(repairs[0].description.contains(&base));
+                assert!(tasks.get(&task.id).unwrap().notes.contains(&repairs[0].id));
+                // A second proof links the same repair instead of filing a duplicate.
+                javascript::execute(root.path(), &args, &repo, &[]).unwrap();
+                assert_eq!(tasks.list(None).unwrap().iter().filter(|task| task.labels.iter().any(|label| label == "release-repair")).count(), 1);
+                assert!(park_refusals(root.path(), &repo, &task, &[path.into()], &head, "main", None).is_empty());
+            } else {
+                assert!(format!("{:#}", result.unwrap_err()).contains("[G-61]"));
+                assert_eq!(missing, scopes);
+                assert!(repairs.is_empty());
+                let refusals = park_refusals(root.path(), &repo, &task, &[path.into()], &head, "main", None);
+                assert!(refusals.iter().any(|refusal| refusal.contains("[G-61]")));
+            }
+        }
+
     }
 
     #[test]

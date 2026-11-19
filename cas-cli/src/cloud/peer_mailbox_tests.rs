@@ -1257,6 +1257,38 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
         .mount(&server).await;
     Mock::given(method("GET")).and(path("/blob"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec())).mount(&server).await;
+    let host_agents = open_agent_store(&host.cas).unwrap();
+    let mut worker = host_agents.get("worker").unwrap();
+    worker.machine_id = Some("prowl".into()); worker.parent_id = Some("owner".into());
+    worker.metadata.insert("train".into(), train.id.clone());
+    worker.metadata.insert("train_owner".into(), "owner".into());
+    worker.metadata.insert("train_owner_generation".into(), park.generation.clone());
+    host_agents.update(&worker).unwrap();
+    let mut metadata = crate::ui::factory::create_metadata("owner-session",0,"owner",&["w".into()],Some(&train.id),Some(source.to_str().unwrap()),None);
+    metadata.worker_host = Some(crate::factory_session_scope::WorkerHost { train:train.id.clone(), owner:"owner".into(),
+        generation:park.generation.clone(), name:"owner".into(), session:"owner-session".into(), machine:"soundwave".into() });
+    let metadata_file = crate::ui::factory::metadata_path("owner-session");
+    std::fs::create_dir_all(metadata_file.parent().unwrap()).unwrap();
+    std::fs::write(metadata_file,serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let host_tasks = crate::store::open_task_store_local(&host.cas).unwrap();
+    let mut unsealed = host_tasks.get(&task.id).unwrap();
+    unsealed.notes = unsealed.notes.lines().filter(|line| !line.starts_with(train_parks::NOTE)).collect::<Vec<_>>().join("\n");
+    host_tasks.update(&unsealed).unwrap();
+    host_agents.try_claim(&task.id,&worker.id,1800,None).unwrap();
+    host_agents.release_lease_for_task(&task.id,"parked fixture").unwrap();
+    let (root,publishing,actor) = (host.cas.clone(),unsealed,worker);
+    let publication = tokio::task::spawn_blocking(move || train_parks::publish_ready(&root,&publishing,&actor)).await.unwrap().unwrap();
+    assert!(publication.is_some());
+    let sealed = host_tasks.get(&task.id).unwrap();
+    park = train_parks::parked(&sealed).unwrap().unwrap();
+    assert_eq!((park.worker.as_str(),park.machine.as_str(),park.tip.as_str()),("worker","prowl",tip.as_str()));
+    assert_eq!(park.epoch,host_agents.get_lease_history(&task.id,Some(1)).unwrap()[0].epoch);
+    let connection = rusqlite::Connection::open(host.cas.join("cas.db")).unwrap();
+    let payload: String = connection.query_row("SELECT payload FROM peer_message_outbox WHERE id=?1",[publication.unwrap()],|row|row.get(0)).unwrap();
+    let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+    assert_eq!((sent.sender_agent_id.as_str(),sent.recipient_agent_id.as_str()),("worker","owner"));
+    task.notes = sealed.notes;
+    crate::store::open_task_store_local(&owner.cas).unwrap().update(&task).unwrap();
     let send = |id: &str, park: &Park| {
         let mut mail = message(id, "owner", REPO, &format!("{}{}", train_parks::TAG,
             serde_json::to_string(&TrainMail::Ready { park:park.clone() }).unwrap()));
@@ -1287,6 +1319,18 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     assert!(train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
     let evidence = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&owner.cas,&task).unwrap();
     assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
+    let mut competing = Agent::new_with_role("other".into(),"other".into(),AgentRole::Supervisor);
+    competing.factory_session = Some("owner-session".into()); competing.machine_id = Some("soundwave".into());
+    agents.register(&competing).unwrap();
+    let core = crate::mcp::CasCore::with_daemon(owner.cas.clone(),None,None);
+    core.set_agent_id_for_testing(competing.id.clone());
+    let error = core.prepare_premerge_verification(&task,repo,"origin/factory/w","main").err().expect("competing supervisor cannot issue review");
+    assert!(error.message.contains("G-113"));
+    let request = serde_json::from_value(serde_json::json!({"id":task.id,"reason":"fixture proof"})).unwrap();
+    let error = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(request)).await.err().expect("competing supervisor cannot close");
+    assert!(error.message.contains("G-113"));
+    assert_eq!(crate::store::open_task_store_local(&owner.cas).unwrap().get(&task.id).unwrap().status,crate::types::TaskStatus::AwaitingMerge);
+    assert!(cas_store::get_latest_verification_dispatch(&owner.cas,&task.id).unwrap().is_none());
     let mut unparked = task.clone();
     unparked.status = crate::types::TaskStatus::Open;
     assert!(!train_parks::admitted(&owner.cas, &unparked, "factory/w", &tip));

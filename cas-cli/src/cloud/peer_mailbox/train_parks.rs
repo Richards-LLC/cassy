@@ -119,3 +119,7 @@ pub(crate) fn admitted(root: &Path, task: &Task, branch: &str, tip: &str) -> boo
         && park.path(root).ok().and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<Park>(&bytes).ok()).as_ref() == Some(&park)
 }
+
+pub(crate) fn publish_ready(_root: &Path, _task: &Task, _worker: &Agent) -> Result<Option<i64>, String> {
+    Ok(None)
+}

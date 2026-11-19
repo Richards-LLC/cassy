@@ -183,7 +183,8 @@ mod authority_tests {
         holder.join().unwrap();
         assert!(refused.starts_with("verifier_factory_store_busy:"), "{refused}");
         assert!(refused.contains("holder_operation=slow_close_fixture"), "{refused}");
-        assert!(refused.contains(&format!("holder_site={}:{}", file!(), site)), "{refused}");
+        let holder_site = refused.split_whitespace().find_map(|field| field.strip_prefix("holder_site="));
+        assert_eq!(holder_site, Some(format!("{}:{}", file!(), site).as_str()));
     }
 }
 

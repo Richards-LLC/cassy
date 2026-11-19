@@ -844,7 +844,6 @@ fn pooled_write_budget() -> Duration {
 /// [`begin_immediate_pooled`] with an explicit per-attempt busy wait and total
 /// budget, so tests can exhaust the budget quickly.
 #[track_caller]
-#[track_caller]
 pub fn begin_immediate_pooled_bounded(
     shared: &Mutex<Connection>,
     attempt_busy: Duration,
@@ -1427,7 +1426,8 @@ mod tests {
         // Holder identity and acquisition location are diagnostic data, rather
         // than a sentence whose prose a test must pin.
         assert!(detail.contains("holder_operation=slow_close_fixture"), "{detail}");
-        assert!(detail.contains(&format!("holder_site={}:{}", file!(), site)), "{detail}");
+        let holder_site = detail.split_whitespace().find_map(|field| field.strip_prefix("holder_site="));
+        assert_eq!(holder_site, Some(format!("{}:{}", file!(), site).as_str()));
         assert!(!HOLDERS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&(Arc::as_ptr(&conn) as usize)));
         // A raw external mutex owner must not inherit the preceding identity.
         let _raw = conn.lock().unwrap();

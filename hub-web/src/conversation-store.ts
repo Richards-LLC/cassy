@@ -377,6 +377,7 @@ export function validCachedSession(raw: unknown): HubSession | undefined {
   }
   if (typeof row.ws_port === "number" && Number.isInteger(row.ws_port)) session.ws_port = row.ws_port;
   if (row.dormant === true) session.dormant = true;
+  if (row.standby === true) session.standby = true;
   return session;
 }
 

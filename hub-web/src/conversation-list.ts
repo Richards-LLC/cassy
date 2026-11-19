@@ -68,6 +68,8 @@ export interface ConversationRow {
   needsYou?: boolean;
   operatorReason?: string;
   supervisorState?: "working" | "idle" | "needs-you" | "offline";
+  /** On standby: workers stopped, supervisor quiet until the operator resumes it (cas-94a0). */
+  standby?: boolean;
   /**
    * One of several live sessions of a project on one machine (cas-55a4). The
    * rows sit together under one heading; the most recently active one is

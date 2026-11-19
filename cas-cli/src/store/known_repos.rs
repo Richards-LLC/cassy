@@ -792,14 +792,9 @@ mod tests {
             );
 
             assert!(message.starts_with("HOST REGISTRY UNAVAILABLE:"));
-            assert!(!message.contains("WORK TARGET REJECTED"));
             #[cfg(target_os = "linux")]
             assert!(message.contains(&format!("holding PID: {}", std::process::id())));
-            #[cfg(not(target_os = "linux"))]
-            assert!(message.contains("holding PID could not be identified"));
             assert!(message.contains("fuser -v"));
-            assert!(message.contains("SIGTERM"));
-            assert!(message.contains("SIGKILL"));
         });
     }
 

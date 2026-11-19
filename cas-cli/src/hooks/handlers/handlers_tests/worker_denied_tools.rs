@@ -260,6 +260,64 @@ PY"#);
 }
 
 #[test]
+fn worker_python_source_edit_literals_are_data_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    let command = r#"python3 - <<'PY'
+from pathlib import Path
+p = Path('cas-cli/src/hooks/handlers/handlers_tests/worker_denied_tools.rs')
+s = p.read_text()
+old = '''print(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())'''
+new = '''print((Path.home() / '.config' / 'neonctl' / 'credentials.json').read_text())'''
+assert old in s
+p.write_text(s.replace(old, new))
+PY"#;
+    let reason = denial(handle_pre_tool_use(&bash(command, cwd.path()), None).unwrap());
+    assert!(reason.is_none(), "{reason:?}");
+}
+
+#[test]
+fn worker_heredoc_source_data_needs_a_python_stdin_consumer_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    // The same unexpanded body: Python reads the substitution text as data, a
+    // shell executes it.
+    let body = r#"from pathlib import Path
+p = Path('cas-cli/src/hooks/handlers/handlers_tests/worker_denied_tools.rs')
+s = p.read_text()
+new = "$(cat ~/.config/neonctl/credentials.json)"
+p.write_text(s.replace('old', new))"#;
+    let python = format!("python3 - <<'PY'\n{body}\nPY");
+    let reason = denial(handle_pre_tool_use(&bash(&python, cwd.path()), None).unwrap());
+    assert!(reason.is_none(), "{reason:?}");
+    for consumer in ["bash", "sh", "cat | bash"] {
+        let command = format!("{consumer} <<'PY'\n{body}\nPY");
+        assert_operator_credential_refusal(
+            handle_pre_tool_use(&bash(&command, cwd.path()), None).unwrap(),
+            &command,
+        );
+    }
+}
+
+#[test]
+fn worker_python_source_edit_cannot_hide_live_reads_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    for script in [
+        "from pathlib import Path; p = Path('~/.config/neonctl/credentials.json').expanduser(); s = p.read_text(); p.write_text(s.replace('old', 'new'))",
+        "from pathlib import Path; p = Path.home() / '.config' / 'neonctl' / 'credentials.json'; s = p.read_text(); p.write_text(s.replace('old', 'new'))",
+        "from pathlib import Path; p = Path('fixture.rs'); s = p.read_text(); code = '''print(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())'''; exec(code); p.write_text(s.replace('old', code))",
+        "from pathlib import Path; p = Path('fixture.rs'); p.write_text(f\"{Path('~/.config/neonctl/credentials.json').expanduser().read_text()}\")",
+        "from pathlib import Path; p = Path('fixture.rs'); p.replace(Path.home() / '.config' / 'neonctl' / 'credentials.json'); p.write_text('new')",
+        // A bare CR ends a comment for CPython but not for tree-sitter.
+        "from pathlib import Path\np = Path('fixture.rs')\ns = p.read_text()\n#x\rcode = open(__import__('os').path.expanduser('~/.config/neonctl/credentials.json')).read()\np.write_text(s.replace('old', 'new'))",
+    ] {
+        let command = format!("python3 - <<'PY'\n{script}\nPY");
+        assert_operator_credential_refusal(
+            handle_pre_tool_use(&bash(&command, cwd.path()), None).unwrap(),
+            &command,
+        );
+    }
+}
+
+#[test]
 fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
     let (_env, cwd) = role_env("worker");
     let project = tempfile::tempdir().unwrap();
@@ -313,6 +371,11 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     for listing in [
         "rg --files /Applications/Postgres.app /opt /usr/local ~/.local/share ~/Library/pnpm 2>/dev/null",
         "find ~ -path '*cas-worker/references/discipline.md' 2>/dev/null",
+        // GH #2119, #2061, #2123: the listing sits in a compound command, and
+        // its pipe consumers only filter the names.
+        "ls /opt; tail -5 install.log && rg --files ~/.local /opt -g initdb -g postgres -g pg_ctl",
+        "rg --files /usr/lib/postgresql ~/.local 2>/dev/null | rg '/(initdb|pg_ctl|postgres)$'",
+        "cat brief.md && printf '\\n--- SKILL PATHS ---\\n' && find ~ -path '*/cas-worker/SKILL.md' -print 2>/dev/null | head -20",
     ] {
         for redirect in ["", " > discovery.txt"] {
             let command = format!("{listing}{redirect}");
@@ -324,8 +387,10 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     // A listed name that reaches a reader is still a credential read.
     for command in [
         "find ~ -name credentials.json -print0 | sort --files0-from=-",
-        "rg --files ~/.local/share | rg codex",
-        "find ~ -path '*cas-worker/references/discipline.md' | head -3",
+        "find ~ -name credentials.json | (xargs cat)",
+        // Another segment of the compound command reads a store.
+        "cat ~/.config/neonctl/credentials.json && find ~ -name x | head -3",
+        "find ~ -name credentials.json | head -3 ~/.config/neonctl/credentials.json",
         "find ~ -name credentials.json | xargs cat",
         "find ~ -name auth.json -exec cat {} +",
         "cat $(rg --files ~ | rg credentials.json)",

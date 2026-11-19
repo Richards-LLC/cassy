@@ -58,9 +58,7 @@ pub(crate) fn prepare(
         for proof in inventory.scope.proof_refs.iter().filter(|p| p.kind == ReleaseProofKind::Review) {
             let Some(receipt) = receipts.iter().find(|r| proof_matches(proof, r)
                 && r.staging_sha == inventory.scope.reviewed_sha) else { continue; };
-            let Ok(body) = std::fs::read_to_string(&receipt.ledger_path) else { continue; };
-            if body.len() as u64 == receipt.ledger_size_bytes
-                && format!("{:x}", Sha256::digest(body.as_bytes())) == receipt.ledger_sha256 {
+            if let Some(body) = bound_review_body(receipt) {
                 reviews.push((receipt.clone(), body));
             }
         }
@@ -136,6 +134,17 @@ pub(crate) fn prepare(
         })
     }
 
+    /// cas-0489: the supervisor's `reviewed-drop: <SHA>[,<SHA>...] -- <why>` for
+    /// this delivery, recorded as a NOT A ROUTE row of the release review
+    /// ledger bound to the delivery's reviewed head. It is only a claim here:
+    /// the caller validates it against the commits with the same check G-56 uses.
+    pub(crate) fn reviewed_drop(&self, id: &str, anchor: Option<&str>) -> Option<String> {
+        self.reviews.iter().find_map(|(receipt, body)| {
+            receipt.task_heads.get(id).filter(|head| anchor.is_none_or(|anchor| *head == anchor))?;
+            reviewed_drop_in_body(body, id)
+        })
+    }
+
     pub(crate) async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
         CURRENT.scope(self, future).await
     }
@@ -143,6 +152,38 @@ pub(crate) fn prepare(
     fn delivery(&self, id: &str) -> Option<&ReleaseDelivery> {
         self.inventory.deliveries.iter().find(|d| d.task_id == id)
     }
+}
+
+fn bound_review_body(receipt: &QaBatchReceipt) -> Option<String> {
+    let body = std::fs::read_to_string(&receipt.ledger_path).ok()?;
+    (body.len() as u64 == receipt.ledger_size_bytes
+        && format!("{:x}", Sha256::digest(body.as_bytes())) == receipt.ledger_sha256)
+        .then_some(body)
+}
+
+fn reviewed_drop_in_body(body: &str, id: &str) -> Option<String> {
+    crate::qa_ledger::parse(body, 0).rows.iter()
+        .filter(|row| row.verdict == crate::qa_ledger::Verdict::NotARoute && report_names(&row.cell, id))
+        .find_map(|row| [&row.expected, &row.observed].into_iter().find_map(|text| {
+            text.find("reviewed-drop:").map(|at| text[at..].trim().to_string())
+        }))
+}
+
+/// A tag can reuse a recorded release review for this exact delivery only
+/// when the reviewed commit is in the tag's history and its ledger bytes match.
+/// The caller still validates the named superseding commits against the tag.
+pub(super) fn reviewed_drop_for_tag(
+    receipts: &[QaBatchReceipt], repo: &Path, id: &str, anchor: &str, tag_sha: &str,
+) -> Option<String> {
+    receipts.iter().filter(|receipt| {
+        receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA
+            && receipt.task_heads.get(id).is_some_and(|head| head == anchor)
+            && ancestor(repo, &receipt.staging_sha, tag_sha) == Some(true)
+    }).find_map(|receipt| {
+        let body = bound_review_body(receipt)?;
+        if ledger_marks_reverted(&body, id) { return None; }
+        reviewed_drop_in_body(&body, id)
+    })
 }
 
 fn ledger_marks_reverted(body: &str, id: &str) -> bool {
@@ -694,8 +735,9 @@ pub(crate) fn reconcile_members(
                 if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|current| current != anchor) {
                     return Err("RELEASE_GENERATION_CHANGED".into());
                 }
-                release_delivery_effect(repo, delivery.base_sha.as_deref(), anchor,
-                    &inventory.scope.final_release_sha, &id).map_err(|code| code.close_gate())?;
+                release_delivery_effect_reviewed(repo, delivery.base_sha.as_deref(), anchor,
+                    &inventory.scope.final_release_sha, &id, review.reviewed_drop(&id, Some(anchor)).as_deref())
+                    .map_err(|code| code.close_gate())?;
                 anchors.push(anchor);
             }
             let tier_zero = delivery.anchor.as_deref().is_some_and(|anchor| {

@@ -588,6 +588,18 @@ pub fn add_system_verification(cas_dir: &Path, verification: &Verification) -> R
     insert_verification_with_conn(&conn, verification)
 }
 
+/// A local dispatch nobody can still resolve: it timed out, or it is still
+/// pending or claimed past its deadline (a crashed verifier). A peer approval
+/// of the delivered tip may supersede it (GH #1913); a live or already
+/// resolved local cycle keeps its ownership.
+pub fn verification_dispatch_is_stale(dispatch: &VerificationDispatch, now: DateTime<Utc>) -> bool {
+    match dispatch.state {
+        VerificationDispatchState::TimedOut => true,
+        VerificationDispatchState::Pending | VerificationDispatchState::Claimed => dispatch.deadline_at <= now,
+        VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated => false,
+    }
+}
+
 /// Atomically admit daemon-validated peer authority into the existing proof
 /// records. Generic store writes cannot mint this provenance. A replay never
 /// updates a verdict or replaces a local verification cycle. A newer source
@@ -639,7 +651,12 @@ pub fn import_peer_premerge_verification(
              ORDER BY created_at DESC,id DESC LIMIT 1",
             [&existing.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
         ).optional()?;
-        let replaceable = matches!(existing.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+        // The approval must also be the newer proof, or the superseded row
+        // would stay the task's latest dispatch.
+        let stale_local = prior.is_none() && old_verdict.is_none() && existing.id != dispatch.id
+            && dispatch.requested_at > existing.requested_at
+            && verification_dispatch_is_stale(&existing, Utc::now());
+        let replaceable = stale_local || matches!(existing.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
             && existing.id != dispatch.id && dispatch.requested_at > existing.requested_at
             && prior.is_some_and(|prior| {
                 prior.receipt.status == VerificationStatus::Approved
@@ -659,7 +676,7 @@ pub fn import_peer_premerge_verification(
             return Err(StoreError::VerificationDispatchConflict { dispatch: Box::new(existing) });
         }
         tx.execute("UPDATE verification_dispatches SET state='invalidated' WHERE id=?1", [&existing.id])?;
-        superseded = Some(existing);
+        superseded = Some((existing, stale_local));
     }
     // Legacy local verdicts also represent an existing proof cycle.
     let has_verdict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM verifications WHERE task_id=?1)", [&expected_task.id], |row| row.get(0))?;
@@ -676,11 +693,15 @@ pub fn import_peer_premerge_verification(
     )?;
     insert_verification_with_conn(&tx, verification)?;
     record_event_with_conn(&tx, approval_event)?;
-    if let Some(prior) = superseded {
-        let event = Event::new(EventType::VerificationAdded, EventEntityType::Task, &expected_task.id,
-            "Peer approval replaced after source review of repaired delivery")
+    if let Some((prior, stale_local)) = superseded {
+        let (summary, code) = if stale_local {
+            ("Peer approval superseded a stale local verification dispatch", "peer_premerge_stale_dispatch_superseded")
+        } else {
+            ("Peer approval replaced after source review of repaired delivery", "peer_premerge_approval_replaced")
+        };
+        let event = Event::new(EventType::VerificationAdded, EventEntityType::Task, &expected_task.id, summary)
             .with_metadata(serde_json::json!({
-                "code": "peer_premerge_approval_replaced",
+                "code": code,
                 "old_dispatch_id": prior.id, "new_dispatch_id": dispatch.id,
                 "old_source_sha": prior.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref())
                     .map(|peer| peer.receipt.source_sha.as_str()),
@@ -3108,15 +3129,27 @@ fn issue_server_verifier_handoff_with_conn(
         ));
     }
 
-    let dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;
+    let mut dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;
     if dispatch.task_id != task_id
         || dispatch.owner_agent_id != issuer_agent_id
         || dispatch.state != VerificationDispatchState::Pending
-        || dispatch.deadline_at <= now
     {
-        return Err(StoreError::Parse(
-            "verifier handoff requires the exact active owned dispatch".to_string(),
-        ));
+        return Err(StoreError::VerifierHandoffNotActive {
+            dispatch_id: dispatch.id,
+        });
+    }
+    // A replacement is scheduled against a dispatch whose first verifier never
+    // started, so its deadline may already have passed while it is still
+    // pending. Refresh it in this transaction so the claim cannot be refused
+    // for the very expiry the replacement exists to recover from.
+    if dispatch.deadline_at <= now {
+        let deadline = now + Duration::minutes(10);
+        tx.execute(
+            "UPDATE verification_dispatches SET deadline_at = ?2
+             WHERE id = ?1 AND state = 'pending' AND verifier_agent_id IS NULL",
+            params![dispatch.id, deadline.to_rfc3339()],
+        )?;
+        dispatch.deadline_at = deadline;
     }
 
     let issued_at = now;
@@ -3330,9 +3363,9 @@ fn bind_server_verifier_handoff_with_conn(
         || dispatch.state != VerificationDispatchState::Pending
         || dispatch.deadline_at <= now
     {
-        return Err(StoreError::Parse(
-            "verifier handoff exact dispatch is not active".to_string(),
-        ));
+        return Err(StoreError::VerifierHandoffNotActive {
+            dispatch_id: dispatch.id,
+        });
     }
 
     let bound_at = now;
@@ -5067,6 +5100,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn replacement_handoff_claims_a_pending_dispatch_past_its_deadline_gh_2135() {
+        let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-expired",
+            "owner",
+            "owner",
+            Utc::now() - Duration::minutes(5),
+        )
+        .expect("dispatch");
+        issue_server_verifier_handoff(dir.path(), "cas-handoff-expired", &dispatch.id, "owner", "replacement")
+            .expect("replacement handoff on an expired pending dispatch");
+        let bound = bind_server_verifier_handoff(dir.path(), "owner", "replacement-child")
+            .expect("replacement claims the exact dispatch");
+        assert_eq!(bound.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+        let claimed = get_verification_dispatch(dir.path(), &dispatch.id).unwrap();
+        assert_eq!(claimed.state, VerificationDispatchState::Claimed);
+        assert!(claimed.deadline_at > Utc::now());
+    }
+
+    #[test]
+    fn refused_replacement_handoff_is_typed_not_a_parse_error_gh_2135() {
+        let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-foreign",
+            "owner",
+            "owner",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("dispatch");
+        let child = Agent::new_sub_agent("child".into(), "task-verifier".into(), "not-the-owner".into());
+        let error = issue_and_bind_server_verifier_handoff(
+            dir.path(),
+            "cas-handoff-foreign",
+            &dispatch.id,
+            "daemon:foreign",
+            &child,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, StoreError::VerifierHandoffNotActive { dispatch_id } if *dispatch_id == dispatch.id),
+            "{error:?}"
+        );
+        // A valid handoff can lose its active proof cycle before a child binds.
+        issue_server_verifier_handoff(dir.path(), "cas-handoff-foreign", &dispatch.id, "owner", "late-bind").unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute("UPDATE verification_dispatches SET owner_agent_id = 'new-owner' WHERE id = ?1", [&dispatch.id]).unwrap();
+        let error = bind_server_verifier_handoff(dir.path(), "owner", "late-child").unwrap_err();
+        assert!(matches!(error, StoreError::VerifierHandoffNotActive { dispatch_id } if dispatch_id == dispatch.id));
+
     }
 
     #[test]

@@ -254,7 +254,15 @@ fn foreign_task_branch_start_refusal(
 /// Keep the resolved SHA immutable across branch preparation and checkout.
 fn worker_start_target_base(git: &GitOperations, target: &str) -> Result<String, String> {
     let fresh = git.resolve_fresh_base(target).map_err(|error| error.to_string())?;
-    Ok(git.resolve_commit(&format!("refs/remotes/origin/{target}")).unwrap_or(fresh.sha))
+    let base = git.resolve_commit(&format!("refs/remotes/origin/{target}")).unwrap_or(fresh.sha);
+    // cas-8bc4: resolve_fresh_base reports an absent branch as an empty sha;
+    // never hand git an empty start point.
+    if base.is_empty() {
+        return Err(format!(
+            "target branch `{target}` exists neither locally nor on origin; ask the supervisor to create or push it from the project base, then retry task start"
+        ));
+    }
+    Ok(base)
 }
 
 fn checkout_task_beside_parked_delivery(
@@ -590,7 +598,7 @@ fn reconcile_reused_factory_branch(
 
 #[cfg(test)]
 mod reused_factory_branch_tests {
-    use super::{reconcile_reused_factory_branch, ReusedFactoryBranchStart};
+    use super::{checkout_task_beside_parked_delivery, reconcile_reused_factory_branch, ReusedFactoryBranchStart};
     use std::path::Path;
     use std::process::Command;
 
@@ -617,6 +625,49 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["add", "base"]);
         git(repo.path(), &["commit", "-m", "base"]);
         repo
+    }
+
+    /// cas-8bc4: an epic target branch that exists neither locally nor on
+    /// origin must be refused naming that branch, never passed to git as an
+    /// empty start point, and must leave no task branch behind.
+    #[test]
+    fn missing_target_branch_is_refused_by_name_and_creates_no_task_branch() {
+        let repo = repo();
+        let target = "epic/never-pushed";
+        for require_fresh_base in [false, true] {
+            let error = checkout_task_beside_parked_delivery(
+                repo.path(), "test-worker", "cas-8bc4", target, require_fresh_base,
+            )
+            .expect_err("missing target must be refused");
+            assert!(error.contains(target), "{error}");
+        }
+        let branches = git(repo.path(), &["branch", "--list", "factory/*"]);
+        assert!(branches.is_empty(), "no task branch may be created: {branches}");
+    }
+
+    /// cas-8bc4 adversarial probe: with an origin configured, a target that is
+    /// absent there is still refused by name; a target present only locally or
+    /// only on origin still starts from its own tip, never an empty start point.
+    #[test]
+    fn target_branch_present_only_locally_or_only_on_origin_still_starts() {
+        let repo = repo();
+        let origin = tempfile::tempdir().expect("origin dir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(repo.path(), &["remote", "add", "origin", &origin.path().display().to_string()]);
+        git(repo.path(), &["push", "origin", "main"]);
+        git(repo.path(), &["branch", "epic/local-only"]);
+        git(repo.path(), &["push", "origin", "main:refs/heads/epic/origin-only"]);
+
+        let error = checkout_task_beside_parked_delivery(repo.path(), "test-worker", "cas-0001", "epic/absent", false)
+            .expect_err("a target absent locally and on origin is refused");
+        assert!(error.contains("epic/absent"), "{error}");
+        assert!(git(repo.path(), &["branch", "--list", "factory/*"]).is_empty());
+
+        for (task, target) in [("cas-0002", "epic/local-only"), ("cas-0003", "epic/origin-only")] {
+            let branch = checkout_task_beside_parked_delivery(repo.path(), "test-worker", task, target, false)
+                .expect("a target present in one place starts");
+            assert_eq!(git(repo.path(), &["rev-parse", &branch]), git(repo.path(), &["rev-parse", "main"]));
+        }
     }
 
     #[test]
@@ -3462,12 +3513,11 @@ impl CasCore {
                 Acquire::PeerHolds(hold) => {
                     peer_notes = crate::gates::override_tag("G-15", peer_notes);
                     peer_notes.push_str(&format!(
-                        "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell them, so you don't both work it: {}coordination action=message target={} summary=\"took over {}\" message=\"...\"",
+                        "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell your supervisor to coordinate the handoff: {}coordination action=message target=supervisor summary=\"took over {}\" message=\"...\"",
                         hold.describe(),
                         req.id,
                         hold.until(),
                         crate::mcp::tools::core::guidance::caller_prefix(),
-                        hold.name(),
                         req.id,
                     ));
                 }
@@ -3930,7 +3980,8 @@ impl CasCore {
             Ok(supervisor_push::LifecyclePushResult::AlreadyComplete { .. }) => {
                 "\n\n📡 Supervisor lifecycle event already complete (outbox)".to_string()
             }
-            Ok(supervisor_push::LifecyclePushResult::NoSupervisor) => String::new(),
+            Ok(supervisor_push::LifecyclePushResult::NoSupervisor
+                | supervisor_push::LifecyclePushResult::Superseded) => String::new(),
             Err(e) => {
                 let key = supervisor_push::transition_key(
                     &req.id,
@@ -6569,6 +6620,90 @@ mod preassigned_start_message_order_tests {
         };
         agent.factory_session = Some(factory_session.to_string());
         store.register(&agent).expect("register agent");
+    }
+
+    /// GH #1889: replay the cas-0e54 handoff after the peer supervisor exits.
+    /// Follow the emitted coordination target through the real message router.
+    #[tokio::test]
+    async fn forced_peer_takeover_notice_routes_to_own_supervisor_cas_c2b0() {
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use rmcp::model::{ContentBlock, ErrorCode};
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-src\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        register_agent(agents.as_ref(), "replacement", "smooth-shark-58", AgentRole::Worker, "soundwave");
+        register_agent(agents.as_ref(), "owner", "local-supervisor", AgentRole::Supervisor, "soundwave");
+        core.set_agent_id_for_testing("replacement".into());
+        let tasks = core.open_task_store().unwrap();
+        let mut task = Task::new("cas-0e54".into(), "Authorized takeover".into());
+        task.assignee = Some("smooth-shark-58".into());
+        tasks.add(&task).unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        let key = crate::cloud::peer_claims::claim_key("cas-src", &task.id);
+        Mock::given(method("POST")).and(path(format!("/api/agents/tasks/{key}/claim")))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "error":"already_claimed", "owner_agent_id":"former-worker",
+                "expires_at":chrono::Utc::now() + chrono::Duration::minutes(10),
+            }))).mount(&server).await;
+        // The peer worker's registration/claim survives its supervisor's exit;
+        // its missing owner means it is no longer a routable worker peer.
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents":[
+                {"id":"former-worker", "name":"rapid-bear-57", "agent_type":"worker",
+                 "user_id":"account", "status":"active", "last_heartbeat":chrono::Utc::now(),
+                 "active_tasks":1, "machine_id":"prowl",
+                 "metadata":{"role":"worker", "factory_session":"ended-peer", "canonical_id":"cas-src", "hostname":"prowl"}},
+                {"id":"replacement", "name":"smooth-shark-58", "agent_type":"worker",
+                 "user_id":"account", "status":"active", "last_heartbeat":chrono::Utc::now(),
+                 "active_tasks":0, "machine_id":"soundwave",
+                 "metadata":{"role":"worker", "factory_session":"soundwave", "canonical_id":"cas-src", "hostname":"soundwave"}}
+            ]}))).mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/agents/locks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"success", "locks":[]})))
+            .mount(&server).await;
+
+        let refusal = core.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: task.id.clone(), brief: Some(true), force: None,
+        })).await.unwrap_err();
+        assert_eq!(refusal.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
+
+        let result = core.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: task.id.clone(), brief: Some(true), force: Some(true),
+        })).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, "replacement");
+        let output = result.content.into_iter().filter_map(|item| match item {
+            ContentBlock::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // target= is a machine tool argument; execute it instead of pinning prose.
+        let target = output.split_whitespace().find_map(|word| word.strip_prefix("target="))
+            .expect("takeover supplies a coordination target");
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        service.coordination(Parameters(serde_json::from_value(json!({
+            "action":"message", "target":target, "summary":"takeover", "message":"cas-0e54 takeover completed",
+        })).unwrap())).await.expect("the takeover's suggested route must accept the replacement");
+        let rows = crate::store::open_prompt_queue_store(root).unwrap().poll_all(10).unwrap();
+        let notices = rows.iter().filter(|row| row.summary.as_deref() == Some("takeover"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].target, "local-supervisor");
+        assert_eq!(notices[0].factory_session.as_deref(), Some("soundwave"));
     }
 
     #[tokio::test]

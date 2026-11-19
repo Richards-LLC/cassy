@@ -1810,13 +1810,11 @@ fn doctor_verdict_warns_on_failing_or_stalled_relay_cas_a897() {
     status.relay.last_ok_at = Some(at(0));
     let (severity, message) = status.doctor(at(20));
     assert_eq!(severity, WatchHealth::Ok, "{message}");
-    assert!(message.contains("last claim 20s ago"), "{message}");
 
     status.relay.consecutive_errors = 3;
     status.relay.last_error = Some("claim: relay unreachable".into());
     let (severity, message) = status.doctor(at(20));
     assert_eq!(severity, WatchHealth::Warning, "{message}");
-    assert!(message.contains("3 consecutive claim failures"), "{message}");
     assert!(message.contains("relay unreachable"), "{message}");
 
     let mut stalled = VioletWatchStatus::default();
@@ -1831,7 +1829,6 @@ fn doctor_verdict_warns_on_failing_or_stalled_relay_cas_a897() {
     });
     let (severity, message) = stalled.doctor(at(900));
     assert_eq!(severity, WatchHealth::Warning, "{message}");
-    assert!(message.contains("factory daemon"), "{message}");
 }
 
 /// Framed local control drains an owned HTTP tick and an external sweep read

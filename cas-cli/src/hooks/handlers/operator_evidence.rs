@@ -19,9 +19,20 @@ static LITERAL: LazyLock<Regex> = LazyLock::new(|| {
 });
 static CLAIM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"(?i)\b(merged|published|saved|deleted|completed|finished|done|passed|shipped|released|clipboard)\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|half|several|few)\s+(seconds?|minutes?|hours?|days?|tasks?|branches|deliveries|tests?)\b"
+    r"(?i)\b(merged|landed|published|saved|deleted|completed|finished|done|passed|fixed|green|shipped|released|clipboard)\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|half|several|few)\s+(seconds?|minutes?|hours?|days?|tasks?|branches|deliveries|tests?)\b"
 ).unwrap()
 });
+
+/// Claims that a delivery reached its target or passed CI. Unlike the rest of
+/// `CLAIM`, an unrelated successful tool never satisfies them.
+static DELIVERY_CLAIM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(merged|landed|shipped|green)\b").unwrap());
+/// A Cassy task result that records a closed delivery.
+static TASK_CLOSED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)status:\s*closed|\bclosed\b.*\bmerged\b|\bmerged\b.*\bclosed\b").unwrap());
+/// A Cassy merge receipt delivered through the inbox.
+static MERGE_RECEIPT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)merged and closed by cassy").unwrap());
 
 #[derive(Default)]
 struct Turn {
@@ -34,6 +45,11 @@ struct Call {
     command: String,
     clipboard_read: bool,
     output: Option<String>,
+    /// The tool that ran and its `action`, for Cassy tool results.
+    tool: String,
+    action: String,
+    /// The successful result is delivery evidence (see `delivery_evidence`).
+    delivery: bool,
 }
 
 /// Read a bounded tail. Without a visible user-turn boundary, no citation is
@@ -119,7 +135,7 @@ fn current_turn(input: &HookInput) -> Turn {
                 }
                 for block in blocks {
                     if block["type"] == "tool_use" {
-                        turn.call(block["id"].as_str(), &block["input"]);
+                        turn.call(block["id"].as_str(), block["name"].as_str(), &block["input"]);
                     }
                 }
             }
@@ -142,7 +158,7 @@ fn current_turn(input: &HookInput) -> Turn {
                         .as_str()
                         .and_then(|s| serde_json::from_str::<Value>(s).ok())
                         .unwrap_or_default();
-                    turn.call(payload["call_id"].as_str(), &args);
+                    turn.call(payload["call_id"].as_str(), payload["name"].as_str(), &args);
                 }
                 Some("function_call_output" | "custom_tool_call_output") => {
                     turn.result(payload["call_id"].as_str(), &payload["output"], false);
@@ -166,7 +182,7 @@ fn current_turn(input: &HookInput) -> Turn {
 }
 
 impl Turn {
-    fn call(&mut self, id: Option<&str>, input: &Value) {
+    fn call(&mut self, id: Option<&str>, name: Option<&str>, input: &Value) {
         let Some(id) = id else { return };
         let command = input["command"]
             .as_str()
@@ -199,6 +215,9 @@ impl Turn {
                 command: command.to_owned(),
                 clipboard_read,
                 output: None,
+                tool: name.unwrap_or_default().to_owned(),
+                action: input["action"].as_str().unwrap_or_default().to_owned(),
+                delivery: false,
             },
         );
     }
@@ -217,7 +236,58 @@ impl Turn {
                 .map(str::to_owned)
                 .unwrap_or_else(|| output.to_string()),
         );
+        call.delivery = delivery_evidence(call);
     }
+}
+
+/// A successful result that proves a delivery state, judged by what actually
+/// ran rather than by words in its arguments or output:
+/// - an executed `git merge-base --is-ancestor` (exit 0, `&&` chains only);
+/// - a gh run or check status whose result shows success with nothing pending
+///   or failing;
+/// - a Cassy task close/show result recording a closed delivery, or a Cassy
+///   merge receipt from the inbox.
+/// Shell output that mentions a word, a different gh verb, or a Read result
+/// never counts.
+fn delivery_evidence(call: &Call) -> bool {
+    let output = call.output.as_deref().unwrap_or_default();
+    if call.command.is_empty() {
+        let cassy = |suffix: &str| call.tool.ends_with(suffix);
+        return (cassy("task") && matches!(call.action.as_str(), "close" | "show" | "get") && TASK_CLOSED.is_match(output))
+            || (cassy("coordination") && matches!(call.action.as_str(), "inbox_poll" | "inbox") && MERGE_RECEIPT.is_match(output));
+    }
+    let Ok(words) = shell_words::split(&call.command) else { return false };
+    // Exit 0 proves every command only when they are joined by `&&`.
+    if words.iter().any(|word| word.contains(['|', ';']) || word == "&") {
+        return false;
+    }
+    let lower = output.to_ascii_lowercase();
+    words.split(|word| word == "&&").any(|segment| match segment.first().map(String::as_str) {
+        Some("git") => {
+            let mut rest = segment[1..].iter().map(String::as_str);
+            let mut subcommand = None;
+            while let Some(word) = rest.next() {
+                match word {
+                    "-C" | "-c" => { rest.next(); }
+                    _ if word.starts_with('-') => {}
+                    _ => { subcommand = Some(word); break; }
+                }
+            }
+            subcommand == Some("merge-base") && segment.iter().any(|word| word == "--is-ancestor")
+        }
+        Some("gh") => {
+            let verbs: Vec<&str> = segment[1..].iter().map(String::as_str).filter(|word| !word.starts_with('-')).take(2).collect();
+            let status = match verbs.as_slice() {
+                ["run", "view" | "list" | "watch"] | ["pr", "checks"] => true,
+                ["api", path] => path.contains("check-runs") || path.contains("/status"),
+                _ => false,
+            };
+            status
+                && (lower.contains("success") || lower.contains("pass"))
+                && !["pending", "in_progress", "queued", "fail", "cancel"].iter().any(|state| lower.contains(state))
+        }
+        _ => false,
+    })
 }
 
 fn failed(value: &Value) -> bool {
@@ -322,12 +392,14 @@ pub(super) fn denial(input: &HookInput, text: &str) -> Option<String> {
             })
         });
         let clipboard = plain.to_ascii_lowercase().contains("clipboard");
+        let delivery_unproven = DELIVERY_CLAIM.is_match(&plain) && !evidence.iter().any(|call| call.delivery);
         if evidence.is_empty()
+            || delivery_unproven
             || !literals_match
             || (clipboard && !evidence.iter().any(|call| call.clipboard_read))
         {
             return Some(String::from(
-                "Operator claim lacks matching same-turn evidence. Numbers and SHAs must occur in successful tool results from this turn; exact commands may be named in backticks. Optional [evidence:<tool-use-id>] citations narrow the results used. Otherwise prefix the paragraph with [unverified]; calculate conversions with a tool. Clipboard claims need a wl-paste or pbpaste read after the latest overwrite.",
+                "Operator claim lacks matching same-turn evidence. Numbers and SHAs must occur in successful tool results from this turn; exact commands may be named in backticks. Optional [evidence:<tool-use-id>] citations narrow the results used. Otherwise prefix the paragraph with [unverified]; calculate conversions with a tool. Clipboard claims need a wl-paste or pbpaste read after the latest overwrite. A merged, landed, shipped or green claim needs delivery evidence from this turn: a successful `git merge-base --is-ancestor`, a successful gh check or run result, a Cassy task close or status, or a merge receipt.",
             ));
         }
     }

@@ -12,6 +12,10 @@ cache_root="$fixture_root/cache"
 cgroup_root="$fixture_root/cgroup"
 proc_root="$fixture_root/proc"
 mkdir -p "$cache_root" "$cgroup_root/slot1" "$cgroup_root/slot2" "$proc_root/101" "$proc_root/102"
+for slot in {3..8}; do
+    mkdir -p "$cgroup_root/slot$slot"
+    : >"$cgroup_root/slot$slot/cgroup.procs"
+done
 mkdir -p "$fixture_root/volume"
 printf '101\n' >"$cgroup_root/slot1/cgroup.procs"
 printf '102\n' >"$cgroup_root/slot2/cgroup.procs"
@@ -21,7 +25,9 @@ printf 'Runner.Listener\n' >"$proc_root/102/comm"
 cat >"$fixture_root/systemctl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-    *cassy-actions-runner-2.service*) printf '/slot2\n' ;;
+    *cassy-actions-runner-[2-8].service*)
+        unit="${!#}"; slot="${unit#cassy-actions-runner-}"
+        printf '/slot%s\n' "${slot%.service}" ;;
     *cassy-actions-runner.service*) printf '/slot1\n' ;;
     *) exit 2 ;;
 esac
@@ -153,6 +159,15 @@ test -d "$busy_marker"
 printf 'ok   Runner.Worker blocks pruning even without cargo/rustc\n'
 
 sed -i '/103/d' "$cgroup_root/slot1/cgroup.procs"
+printf '103\n' >"$cgroup_root/slot8/cgroup.procs"
+if run_pruner --now >/dev/null 2>&1; then
+    printf 'FAIL forced prune accepted an active light runner in slot 8\n' >&2
+    exit 1
+fi
+test -d "$busy_marker"
+: >"$cgroup_root/slot8/cgroup.procs"
+printf 'ok   light slot 8 participates in the idle gate\n'
+
 mv "$cgroup_root/slot2/cgroup.procs" "$cgroup_root/slot2/cgroup.procs.unreadable"
 if run_pruner --check-idle >/dev/null 2>&1; then
     printf 'FAIL missing job-state file was treated as idle\n' >&2

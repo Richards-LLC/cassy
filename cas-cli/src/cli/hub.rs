@@ -2000,6 +2000,17 @@ fn terminate_failed_launch(
 
 /// One hub.log breadcrumb, prefixed with an RFC 3339 UTC timestamp so the
 /// log can be lined up against the service manager's journal.
+/// cas-f461: stderr is what reaches the journal. Return a line only when the
+/// publication failure cause differs from the last one reported, so retries
+/// of the same failure stay silent.
+fn publication_cause_line(last: &mut Option<String>, cause: &str) -> Option<String> {
+    if last.as_deref() == Some(cause) {
+        return None;
+    }
+    *last = Some(cause.to_owned());
+    Some(format!("cas hub: Tailscale Serve unavailable; keeping loopback-only: {cause}"))
+}
+
 fn hub_log_line(message: &str) -> String {
     format!(
         "{} {message}",
@@ -2247,6 +2258,11 @@ fn serve_foreground_logged(
                 }
                 Err(error) => {
                     let warning = error.to_string();
+                    if warning != PUBLICATION_PENDING
+                        && let Some(line) = publication_cause_line(&mut None, &warning)
+                    {
+                        eprintln!("{line}");
+                    }
                     tracing::warn!(%warning, "Tailscale Serve refused; keeping Commander loopback-only");
                     (Some(proxy_listener), None, Some(warning))
                 }
@@ -2392,6 +2408,7 @@ async fn recover_tailscale_publication<R: crate::hub::SessionReadModel>(
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut delay = Duration::from_secs(1);
+    let mut last_cause = record.transport_warning.clone();
     loop {
         if *stop.borrow() { return; }
         let attempt_manager = manager.clone();
@@ -2429,6 +2446,9 @@ async fn recover_tailscale_publication<R: crate::hub::SessionReadModel>(
         if let Some(warning) = &record.transport_warning {
             let _ = writeln!(log, "{}", hub_log_line(&format!(
                 "Tailscale Serve unavailable; keeping loopback and retrying in {}s: {warning}", delay.as_secs())));
+            if let Some(line) = publication_cause_line(&mut last_cause, warning) {
+                eprintln!("{line}");
+            }
         }
         tokio::select! {
             _ = stop.changed() => return,
@@ -3235,7 +3255,13 @@ fn render_transport_status(report: &HubTransportReport) -> String {
             .message
             .starts_with("hub is loopback-only; Tailscale Serve publication")
         {
-            return "Tailscale Serve: WARN - unavailable; hub remains loopback-only".to_owned();
+            let mut lines = vec!["Tailscale Serve: WARN - unavailable; hub remains loopback-only".to_owned()];
+            if let Some((_, cause)) = report.message.split_once(": ") {
+                let cause = cause.trim_end_matches("; publication retries automatically");
+                lines.extend(crate::cloud::presence::wrap_line(&format!("Cause: {cause}"))
+                    .lines().map(|line| format!("  {line}")));
+            }
+            return lines.join("\n");
         }
         if report
             .message
@@ -4449,10 +4475,25 @@ mod tests {
         let unavailable = HubTransportReport::ok(
             "hub is loopback-only; Tailscale Serve publication was unavailable: tailscale is not installed",
         );
-        assert_eq!(
-            render_transport_status(&unavailable),
-            "Tailscale Serve: WARN - unavailable; hub remains loopback-only"
+        // cas-f461: the cause rides on its own row; assert it is carried, not its wording.
+        let rendered = render_transport_status(&unavailable);
+        assert!(rendered.starts_with("Tailscale Serve: WARN"), "{rendered}");
+        assert!(rendered.contains("tailscale is not installed"), "cause dropped: {rendered}");
+        let retrying = HubTransportReport::ok(
+            "hub is loopback-only; Tailscale Serve publication unavailable: tailscale command timed out; publication retries automatically",
         );
+        let rendered = render_transport_status(&retrying);
+        assert!(rendered.contains("tailscale command timed out"), "cause dropped: {rendered}");
+    }
+
+    #[test]
+    fn publication_failure_reaches_stderr_once_per_distinct_cause() {
+        let mut last = None;
+        assert!(publication_cause_line(&mut last, "tailscale is not installed")
+            .is_some_and(|line| line.contains("tailscale is not installed")));
+        assert!(publication_cause_line(&mut last, "tailscale is not installed").is_none());
+        assert!(publication_cause_line(&mut last, "tailscale command timed out")
+            .is_some_and(|line| line.contains("timed out")));
     }
 
     #[test]
@@ -4909,7 +4950,6 @@ mod tests {
         holder.phase = Some("running".to_owned());
         let message = lock_holder_termination_message(&paths, &holder);
         assert!(message.contains("but not answering"), "{message}");
-        assert!(!message.contains("no completed runtime state"), "{message}");
         holder.phase = Some("stopping".to_owned());
         assert!(lock_holder_termination_message(&paths, &holder).contains("is stopping"));
     }

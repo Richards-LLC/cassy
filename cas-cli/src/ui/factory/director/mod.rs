@@ -49,7 +49,7 @@ pub use prompts::{
 };
 pub(crate) use prompts::{
     enqueue_external_message, enqueue_external_message_for_session, external_response_hint,
-    apply_idle_liveness, epic_completion_is_current, idle_relay_deliverable, idle_worker_liveness,
+    apply_idle_liveness, epic_completion_is_current, idle_worker_liveness,
     prompt_is_still_deliverable,
 };
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module

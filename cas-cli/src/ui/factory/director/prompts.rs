@@ -733,17 +733,6 @@ pub(crate) fn idle_worker_liveness(
     )
 }
 
-/// The production consumer of an idle relay at delivery time: the worker's
-/// observed liveness applied against the live task snapshot.
-pub(crate) fn idle_relay_deliverable(
-    prompt: &mut Prompt,
-    worker: &str,
-    observation: &crate::mcp::tools::service::worker_liveness::Observation,
-    _live: &DirectorData,
-) -> bool {
-    apply_idle_liveness(prompt, worker, observation)
-}
-
 pub(crate) fn apply_idle_liveness(
     prompt: &mut Prompt,
     worker: &str,
@@ -2421,7 +2410,7 @@ mod tests {
         }
     }
 
-    pub(super) fn task_with_status(id: &str, assignee: Option<&str>, status: TaskStatus) -> TaskSummary {
+    fn task_with_status(id: &str, assignee: Option<&str>, status: TaskStatus) -> TaskSummary {
         TaskSummary {
             status,
             ..open_task(id, assignee)

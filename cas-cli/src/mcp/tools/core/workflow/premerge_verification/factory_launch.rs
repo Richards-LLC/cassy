@@ -41,9 +41,49 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> anyhow::Result<Daem
     Ok(serde_json::from_slice(&body)?)
 }
 
-pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
+use super::automatic::{LaunchError, Retry, store_refusal};
+
+/// The daemon names each refusal with a leading code. The code, matched whole,
+/// is the classification; the message text after it is never searched.
+fn retry_for_code(message: &str) -> Retry {
+    match message.split_once(':').map_or(message, |(code, _)| code).trim() {
+        "verifier_factory_scope"
+        | "verifier_factory_task_terminal"
+        | "verifier_factory_owner"
+        | "verifier_factory_unsupported"
+        | "verifier_handoff_not_active" => Retry::Never,
+        "verifier_factory_store_busy" | "verifier_factory_launch_dropped" => Retry::Contended,
+        _ => Retry::Backoff,
+    }
+}
+
+/// The daemon's answer, carried through the socket read as its own error type.
+#[derive(Debug)]
+struct Refused(String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// The daemon predates verifier launches: only an update changes that.
+#[derive(Debug)]
+struct Unsupported;
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("verifier_factory_unsupported: factory daemon lacks verifier launch support; update/relaunch the factory daemon")
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+pub(super) fn request(session: &str, dispatch: &str) -> Result<(), LaunchError> {
     let request = || -> anyhow::Result<()> {
-        let deadline = Instant::now() + VERIFIER_FACTORY_REQUEST_TIMEOUT;
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mut stream = UnixStream::connect(crate::ui::factory::gui_socket_path(session))?;
         match read_frame(&mut stream, deadline)? {
             DaemonMessage::Welcome {
@@ -52,9 +92,7 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
                 ..
             } if session_name == session
                 && capabilities.contains(&ProtocolCapability::VerifierLaunch) => {}
-            _ => anyhow::bail!(
-                "factory daemon lacks verifier launch support; update/relaunch the factory daemon"
-            ),
+            _ => return Err(Unsupported.into()),
         }
         stream.set_write_timeout(Some(deadline.saturating_duration_since(Instant::now())))?;
         stream.write_all(&encode_message(&ClientMessage::LaunchVerifier {
@@ -68,32 +106,60 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
                 DaemonMessage::Error {
                     message,
                     client_ref,
-                } if client_ref.as_deref() == Some(dispatch) => anyhow::bail!(message),
+                } if client_ref.as_deref() == Some(dispatch) => {
+                    return Err(Refused(message).into());
+                }
                 _ => {}
             }
         }
     };
-    request().map_err(|error| format!("verifier_factory_launch: {error:#}"))
+    request().map_err(|error| {
+        let retry = if let Some(Refused(message)) = error.downcast_ref::<Refused>() {
+            retry_for_code(message)
+        } else if error.is::<Unsupported>() {
+            Retry::Never
+        } else {
+            Retry::Backoff
+        };
+        LaunchError { retry, message: format!("verifier_factory_launch: {error:#}") }
+    })
 }
 
 /// The dispatch owner must be a live registered supervisor. cas-5d2e: a lookup
 /// that failed, such as on a busy store connection, keeps its own cause and
 /// code; only a caller who is not a live supervisor is reported as one.
+/// cas-4fd6: a row still marked active whose process is gone is not live, and
+/// a refusal names the agent and its status, never the whole row.
 fn owner_authority(core: &CasCore) -> Result<(), String> {
+    use crate::mcp::daemon::{LivenessOutcome, evaluate_liveness, pid_alive, pid_matches_fingerprint};
     use crate::mcp::tools::core::task::lifecycle::close_ops::SupervisorAuthorityError;
-    core.resolve_live_supervisor_authority()
-        .map(drop)
-        .map_err(|error| match &error {
-            SupervisorAuthorityError::NotLive(_) | SupervisorAuthorityError::NotRegistered { .. } => {
-                format!("verifier_factory_owner: live registered supervisor required ({error:?})")
-            }
-            SupervisorAuthorityError::StoreBusy(error) => {
-                format!("verifier_factory_store_busy: {error}")
-            }
-            SupervisorAuthorityError::Identity(error) | SupervisorAuthorityError::Store(error) => {
-                format!("verifier_factory_owner_lookup: {error}")
-            }
-        })
+    let owner = core.resolve_live_supervisor_authority().map_err(|error| match error {
+        SupervisorAuthorityError::NotLive(agent) => format!(
+            "verifier_factory_owner: live registered supervisor required (agent {} is {} with status {:?})",
+            agent.id, agent.role, agent.status
+        ),
+        SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
+            "verifier_factory_owner: live registered supervisor required (agent {caller_id} is not registered: {error})"
+        ),
+        SupervisorAuthorityError::StoreBusy(error) => format!("verifier_factory_store_busy: {error}"),
+        SupervisorAuthorityError::Identity(error) | SupervisorAuthorityError::Store(error) => {
+            format!("verifier_factory_owner_lookup: {error}")
+        }
+    })?;
+    let local = owner
+        .machine_id
+        .as_deref()
+        .is_none_or(|machine| machine == cas_types::Agent::get_or_generate_machine_id());
+    if local
+        && let LivenessOutcome::Dead { cc_pid, .. } =
+            evaluate_liveness(&owner, pid_alive, pid_matches_fingerprint)
+    {
+        return Err(format!(
+            "verifier_factory_owner: live registered supervisor required (agent {} process {cc_pid} is not running)",
+            owner.id
+        ));
+    }
+    Ok(())
 }
 
 /// This local control carries identity only, never executable arguments or a root.
@@ -106,7 +172,7 @@ pub(crate) fn launch(
     let owner = crate::store::open_agent_store(root)
         .map_err(|e| e.to_string())?
         .get(&dispatch.owner_agent_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| store_refusal(&e))?;
     if owner.factory_session.as_deref() != Some(session)
         || cas_store::get_latest_verification_dispatch(root, &dispatch.task_id)
             .map_err(|e| e.to_string())?

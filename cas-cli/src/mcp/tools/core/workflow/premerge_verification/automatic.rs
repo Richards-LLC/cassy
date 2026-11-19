@@ -238,39 +238,62 @@ const LAUNCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1
 const CONTENTION_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 const CONTENTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Waits that clear on their own: another start for the same parent awaiting
-/// SubagentStart, or a busy shared store.
-fn contended(error: &str) -> bool {
-    error.contains("already awaiting SubagentStart")
-        || error.contains("wait budget is spent")
-        || error.contains("verifier_factory_store_busy")
-        || error.contains("verifier_factory_launch_dropped")
-        || error.contains("QueuedDroppedOldest")
-        || error.contains("database is locked")
+/// How the request side treats a refused launch (cas-4fd6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Retry {
+    /// Retrying cannot change the answer.
+    Never,
+    /// A wait that clears on its own; queue behind it without spending an attempt.
+    Contended,
+    /// Anything else: a bounded number of attempts with a growing delay.
+    Backoff,
+}
+
+/// A refused launch and what retrying it can achieve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LaunchError {
+    pub retry: Retry,
+    pub message: String,
+}
+
+/// A store refusal with its code, by the typed error: contention is named
+/// `verifier_factory_store_busy`, everything else keeps its own text.
+pub(super) fn store_refusal(error: &cas_store::StoreError) -> String {
+    use cas_store::StoreError;
+    let contended = match error {
+        StoreError::Database(sqlite) => cas_store::shared_db::is_busy_error(sqlite),
+        StoreError::Io(io) => io.kind() == std::io::ErrorKind::WouldBlock,
+        StoreError::VerifierHandoffPending => true,
+        _ => false,
+    };
+    if contended {
+        format!("verifier_factory_store_busy: {error}")
+    } else {
+        error.to_string()
+    }
 }
 
 /// cas-d824: a failed start is re-attempted here, on the thread that already
 /// owns the request, rather than waiting for an operator to repeat the merge.
-/// Scope and terminal-task refusals are permanent. Contention queues behind
-/// its holder with a doubling delay for up to `window` and spends no attempt
-/// (cas-111e); anything else is retried with a growing delay. Returns the
-/// attempts spent and the true blocker.
+/// A refusal is classified by its typed [`Retry`], not by its text: a
+/// permanent one stops at once, contention queues behind its holder with a
+/// doubling delay for up to `window` and spends no attempt (cas-111e), and
+/// anything else is retried with a growing delay. Returns the attempts spent
+/// and the true blocker.
 fn request_with_retry(
     attempts: u32,
     delay: std::time::Duration,
     window: std::time::Duration,
-    mut request: impl FnMut() -> Result<(), String>,
+    mut request: impl FnMut() -> Result<(), LaunchError>,
 ) -> Result<(), (u32, String)> {
     let started = std::time::Instant::now();
     let (mut attempt, mut waits) = (1, 0u32);
     loop {
         match request() {
             Ok(()) => return Ok(()),
-            Err(error) => {
-                let permanent = error.contains("verifier_factory_scope")
-                    || error.contains("verifier_factory_task_terminal")
-                    || error.contains("verifier_handoff_not_active");
-                if !permanent && contended(&error) {
+            Err(LaunchError { retry, message: error }) => {
+                let permanent = retry == Retry::Never;
+                if retry == Retry::Contended {
                     let pause = delay.saturating_mul(1 << waits.min(16)).min(CONTENTION_BACKOFF_CAP);
                     if started.elapsed() + pause >= window {
                         return Err((attempt, format!(

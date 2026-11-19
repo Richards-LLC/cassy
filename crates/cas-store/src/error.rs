@@ -70,6 +70,11 @@ pub enum StoreError {
     #[error("verifier_handoff_not_active: dispatch {dispatch_id} is not the exact pending dispatch owned by this issuer")]
     VerifierHandoffNotActive { dispatch_id: String },
 
+    /// Another verifier handoff for the same parent is still waiting to bind.
+    /// It clears on its own, so a launch queues behind it instead of failing.
+    #[error("another task-verifier spawn is already awaiting SubagentStart for this parent; wait for it to bind or for exact failure cleanup/expiry")]
+    VerifierHandoffPending,
+
     #[error(
         "local {entity_type} {operation} committed, but cloud sync is degraded; durable retry intent retained for {entity_id}: {reason}"
     )]

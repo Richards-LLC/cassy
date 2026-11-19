@@ -279,25 +279,40 @@ pub(crate) fn remaining_minutes(root: &Path, train: &Task, now: DateTime<Utc>) -
     Ok(suite + queue + publish)
 }
 
-/// "Frozen 2:05 PM ET · ETA 2:50 PM ET", or the stage that is unmeasured.
-pub(crate) fn summary(root: &Path, train: &Task, freeze: &Freeze, now: DateTime<Utc>) -> String {
-    let eta = match remaining_minutes(root, train, now) {
-        Ok(minutes) => format!("ETA {}", eastern(now + chrono::Duration::seconds((minutes * 60.0) as i64))),
-        Err(stage) => format!("ETA unmeasured: no {stage} timing"),
+/// An estimate needs a run at this tip that is still running or succeeded.
+fn run_has_eta(run: &Value) -> bool {
+    run["run_url"].is_string()
+        && (matches!(run["status"].as_str(), Some("queued" | "in_progress"))
+            || (run["status"] == "completed" && run["conclusion"] == "success"))
+}
+
+fn summary_with_run(root: &Path, train: &Task, freeze: &Freeze, now: DateTime<Utc>, run: &Value) -> String {
+    let detail = run["detail"].as_str().unwrap_or("Train suite has not been dispatched.");
+    let ci = match run["run_url"].as_str() {
+        Some(url) => format!("{detail} {url}"),
+        None => format!("{detail} ({})", run["skip_reason"].as_str().unwrap_or("no_run")),
     };
-    format!("Frozen {} · {eta}", eastern(freeze.at))
+    let eta = if run_has_eta(run) {
+        match remaining_minutes(root, train, now) {
+            Ok(minutes) => format!(" · ETA {}", eastern(now + chrono::Duration::seconds((minutes * 60.0) as i64))),
+            Err(stage) => format!(" · ETA unmeasured: no {stage} timing"),
+        }
+    } else {
+        String::new()
+    };
+    format!("Frozen {} · {ci}{eta}", eastern(freeze.at))
 }
 
 /// The Commander train card's freeze line, for an open train.
 pub(crate) fn card(root: &Path, train: &Task) -> Option<Value> {
     let freeze = active(root, train)?;
     let now = Utc::now();
-    let eta = remaining_minutes(root, train, now).ok().map(|minutes| (now + chrono::Duration::seconds((minutes * 60.0) as i64)).to_rfc3339());
+    let run = crate::train_ci::current_run(root, train).unwrap_or(Value::Null);
+    let eta = run_has_eta(&run).then(|| remaining_minutes(root, train, now).ok()).flatten()
+        .map(|minutes| (now + chrono::Duration::seconds((minutes * 60.0) as i64)).to_rfc3339());
     Some(serde_json::json!({
-        "frozen_at": freeze.at.to_rfc3339(),
-        "tip": freeze.tip,
-        "eta": eta,
-        "summary": summary(root, train, &freeze, now),
+        "frozen_at": freeze.at.to_rfc3339(), "tip": freeze.tip, "eta": eta,
+        "summary": summary_with_run(root, train, &freeze, now, &run), "train_ci": run,
     }))
 }
 
@@ -309,10 +324,10 @@ fn train(store: &dyn cas_store::TaskStore, train_id: &str) -> Result<Task> {
 
 /// Freeze a train at its current tip. Repeating it reports the standing freeze.
 pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&str>) -> Result<String> {
-    freeze_with_promotion(root, train_id, actor, reason, false)
+    freeze_with_promotion(root, train_id, actor, reason, false).map(|(detail, _)| detail)
 }
 
-fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Option<&str>, promote: bool) -> Result<String> {
+fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Option<&str>, promote: bool) -> Result<(String, Value)> {
     let store = crate::store::open_task_store(root)?;
     let mut task = store.get(train_id).with_context(|| format!("{train_id} not found"))?;
     ensure!(task.task_type == crate::types::TaskType::Epic && !task.is_terminal(), "{train_id} is not an open epic");
@@ -332,11 +347,12 @@ fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Optio
             store.update(&task)?;
             store.append_note(train_id, &format!("RELEASE FREEZE: {actor} took ownership of the standing freeze on {train_id}"))?;
         }
-        return Ok(format!(
+        let train_ci = crate::train_ci::freeze_dispatch(root, &task);
+        return Ok((format!(
             "TRAIN FROZEN: {train_id} at {}. {}",
             short(&freeze.tip),
-            summary(root, &task, &freeze, Utc::now())
-        ));
+            summary_with_run(root, &task, &freeze, Utc::now(), &train_ci)
+        ), train_ci));
     }
     let lane = task.effective_epic_branch().context("train has no lane")?.to_string();
     let repo = repo_of(root, &task).context("train repository missing")?;
@@ -364,13 +380,14 @@ fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Optio
         &format!("RELEASE FREEZE: {actor} froze {train_id} at {} on tip {tip}: {reason}", eastern(now)),
     )?;
     let freeze = Freeze { at: DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now), tip };
-    Ok(format!(
+    let train_ci = crate::train_ci::freeze_dispatch(root, &task);
+    Ok((format!(
         "TRAIN FROZEN: {train_id} at {}. {}. Merges, new staffing and CI retries into {lane} are refused on every machine \
          except `{REPAIR_LABEL}` tasks while the train is red; new tasks join the next train. \
          The freeze ends on publication, an operator lift in Commander, or an audited supervisor lift.",
         short(&freeze.tip),
-        summary(root, &task, &freeze, now)
-    ))
+        summary_with_run(root, &task, &freeze, now, &train_ci)
+    ), train_ci))
 }
 
 /// Whether the standing freeze is the operator's: theirs, or unmarked legacy.
@@ -439,6 +456,7 @@ impl crate::mcp::CasCore {
             ))?;
         let _lock = crate::mcp::tools::core::task::release_train::lock_trains_blocking(&self.cas_root)?;
         freeze_with_promotion(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason), promote)
+            .map(|(detail, train_ci)| serde_json::json!({"detail": detail, "train_ci": train_ci}).to_string())
     }
 
     /// MCP lift (cas-444b): the train's live supervisor reopens a frozen train

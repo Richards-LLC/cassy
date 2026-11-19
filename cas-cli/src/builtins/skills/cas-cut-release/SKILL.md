@@ -24,8 +24,11 @@ binary; this step requires no second candidate build or new release command.
 
 1. Start from the epic branch only after closeout is complete: one full review,
    one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4).
-   Before `train_freeze`, dispatch `gh workflow run ci.yml --ref <train branch>`
-   (no train push CI) and read green for the exact tip SHA. On that tip run
+   Call `train_freeze` to dispatch or adopt `full-validation.yml` at the exact
+   train tip (no train push CI); read its returned run URL and wait for green
+   at that SHA. If no run is reported, read the skip/failure reason; the manual
+   dispatch command is `gh workflow run full-validation.yml --ref <train branch>`.
+   On that tip run
    `cargo tree -i aws-lc-rs --target x86_64-unknown-linux-gnu` (empty graph), capped
    `cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'`, and
    `python3 scripts/check-test-shape.py`.

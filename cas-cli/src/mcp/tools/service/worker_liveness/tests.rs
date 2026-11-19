@@ -862,6 +862,9 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     // The child exits while the worker stays alive and inactive: once the
     // window passes with nothing advancing, it reads idle again.
     tree.work("exit_leaf");
+    // The exit's own teardown CPU lands in the first sample after it; read that
+    // sample, then let the window pass with nothing running.
+    status(after + chrono::Duration::minutes(21));
     let gone = status(after + chrono::Duration::minutes(30));
     assert_eq!(gone.state, Liveness::WaitingForInput, "{}", gone.detail());
     assert_eq!(status(after + chrono::Duration::minutes(31)).state, Liveness::WaitingForInput);

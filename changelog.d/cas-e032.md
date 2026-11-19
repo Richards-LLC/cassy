@@ -1,0 +1,3 @@
+### Fixed — Factory
+
+- **A supervisor's "merged", "landed", "shipped" or "green" now needs delivery proof** — Was: any successful tool result from the turn satisfied a completion claim, and "green", "fixed" and "landed" were not checked at all. Now: those three words count as claims, and a delivery claim needs a same-turn `git merge-base --is-ancestor` success, a gh check or run result with nothing pending or failing, a Cassy task close or status, or a merge receipt. An unrelated command no longer counts, and `[unverified]` still labels an uncertain paragraph.

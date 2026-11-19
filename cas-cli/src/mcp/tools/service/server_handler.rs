@@ -710,13 +710,13 @@ impl CasService {
                 // cannot be cancelled, so "UNKNOWN" was followed by a late
                 // Closed write or refusal nobody saw. It keeps running, and
                 // its final outcome is recorded on the task as a note.
-                let close_unfinished = tool_name == "task"
+                let task_close = tool_name == "task"
                     && receipt.action() == "close"
-                    && receipt.terminal.get().is_none()
                     && receipt.task_id().is_some();
+                let close_unfinished = task_close && receipt.terminal.get().is_none();
                 if let Some(id) = &continuation_id {
                     self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
-                } else if close_unfinished {
+                } else if task_close {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
                 } else if commit.is_some()
                     && matches!(

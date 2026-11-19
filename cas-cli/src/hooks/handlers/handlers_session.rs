@@ -278,8 +278,17 @@ pub fn handle_session_start(
     let context = resume_context_delta(cas_root, input, context);
     let mut assembler = SessionContextAssembler::new(context);
     // gate[N-55 notice]: Supervisor lane handoff
+    // cas-516f: a large predecessor lane used to ride protected and push the
+    // payload past the harness inline cap. Over budget it degrades to counts
+    // plus the receipt paths that hold every row.
     if !lane_handoff.is_empty() {
-        assembler.prepend_protected(lane_handoff);
+        let compact = crate::supervisor_continuity::compact_startup(&lane_handoff);
+        assembler.prepend_degradable_with_priority(
+            "Supervisor handoff",
+            lane_handoff,
+            compact,
+            DegradationPriority::FactoryInbox,
+        );
     }
 
     // gate[N-57 notice]: Agent role mismatch

@@ -4982,11 +4982,28 @@ fn shell_command_projection(command: &str, preserve_offsets: bool) -> String {
 }
 
 pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
-    let mut pending: std::collections::VecDeque<(HeredocDelimiter, String)> =
+    shell_heredoc_bodies_with_consumer(command).into_iter().map(|body| body.text).collect()
+}
+
+/// One heredoc body and how its consumer reads it.
+pub(super) struct HeredocBody {
+    pub(super) text: String,
+    /// Unchanged Python source: the delimiter is quoted (no shell expansion) and
+    /// the one command on the introducing line is Python reading `-`.
+    pub(super) python_source: bool,
+    /// A shell reads the body as commands.
+    pub(super) shell_commands: bool,
+}
+
+/// Each heredoc body with its consumer. Anything else (an unknown tool, several
+/// heredocs on one line) reads or executes the body in a way not judged here,
+/// so it is never Python source data.
+pub(super) fn shell_heredoc_bodies_with_consumer(command: &str) -> Vec<HeredocBody> {
+    let mut pending: std::collections::VecDeque<(HeredocDelimiter, String, (bool, bool))> =
         std::collections::VecDeque::new();
     let mut bodies = Vec::new();
     for line in command.split_inclusive('\n') {
-        if let Some((delimiter, body)) = pending.front_mut() {
+        if let Some((delimiter, body, _)) = pending.front_mut() {
             let candidate = line.trim_end_matches('\n').trim_end_matches('\r');
             let candidate = if delimiter.strip_leading_tabs {
                 candidate.trim_start_matches('\t')
@@ -4995,20 +5012,38 @@ pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
             };
             let is_delimiter = candidate == delimiter.value;
             if is_delimiter {
-                let (_, body) = pending.pop_front().expect("heredoc body is pending");
-                bodies.push(body);
+                let (delimiter, text, (python, shell)) = pending.pop_front().expect("heredoc body is pending");
+                bodies.push(HeredocBody {
+                    text,
+                    python_source: delimiter.literal_body && python,
+                    shell_commands: shell,
+                });
             } else {
                 body.push_str(line);
             }
             continue;
         }
-        pending.extend(
-            heredoc_delimiters(line)
-                .into_iter()
-                .map(|delimiter| (delimiter, String::new())),
-        );
+        let delimiters = heredoc_delimiters(line);
+        let consumer = if delimiters.len() == 1 { heredoc_consumer(line) } else { (false, false) };
+        pending.extend(delimiters.into_iter().map(|delimiter| (delimiter, String::new(), consumer)));
     }
     bodies
+}
+
+/// `(python_stdin, shell)` for the command a heredoc on `line` feeds: Python
+/// reading its program from stdin as the only command, or a shell last in the
+/// line.
+fn heredoc_consumer(line: &str) -> (bool, bool) {
+    let statements = shell_statement_arguments(line);
+    let Some(last) = statements.last() else { return (false, false) };
+    let Some((executable, args)) = last.split_first() else { return (false, false) };
+    let name = shell_word_basename(executable);
+    let shell = matches!(name, "bash" | "sh" | "zsh" | "dash" | "ksh");
+    let python = statements.len() == 1
+        && name.strip_prefix("python").is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        && args.last().is_some_and(|last| last == "-")
+        && args.iter().all(|arg| matches!(arg.as_str(), "-" | "-u" | "-B" | "-I" | "-S" | "-s" | "-E"));
+    (python, shell)
 }
 
 /// Extract targets from known script write APIs only. The script itself is

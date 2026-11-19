@@ -2972,7 +2972,7 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
         vec!["add", "."],
         vec!["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fixture"],
     ] {
-        let status = Command::new("git").args(&args).current_dir(&worktree).status().unwrap();
+        let status = std::process::Command::new("git").args(&args).current_dir(&worktree).status().unwrap();
         assert!(status.success(), "git {args:?}");
     }
     let output = cas_cmd(temp.path())

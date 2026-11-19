@@ -52,6 +52,7 @@
     "cas-cli/src/mcp/tools/service/factory_ops.rs#factory_clear_context_impl#Err#recipients . is_empty ()": 1,
     "cas-cli/src/mcp/tools/service/factory_ops.rs#factory_restart_spawn_queue#Err#! is_supervisor_from_env ()": 1,
     "cas-cli/src/mcp/tools/service/factory_ops.rs#factory_restart_supervisor#Err#! is_supervisor_from_env ()": 1,
+    "cas-cli/src/mcp/tools/service/factory_ops.rs#factory_standby#Err#! is_supervisor_from_env ()": 1,
     "cas-cli/src/mcp/tools/service/factory_ops.rs#factory_spawn_workers_in_with_name_source#Err#let Some (refusal) = worker_names . iter () . find_map (| name | { crate :: factory_session_scope :: foreign_owner_in_store (& self . inner . cas_root , | agents , caller , now | { crate :: factory_session_scope :: foreign_owner_of_worker (agents , caller , name , now) } ,) . map (| (owner , caller) | { owner . refusal (& format ! (\"<text>\") , & caller) }) })": 1,
     "cas-cli/src/mcp/tools/service/factory_ops.rs#resolve_sync_all_workers_target#Err#metadata_project != project_root": 1,
     "cas-cli/src/ui/factory/daemon/runtime/external_work_reconcile_jobs.rs#reconcile_due#Err#agent . role != crate :: types :: AgentRole :: Supervisor": 1

@@ -3187,6 +3187,8 @@ fn standby_env() -> EnvGuard {
 async fn standby_stops_every_worker_and_resume_respawns_the_ones_holding_tasks_cas_94a0() {
     let _guard = standby_env();
     let env = FactoryTestEnv::new();
+    // Isolated respawns need a real repository under the project.
+    init_sync_repo(&env, "alice");
     env.create_epic("Standby Epic");
     env.register_worker_in_session("alice", STANDBY_SESSION);
     env.register_worker_in_session("bob", STANDBY_SESSION);

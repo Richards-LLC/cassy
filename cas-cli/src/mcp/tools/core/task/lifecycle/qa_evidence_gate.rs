@@ -5,6 +5,7 @@
 //! A user-facing delivery can then neither park for merge (and so never gets
 //! an independent reviewer spawned, cas-619f) nor finish its post-merge
 //! re-close without valid implementer evidence for the delivered head. The
+//! batch mode defers that evidence to the staging receipt. The
 //! same check refuses any delivery that adds test skip/focus markers without
 //! a `cas-allow-skip:` reason.
 //!
@@ -659,19 +660,24 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
-    if deferred && integrated != Some(false) && batch_receipt.is_none() && covering_pass.is_none() {
+    // Unknown ancestry does not turn a batch park into a final close. G-83
+    // still enforces recorded debt before any transition to Closed.
+    let batch_ancestry_unknown = batch_mode && integrated.is_none();
+    if deferred && !batch_ancestry_unknown && integrated != Some(false) && batch_receipt.is_none() && covering_pass.is_none() {
         let recorded = rapid.as_ref().is_some_and(|window| {
             crate::rapid_response::record_skip(
                 cas_root, window, &task.id, "batch-qa-receipt", "closed before its batch QA receipt",
             )
         });
         if !recorded {
-            return Err(crate::qa_batch::debt_refusal(&task.id));
+            return Err(crate::qa_batch::debt_refusal(cas_root, task, repo, target_branch, Some(&head)));
         }
     }
-    // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
-    let batch_defer =
-        batch_mode && integrated == Some(false) && !matches!(tier, EvidenceTier::None);
+    // Missing target refs must not turn a batch park into per-task QA.
+    // Proven integrated deliveries retain their final-close evidence path.
+    let batch_defer = batch_mode
+        && integrated != Some(true)
+        && !matches!(tier, EvidenceTier::None);
     // Optional citations alone do not upgrade None/Ledger proof requirements.
     // A declared comparison still applies when batch approval replaces a bundle.
     let pair_coverage = if tier != EvidenceTier::Bundle
@@ -852,6 +858,60 @@ mod tests {
         assert!(adversarial_probe_refusal("cas-x", &ledger, &guard).is_some());
         std::fs::write(&ledger, "| P1 | Adversarial probe: chained write | refused | refused | PASS | fixture | a.txt | - |\n").unwrap();
         assert!(adversarial_probe_refusal("cas-x", &ledger, &guard).is_none());
+    }
+
+    /// GH #2111: pulse-card sets origins/registry, so qa.mode resolves to
+    /// batch. Target ancestry cannot transfer implementer proof to per-task QA.
+    #[test]
+    fn pulse_card_batch_mode_owns_park_evidence_without_a_task_bundle() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for (mode, expected) in [("", crate::config::QaMode::Batch), ("mode='per_task'\n", crate::config::QaMode::PerTask)] {
+            for integration in [None, Some(false), Some(true)] {
+                let temp = tempfile::tempdir().unwrap();
+                let repo = temp.path();
+                env.set_current_dir(repo);
+                git(repo, &["init", "-q", "-b", "main"]);
+                let base = commit_file(repo, "README.md", "base\n");
+                git(repo, &["switch", "-q", "-c", "factory/worker"]);
+                let path = "apps/frontend/app/src/components/auth/InspectionBanner.vue";
+                let head = commit_file(repo, path, "<template>fixed</template>\n");
+                if integration == Some(true) { git(repo, &["branch", "-f", "main", &head]); }
+                let target = if integration.is_none() { "missing-target" } else { "main" };
+                let root = crate::store::init_cas_dir(repo).unwrap();
+                // Exact QA stanza from pulse-card; only the per-task control adds mode.
+                std::fs::write(root.join("config.toml"), format!(
+                    "[qa]\n{mode}deployed_origins=['https://getpulsecard.com']\n[qa.registry]\nenforce='enforce'\n"
+                )).unwrap();
+                assert_eq!(crate::config::Config::load(&root).unwrap().qa().mode, expected);
+                assert_eq!(crate::qa_batch::integration_state(repo, &head, target), integration);
+                let mut task = Task::new("cas-72c6-replay".into(), "Inspection banner fix".into());
+                task.assignee = Some("worker".into());
+                task.deliverables.factory_branch_anchor = Some(head.clone());
+                crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+                let changed = [path.to_string()];
+                let check = || qa_evidence_close_gate_for_paths(
+                    &root, &task, repo, target, Some(&head), Some(&changed), Some(&base),
+                );
+                let result = check();
+                let batch_park = expected == crate::config::QaMode::Batch
+                    && integration != Some(true);
+                assert_eq!(result.is_ok(), batch_park,
+                    "mode={expected}, integration={integration:?}: {result:?}");
+                assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
+                    batch_park);
+                if batch_park {
+                    assert!(check().is_ok());
+                    // Once integrated, recorded staging evidence remains due.
+                    git(repo, &["branch", "-f", "main", &head]);
+                    assert!(qa_evidence_close_gate_for_paths(
+                        &root, &task, repo, "main", Some(&head), Some(&changed), Some(&base),
+                    ).is_err());
+                } else if expected == crate::config::QaMode::PerTask {
+                    cas_store::defer_qa_batch_evidence(&root, &task.id, &head).unwrap();
+                    assert!(check().is_err());
+                }
+            }
+        }
     }
 
     #[test]
@@ -1270,6 +1330,8 @@ mod tests {
     fn ui_merge_receipt_keeps_its_own_qa_requirement_after_later_backend_merge_gh1181() {
         for later in [None, Some("src/service.ts")] {
             let (temp, receipt) = merged_receipt_fixture_gh1181("hub-web/dist/own.vue", later);
+            // This attribution control exercises individual evidence ownership.
+            std::fs::write(temp.path().join(".cas/config.toml"), "[qa]\nmode='per_task'\n").unwrap();
             let repo = temp.path().join("repo");
             let mut task = Task::new("cas-8104".into(), "UI delivery".into());
             task.assignee = Some("worker".into());

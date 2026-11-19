@@ -1440,13 +1440,13 @@ impl CasService {
                 // lift. Neither is a temporary CI hold.
                 "train_freeze" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_freeze requires id=<release-train epic>"))?;
-                    if req.decision.as_deref().is_some_and(|decision| decision != "lift") {
-                        return Err(Self::error(ErrorCode::INVALID_PARAMS, "train_freeze decision must be lift or omitted"));
+                    if req.decision.as_deref().is_some_and(|decision| !matches!(decision, "lift" | "promote")) {
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, "train_freeze decision must be lift, promote or omitted"));
                     }
                     let inner = this.inner.clone();
                     tokio::task::spawn_blocking(move || match req.decision.as_deref() {
                         Some("lift") => inner.train_lift(&train, req.reason.as_deref()),
-                        _ => inner.train_freeze(&train, req.reason.as_deref()),
+                        decision => inner.train_freeze(&train, req.reason.as_deref(), decision.is_some()),
                     })
                         .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                         .map(Self::success)
@@ -1811,6 +1811,7 @@ mod memory_lifecycle_tests;
 mod pattern_ops;
 mod qa_pass_ops;
 mod server_handler;
+pub(crate) mod close_continuation;
 mod merge_response;
 pub(crate) use server_handler::potentially_mutating_call;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.

@@ -403,23 +403,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_writer_creates_file() {
-        let dir = TempDir::new().unwrap();
-        let config = test_config(&dir);
-
-        let writer = RecordingWriter::new(80, 24, "agent-1", "session-123", "worker", config)
-            .await
-            .unwrap();
-
-        let file_path = writer.file_path().clone();
-        let stats = writer.close().await.unwrap();
-
-        assert!(file_path.exists());
-        assert_eq!(stats.total_events, 0);
-        assert_eq!(stats.keyframe_count, 0);
-    }
-
-    #[tokio::test]
     async fn test_writer_output_events() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
@@ -430,39 +413,27 @@ mod tests {
 
         writer.write_output(b"Hello, ").await.unwrap();
         writer.write_output(b"World!\n").await.unwrap();
+        let mut writer = writer;
+        writer.write_resize(120, 40).await.unwrap();
 
         let path = writer.file_path().clone();
-        writer.close().await.unwrap();
+        let before_resume = writer.close().await.unwrap();
+        assert_eq!(before_resume.total_events, 3);
         let resumed = RecordingWriter::resume(path.clone()).await.unwrap();
         resumed.write_output(b"After exec").await.unwrap();
         let stats = resumed.close().await.unwrap();
         let reader = crate::RecordingReader::open(path).unwrap();
         let events: Vec<_> = reader.read_all_events().map(|event| event.unwrap()).collect();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[2], RecordingEvent::Resize { cols: 120, rows: 40, .. }));
         let output: Vec<u8> = events.into_iter().flat_map(|event| match event {
             RecordingEvent::Output { data, .. } => data,
-            _ => panic!("output-only recording changed event kind"),
+            RecordingEvent::Resize { .. } => Vec::new(),
+            _ => panic!("unexpected recording event kind"),
         }).collect();
         assert_eq!(output, b"Hello, World!\nAfter exec");
-        assert_eq!(stats.total_events, 3);
+        assert_eq!(stats.total_events, 4);
         assert!(stats.file_size > 0);
-    }
-
-    #[tokio::test]
-    async fn test_writer_resize_events() {
-        let dir = TempDir::new().unwrap();
-        let config = test_config(&dir);
-
-        let mut writer = RecordingWriter::new(80, 24, "agent-1", "session-123", "worker", config)
-            .await
-            .unwrap();
-
-        writer.write_output(b"test").await.unwrap();
-        writer.write_resize(120, 40).await.unwrap();
-        writer.write_output(b"test2").await.unwrap();
-
-        let stats = writer.close().await.unwrap();
-
-        assert_eq!(stats.total_events, 3);
     }
 
     #[tokio::test]
@@ -491,18 +462,18 @@ mod tests {
     async fn test_should_generate_keyframe() {
         let dir = TempDir::new().unwrap();
         let mut config = test_config(&dir);
-        config.keyframe_interval_ms = 10; // Very short interval for testing
-
-        let writer = RecordingWriter::new(80, 24, "agent-1", "session-123", "worker", config)
+        config.keyframe_interval_ms = 10;
+        let mut writer = RecordingWriter::new(80, 24, "agent-1", "session-123", "worker", config)
             .await
             .unwrap();
 
-        // Initially no keyframe needed (we're at 0ms)
+        // A future origin holds std::Instant::elapsed at zero; the offset is
+        // the controlled recording clock, independent of scheduling.
+        writer.start_time = Instant::now() + std::time::Duration::from_secs(3600);
         assert!(!writer.should_generate_keyframe());
-
-        // Wait for interval to pass
-        tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
-
+        writer.timestamp_offset_ms = 9;
+        assert!(!writer.should_generate_keyframe());
+        writer.timestamp_offset_ms = 10;
         assert!(writer.should_generate_keyframe());
 
         writer.close().await.unwrap();

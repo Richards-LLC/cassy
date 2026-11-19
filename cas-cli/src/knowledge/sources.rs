@@ -526,16 +526,14 @@ mod tests {
         assert_eq!(scan.skipped.len(), 1);
         assert_eq!(scan.skipped[0].path, "broken.md");
         assert!(
-            scan.skipped[0].reason.contains("not valid UTF-8"),
+            !scan.skipped[0].reason.is_empty(),
             "the skip must carry a reason, got {:?}",
             scan.skipped[0].reason
         );
-        assert_eq!(
-            scan.skip_notes(),
-            vec![
-                "source skipped: broken.md (not valid UTF-8 and no BOM identifies its encoding)"
-                    .to_string()
-            ]
-        );
+        // The note carries the skipped path and the current reason, whatever its wording.
+        let notes = scan.skip_notes();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains(&scan.skipped[0].path), "{notes:?}");
+        assert!(notes[0].contains(&scan.skipped[0].reason), "{notes:?}");
     }
 }

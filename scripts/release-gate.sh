@@ -1796,16 +1796,18 @@ registry_upkeep_needed() {
     fi
 }
 
-# A cas with `qa journeys --check` and `qa impact`: CAS_BIN, else the latest
-# release installed by scripts/cas-install.sh (SHA-256 checked against the
-# release receipt) into a temporary directory. Lane CI needs no workflow step.
+# A cas with `qa journeys --check` and `qa impact`: CAS_BIN, else a cas on PATH
+# that answers `qa journeys --help` (cas-d4ed), else the latest release
+# installed by scripts/cas-install.sh (SHA-256 checked against the release
+# receipt) into a temporary directory. Lane CI needs no workflow step.
 registry_validator() {
-    local dir
-    local candidate="${CAS_BIN:-}"
-    if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" qa journeys --help >/dev/null 2>&1; then
-        printf '%s\n' "$candidate"
-        return 0
-    fi
+    local dir candidate
+    for candidate in "${CAS_BIN:-}" "$(command -v cas 2>/dev/null || true)"; do
+        if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" qa journeys --help >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
     dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-registry-validator.XXXXXX")" || return 1
     printf 'journey-catalog: installing the released cas validator into %s\n' "$dir" >&2
     CAS_INSTALL_DIR="$dir" CAS_WIRE_PATH=0 bash "${CAS_VALIDATOR_INSTALLER:-scripts/cas-install.sh}" >&2 || return 1

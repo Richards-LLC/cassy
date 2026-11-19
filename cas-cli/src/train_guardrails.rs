@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use crate::mcp::CasCore;
 use crate::supervisor_notices::{self, Recipient};
 
-const DROP_NOTE: &str = "Train drop:";
-const REENQUEUED: &str = "re-enqueued PR #";
+pub(crate) const DROP_NOTE: &str = "Train drop:";
+pub(crate) const REENQUEUED: &str = "re-enqueued PR #";
 
 /// The train branch of a release-train epic.
 pub(crate) fn train_lane(epic: &Task) -> Option<&str> {

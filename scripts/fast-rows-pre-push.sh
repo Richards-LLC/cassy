@@ -183,8 +183,9 @@ PY
             END { exit !found }
         ' "$attempt_logs/gate.log" >&2 \
             || tail -n 20 "$attempt_logs/gate.log" >&2
-        printf 'pre-push: refused: fast rows failed on %s. Apply each FIX, commit, push again. Override (logged): CAS_SKIP_FAST_ROWS=<reason> git push\n' \
-            "${local_sha:0:12}" >&2
+        failed_rows="$(awk '/^FAIL / { print $2 }' "$attempt_logs/gate.log" | paste -sd' ' -)"
+        printf 'pre-push: refused: fast rows failed on %s (rows: %s; logs: %s). Apply each FIX, commit, push again. Override (logged): CAS_SKIP_FAST_ROWS=<reason> git push\n' \
+            "${local_sha:0:12}" "${failed_rows:-unknown}" "$attempt_logs" >&2
         status=1
     else
         rm -rf -- "$attempt_logs"

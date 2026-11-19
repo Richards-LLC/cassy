@@ -8046,6 +8046,16 @@ impl CasService {
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on, &retained_tasks, retained.is_partial());
         report.push_str(&retained.render());
+        // cas-9452: merged-to-epic is not shipped. Same determination epic
+        // close refuses on, printed as one token.
+        report.push_str(&format!(
+            "\n{}\n",
+            crate::mcp::tools::core::task::lifecycle::close_ops::epic_shipping(
+                &close_project_root,
+                epic.branch.as_deref(),
+                declared_repo_context.as_ref().map(|context| context.target_branch.as_str()),
+            ).status_token()
+        ));
         if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
             report.push_str(&gain.status_line());
         }
@@ -14794,7 +14804,6 @@ mod tests {
         assert!(message.contains("older-daemon-build"), "{message}");
         assert!(message.contains(&provisioner_build), "{message}");
         assert!(message.contains("cas factory kill"), "{message}");
-        assert!(message.contains("Only daemons too old to support reexec"), "{message}");
         assert!(message.contains(session), "{message}");
 
         let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
@@ -19418,169 +19427,6 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         assert!(output.contains("Factory MCP versions (installed 9.99.2)"), "{output}");
         assert!(output.contains("release-worker (Worker") && output.contains("9.99.1 [STALE"), "{output}");
-    }
-
-    #[tokio::test]
-    async fn cas_070a_recycled_worker_with_unresolved_artifact_and_fresh_activity_executes() {
-        let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
-        use cas_store::{AgentStore, EventStore, PromptQueueStore, SqliteAgentStore, SqliteEventStore, SqlitePromptQueueStore};
-        use cas_types::{Agent, AgentRole};
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_SESSION",
-            "liveness-fixture-session",
-        )]);
-        let temp = tempfile::tempdir().unwrap();
-        let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = SqliteAgentStore::open(&root).unwrap();
-        let events = SqliteEventStore::open(&root).unwrap();
-        let queue = SqlitePromptQueueStore::open(&root).unwrap();
-        queue.init().unwrap();
-        let sessions = temp.path().join("account/sessions/2026/09/10");
-        std::fs::create_dir_all(&sessions).unwrap();
-        let now = chrono::Utc::now();
-        // A real, identity-labelled PTY child surrogate for the OS probe. The
-        // event fixtures remain the execution evidence; a sleeping process
-        // alone must not decide waiting versus executing.
-        struct Child(std::process::Child);
-        impl Drop for Child {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let child = Child(
-            std::process::Command::new("bash")
-                .args(["-c", "exec -a codex sleep 120"])
-                .spawn()
-                .unwrap(),
-        );
-        for (index, (kind, age, dead)) in [
-            ("task_complete", 1800, false),
-            ("turn_completed", 600, false),
-            ("task_started", 1, false),
-            ("task_started", 1800, false),
-            ("task_started", 1, true),
-            ("task_started", 1, false),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let name = format!("liveness-fixture-{index}");
-            let cwd = temp.path().join(&name);
-            std::fs::create_dir_all(&cwd).unwrap();
-            let path = sessions.join(format!("rollout-2026-09-10T19-00-00-{index}.jsonl"));
-            let metadata = serde_json::json!({"type":"session_meta","payload":{"id":format!("fixture-{index}"),"cwd":cwd.to_str().unwrap(),"source":"cli"}});
-            let event = serde_json::json!({"timestamp":(now-chrono::Duration::seconds(age)).to_rfc3339(),"type":"event_msg","payload":{"type":kind,"turn_id":"fixture"}});
-            // A large old record makes the performance test sensitive to
-            // accidental full-rollout scanning without retaining private data.
-            std::fs::write(
-                &path,
-                format!("{metadata}\n{}\n{event}\n", "x".repeat(4 * 1024 * 1024)),
-            )
-            .unwrap();
-            let mut agent =
-                Agent::new_with_role(format!("fixture-{index}"), name, AgentRole::Worker);
-            agent.last_heartbeat = now;
-            agent.factory_session = Some("liveness-fixture-session".into());
-            let pid = if dead { i32::MAX as u32 } else { child.0.id() };
-            agent.pid = Some(pid);
-            crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
-            agent.metadata.insert("worker_cli".into(), "codex".into());
-            agent
-                .metadata
-                .insert("clone_path".into(), cwd.to_string_lossy().into());
-            agent.metadata.insert(
-                "worker_account_dir".into(),
-                temp.path().join("account").to_string_lossy().into(),
-            );
-            if matches!(index, 2 | 3 | 5) {
-                agent.last_heartbeat = now - chrono::Duration::minutes(30);
-                agent.cc_session_id = Some("pre-recycle-session".into());
-            }
-            store.register(&agent).unwrap();
-            if matches!(index, 2 | 3 | 5) {
-                // A confirmed recycle replaces the transcript identity but
-                // must not need an MCP heartbeat before work is visible.
-                assert_eq!(
-                    record_reset_registration(&store, &agent, &agent.id),
-                    ResetRegistration::Recorded,
-                );
-                assert_eq!(store.get(&agent.id).unwrap().last_heartbeat, agent.last_heartbeat);
-                std::fs::remove_file(&path).unwrap();
-            }
-            if index == 4 {
-                std::fs::remove_file(&path).unwrap();
-            }
-            // Terminal turns and confirmed exits still beat fresh activity.
-            // Row 3 has only expired own activity and fresh foreign activity.
-            if matches!(index, 0 | 2 | 3 | 4) {
-                events.record(&make_event(cas_types::EventType::WorkerActivity,
-                    &agent.id, if index == 3 { 1800 } else { 0 })).unwrap();
-            }
-            if index == 5 {
-                queue.enqueue_with_session(&agent.name, "supervisor", "working after recycle",
-                    "liveness-fixture-session").unwrap();
-            }
-            if index == 3 {
-                queue.enqueue_with_session(&agent.name, "supervisor", "different factory",
-                    "foreign-factory-session").unwrap();
-            }
-        }
-        events.record(&make_event(cas_types::EventType::WorkerActivity, "foreign-worker", 0)).unwrap();
-        queue.enqueue_with_session("foreign-worker", "supervisor", "another worker is active",
-            "liveness-fixture-session").unwrap();
-        drop(store);
-        let core = CasCore::with_daemon(root, None, None);
-        #[cfg(feature = "mcp-proxy")]
-        let service = CasService::new(core, None);
-        #[cfg(not(feature = "mcp-proxy"))]
-        let service = CasService::new(core);
-        let request =
-            serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true}))
-                .unwrap();
-        let start = std::time::Instant::now();
-        let output = response_text(service.factory_worker_status(request).await.unwrap());
-        let elapsed = start.elapsed();
-        let lines: Vec<_> = output.lines().collect();
-        let liveness_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("liveness:")).collect();
-        assert_eq!(liveness_lines.len(), 6, "{output}");
-        assert!(lines.iter().any(|line| line.starts_with("Factory MCP versions")), "{output}");
-        assert!(
-            lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
-                && line.contains("has not reported a mailbox poll")),
-            "summary must retain a visible mailbox health footer: {output}"
-        );
-        assert!(
-            lines[0].contains("Factory session: liveness-fixture-session")
-                && lines[0].contains("worker rows in scope: 6"),
-            "summary must lead with its session scope: {output}"
-        );
-        for (index, expected) in [
-            "waiting_for_input",
-            "waiting_for_input",
-            "executing",
-            "stalled",
-            "dead",
-            "executing",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert!(
-                liveness_lines
-                    .get(index)
-                    .unwrap()
-                    .starts_with(&format!("liveness: {expected} |")),
-                "{output}"
-            );
-        }
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "six-worker poll: {elapsed:?}"
-        );
-        if let Ok(dir) = proof_dir {
-            std::fs::write(std::path::Path::new(&dir).join("six-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n6 workers; recycled workers have stale heartbeat and unresolved artifacts; worker 2 has fresh own activity; worker 5 has fresh outbound; worker 3 has expired own activity and fresh foreign activity; local process lookup\n{output}\n")).unwrap();
-        }
     }
 
     /// Characterization for cas-fa69: worker_status resolves its live

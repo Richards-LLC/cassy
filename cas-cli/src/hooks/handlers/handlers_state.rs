@@ -1285,6 +1285,17 @@ mod supervisor_handoff_tests {
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         // Ordinary handoff mail was already delivered during the held startup.
         let context = format!("{held}\n{context}");
+        // cas-516f: over the SessionStart budget the lane degrades to counts plus
+        // receipt paths, so every row is reachable inline or through a receipt.
+        let reachable = |agent: &str| {
+            let mut text = std::fs::read_to_string(root.join("supervisor-recovery").join(format!("{agent}.txt"))).unwrap_or_default();
+            for entry in std::fs::read_dir(root.join("supervisor-handoffs")).unwrap() {
+                text.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+            }
+            text
+        };
+        let inline = context.clone();
+        let context = format!("{inline}\n{}", reachable("successor-id"));
         // GH #1487: integration alone does not prove the remaining close gates.
         for gate in ["ledger", "upkeep", "branch attribution"] {
             assert!(context.contains(gate), "recovery must disclose {gate}: {context}");
@@ -1307,7 +1318,7 @@ mod supervisor_handoff_tests {
         for id in ["cas-live-review", "cas-dropped", "cas-rejected"] {
             assert!(!context.contains(&format!("task action=close id={id}")), "substantive hold on {id} stays outside receipt recovery: {context}");
         }
-        assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");
+        assert!(context.contains("Supervisor lease without assignee") && context.contains("cas-leased"), "supervisor lease ownership must survive even without an assignee: {context}");
         assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
         let handoff_start = context.find("Supervisor handoff").unwrap();
         let handoff_end = context.find("verify current liveness before recovery.").unwrap();
@@ -1316,7 +1327,7 @@ mod supervisor_handoff_tests {
             assert!(context.contains(expected), "startup lost {expected}: {context}");
         }
         assert!(context[handoff_start..handoff_end].lines().count() <= 30, "handoff must bound short historical rows too: {context}");
-        assert!(!context.contains("{\""), "startup handoff must use readable rows: {context}");
+        assert!(!inline.contains("{\""), "startup handoff must use readable rows: {inline}");
         let receipts = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap();
         let receipt: serde_json::Value = serde_json::from_slice(
             &std::fs::read(receipts.into_iter().next().unwrap().unwrap().path()).unwrap(),
@@ -1342,6 +1353,7 @@ mod supervisor_handoff_tests {
         let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();
         let third = serde_json::to_value(third).unwrap();
         let context = third["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let context = format!("{context}\n{}", reachable("third-id"));
         let receipts: Vec<_> = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap().map(|r| std::fs::read_to_string(r.unwrap().path()).unwrap()).collect();
         assert!(receipts.iter().any(|r| r.contains("cas-owned-id") && r.contains("inherited_handoff")), "unadopted inherited epics must remain retrievable");
         assert!(context.contains("live-worker"), "the inherited live worker must remain visible: {context}");
@@ -1351,6 +1363,76 @@ mod supervisor_handoff_tests {
         assert!(context.contains("cas-unreadable: verification metadata unreadable"), "startup must report the skipped row: {context}");
 
 
+    }
+
+    /// cas-516f: a predecessor with 100+ pending rows and 25 integrated
+    /// deliveries made the supervisor SessionStart 10-15 KB, past the harness
+    /// inline cap. Overflow must be pointed to by receipt path, not inlined.
+    #[test]
+    fn supervisor_startup_with_large_handoff_and_recovery_fits_budget() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        let mut ending = Agent::new("ending-id".into(), "ending".into());
+        ending.role = AgentRole::Supervisor;
+        ending.machine_id = Some(Agent::get_or_generate_machine_id());
+        ending.factory_session = Some("old-session".into());
+        agents.register(&ending).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(temp.path()).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(temp.path().join("feature.rs"), "delivery\n").unwrap();
+        git(&["add", "feature.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff-project'\n[qa]\nmode='batch'\n").unwrap();
+        for index in 0..25 {
+            let id = format!("cas-int-{index:02}");
+            let mut task = Task::new(id.clone(), "Merged delivery".into());
+            task.origin_project = Some("handoff-project".into());
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.parked_branch = Some(format!("factory/{id}"));
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "main".into() },
+                assignee: "ended-worker".into(), branch: format!("factory/{id}"), base_sha: base.clone(),
+            });
+            tasks.add(&task).unwrap();
+        }
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        for index in 0..120 {
+            queue.enqueue("requester", "ending", &format!("Pending ask {index}: approve delivery")).unwrap();
+        }
+        handle_session_end(
+            &HookInput { session_id: ending.id.clone(), reason: Some("compaction".into()), ..Default::default() },
+            Some(&root),
+        ).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "successor");
+        env.set("CAS_HOOK_HARNESS", "claude");
+        let output = handle_session_start(&HookInput { session_id: "successor-id".into(), ..Default::default() }, Some(&root)).unwrap();
+        let value = serde_json::to_value(&output).unwrap();
+        let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("Integrated deliveries to adopt/close (25)"), "{context}");
+        assert!(
+            context.len() <= SESSION_START_BUDGET_BYTES,
+            "supervisor SessionStart is {} bytes, over the {SESSION_START_BUDGET_BYTES}B budget: {context}",
+            context.len()
+        );
+        // The inline list is bounded; every row stays reachable by receipt path.
+        let receipt = context.lines().find_map(|l| l.strip_prefix("Recovery receipt: ")).expect("overflow must name its receipt");
+        let full = std::fs::read_to_string(receipt.trim()).unwrap();
+        for index in 0..25 {
+            assert!(full.contains(&format!("task action=close id=cas-int-{index:02} ")), "receipt lost row {index}");
+        }
     }
 
     /// Replay a busy supervisor exiting before it sees phone or Violet mail.

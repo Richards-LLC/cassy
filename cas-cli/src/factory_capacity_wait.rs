@@ -31,6 +31,8 @@ pub(crate) enum CapacityKind {
 #[derive(Default)]
 struct ReclaimableCaches {
     caches: Vec<(PathBuf, u64)>,
+    /// cas-7a37: bytes the guarded review-scratch inventory could free now.
+    review_scratch_bytes: u64,
     complete: bool,
 }
 
@@ -95,12 +97,15 @@ fn reclaimable_caches(root: &Path) -> Result<ReclaimableCaches> {
             known.extend(entries.flatten().map(|entry| entry.path()));
         }
     }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let report = crate::factory_target_cache::inspect_until(root, TargetCachePolicy::from(config.factory()),
-        &known, &live, std::time::Instant::now() + std::time::Duration::from_secs(2))?;
+        &known, &live, deadline)?;
+    let review_scratch = crate::factory_review_scratch::reclaimable_bytes_until(root, Some(deadline));
     Ok(ReclaimableCaches {
         caches: report.caches.into_iter().filter(|cache| matches!(cache.disposition,
             CacheDisposition::Eligible | CacheDisposition::Selected)).map(|cache| (cache.path, cache.bytes)).collect(),
-        complete: report.inventory_complete,
+        review_scratch_bytes: review_scratch.unwrap_or(0),
+        complete: report.inventory_complete && review_scratch.is_some(),
     })
 }
 
@@ -578,7 +583,7 @@ fn reconcile_with_inventory(
     }
     let inventory = inventory()?;
     let reclaimable_bytes = inventory.complete.then(|| inventory.caches.iter()
-        .fold(0u64, |total, (_, bytes)| total.saturating_add(*bytes)));
+        .fold(inventory.review_scratch_bytes, |total, (_, bytes)| total.saturating_add(*bytes)));
     let agents = open_agent_store(root)?.list(None)?;
     for (key, waits) in disk_groups {
         if waits.iter().all(|wait| now - wait.since < Duration::seconds(ESCALATE_SECONDS)) { continue; }
@@ -598,9 +603,13 @@ fn reconcile_with_inventory(
         // retry the same idempotent notice, including snapshot reversions.
         write_pressure(root, &pressure)?;
         let workers = waits.iter().map(|wait| format!("- {} ({}): {}", wait.worker_name, wait.task_id, wait.cause)).collect::<Vec<_>>().join("\n");
-        let caches = inventory.caches.iter().map(|(path, bytes)| format!("- {}: {bytes} bytes", path.display())).collect::<Vec<_>>().join("\n");
+        let mut caches = inventory.caches.iter().map(|(path, bytes)| format!("- {}: {bytes} bytes", path.display())).collect::<Vec<_>>();
+        if inventory.review_scratch_bytes > 0 {
+            caches.push(format!("- verifier review scratch: {} bytes", inventory.review_scratch_bytes));
+        }
+        let caches = caches.join("\n");
         let total = reclaimable_bytes.map_or_else(|| "unknown (inventory incomplete)".to_string(), |bytes| format!("{bytes} bytes"));
-        let detail = format!("Disk pressure is delaying builds. Waiting workers (cause at last refusal):\n{workers}\nNow: {}\nReclaimable target caches (logical bytes): {total}\n{}\nThis notice updates only when waiting workers or reclaimable bytes change; tasks and leases remain active.", live_admission(root), if caches.is_empty() { "- none found" } else { &caches });
+        let detail = format!("Disk pressure is delaying builds. Waiting workers (cause at last refusal):\n{workers}\nNow: {}\nReclaimable target caches and review scratch (logical bytes): {total}\n{}\nThis notice updates only when waiting workers or reclaimable bytes change; tasks and leases remain active.", live_admission(root), if caches.is_empty() { "- none found" } else { &caches });
         let recipient = crate::supervisor_notices::resolve(&agents, None, waits[0].session.as_deref());
         crate::supervisor_notices::enqueue(root, &recipient, "capacity_wait", &detail, &occurrence)?;
         pressure.get_mut(&key).expect("pressure episode").notified = true;
@@ -661,7 +670,7 @@ mod tests {
         for repo in &repos {
             record_refusal_with_kind(&root, repo, "disk_fixture", CapacityKind::Disk, later).unwrap();
         }
-        let inventory = |bytes| Ok(ReclaimableCaches { caches: vec![(PathBuf::from("/fixture/retired-cache"), bytes)], complete: true });
+        let inventory = |bytes| Ok(ReclaimableCaches { caches: vec![(PathBuf::from("/fixture/retired-cache"), bytes)], complete: true, ..Default::default() });
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(10)).unwrap(), 1);
         assert_eq!(notices.pending_count("capacity-lead").unwrap(), 1);
         let prompts = open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap();
@@ -701,5 +710,67 @@ mod tests {
         record_refusal_with_kind(&root, &repos[0], "disk_fixture", CapacityKind::Disk, restart).unwrap();
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), restart + Duration::minutes(25), || inventory(0)).unwrap(), 1);
         assert_eq!(notices.pending_count("capacity-lead").unwrap(), 6);
+    }
+
+    /// cas-7a37: a completed review walk still holds its build output on disk,
+    /// so the notice's reclaimable total (read through the production
+    /// inventory, with no staged trash) counts it.
+    #[test]
+    fn disk_notice_counts_review_scratch_in_the_reclaimable_total_cas_7a37() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().canonicalize().unwrap();
+        let root = project.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(&project).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@cas"]);
+        git(&["config", "user.name", "CAS Test"]);
+        std::fs::write(project.join("README"), "initial\n").unwrap();
+        std::fs::create_dir_all(project.join(".git/info")).unwrap();
+        std::fs::write(project.join(".git/info/exclude"), "target/\n.cas/\n").unwrap();
+        git(&["add", "README"]);
+        git(&["commit", "-m", "initial"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut lead = Agent::new_with_role("scratch-lead".into(), "scratch-lead".into(), AgentRole::Supervisor);
+        lead.factory_session = Some("scratch-session".into());
+        agents.register(&lead).unwrap();
+        let now = Utc::now();
+        let name = "scratch-worker";
+        let mut worker = Agent::new_with_role(name.into(), name.into(), AgentRole::Worker);
+        worker.factory_session = lead.factory_session.clone();
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-scratch-worker".into(), "capacity fixture".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(name.into());
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, name, 7200, Some("working")).unwrap();
+        let repo = root.join("worktrees").join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        record_refusal_with_kind(&root, &repo, "disk_fixture", CapacityKind::Disk, now).unwrap();
+
+        // A finished task's review walk with its build output in place and no
+        // staged trash: the verdict-time handoff has not moved it.
+        let mut reviewed = Task::new("cas-reviewed".into(), "reviewed".into());
+        reviewed.status = TaskStatus::Closed;
+        tasks.add(&reviewed).unwrap();
+        let walk = crate::factory_review_scratch::create_candidate(&root, &project, &reviewed.id, &head).unwrap();
+        std::fs::create_dir_all(walk.path.join("target/debug")).unwrap();
+        std::fs::write(walk.path.join("target/debug/output"), b"regenerable").unwrap();
+        drop(walk);
+
+        let later = now + Duration::minutes(25);
+        assert_eq!(reconcile(&root, Some("scratch-session"), later).unwrap(), 1);
+        let notice = read_pressure(&root).unwrap().into_values().next().expect("pressure episode");
+        assert_eq!(notice.reclaimable_bytes, Some(11));
     }
 }

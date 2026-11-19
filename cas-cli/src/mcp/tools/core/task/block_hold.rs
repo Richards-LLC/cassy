@@ -307,6 +307,32 @@ pub(crate) fn latest_blocker_reason(notes: &str) -> Option<String> {
     blocker_note_entries(notes).pop().map(|(_, reason)| reason)
 }
 
+/// The reason this blocked task is held for now: the structured hold the
+/// last `status=blocked` recorded when it is not older than the newest blocker
+/// note, otherwise that note (GH #1904). An older worker blocker note must not
+/// outrank a later hold the supervisor recorded for the operator.
+pub(crate) fn current_hold_reason(
+    task_store: &dyn TaskStore,
+    task_id: &str,
+    notes: &str,
+) -> Option<String> {
+    let hold = read(task_store, task_id).ok().flatten();
+    let note = blocker_note_entries(notes).pop();
+    // Notes stamp only the minute (UTC); the hold carries its full instant.
+    // A hold recorded in the note's own minute or later wins, so the common
+    // sequence (the worker blocks, the supervisor holds right after) is not
+    // decided by truncating the hold to the minute.
+    let at_or_after = |note_minute: &str, hold: &TaskBlockedHold| {
+        chrono::NaiveDateTime::parse_from_str(&format!("{note_minute}:00"), "%Y-%m-%d %H:%M:%S")
+            .is_ok_and(|minute| hold.when.naive_utc() >= minute)
+    };
+    match (note, hold) {
+        (Some((at, _)), Some(hold)) if at_or_after(&at, &hold) => Some(hold.reason),
+        (Some((_, reason)), _) => Some(reason),
+        (None, hold) => hold.map(|hold| hold.reason),
+    }
+}
+
 /// Whether a blocker reason is currently gated on an operator decision.
 /// Keep the explicit `owner:` marker authoritative, matching the progress
 /// watchdog's cas-e239 exclusion; older notes without it retain the operator

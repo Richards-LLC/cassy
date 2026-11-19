@@ -262,7 +262,12 @@ except BaseException:
     process.wait()
     raise
 events = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
-assert [event for event in events if event.get("event") == "release_adapter_timeout"] == [{
+timeouts = [event for event in events if event.get("event") == "release_adapter_timeout"]
+assert len(timeouts) == 1, output
+# Require a human diagnostic in the log schema, without fixing its prose.
+message = timeouts[0].pop("message")
+assert isinstance(message, str) and message.strip(), output
+assert timeouts == [{
     "event": "release_adapter_timeout", "phase": "installed", "deadline_seconds": 1,
     "receipt": str(pathlib.Path(os.environ["XDG_STATE_HOME"]) / "cassy/install-on-publish.pending.d/v9.99.4.json"),
 }], output

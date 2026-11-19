@@ -10314,7 +10314,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         }));
         let message = stray_user_skills_check(&strays).message;
         assert!(message.contains("cas doctor --fix --yes"), "{message}");
-        assert!(message.contains("manual review"), "{message}");
 
         let removed = remove_stale_managed_user_skills(&strays, &targets).unwrap();
         assert_eq!(

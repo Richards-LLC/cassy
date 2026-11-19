@@ -490,7 +490,15 @@ struct EvidenceSync {
     machine_id: String,
     root: String,
     files: Vec<SyncedFile>,
+    /// A routed build's manifest must arrive byte-identical before review.
+    /// An ordinary park's manifest restores what it can and never refuses
+    /// (cas-dae1: no new admission gate). Manifests written before this
+    /// field existed were all routed.
+    #[serde(default = "strict_by_default")]
+    strict: bool,
 }
+
+fn strict_by_default() -> bool { true }
 
 /// One evidence file by its `/`-separated path under the task evidence
 /// directory. Empty files carry no artifact: their bytes are the hash.
@@ -601,11 +609,13 @@ pub(crate) fn publish_routed_evidence(
         };
         files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
     }
-    if !routed { return Ok(()); }
-    let source = source.unwrap_or_default();
-    let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files };
+    // Every park records where each evidence file sits under the task evidence
+    // directory, so the merge owner can restore nested captures at the paths
+    // the ledger cites (GH #2079). Only a routed build makes it strict.
+    let audience = if routed { source.unwrap_or_default() } else { "the merge owner".into() };
+    let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files, strict: routed };
     let note = format!(
-        "[{}] Evidence synced for review on {source}\n{EVIDENCE_SYNC}{}",
+        "[{}] Evidence synced for review on {audience}\n{EVIDENCE_SYNC}{}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
         serde_json::to_string(&manifest).map_err(|error| fail(error.to_string()))?,
     );
@@ -680,7 +690,13 @@ pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task)
         serde_json::from_str::<EvidenceSync>(line.strip_prefix(EVIDENCE_SYNC)?).ok()
     });
     if let Some(sync) = manifest {
-        return materialize_manifest(cas_root, task, &sync);
+        let restored = materialize_manifest(cas_root, task, &sync);
+        if sync.strict {
+            return restored;
+        }
+        if let Err(error) = restored {
+            tracing::warn!(task_id = %task.id, %error, "peer evidence manifest not fully restored");
+        }
     }
     let result = (|| -> anyhow::Result<()> {
         let store = SqliteArtifactStore::open(cas_root)?;
@@ -853,10 +869,73 @@ mod tests {
             assert_eq!(records[0].sha256, digest_file(&log).unwrap().0);
             let task = crate::store::open_task_store(&owner.root).unwrap().get(&owner.task.id).unwrap();
             assert!(from_notes(&task.notes, &records[0].id, &task.id).unwrap().is_some());
-            // Ordinary evidence uses fetchable references without a strict
-            // routed-build manifest introducing a new admission requirement.
-            assert!(!task.notes.lines().any(|line| line.starts_with(EVIDENCE_SYNC)));
+            // Ordinary evidence is listed by task-relative path, but only a
+            // routed build's manifest is strict: no new admission requirement.
+            let manifest = task.notes.lines().find_map(|line| {
+                serde_json::from_str::<EvidenceSync>(line.strip_prefix(EVIDENCE_SYNC)?).ok()
+            }).expect("an ordinary park records its evidence manifest");
+            assert!(!manifest.strict);
         }).await.unwrap();
+    }
+
+    /// GH #2079: a delivery parked on one machine leaves nested captures
+    /// (`proof/`) and top-level logs in its task evidence directory. The merge
+    /// owner, holding only the synced task notes, restores each at the path the
+    /// ledger cites; an artifact it cannot fetch never blocks the dispatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_park_evidence_reaches_the_merge_owner_at_cited_paths_gh2079() {
+        use wiremock::matchers::body_partial_json;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        let evidence: [(&str, &[u8]); 2] =
+            [("proof/shot.png", b"\x89PNG capture"), ("web-green.log", b"web: PASS\n")];
+        for (index, (name, bytes)) in evidence.iter().enumerate() {
+            let leaf = Path::new(name).file_name().unwrap().to_str().unwrap();
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(body_partial_json(serde_json::json!({"name": leaf})))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"),
+                    "upload_url": format!("{}/blob/{index}", server.uri()), "required_headers": {}})))
+                .mount(&server).await;
+            Mock::given(method("PUT")).and(path(format!("/blob/{index}")))
+                .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("/api/artifacts/cloud-{index}/complete")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("/api/artifacts/cloud-{index}/url")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"),
+                    "url": format!("{}/blob/{index}", server.uri()), "size_bytes": bytes.len()})))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("/blob/{index}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+                .mount(&server).await;
+        }
+        let task = cas_types::Task::new("cas-2079-fixture".into(), "parked elsewhere".into());
+        let parking = PeerReviewer::new(&server.uri(), task);
+        env.set("CAS_ROOT", &parking.root);
+        for (name, bytes) in &evidence {
+            let file = parking.evidence_dir().join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+        let (parked, parking_dir) = tokio::task::spawn_blocking(move || {
+            publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
+            let parked = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
+            (parked, parking.evidence_dir())
+        }).await.unwrap();
+        std::fs::remove_dir_all(&parking_dir).unwrap();
+
+        let owner = PeerReviewer::new(&server.uri(), parked);
+        let owner_dir = owner.evidence_dir();
+        let (owner_task, owner_root) = (owner.task.clone(), owner.root.clone());
+        env.set("CAS_ROOT", &owner_root);
+        tokio::task::spawn_blocking(move || {
+            materialize_peer_evidence(&owner_root, &owner_task).unwrap();
+        }).await.unwrap();
+        for (name, bytes) in &evidence {
+            assert_eq!(&std::fs::read(owner_dir.join(name)).unwrap(), bytes, "{name}");
+        }
     }
 
 }

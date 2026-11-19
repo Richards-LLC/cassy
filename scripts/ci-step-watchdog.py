@@ -32,20 +32,32 @@ GRACE_SECONDS = 20
 
 
 def processes():
-    """Every readable process as {pid: (ppid, argv, rss_kib, started_ticks)}."""
+    """A portable snapshot as {pid: (ppid, argv, rss_kib, start_order)}.
+
+    Diagnostics are best effort: an unavailable process table must never
+    prevent the deadline from stopping the command's owned process group.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,rss=,etime=,args="],
+            capture_output=True, text=True, errors="replace", check=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return {}
     table = {}
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 4)
+        if len(fields) != 5:
             continue
         try:
-            stat = (entry / "stat").read_text()
-            argv = (entry / "cmdline").read_bytes().split(b"\0")
-            status = (entry / "status").read_text()
-        except OSError:
+            pid, ppid, rss = map(int, fields[:3])
+            days, _separator, clock = fields[3].rpartition("-")
+            age = int(days or 0) * 86400 + sum(
+                int(value) * 60 ** index for index, value in enumerate(reversed(clock.split(":"))))
+        except ValueError:
             continue
-        fields = stat[stat.rindex(")") + 2:].split()
-        rss = next((int(line.split()[1]) for line in status.splitlines() if line.startswith("VmRSS:")), 0)
-        table[int(entry.name)] = (int(fields[1]), [a.decode(errors="replace") for a in argv if a], rss, int(fields[19]))
+        # ps reports elapsed time on both BSD and GNU; its inverse sorts
+        # newest first just like Linux's start ticks did.
+        table[pid] = (ppid, fields[4].split(), rss, -age)
     return table
 
 

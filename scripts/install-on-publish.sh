@@ -282,6 +282,7 @@ deliver_notice() {
         };
         $SIG{ALRM} = sub {
             print STDERR encode_json({event => "release_adapter_timeout", phase => $phase,
+                message => "$phase adapter timed out after ${seconds}s",
                 deadline_seconds => 0 + $seconds, receipt => $receipt}), "\n";
             $stop->();
         };

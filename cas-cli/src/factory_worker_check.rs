@@ -307,7 +307,7 @@ fn passing_run_proves(run: &str, package: &str, harness: Option<&str>, filter: &
         && passes.iter().all(|pass| pass[1] == binary && stability::rust::filter_matches(filter, &pass[2]))
 }
 
-fn named_filter(filter: &str) -> bool {
+pub(crate) fn named_filter(filter: &str) -> bool {
     regex::Regex::new(r"^[ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\)(?:[ \t]*[|&][ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\))*[ \t]*$")
         .is_ok_and(|pattern| pattern.is_match(filter))
 }
@@ -1194,6 +1194,11 @@ impl<'a> PassingTests<'a> {
             }
             records
         })
+    }
+
+    /// cas-bc25: the filters of this tip's passing receipts.
+    pub(crate) fn filters(&self) -> Vec<String> {
+        self.records().iter().map(|(_, _, test)| test.filter.clone()).collect()
     }
 
     pub(crate) fn receipts(&self) -> Vec<String> {

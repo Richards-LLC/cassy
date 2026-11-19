@@ -2,6 +2,7 @@ pub(crate) mod audit;
 pub(crate) mod integration_batch;
 pub(crate) mod block_hold;
 pub(crate) mod close_refusal;
+pub(crate) mod repair_class;
 mod dependencies;
 pub(crate) mod lifecycle;
 mod notes;

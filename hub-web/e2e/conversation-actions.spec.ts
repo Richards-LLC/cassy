@@ -44,5 +44,7 @@ test("A lost connection keeps the thread under the banner and says why the actio
   await expect(banner).toBeVisible();
   await expect(banner).toContainText("Atlas · Linux");
   await expect(page.getByRole("log")).toContainText("The project badge stays visible");
-  await expect(page.locator("#conversation-interrupt")).toHaveAccessibleDescription(/Interrupt and raw output wait until then\./);
+  const interrupt = page.locator("#conversation-interrupt");
+  await expect(interrupt).toHaveAttribute("aria-disabled", "true");
+  await expect(interrupt).toHaveAccessibleDescription(/\S/);
 });

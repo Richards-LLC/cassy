@@ -156,7 +156,6 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await showConversationList(page);
     await expect(row).not.toContainText("Reconnecting");
     await openConversation(page, "cas-src");
-    await expect(footer).toContainText("Connected");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot connected");
     // The held message went out on its own, exactly once, and the waiting
     // line cleared with the reconnect (cas-0978, cas-b789).

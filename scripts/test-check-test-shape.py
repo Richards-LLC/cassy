@@ -661,6 +661,7 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 f'for id in helpers {{ assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
                 f'match helper {{ Some(id) => assert_eq!(source, id("a.test.ts", "{sentence}")), _ => () }}',
                 f'use diagnostic::id; assert_eq!(source, id("a.test.ts", "{sentence}"));',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}")); use diagnostic::id;',
                 f'assert_eq!(source, diagnostic::Identity::exact("a.test.ts", "{sentence}"));',
                 f'struct Identity; assert_eq!(source, Identity::exact("a.test.ts", "{sentence}"));',
             ]
@@ -670,6 +671,9 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 (prefix, f'assert_eq!(&selected, &(id("a.test.ts", "{sentence}")));', 0),
                 (prefix, f'assert_eq!(selected.id, id("a.test.ts", "{sentence}").id);', 0),
             ])
+            cases.append((prefix.replace('#[test] fn check() {',
+                                         '#[cfg(test)] fn check<T>(id: fn(&str, &str) -> String) {'),
+                          f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1))
             for setup, assertion, status in cases:
                 with self.subTest(assertion=assertion, setup=setup):
                     path.write_text(setup + assertion + '\n}\n')

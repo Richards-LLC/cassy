@@ -1282,28 +1282,6 @@ fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
         &source[node.byte_range()]
     }
 
-    // Plain and raw strings are inert; f-string expressions are executable.
-    fn literal<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
-        if node.kind() != "string" {
-            return None;
-        }
-        let spelling = text(node, source);
-        let quote = spelling.find(['\'', '"'])?;
-        if !spelling[..quote]
-            .chars()
-            .all(|ch| matches!(ch, 'r' | 'R' | 'u' | 'U'))
-        {
-            return None;
-        }
-        let spelling = &spelling[quote..];
-        let width = if spelling.starts_with("\"\"\"") || spelling.starts_with("'''") {
-            3
-        } else {
-            1
-        };
-        spelling.get(width..spelling.len().checked_sub(width)?)
-    }
-
     fn value(
         node: Node<'_>,
         source: &str,
@@ -1316,7 +1294,7 @@ fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
         }
         match node.kind() {
             "identifier" => vars.get(text(node, source)).copied(),
-            "string" => literal(node, source).map(|_| Value::Text),
+            "string" => python_string_literal(node, source).map(|_| Value::Text),
             "parenthesized_expression" => value(node.named_child(0)?, source, vars, cwd, depth + 1),
             "comparison_operator" => {
                 let mut cursor = node.walk();
@@ -1333,7 +1311,7 @@ fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
                     && text(function, source) == "Path"
                     && args.len() == 1
                 {
-                    let path = literal(args[0], source)?;
+                    let path = python_string_literal(args[0], source)?;
                     // Do not guess Python escapes, dynamic targets or paths
                     // outside the checkout's working directory.
                     return (!path.contains('\\')

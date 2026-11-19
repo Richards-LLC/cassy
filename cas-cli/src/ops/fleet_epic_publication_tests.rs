@@ -163,6 +163,8 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             epic.epic_verification_owner = Some(owner.id.clone());
             epic.labels.push("release-train".into());
             tasks.update(&epic).unwrap();
+            std::fs::write(root.join("config.toml"),
+                "[project]\ncanonical_id = \"publication-test\"\n[factory]\nrelease_train = true\n[verification]\nenabled = true\n").unwrap();
             let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
             core.set_agent_id_for_testing(owner.id.clone());
             focus_epic(root, "publication-test", FocusEpic::Clear).unwrap();
@@ -201,10 +203,6 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
                 artifact_path: None,
             }, "focus-held", chrono::Utc::now());
             cas_store::create_worker_delivery(root, &receipt, cas_types::WorkerDeliveryState::CloseReady, &owner.id).unwrap();
-            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-            conn.execute_batch("CREATE TRIGGER hold_focus_close BEFORE UPDATE OF status ON tasks
-                WHEN NEW.id = 'cas-focus-held' AND NEW.status = 'closed'
-                BEGIN SELECT RAISE(ABORT, 'fixture held close'); END;").unwrap();
             focus_epic(root, "publication-test", FocusEpic::Clear).unwrap();
             let result = runtime.block_on(core.worktree_merge(source, false, Some(&child.id), false, Some(false), false, None)).unwrap();
             assert!(!result.is_error.unwrap_or(false), "{result:?}");
@@ -212,9 +210,8 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             assert_eq!(cas_store::get_latest_worker_delivery(root, &child.id).unwrap().unwrap().1.state,
                 cas_types::WorkerDeliveryState::CloseReady);
             assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
-            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()),
-                "{result:?}; actor={:?}; epic={:?}", agents.get(&core.get_agent_id().unwrap()), tasks.get(&epic.id));
-            conn.execute_batch("DROP TRIGGER hold_focus_close;").unwrap();
+            assert_eq!(tasks.get(&epic.id).unwrap().status, cas_types::TaskStatus::Open);
+            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()), "{result:?}");
 
             crate::mcp::tools::core::task::release_train::mark_cut_trains(
                 root, repo, tasks.as_ref(), &epic.id, base, "main", &[],

@@ -6493,13 +6493,6 @@ impl CasCore {
             do_cleanup = false;
             reconcile_note.push_str("\nCleanup deferred until publication; source worktree and branch retained.");
         }
-        let focus_note = if push_outcome.is_published() {
-            self.get_agent_id().map(|actor|
-                crate::ops::fleet::auto_focus_target(&cas_root, &actor, &worktree.parent_branch)
-            ).unwrap_or_default()
-        } else {
-            String::new()
-        };
         if push_outcome.is_published()
             && let Some(tip) = merge_commit.as_deref()
         {
@@ -6748,9 +6741,6 @@ impl CasCore {
             if !push_outcome.is_published() {
                 close_result.content.push(ContentBlock::text(push_note));
             }
-            if !focus_note.is_empty() {
-                close_result.content.push(ContentBlock::text(focus_note));
-            }
             return Ok(close_result);
         }
 
@@ -6836,7 +6826,9 @@ impl CasCore {
         if ci_override { detail = crate::gates::override_tag("G-108", detail); }
         if dirty_override { detail = crate::gates::override_tag("G-138", detail); }
         if trunk_fallback { detail = crate::gates::override_tag("G-140", detail); }
-        detail.push_str(&focus_note);
+        if let Ok(actor) = self.get_agent_id() {
+            detail.push_str(&crate::ops::fleet::auto_focus_target(&cas_root, &actor, &worktree.parent_branch));
+        }
         Ok(Self::success(detail))
     }
 

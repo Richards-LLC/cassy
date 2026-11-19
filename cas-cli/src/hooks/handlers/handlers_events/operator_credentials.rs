@@ -134,11 +134,21 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             directories.iter().any(|cwd| {
                 script_constructs_store_path(&body.text, cwd, body.python_source)
                     // A shell executes the body, including any substitution in it.
-                    || (body.shell_commands && shell_references_store(&body.text, cwd, depth + 1))
+                    || (body.shell_commands && shell_body_references_store(&body.text, cwd, depth + 1))
             })
         }) { return true; }
     }
     false
+}
+
+/// A shell executes this heredoc body. Beyond its statements, any word naming a
+/// store path counts, wherever it sits (inside a quoted command substitution
+/// included): the shell's own parse is not trusted to surface it.
+fn shell_body_references_store(body: &str, cwd: &Path, depth: usize) -> bool {
+    body.split(|c: char| c.is_whitespace() || "\"'`()$;|&<>={}".contains(c))
+        .filter(|word| !word.is_empty())
+        .any(|word| path_references_store(word, cwd, false))
+        || shell_references_store(body, cwd, depth)
 }
 
 /// The directories that stand for `cwd`. Each unknown entry takes, per store,

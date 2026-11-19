@@ -12,7 +12,7 @@ metadata:
 1. Write the title as a user-visible promise. End with assertions proving that exact outcome: rendered state, a persisted record through its consumer, or a delivered message. A click or request alone does not prove the result.
 2. Sabotage the guarded behavior through the real consumer: revert the fix, delete the guarded line or return a wrong fixture value. Keep that red run's trace; restore the build and retain green proof. An unrelated timeout is not sabotage evidence.
 3. Make green honest: retries zero, failOnFlakyTests true, no swallowed errors or soft returns. Missing required data fails; declared optional lanes skip visibly with reasons. Check the aggregate required executed count and every unexplained skip using the project's report guard; expected failures execute and unexpected passes fail.
-4. Use seeded data and bounded event/web-first completion. Install a controlled clock only for time-dependent logic. Banned: networkidle, waitForTimeout/sleeps, strictness-silencing .first(), swallowed catches and isVisible() branching that avoids required assertions.
+4. Use seeded data and apply [Test hygiene](../cas-writing-tests/SKILL.md#test-hygiene) item 4 to timing. Banned: networkidle, waitForTimeout, strictness-silencing .first(), swallowed catches and isVisible() branching that avoids required assertions.
 5. Retain trace, video and final ARIA on failure; journey/evidence projects retain successful captures too. Keep full structured/HTML journey reports; the failures console reporter only trims terminal noise. Follow `cas-qa-craft` for the evidence bundle.
 
 ## Build the spec

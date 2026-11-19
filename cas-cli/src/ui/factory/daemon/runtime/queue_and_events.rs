@@ -23069,7 +23069,7 @@ mod stall_nudge_rework_tests {
         assert_eq!(reason.as_deref(), Some("gated_not_ready"));
 
         // The front lists tools privately before Codex has any: that does not release the wake.
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CAS_AGENT_ROLE", "worker"),
             ("CAS_FACTORY_SESSION", daemon.session_name.as_str()),
             ("CAS_AGENT_NAME", "worker-a"),
@@ -23088,16 +23088,29 @@ mod stall_nudge_rework_tests {
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }
         assert!(queue.queued_prompt(wake).unwrap().unwrap().processed_at.is_some(), "the wake goes out once the tools are listed");
+
+        // A hot update retires the backend that listed the tools, behind the same front,
+        // and the client never lists again: the record names the front, so wakes still go.
+        let retired_backend = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            child.id()
+        };
+        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        env.set(crate::factory_tools_ready::FRONT_PID_ENV, &std::process::id().to_string());
+        crate::factory_tools_ready::note_listed_by_backend_for_test(&cas_dir, "1", retired_backend);
+        let after_swap = queue.enqueue("supervisor", "worker-a", "after the swap").unwrap();
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(after_swap).unwrap().unwrap().processed_at.is_some(), "a backend swap does not hold the worker's wakes");
     }
 
     /// GH #2128: the other ways an actionable prompt reaches a Codex worker (its spawn
     /// handoff and the respawn resume brief) wait for its tools like a wake.
     #[tokio::test]
     async fn a_codex_workers_spawn_handoff_and_resume_brief_wait_for_its_cassy_tools_gh_2128() {
-        use crate::ui::factory::app::render_and_ops::epic_workers::{StartupHandoff, startup_handoff};
-        assert_eq!(startup_handoff(cas_mux::SupervisorCli::Codex), StartupHandoff::GatedQueue, "Codex launches with no actionable startup argument");
-        assert_eq!(startup_handoff(cas_mux::SupervisorCli::Claude), StartupHandoff::LaunchArgument);
-
         let (_root, cas_dir, _worker, _nudge) = fixture(false);
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
         make_worker_ready(&mut daemon).await;

@@ -460,6 +460,8 @@ fn spawn_backend(program: &std::path::Path, standby: bool) -> Result<Backend> {
     let mut command = tokio::process::Command::new(program);
     command.args(["serve", "--backend", "--control-fd", &fd.to_string()]);
     if standby { command.arg("--standby"); }
+    // A hot update swaps backends while the front lives on; readiness records outlive the swap by naming the front.
+    command.env(crate::factory_tools_ready::FRONT_PID_ENV, std::process::id().to_string());
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true);
     // SAFETY: after fork this closure performs only the async-signal-safe
     // fcntl call. Exactly the intentional private control socket survives exec.

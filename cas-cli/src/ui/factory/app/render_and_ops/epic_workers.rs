@@ -3353,6 +3353,7 @@ impl FactoryApp {
             Some(prompt)
         });
         self.remove_exited_worker_pane(&worker_name)?;
+        self.forget_tools_listed(&worker_name);
         let handoff = startup_handoff(effective_cli);
         // A Codex worker launches without the actionable prompt; its assignment is
         // enqueued below and the readiness-gated queue delivers it (GH #2128).
@@ -4182,6 +4183,14 @@ impl FactoryApp {
         self.respawn_worker_with_spec(name, teams, None)
     }
 
+    /// A launching worker has listed no tools yet; its predecessor's record (a recycle's
+    /// old server may still be alive) must not release its first wake (GH #2128).
+    fn forget_tools_listed(&self, worker: &str) {
+        if let Some(session) = self.factory_session() {
+            crate::factory_tools_ready::clear(self.cas_dir(), session, worker);
+        }
+    }
+
     /// Respawn a worker, optionally overriding the daemon's default recipe.
     /// The optional spec is used by in-place recycling to retain the worker's
     /// provider, model, effort, and account directory.
@@ -4234,6 +4243,7 @@ impl FactoryApp {
 
         // Add pane to mux (spawns new Claude process)
         self.remove_exited_worker_pane(name)?;
+        self.forget_tools_listed(name);
         if let Err(e) = self.mux.add_worker(
             name,
             cwd,
@@ -7930,6 +7940,65 @@ mod tests {
             assert_ne!(fresh, received, "respawn={respawn}: the replacement got no row");
             assert_eq!(crate::task_assignment::enqueue(&cas_dir, &task).unwrap(), Some(fresh));
         }
+    }
+
+    /// GH #2128: a Codex worker spawned for a task launches with no actionable startup
+    /// prompt (its Cassy tools may not exist yet), and the spawn row waits for the
+    /// readiness gate instead of being marked delivered. The launch is real: the
+    /// fake `codex` records the arguments it was started with.
+    #[test]
+    fn a_codex_spawn_launches_without_the_task_prompt_and_leaves_its_row_to_the_gate_gh_2128() {
+        const CHILD: &str = "CAS_CODEX_SPAWN_HANDOFF_CHILD";
+        let argv_file = std::env::var_os(CHILD).map(std::path::PathBuf::from);
+        let Some(argv_file) = argv_file else {
+            use std::os::unix::fs::PermissionsExt;
+            let cas = crate::test_support::fake_cas_on_path();
+            let argv_file = cas.bin().join("codex-argv");
+            let codex = cas.bin().join("codex");
+            std::fs::write(&codex, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n", argv_file.display())).unwrap();
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let test = format!("{}::a_codex_spawn_launches_without_the_task_prompt_and_leaves_its_row_to_the_gate_gh_2128", module_path!().split_once("::").unwrap().1);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env("PATH", cas.path())
+                .env(CHILD, &argv_file)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        };
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+        open_task_store_cached(&cas_dir).unwrap().add(&task_with("cas-handoff", None, TaskStatus::Open)).unwrap();
+        let mut app = FactoryApp::for_test_at(cas_dir.clone());
+        app.set_factory_session("handoff".into());
+        let name = "codex-worker";
+        // A predecessor's readiness record is cleared when the name launches again.
+        let stale = cas_dir.join("factory-tools-ready").join("handoff").join(name);
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, std::process::id().to_string()).unwrap();
+
+        app.finish_worker_spawn(
+            spawn_result_for_test(name, &project), None, Some(cas_mux::WorkerSpec::codex_default(name)), Some("cas-handoff".into()),
+        ).unwrap();
+
+        for _ in 0..100 {
+            if argv_file.exists() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let argv = std::fs::read_to_string(&argv_file).expect("the fake codex was launched");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let delivered: Vec<Option<String>> = conn
+            .prepare("SELECT transport_delivered_at FROM prompt_queue WHERE target = ?").unwrap()
+            .query_map([name], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(
+            (argv.contains("cas-handoff"), delivered.len(), delivered.iter().any(Option::is_some), stale.exists()),
+            (false, 1, false, false),
+            "(launch argument names the task, spawn rows, row marked delivered, stale readiness record kept); argv: {argv}"
+        );
     }
 
     // --- cas-6913 / cas-7a94: spawn-time task pre-assignment ------------

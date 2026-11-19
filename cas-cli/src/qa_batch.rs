@@ -1207,12 +1207,34 @@ fn covering_receipt(
     head: &str,
     receipts_for_task: fn(&Path, &str, &str) -> cas_store::Result<Vec<QaBatchReceipt>>,
 ) -> Result<Option<QaBatchReceipt>, String> {
+    let mut covering = None;
+    walk_receipts(root, task, repo, target, head, receipts_for_task, |receipt, gap| {
+        if gap.is_none() {
+            covering = Some(receipt.clone());
+        }
+        gap.is_none()
+    })?;
+    Ok(covering)
+}
+
+/// Judge each recorded receipt against the delivery in order, handing the
+/// visitor the receipt and the first reason it does not cover (`None`: it
+/// covers). The visitor stops the walk by returning true.
+fn walk_receipts(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+    receipts_for_task: fn(&Path, &str, &str) -> cas_store::Result<Vec<QaBatchReceipt>>,
+    mut visit: impl FnMut(&QaBatchReceipt, Option<&'static str>) -> bool,
+) -> Result<(), String> {
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
-        return Ok(None);
+        return Ok(());
     }
     let Some(anchor) = resolved_delivery_anchor(repo, task, target) else {
-        return Ok(None);
+        return Ok(());
     };
     // Retired history can recover only reviewed delivery. Without an active
     // park, a later integrated head may be an unreviewed correction, rather
@@ -1228,68 +1250,73 @@ fn covering_receipt(
     let fixed_target = release_close::target(root, &task.id);
     let target = fixed_target.as_deref().unwrap_or(target);
     for receipt in receipts {
-        if !release_close::receipt_allowed(root, task, &receipt) { continue; }
-        let Some(reviewed) = receipt.task_heads.get(&task.id) else { continue };
-        let known = *reviewed == anchor || retired.contains(reviewed);
-        if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
-            let Some(tag) = receipt.release_tag.as_deref() else { continue };
-            let tag_ref = format!("refs/tags/{tag}");
-            if !known
-                || ![anchor.as_str(), head].contains(&reviewed.as_str())
-                || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
-                || !release_tag_ships_delivery(repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, &task.id)
-            {
-                continue;
+        let gap = 'judge: {
+            if !release_close::receipt_allowed(root, task, &receipt) { break 'judge Some("RECEIPT_NOT_ALLOWED"); }
+            let Some(reviewed) = receipt.task_heads.get(&task.id) else { break 'judge Some("TASK_NOT_LISTED"); };
+            let known = *reviewed == anchor || retired.contains(reviewed);
+            if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
+                let Some(tag) = receipt.release_tag.as_deref() else { break 'judge Some("TAG_UNBOUND"); };
+                let tag_ref = format!("refs/tags/{tag}");
+                if !known
+                    || ![anchor.as_str(), head].contains(&reviewed.as_str())
+                    || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
+                    || !release_tag_ships_delivery(repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, &task.id)
+                {
+                    break 'judge Some("TAG_UNBOUND");
+                }
+                break 'judge None;
             }
-            return Ok(Some(receipt));
-        }
-        let inside_review = active == Some(reviewed.as_str())
-            || head == reviewed
-            || ancestor(repo, head, &receipt.staging_sha) == Some(true);
-        if !known
-            || !inside_review
-            || receipt.project_id != project
-            || ancestor(repo, reviewed, head) != Some(true)
-            || ancestor(repo, reviewed, &receipt.staging_sha) != Some(true)
-            || !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
+            if !known { break 'judge Some("ANCHOR_MISMATCH"); }
+            let inside_review = active == Some(reviewed.as_str())
+                || head == reviewed
+                || ancestor(repo, head, &receipt.staging_sha) == Some(true);
+            if !inside_review { break 'judge Some("HEAD_OUTSIDE_REVIEW"); }
+            if receipt.project_id != project { break 'judge Some("PROJECT_MISMATCH"); }
+            if ancestor(repo, reviewed, head) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_HEAD"); }
+            if ancestor(repo, reviewed, &receipt.staging_sha) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_STAGING"); }
+            if !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
                 || (ancestor(repo, &receipt.staging_sha, head) == Some(true)
                     && integration_state(repo, head, target) == Some(true)))
-            || integration_state(repo, &receipt.staging_sha, target) != Some(true)
-        {
-            continue;
-        }
-        // cas-26ac: lineage can grow after recording, so recheck the author.
-        // Receipts from before authors were recorded carry none.
-        if let Some(author) = receipt.ledger_author_id.as_deref()
-            && !receipt.author_overrides.contains_key(&task.id)
-            && author_override(root, task).is_none()
-            && !author_is_independent(root, task, repo, author)?
-            && !(receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA
-                && release_author_waiver(root, task, repo, reviewed)?.is_some())
-        {
-            continue;
-        }
-        // A post-review integration receipt may be later than staging. The
-        // immutable task anchor, rather than that umbrella merge, binds QA.
-        let ledger_ok = match validate_ledger(
-            root,
-            &receipt.ledger_artifact_id,
-            Path::new(&receipt.ledger_path),
-        ) {
-            Ok((artifact, _)) => {
-                artifact.sha256 == receipt.ledger_sha256
-                    && artifact.size_bytes == receipt.ledger_size_bytes
+            {
+                break 'judge Some("STAGING_NOT_COVERING_HEAD");
             }
-            // cas-6048: a peer's receipt names a ledger published on the
-            // machine that recorded it, which validated those bytes there.
-            // Without a local copy, its recorded SHA-256 and size stand.
-            Err(_) => receipt.imported,
+            if integration_state(repo, &receipt.staging_sha, target) != Some(true) {
+                break 'judge Some("STAGING_NOT_ON_TARGET");
+            }
+            // cas-26ac: lineage can grow after recording, so recheck the author.
+            // Receipts from before authors were recorded carry none.
+            if let Some(author) = receipt.ledger_author_id.as_deref()
+                && !receipt.author_overrides.contains_key(&task.id)
+                && author_override(root, task).is_none()
+                && !author_is_independent(root, task, repo, author)?
+                && !(receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA
+                    && release_author_waiver(root, task, repo, reviewed)?.is_some())
+            {
+                break 'judge Some("AUTHOR_IN_LINEAGE");
+            }
+            // A post-review integration receipt may be later than staging. The
+            // immutable task anchor, rather than that umbrella merge, binds QA.
+            let ledger_ok = match validate_ledger(
+                root,
+                &receipt.ledger_artifact_id,
+                Path::new(&receipt.ledger_path),
+            ) {
+                Ok((artifact, _)) => {
+                    artifact.sha256 == receipt.ledger_sha256
+                        && artifact.size_bytes == receipt.ledger_size_bytes
+                }
+                // cas-6048: a peer's receipt names a ledger published on the
+                // machine that recorded it, which validated those bytes there.
+                // Without a local copy, its recorded SHA-256 and size stand.
+                Err(_) => receipt.imported,
+            };
+            (!ledger_ok).then_some("LEDGER_CHANGED")
         };
-        if ledger_ok {
-            return Ok(Some(receipt));
+        if visit(&receipt, gap) {
+            break;
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 // gate-audit[author_override]: selector Read-only evidence lookup replays operator authorization; no new approval or delivery accepted.
@@ -1329,10 +1356,52 @@ pub(crate) fn covering_pass(
     Ok(None)
 }
 
-pub(crate) fn debt_refusal(task: &str) -> String {
+/// The deferred-debt refusal, with the delivery identity, each recorded piece of
+/// evidence and why it does not count, and the one-call supervisor close. The
+/// `debt:` line is machine-readable: `anchor=` and `head=` are commits,
+/// `receipt:<id>=` and `qa_pass:<id>=` carry a gap code (see `walk_receipts`,
+/// `pass_gap`), and `supervisor_close=` is the call that clears the debt.
+pub(crate) fn debt_refusal(root: &Path, task: &Task, repo: &Path, target: &str, head: Option<&str>) -> String {
+    let anchor = resolved_delivery_anchor(repo, task, target);
+    let mut evidence = Vec::new();
+    if let Some(head) = head {
+        let _ = walk_receipts(root, task, repo, target, head, cas_store::qa_batch_receipts_for_task, |receipt, gap| {
+            evidence.push(format!("receipt:{}={}", receipt.id, gap.unwrap_or("COVERS")));
+            false
+        });
+        for pass in cas_store::list_qa_passes(root, &task.id).unwrap_or_default() {
+            evidence.push(format!("qa_pass:{}={}:{}", pass.id, pass.state, pass_gap(root, task, repo, anchor.as_deref(), &pass)));
+        }
+    }
+    if evidence.is_empty() {
+        evidence.push("none".into());
+    }
     format!(
-        "waiting for batch receipt: {task} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor or a covering passed independent QA round is required before close"
+        "waiting for batch receipt: {id} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor or a covering passed independent QA round is required before close\n\
+         debt: task={id} anchor={anchor} head={head} evidence={evidence}\n\
+         supervisor_close: task action=close id={id} supervisor_override=true reason=\"<why>\"{receipt}",
+        id = task.id,
+        anchor = anchor.as_deref().unwrap_or("none"),
+        head = head.unwrap_or("none"),
+        evidence = evidence.join(","),
+        receipt = head.map(|head| format!(" commit_receipt={head}")).unwrap_or_default(),
     )
+}
+
+/// Why a recorded QA round does not satisfy deferred debt (`COVERS`: it does,
+/// so the debt is on the head's integration, not the round).
+fn pass_gap(root: &Path, task: &Task, repo: &Path, anchor: Option<&str>, pass: &cas_types::QaPass) -> &'static str {
+    if pass.state != cas_types::QaPassState::Passed {
+        return "QA_PASS_NOT_PASSED";
+    }
+    if anchor.is_none() || commit(repo, &pass.bound_head).as_deref() != anchor {
+        return "QA_PASS_ANCHOR_MISMATCH";
+    }
+    match pass.reviewer_agent_id.as_deref() {
+        Some(reviewer) if author_override(root, task).is_none()
+            && !author_is_independent(root, task, repo, reviewer).unwrap_or(true) => "QA_REVIEWER_IN_LINEAGE",
+        _ => "COVERS",
+    }
 }
 
 /// Final transition guard, independent of QA mode, classification, merge
@@ -1362,7 +1431,7 @@ pub(crate) fn ensure_deferred_close(
         Some(head) => commit(&repo, head),
         None => delivery_anchor(&repo, task),
     }
-    .ok_or_else(|| debt_refusal(&task.id))?;
+    .ok_or_else(|| debt_refusal(root, task, &repo, &target, None))?;
     let satisfies = |head: &str| -> Result<bool, String> {
         Ok(
             satisfying_deferred_receipt(root, task, &repo, &target, head)?.is_some()
@@ -1381,7 +1450,7 @@ pub(crate) fn ensure_deferred_close(
     {
         return Ok(());
     }
-    Err(debt_refusal(&task.id))
+    Err(debt_refusal(root, task, &repo, &target, Some(&head)))
 }
 
 #[cfg(test)]

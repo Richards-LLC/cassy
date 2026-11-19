@@ -2930,6 +2930,26 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
         !copy_config.contains("min_helpful = 7"),
         "the working-directory store must be untouched.\ncopy config: {copy_config}"
     );
+
+    // cas-008b (GH #1905): an explicit `--store here` has chosen, so the
+    // CAS_ROOT-default notice (which names both store paths) must not print.
+    // The write lands in the working-directory store, read back below.
+    let output = cas_cmd(temp.path())
+        .current_dir(&copy)
+        .env("CAS_ROOT", &live_root)
+        .args(["config", "set", "sync.min_helpful", "9", "--store", "here"])
+        .output()
+        .expect("cas config set --store here must run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "--store here must write.\nstderr: {stderr}");
+    assert!(
+        !stderr.contains(&live_root.display().to_string()),
+        "an explicit --store here must not print the CAS_ROOT-override notice.\nstderr: {stderr}"
+    );
+    let live_config = std::fs::read_to_string(live_root.join("config.toml")).unwrap();
+    let copy_config = std::fs::read_to_string(copy_root.join("config.toml")).unwrap();
+    assert!(copy_config.contains("min_helpful = 9"), "copy config: {copy_config}");
+    assert!(!live_config.contains("min_helpful = 9"), "live config: {live_config}");
 }
 
 /// cas-e1c7: `cas cloud project set`, run inside another project from a shell

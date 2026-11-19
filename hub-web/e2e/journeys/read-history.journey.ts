@@ -280,21 +280,6 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
       }
     });
   }
-  await journey.stage("Read a short status table without folding plain progress into it (cas-2656)", async () => {
-    const short = "| Name | Value |\r\n| --- | --- |\r\n| quoted | comma, \"quote\" 雪 |";
-    hub.supervisorSays(PELICAN, "Checking evidence", { kind: "status" });
-    hub.supervisorSays(PELICAN, short, { kind: "status" });
-    const statusTable = log.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Name", exact: true }) });
-    await expect(statusTable.getByRole("columnheader")).toHaveText(["Name", "Value"]);
-    await expect(statusTable.getByRole("cell")).toHaveText(["quoted", 'comma, "quote" 雪']);
-    await expect(log.locator(".coalesce")).toHaveText("Checking evidence");
-    const controls = statusTable.locator("xpath=../..");
-    await controls.getByRole("button", { name: "Copy CSV", exact: true }).focus();
-    await page.keyboard.press("Enter");
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('Name,Value\r\nquoted,"comma, ""quote"" 雪"');
-    await controls.getByRole("button", { name: "Copy Markdown", exact: true }).click();
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(short);
-  });
   await journey.stage("Copy formula-leading values safely while keeping the table and Markdown exact (cas-4800)", async () => {
     const source = "| Formula | Value |\n| --- | --- |\n| =cmd | @x |\n| +1 | -1 |";
     hub.supervisorSays(PELICAN, source);

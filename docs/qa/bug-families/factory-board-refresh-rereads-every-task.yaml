@@ -1,3 +1,0 @@
-title: The factory board's two-second refresh re-reads every task row on a long-lived project instead of only the tasks that changed
-tasks: [cas-ddbe]
-journeys: [FACTORY-SUPERVISE]

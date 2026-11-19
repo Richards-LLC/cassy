@@ -4670,6 +4670,123 @@ impl CasService {
         )))
     }
 
+    /// `/standby` (cas-94a0): stop every worker of this session without losing
+    /// work, then park the session. `status=resume` brings the workers that held
+    /// tasks back from their queues. The marker in `factory_standby` is the whole
+    /// state; the daemon reads it to keep the supervisor pane quiet.
+    // gate-audit[forward]: standby refuses through shutdown_workers' own unsaved-work gate; no waiver is accepted here.
+    pub(super) async fn factory_standby(&self, req: FactoryRequest) -> Result<CallToolResult, McpError> {
+        use crate::factory_standby as standby;
+        use crate::harness_policy::is_supervisor_from_env;
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{AgentRole, AgentStatus, TaskStatus};
+
+        if !is_supervisor_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "standby rejected: only the supervisor may park its session",
+            ));
+        }
+        let ctx = mcp_fleet_context();
+        let Some(session) = ctx.factory_session.clone() else {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "standby requires an active factory session (CAS_FACTORY_SESSION is not set)",
+            ));
+        };
+        let root = &self.inner.cas_root;
+        let internal = |message: String| Self::error(ErrorCode::INTERNAL_ERROR, message);
+        if req.status.as_deref() == Some("resume") {
+            let Some(parked) = standby::read(root, &session) else {
+                return Ok(Self::success(format!("Session '{session}' is not on standby; nothing to resume.")));
+            };
+            let mut respawned = Vec::new();
+            for held in &parked.workers {
+                let mut spawn = req.clone();
+                spawn.action = "spawn_workers".into();
+                spawn.status = None;
+                spawn.count = Some(1);
+                spawn.worker_names = Some(held.name.clone());
+                spawn.task_ids = Some(held.tasks.clone());
+                self.factory_spawn_workers_in(&ctx, spawn).await?;
+                respawned.push(format!("{} ({})", held.name, held.tasks.join(", ")));
+            }
+            standby::clear(root, &session).map_err(|error| internal(format!("Could not clear the standby marker: {error}")))?;
+            return Ok(Self::success(format!(
+                "Resumed session '{session}': {} worker(s) queued to respawn from their task queues{}. Reload the handoff next.",
+                respawned.len(),
+                if respawned.is_empty() { String::new() } else { format!(": {}", respawned.join("; ")) },
+            )));
+        }
+        if let Some(parked) = standby::read(root, &session) {
+            return Ok(Self::success(format!(
+                "Session '{session}' has been on standby since {}. Use status=resume to bring its workers back.",
+                parked.since.to_rfc3339(),
+            )));
+        }
+        let workers: Vec<cas_types::Agent> = open_agent_store(root)
+            .map_err(|error| internal(format!("Failed to open agent store: {error}")))?
+            .list(None)
+            .map_err(|error| internal(format!("Failed to list agents: {error}")))?
+            .into_iter()
+            .filter(|agent| {
+                agent.role == AgentRole::Worker
+                    && agent.status != AgentStatus::Shutdown
+                    && agent.visible_to_factory_session(Some(&session))
+            })
+            .collect();
+        let tasks = open_task_store(root)
+            .map_err(|error| internal(format!("Failed to open task store: {error}")))?
+            .list(None)
+            .map_err(|error| internal(format!("Failed to list tasks: {error}")))?;
+        let held: Vec<standby::HeldWorker> = workers
+            .iter()
+            .filter_map(|worker| {
+                let ids: Vec<String> = tasks
+                    .iter()
+                    .filter(|task| {
+                        task.assignee.as_deref().is_some_and(|who| who == worker.name || who == worker.id)
+                            && matches!(task.status, TaskStatus::InProgress | TaskStatus::Open | TaskStatus::Blocked)
+                    })
+                    .map(|task| task.id.clone())
+                    .collect();
+                (!ids.is_empty()).then(|| standby::HeldWorker { name: worker.name.clone(), tasks: ids })
+            })
+            .collect();
+        // Never forced: a worker with unsaved work refuses here, with its state,
+        // and the session stays as it was.
+        let mut shutdown = req.clone();
+        shutdown.action = "shutdown_workers".into();
+        shutdown.status = None;
+        shutdown.force = None;
+        shutdown.id = None;
+        shutdown.worker_names = None;
+        shutdown.count = Some(0);
+        let stopped = if workers.is_empty() {
+            String::from("No workers were running.")
+        } else {
+            let result = self.factory_shutdown_workers_in(&ctx, shutdown).await?;
+            serde_json::to_value(&result)
+                .ok()
+                .and_then(|value| {
+                    value["content"].as_array().map(|items| {
+                        items.iter().filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("\n")
+                    })
+                })
+                .unwrap_or_default()
+        };
+        standby::enter(
+            root,
+            &standby::Standby { session: session.clone(), since: chrono::Utc::now(), workers: held.clone() },
+        )
+        .map_err(|error| internal(format!("Workers were stopped but the standby marker was not written: {error}")))?;
+        Ok(Self::success(format!(
+            "Session '{session}' is on standby: {} worker(s) stopped, {} held task(s) kept for resume. The daemon now wakes this pane only for the operator and CAS lifecycle events. Post one line and go silent.\n{stopped}",
+            workers.len(),
+            held.iter().map(|worker| worker.tasks.len()).sum::<usize>(),
+        )))
+    }
+
     pub(super) async fn factory_set_worker_hold(
         &self,
         req: FactoryRequest,

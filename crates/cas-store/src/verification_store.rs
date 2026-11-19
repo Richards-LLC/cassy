@@ -3123,10 +3123,7 @@ fn issue_server_verifier_handoff_with_conn(
         |row| row.get(0),
     )?;
     if pending_count != 0 {
-        return Err(StoreError::Parse(
-            "another task-verifier spawn is already awaiting SubagentStart for this parent; wait for it to bind or for exact failure cleanup/expiry"
-                .to_string(),
-        ));
+        return Err(StoreError::VerifierHandoffPending);
     }
 
     let mut dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;

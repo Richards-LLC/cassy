@@ -635,7 +635,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors), peer_transcript (own-account transcript query). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
+        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors), peer_transcript (own-account transcript). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
     )]
     pub async fn coordination(
         &self,
@@ -1494,7 +1494,7 @@ impl CasService {
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "epic_split" | "remind" | "remind_list"
                 | "remind_cancel" | "server_start" | "server_stop" | "server_list"
-                | "candidate_request" | "restart_spawn_queue" | "restart_supervisor" => {
+                | "candidate_request" | "restart_spawn_queue" | "restart_supervisor" | "standby" => {
                     let factory_req = req.to_factory_request();
                     match action.as_str() {
                         "spawn_workers" => heap_future(|| this.factory_spawn_workers(factory_req)).await,
@@ -1526,6 +1526,8 @@ impl CasService {
                         "server_stop" => heap_future(|| this.factory_server_stop(factory_req)).await,
                         "server_list" => heap_future(|| this.factory_server_list(factory_req)).await,
                         "candidate_request" => heap_future(|| this.factory_candidate_request(factory_req)).await,
+                        // cas-94a0: park the session with its workers stopped, or status=resume.
+                        "standby" => heap_future(|| this.factory_standby(factory_req)).await,
                         // cas-73b5 (GH #970): unwedge the spawn queue in place.
                         "restart_spawn_queue" => {
                             heap_future(|| this.factory_restart_spawn_queue(factory_req)).await
@@ -1712,6 +1714,7 @@ impl CasService {
                     | "candidate_request"
                     | "restart_spawn_queue"
                     | "restart_supervisor"
+                    | "standby"
                     | "record_test_receipt"
                     | "db_branch_create"
                     | "db_branch_show"
@@ -1764,6 +1767,7 @@ impl CasService {
             "epic_split" => self.factory_epic_split(req).await,
             "remind" => self.factory_remind(req).await,
             "remind_list" => self.factory_remind_list(req).await,
+            "standby" => self.factory_standby(req).await,
             "restart_spawn_queue" => self.factory_restart_spawn_queue(req).await,
             "restart_supervisor" => self.factory_restart_supervisor(req).await,
             "remind_cancel" => self.factory_remind_cancel(req).await,

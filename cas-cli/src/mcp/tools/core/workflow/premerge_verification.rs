@@ -2074,9 +2074,10 @@ mod tests {
         task.deliverables.factory_branch_anchor = Some(changed);
         store.update(&task).unwrap();
         run(repo, &["checkout", "-q", "epic/next"]);
-        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next").is_err());
+        let changed_review = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next");
+        assert!(changed_review.is_err());
         let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-        assert_ne!(replacement.id, dispatch.id);
+        assert_ne!(replacement.id, dispatch.id, "{changed_review:?}");
         let approve_changed = serde_json::from_value(serde_json::json!({
             "task_id":task.id, "dispatch_id":replacement.id, "status":"approved",
             "summary":"Reviewed the changed source", "issues":"[]",

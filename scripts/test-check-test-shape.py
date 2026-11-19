@@ -611,6 +611,124 @@ def test_workflow_command():
             self.assertEqual(subprocess.run(cmd+['--changed-since', base], cwd=root, capture_output=True).returncode, 0)
             self.assertEqual(subprocess.run(cmd+['--changed-since', 'missing-ref'], cwd=root, capture_output=True).returncode, 1)
 
+    def test_cli_runtime_identities_and_codes_leave_prose_rejected_cas_047d(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'runtime_tests.rs'
+            path.write_text('')
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.email', 'fixture@example.test')
+            git('config', 'user.name', 'fixture')
+            git('add', '.')
+            git('commit', '-qm', 'runtime identity fixture')
+            command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', git('rev-parse', 'HEAD')]
+            prefix = '''use crate::factory_worker_check::stability::Identity;
+fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
+#[test] fn check() {
+    let source = "fixture";
+'''
+            sentence = 'The release gate should identify which component caused this failure.'
+            cases = [
+                (prefix, 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "group changed")]);', 1),
+                (prefix, 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [Identity::exact("a.test.ts", "group changed")]);', 0),
+                (prefix.replace('fn id(', 'fn selector('), 'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [selector("a.test.ts", "group changed")]);', 1),
+                (prefix, f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
+                (prefix, 'assert_eq!(source.code(), "source:missing");', 0),
+                (prefix, 'assert_eq!(source.code(), "E_SCOPE_DENIED");', 0),
+                (prefix, f'assert_eq!(source.message(), "{sentence}");', 1),
+                (prefix.replace('-> Identity { Identity::exact(path, name) }', '-> String { name.to_string() }'), f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
+                (prefix, f'assert_eq!((source.message(), selected), ("{sentence}", [id("a.test.ts", "group changed")]));', 1),
+                (prefix, f'{{ fn id<T: ToString>(path: &str, name: T) -> String {{ name.to_string() }} assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]); }}', 1),
+                (prefix, f'let id = |path: &str, name: &str| name.to_string(); assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
+                (prefix.replace('fn check() {', 'fn check(id: fn(&str, &str) -> String) {'), f'assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "{sentence}")]);', 1),
+            ]
+            # These are rendered/projection uses, not comparisons of identities.
+            bypasses = [
+                f'assert_eq!(source, id("a.test.ts", "{sentence}").name);',
+                f'assert_eq!(source, Identity::exact("a.test.ts", "{sentence}").name);',
+                f'assert_eq!(selected, id("a.test.ts", {{ assert_eq!(source, "{sentence}"); name }}));',
+                f'assert_eq!(source, (id("a.test.ts", "{sentence}")).name);',
+                f'assert_eq!(source, [id("a.test.ts", "{sentence}")][0].name);',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}").name.to_string());',
+                f'assert_eq!(source, format!("{{:?}}", id("a.test.ts", "{sentence}")));',
+                f'assert_eq!(source, render(id("a.test.ts", "{sentence}")));',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}").name_pattern());',
+                f'assert_eq!(selected, id("a.test.ts", format!("{{}}", source == "{sentence}")));',
+                f'assert_eq!(selected, id("a.test.ts", {{ source == "{sentence}"; name }}));',
+                f'let check = |id: fn(&str, &str) -> String| assert_eq!(source, id("a.test.ts", "{sentence}"));',
+                f'for id in helpers {{ assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                f'match helper {{ Some(id) => assert_eq!(source, id("a.test.ts", "{sentence}")), _ => () }}',
+                f'use diagnostic::id; assert_eq!(source, id("a.test.ts", "{sentence}"));',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}")); use diagnostic::id;',
+                f'assert_eq!(source, id("a.test.ts", "{sentence}")); const id: fn(&str, &str) -> String = diagnostic;',
+                f'assert_eq!(source, diagnostic::Identity::exact("a.test.ts", "{sentence}"));',
+                f'struct Identity; assert_eq!(source, Identity::exact("a.test.ts", "{sentence}"));',
+            ]
+            cases.extend((prefix, assertion, 1) for assertion in bypasses)
+            cases.extend([
+                (prefix, f'assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+                (prefix, f'assert_eq!(&selected, &(Identity::exact("a.test.ts", "{sentence}")));', 0),
+                (prefix, f'assert_eq!(selected.id, id("a.test.ts", "{sentence}").id);', 1),
+            ])
+            cases.extend([
+                (prefix.replace('crate::factory_worker_check::stability::Identity', 'diagnostic::stability::Identity'),
+                 f'assert_eq!(source, Identity::exact("a.test.ts", "{sentence}"));', 1),
+                (prefix.replace('crate::factory_worker_check::stability::Identity', 'super::stability::{Identity, Proof}'),
+                 f'assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 1),
+                (prefix.replace('fn id(', '#[cfg(any())] fn id(').replace('#[test]',
+                 'fn id(path: &str, name: &str) -> String { name.to_string() }\n#[test]'),
+                 f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1),
+            ])
+            cases.append((prefix.replace('-> Identity { Identity::exact(path, name) }',
+                                         '-> String { name.to_string() }'),
+                          'struct Wrapper; impl Wrapper { fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) } '
+                          f'fn check() {{ let source = "fixture"; assert_eq!(source, id("a.test.ts", "{sentence}")); }} }}', 1))
+            cases.append((prefix.replace('#[test] fn check() {',
+                                         '#[cfg(test)] fn check<T>(id: fn(&str, &str) -> String) {'),
+                          f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1))
+            shadow_probes = {
+                'block-local wildcard': f'{{ use diagnostic::*; assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'aliased use': f'{{ use diagnostic::message as id; assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'local let': f'{{ let id = |path: &str, name: &str| name.to_string(); assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'local fn': f'{{ fn id(path: &str, name: &str) -> String {{ name.to_string() }} assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'nested-module glob': f'mod nested {{ use super::diagnostic::*; #[test] fn check() {{ let source = "fixture"; assert_eq!(source, id("a.test.ts", "{sentence}")); }} }}',
+                'closure parameter': f'let check = |id: fn(&str, &str) -> String| assert_eq!(source, id("a.test.ts", "{sentence}"));',
+                'projection': f'assert_eq!(source, id("a.test.ts", "{sentence}").name);',
+                'macro-generated binding': 'macro_rules! diagnostic_id { () => { fn id(path: &str, name: &str) -> String { name.to_string() } } } '
+                                           f'diagnostic_id!(); assert_eq!(source, id("a.test.ts", "{sentence}"));',
+            }
+            shadow_probes.update({
+                'bare constructor wildcard': f'{{ use diagnostic::*; assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}")); }}',
+                'bare constructor alias': f'{{ use diagnostic::Message as Identity; assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}")); }}',
+                'bare constructor unknown macro': f'diagnostic_type!(); assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));',
+            })
+            cases.extend((prefix, assertion, 1) for assertion in shadow_probes.values())
+            cases.extend([
+                (prefix, f'{{ use diagnostic::*; }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 1),
+                (prefix, f'if !ready {{ }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+            ])
+            cases.append(('use crate::factory_worker_check::stability::Identity;\n'
+                          '#[cfg(test)] mod tests {\n'
+                          'trait Diagnostic { fn exact(path: &str, name: &str) -> String { name.to_string() } }\n'
+                          'impl<T> Diagnostic for T {}\n'
+                          'fn check<Identity>() { let source = "fixture";\n',
+                          f'assert_eq!(source, Identity::exact("a.test.ts", "{sentence}")); }}\n'
+                          '#[test] fn run() { check::<()>(); }', 1))
+            for setup, assertion, status in cases:
+                probe = next((name for name, body in shadow_probes.items() if body == assertion), 'existing')
+                with self.subTest(probe=probe, assertion=assertion, setup=setup):
+                    path.write_text(setup + assertion + '\n}\n')
+                    result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+                    kinds = {line.split(': ', 1)[1].split(';', 1)[0]
+                             for line in result.stdout.splitlines() if line.startswith('runtime_tests.rs:')}
+                    self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                    if status:
+                        self.assertIn('exact-text pin', kinds)
+                    elif not status:
+                        self.assertEqual(kinds, set())
+
     def test_cli_changed_since_scans_non_rust_test_files(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

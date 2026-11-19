@@ -691,9 +691,8 @@ def text_literals(source, path):
 
 def is_exact_text_pin(body, context):
     """Recognize long exact prose and short needles into source-like inputs."""
-    if ('/' in body and not re.search(r'\s', body)
-            or re.fullmatch(r'[A-Z][A-Z0-9_]*=[A-Za-z0-9_.-]+', body)):
-        return False  # Machine resource routes and key-value records.
+    if '{' not in body and not human_message_literal(body):
+        return False  # Share the structured machine-data policy with message assertions.
     words = re.findall(r"[A-Za-z0-9_'-]+", body)
     prose = len(body.strip()) >= 55 and len(words) >= 8 and (
         '\n' in body or re.search(r'[.!?](?:\s|$)', body) is not None
@@ -748,18 +747,113 @@ def rust_assertion_diagnostics(source):
 
 
 def rust_runtime_inputs(source):
-    """Git command arguments and Result/Option expect messages are inputs,
-    not assertions about the returned text. Keep surrounding assertions in scope.
+    """Git argv, expect diagnostics and unambiguous bare stability constructors.
+
+    No helper-name resolution: lexical lookup cannot prove macro/import bindings.
+    Only whole Identity::exact values with atomic inputs grant literal exemptions.
     """
     ts = tokens(source)
     ps = pairs(ts)
+
+    equality_macros = {'assert_eq', 'assert_ne', 'debug_assert_eq', 'debug_assert_ne'}
+    canonical_imports, conflicting_identity = 0, False
+    for i, token in enumerate(ts):
+        if token.string:
+            continue
+        if token.value == 'use':
+            end = next((j for j in range(i + 1, len(ts)) if ts[j].value == ';'), len(ts))
+            names = [t.value for t in ts[i + 1:end]]
+            conflicting_identity |= '*' in names
+            if 'Identity' in names:
+                trusted = ''.join(names) == 'crate::factory_worker_check::stability::Identity'
+                canonical_imports += trusted
+                conflicting_identity |= not trusted
+        if token.value == 'Identity' and i:
+            conflicting_identity |= (ts[i - 1].value in (
+                'struct', 'enum', 'type', 'trait', 'mod', 'fn', 'union', 'const',
+                'static', 'let', 'mut', 'ref', 'as', '|')
+                or i + 1 < len(ts) and ts[i + 1].value in (':', 'in', '@', '|'))
+        if token.value == 'let':
+            end = next((j for j in range(i + 1, len(ts)) if ts[j].value in ('=', ';')), len(ts))
+            conflicting_identity |= any(not t.string and t.value == 'Identity' for t in ts[i + 1:end])
+        # Scan declaration generics as tokens, never resolve names or scopes.
+        if token.value in ('fn', 'struct', 'enum', 'trait', 'type', 'union', 'impl'):
+            opening = i + (1 if token.value == 'impl' else 2)
+            if opening < len(ts) and ts[opening].value == '<':
+                depth, j = 1, opening + 1
+                while j < len(ts) and depth:
+                    current = ts[j]
+                    if not current.string:
+                        if (depth == 1 and current.value == 'Identity'
+                                and ts[j - 1].value in ('<', ',', 'const')):
+                            conflicting_identity = True
+                        depth += (current.value == '<') - (current.value == '>')
+                    j += 1
+        if token.value == 'mod' and i + 1 < len(ts) and ts[i + 1].value == 'stability':
+            conflicting_identity = True
+        # An unknown macro can create a binding anywhere in the file.
+        if (i + 2 in ps and ts[i + 1].value == '!'
+                and re.fullmatch(r'[A-Za-z_]\w*', token.value)
+                and token.value not in equality_macros):
+            conflicting_identity = True
+
+    def arguments(left, right):
+        start = j = left
+        while j < right:
+            if not ts[j].string and ts[j].value == ',':
+                yield start, j
+                start = j + 1
+            j = ps.get(j, j) + 1
+        if start < right:
+            yield start, right
+
+    constructors = {}
     for i, token in enumerate(ts[:-1]):
         if token.string or ts[i + 1].value != '(' or i + 1 not in ps:
             continue
-        if token.value == 'git' or (
-            token.value == 'expect' and i > 0 and ts[i - 1].value == '.'
-        ):
-            yield ts[i + 1].end, ts[ps[i + 1]].start
+        close = ps[i + 1]
+        if token.value == 'git' or (token.value == 'expect' and i > 0 and ts[i - 1].value == '.'):
+            yield ts[i + 1].end, ts[close].start
+            continue
+        if canonical_imports != 1 or conflicting_identity:
+            continue
+        if not (i >= 2 and ts[i - 2].value == 'Identity' and ts[i - 1].value == '::'
+                and token.value == 'exact' and (i == 2 or ts[i - 3].value not in ('.', '::'))):
+            continue
+        args = list(arguments(i + 2, close))
+        if len(args) != 2 or any(right != left + 1 or not (
+                ts[left].string or re.fullmatch(r'[A-Za-z_]\w*', ts[left].value))
+                for left, right in args):
+            continue
+        constructors[i - 2] = (close + 1, [
+            (ts[left].start, ts[left].end) for left, _ in args if ts[left].string])
+
+    def identity_operand(left, right):
+        """Whole values/collections only; no fields, indexing or rendering."""
+        if left >= right:
+            return None
+        if ts[left].value == '&':
+            return identity_operand(left + 1, right)
+        if left in constructors and constructors[left][0] == right:
+            return constructors[left][1]
+        if ts[left].value in ('(', '[') and ps.get(left) == right - 1:
+            spans = []
+            for begin, end in arguments(left + 1, right - 1):
+                nested = identity_operand(begin, end)
+                if nested is None:
+                    return None
+                spans.extend(nested)
+            return spans
+        if right == left + 1 and re.fullmatch(r'[A-Za-z_]\w*', ts[left].value) and not ts[left].string:
+            return []
+        return None
+
+    for i, token in enumerate(ts[:-2]):
+        if (token.string or token.value not in equality_macros
+                or ts[i + 1].value != '!' or i + 2 not in ps):
+            continue
+        for left, right in list(arguments(i + 3, ps[i + 2]))[:2]:
+            yield from identity_operand(left, right) or []
 
 
 def rust_literal_loop_bodies(source):

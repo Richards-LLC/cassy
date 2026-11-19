@@ -1108,6 +1108,30 @@ fn emit_task_lifecycle_transition_in_project(
     escalation: bool,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
+    if let Some(root) = cas_dir
+        && let Some(task) = crate::store::open_task_store_local(root).ok().and_then(|tasks| tasks.get(task_id).ok())
+        && let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(root,&task)
+        && (worker.id == actor || worker.name == actor)
+    {
+        use crate::cloud::peer_mailbox::{self,PeerScope,PeerSend};
+        // Ready is sealed and sent only after the park has released its lease.
+        if kind == LifecycleTransition::AwaitingMerge { return Ok(LifecyclePushResult::NoSupervisor); }
+        if task.status != new_status { return Ok(LifecyclePushResult::Superseded); }
+        let (recipient,label) = peer_mailbox::owned_route(root,&worker,"supervisor")?
+            .ok_or("Worker host has no current train owner route")?;
+        let key = transition_key(task_id,old_status,new_status,factory_session.as_deref(),kind,occurrence_id);
+        let prompt = build_prompt_body(kind,task_id,task_title,old_status,new_status,actor,reason,0,
+            factory_session.as_deref(),occurrence_id,branch_tip);
+        let message = PeerSend {
+            project_id:crate::cloud::resolve_canonical_id(root).ok_or("Project has no canonical identity")?,
+            sender_agent_id:worker.id, recipient_agent_id:recipient,
+            body:peer_mailbox::attach_message_intent(&prompt,Some(if kind.wakes_idle_supervisor() { "blocker" } else { "quiet" }),false)?,
+            summary:Some(format!("{}: {task_id}",kind.as_event_type())), in_reply_to:None,
+            dedupe_key:key, scope:PeerScope::Project, recipient_project_id:None,
+        };
+        return peer_mailbox::enqueue_notice(root,message,&label)
+            .map(|notification_id| LifecyclePushResult::Enqueued { notification_id });
+    }
     let Some((supervisor, recipient)) =
         lifecycle_notice_owner(agent_store, factory_session.as_deref())
     else {

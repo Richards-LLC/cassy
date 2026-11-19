@@ -29,7 +29,7 @@ mod outbox;
 mod workers;
 pub(crate) mod train_parks;
 pub(crate) use workers::{WorkerDirectory, owned_route, notice_route, worker_notice};
-pub(crate) use outbox::enqueue_feedback;
+pub(crate) use outbox::{enqueue_feedback, enqueue_notice};
 mod runtime;
 pub mod transcript;
 pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};

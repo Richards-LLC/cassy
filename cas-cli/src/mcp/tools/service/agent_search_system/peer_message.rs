@@ -397,28 +397,13 @@ impl CasService {
             }
             None => (None, None),
         };
-        // cas-9f53: a live worker in a peer's session takes instructions only
-        // from its own supervisor. Name that supervisor instead of "no such
-        // worker", so a lane takeover has a channel.
         if peer.is_none()
             && let Some(worker) = workers.iter().find(|worker| worker.matches(&wanted))
         {
             let owner = &worker.supervisor;
-            return Err(Self::error(
-                ErrorCode::INVALID_REQUEST,
-                format!(
-                    "{}@{} is a worker in peer supervisor {}@{}'s factory session ({}); peer \
-                     workers take messages only from their own supervisor. Message target={}@{} \
-                     to relay it. Nothing was enqueued.",
-                    worker.name,
-                    worker.machine,
-                    owner.name,
-                    owner.machine,
-                    owner.session.as_deref().unwrap_or("unknown"),
-                    owner.name,
-                    owner.machine
-                ),
-            ));
+            return Err(Self::error(ErrorCode::INVALID_REQUEST,format!(
+                "{}@{} belongs to {}@{}; its owner must send directly to that worker. Nothing was enqueued.",
+                worker.name,worker.machine,owner.name,owner.machine)));
         }
         let Some(peer) = peer else {
             // cas-2a5a: not a supervisor of this repo; perhaps one of

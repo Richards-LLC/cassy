@@ -1386,6 +1386,7 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     let waiver = service.verification(rmcp::handler::server::wrapper::Parameters(request)).await;
     assert!(correction.err().is_some_and(|error| error.message.contains("G-113")), "only the pinned owner may return a delivery");
     assert!(waiver.err().is_some_and(|error| error.message.contains("G-113")), "only the pinned owner may waive its delivery QA");
+    assert!(cas_store::list_qa_passes(&owner.cas,&task.id).unwrap().is_empty());
     assert_eq!(crate::store::open_task_store_local(&owner.cas).unwrap().get(&task.id).unwrap().status,crate::types::TaskStatus::AwaitingMerge);
     assert!(cas_store::get_latest_verification_dispatch(&owner.cas,&task.id).unwrap().is_none());
     let mut unparked = task.clone();

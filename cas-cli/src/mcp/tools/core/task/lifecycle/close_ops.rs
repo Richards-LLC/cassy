@@ -9671,7 +9671,7 @@ impl CasCore {
             && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
-            match run_factory_branch_merge_gate_for_delivery(
+            let mut merge_outcome = run_factory_branch_merge_gate_for_delivery(
                 &task,
                 &req,
                 &resolved_parent_branch,
@@ -9681,7 +9681,14 @@ impl CasCore {
                     window: commit_receipt_window.as_ref(),
                 },
                 recovery_branch.as_deref(),
-            ) {
+            );
+            if crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task).is_some()
+                && matches!(merge_outcome, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_))
+            {
+                if let MergeStateGateOutcome::ProceedWithNote(note) = &merge_outcome { close_notes.record(&mut task,note); }
+                merge_outcome = MergeStateGateOutcome::Reject("MERGE REQUIRED\n\nWorker-host delivery requires its train owner's verification and close, including work already integrated into the target.".into());
+            }
+            match merge_outcome {
                 MergeStateGateOutcome::Proceed => {}
                 // cas-e74c: the delivery is proven integrated (or nothing on
                 // the lane belongs to this task) — record the residue note
@@ -13915,6 +13922,10 @@ impl CasCore {
                     format!("merge_source requires a live registered supervisor: {error:?}"))
             })?.id
         };
+        let actor = self.open_agent_store()?.get(&supervisor_id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,error.to_string()))?;
+        crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
         // First-park integration cannot decline a park that has not happened.
         // Apply only the typed grant, preserving the current task revision's status.
         if grant_only {

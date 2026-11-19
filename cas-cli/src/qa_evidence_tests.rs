@@ -517,9 +517,14 @@ fn missing_bundle_refusal_requests_hook_writable_path_gh_1061() {
     let bundle = fx.task_dir.join("qa/bundle.json");
     for notes in [String::new(), format!("qa-bundle: {}", legacy.join("qa/bundle.json").display())] {
         let error = scoped_close(&fx, &cas_root, &notes).unwrap_err();
-        let (_, next) = error.split_once("Next: ").unwrap();
-        assert!(next.contains(bundle.to_str().unwrap()), "{error}");
-        assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
+        // The recommended command's argument is the only `notes="qa-bundle: <path>"` it prints.
+        let cited: Vec<&str> = error
+            .split(&format!("notes=\"{} ", crate::qa_evidence::BUNDLE_CITATION))
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(cited.contains(&bundle.to_str().unwrap()), "{error}");
+        assert!(cited.iter().all(|path| !path.contains(legacy.to_str().unwrap())), "{error}");
         assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
     }
     let denied = hook_bundle_write(&fx, &cas_root, &legacy.join("qa/bundle.json"));

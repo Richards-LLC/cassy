@@ -255,6 +255,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
 
+    fn user_namespaces_available() -> bool {
+        Command::new("bwrap")
+            .args(["--dev-bind", "/", "/", "--unshare-user", "--", "true"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
     #[test]
     fn factory_review_starts_outside_worker_userns_cas_343d() {
         const CANDIDATE_DATA: &[u8] = &[0, 1, 2, 127, 255];
@@ -402,6 +409,13 @@ mod tests {
                     .to_str()
                     .unwrap()
             );
+            return;
+        }
+        // The worker role runs under bwrap's user namespace. Hosts that refuse
+        // unprivileged namespaces (a factory worker session on soundwave) cannot
+        // exercise it; lane CI and the merge queue still do.
+        if !user_namespaces_available() {
+            eprintln!("skipping {exact}: bwrap cannot create a user namespace on this host");
             return;
         }
         let mut env = crate::test_support::TestEnvGuard::temp_home();

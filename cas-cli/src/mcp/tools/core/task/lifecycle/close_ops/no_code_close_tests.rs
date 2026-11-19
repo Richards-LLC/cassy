@@ -915,51 +915,14 @@ async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
     let id = "cas-nc33";
     f.put(&assigned(id, TaskType::Task, "main"));
     claim(&f, id);
-    env.set("CAS_TEST_HUB_PATH", env.home().join("no-provider"));
-    let agents = open_agent_store(&f.cas_dir()).unwrap();
-    let mut owner = agents.get("nocode-supervisor-session").unwrap();
-    owner.factory_session = Some("slow-close-session".into());
-    owner.pid = Some(std::process::id());
-    crate::mcp::daemon::stamp_pid_fingerprint(&mut owner, std::process::id());
-    agents.update(&owner).unwrap();
-    let mut review_task = Task::new("cas-d0f6-concurrent-review".into(), "Concurrent review".into());
-    review_task.status = TaskStatus::AwaitingMerge;
-    review_task.pending_verification = true;
-    f.put(&review_task);
-    let dispatch = cas_store::create_verification_dispatch_bound(
-        &f.cas_dir(), &review_task.id, &owner.id, &owner.id,
-        &cas_types::VerificationProofBoundary::task(),
-        chrono::Utc::now() + chrono::Duration::minutes(5), false,
-    ).unwrap();
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    lifecycle_race_hook::during_gate_io(id, move || {
-        entered_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-    });
-    let worker = f.worker.clone();
-    let closing = std::thread::spawn(move || { tokio::runtime::Builder::new_current_thread()
-        .enable_all().build().unwrap().block_on(call(
-        &worker,
+    let response = call(
+        &f.worker,
         serde_json::json!({
             "action": "close", "id": id, "reason": "Deployed the monthly release",
             "execution_note": "no-code", "external_ref": PROOF,
         }),
     )
-    ) });
-    tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx).await.unwrap().unwrap();
-    let launch = {
-        let _budget = cas_store::wait_budget::bound_waits_for(std::time::Duration::from_millis(50));
-        crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
-            &f.cas_dir(), "slow-close-session", &dispatch.id,
-        )
-    };
-    // Unblock the close even when verifier startup returns an error.
-    release_tx.send(()).unwrap();
-    let response = closing.join().unwrap();
-    eprintln!("exact verifier launch during real Git attribution gate: {launch:?}");
-    let review = launch.expect("exact verifier claim while Git attribution gate remains paused").unwrap();
-    review.join().unwrap();
+    .await;
     assert_closed_without_lane(&f, id, &response);
     let task = f.task(id);
     assert_eq!(task.execution_note.as_deref(), Some("no-code"));

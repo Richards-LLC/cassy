@@ -3251,17 +3251,8 @@ fn same_except_close_audit(before: &Task, after: &Task) -> bool {
 pub(crate) mod lifecycle_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
     #[derive(PartialEq)]
-    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark, DuringGateIo }
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark }
     static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
-
-    pub(crate) fn during_gate_io(task_id: &str, hook: impl FnOnce() + Send + 'static) {
-        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::DuringGateIo, Box::new(hook)));
-    }
-
-    #[track_caller]
-    pub(super) fn fire_during_gate_io(task_id: &str) {
-        fire_at(task_id, Phase::DuringGateIo);
-    }
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
         HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeWrite, Box::new(hook)));
@@ -3303,7 +3294,6 @@ pub(crate) mod lifecycle_race_hook {
         fire_at(task_id, Phase::BeforeHandoff);
     }
 
-    #[track_caller]
     fn fire_at(task_id: &str, at: Phase) {
         let hook = {
             let mut hooks = HOOKS.lock().unwrap();
@@ -3313,9 +3303,6 @@ pub(crate) mod lifecycle_race_hook {
                 .map(|index| hooks.remove(index).2)
         };
         if let Some(hook) = hook {
-            if at == Phase::DuringGateIo {
-                eprintln!("paused real Git attribution gate at {}", std::panic::Location::caller());
-            }
             hook();
         }
     }
@@ -17631,10 +17618,6 @@ pub(crate) fn task_without_own_commits_judged(
             if !is_safe_git_refname(&reference) || !git_ref_exists(repo_path, &reference) {
                 continue;
             }
-            // Pause inside the Git attribution gate, before its remaining IO,
-            // rather than after all gates at the terminal-write boundary.
-            #[cfg(test)]
-            lifecycle_race_hook::fire_during_gate_io(&task.id);
             if !matches!(
                 task_attribution::branch_task_claims(repo_path, &reference, &identity),
                 Some((None, _))

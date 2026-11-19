@@ -26,6 +26,7 @@ pub(super) fn execute_daemon(
     worker_names: Vec<String>,
     worker_spec_jsons: Vec<String>,
     supervisor_spec_json: Option<String>,
+    worker_host: Option<String>,
 ) -> Result<()> {
     crate::ui::factory::validate_daemon_start(session, cwd)?;
     // The daemon command is an internal launch path, but it can still be
@@ -138,11 +139,21 @@ pub(super) fn execute_daemon(
     // Resolve supervisor name up front so teams_configs and FactoryConfig agree.
     // When the caller doesn't provide a name, generate one so the teams config
     // key matches the Mux pane name (app/init.rs uses generate_unique for this).
-    let resolved_supervisor_name = supervisor_name
+    let host = worker_host.as_deref().map(|train|
+        crate::factory_session_scope::WorkerHost::resolve(&cas_root, train).map_err(anyhow::Error::msg)).transpose()?;
+    if let Some(host) = &host {
+        if host.session != session { bail!("Worker host must use the train owner's factory session"); }
+        let mut metadata = crate::ui::factory::session::create_metadata(session, 0, &host.name,
+            &worker_names, Some(&host.train), project_root.to_str(), None);
+        metadata.worker_host = Some(host.clone());
+        metadata.pinned_epic_id = Some(host.train.clone());
+        crate::ui::factory::SessionManager::new().save_daemon_metadata(metadata, &cas_root)?;
+    }
+    let resolved_supervisor_name = host.map(|host| host.name).or(supervisor_name)
         .unwrap_or_else(|| crate::orchestration::names::generate_unique(1).remove(0));
 
     // Build native Agent Teams spawn configs so agents start with Teams CLI flags.
-    let (teams_configs, lead_session_id) = {
+    let (teams_configs, lead_session_id) = if worker_host.is_some() { (Default::default(), String::new()) } else {
         use crate::ui::factory::daemon::runtime::teams::TeamsManager;
         TeamsManager::build_configs_for_mux(session, &resolved_supervisor_name, &worker_names)
     };
@@ -159,6 +170,7 @@ pub(super) fn execute_daemon(
         workers: effective_workers,
         worker_names,
         supervisor_name: Some(resolved_supervisor_name),
+        worker_host,
         supervisor_cli,
         worker_cli,
         supervisor_model,
@@ -183,7 +195,7 @@ pub(super) fn execute_daemon(
             None
         },
         teams_configs,
-        lead_session_id: Some(lead_session_id),
+        lead_session_id: (!lead_session_id.is_empty()).then_some(lead_session_id),
         minions_theme: cas_config
             .theme
             .as_ref()

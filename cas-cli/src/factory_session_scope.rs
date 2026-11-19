@@ -54,6 +54,59 @@ pub(crate) fn require_train_owner(root: &Path, epic: &Task, actor: &Agent) -> Re
     Ok(generation)
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkerHost {
+    pub train: String,
+    pub owner: String,
+    pub generation: String,
+    pub name: String,
+    pub session: String,
+    pub machine: String,
+}
+
+impl WorkerHost {
+    pub(crate) fn resolve(root: &Path, train: &str) -> Result<Self, String> {
+        use crate::cloud::peers::{PeerDiscovery, discover_peers};
+        let epic = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
+            .get(train).map_err(|e| e.to_string())?;
+        if epic.task_type != crate::types::TaskType::Epic || epic.is_terminal() {
+            return Err("Worker-host startup requires an open train".into());
+        }
+        let generation = train_owner_generation(&epic)?;
+        let owner = epic.epic_verification_owner.as_deref().unwrap();
+        let PeerDiscovery::Found { peers, ended, .. } = discover_peers(root, None).map_err(|e| e.to_string())?
+            else { return Err("Train owner directory is unavailable".into()) };
+        let peer = peers.iter().chain(&ended).find(|peer| peer.agent_id == owner && peer.own == Some(true))
+            .ok_or("Train owner is not an authenticated supervisor of this account and repository")?;
+        Ok(Self {
+            train: train.into(), owner: owner.into(), generation, name: peer.name.clone(),
+            session: peer.session.clone().ok_or("Train owner has no factory session")?,
+            machine: peer.machine_id.clone().ok_or("Train owner has no machine identity")?,
+        })
+    }
+
+    pub(crate) fn current(root: &Path, session: Option<&str>) -> Result<Option<Self>, String> {
+        let Some(session) = session else { return Ok(None) };
+        let path = crate::ui::factory::metadata_path(session);
+        if !path.exists() { return Ok(None); }
+        let metadata: crate::ui::factory::SessionMetadata = serde_json::from_slice(
+            &std::fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let Some(host) = metadata.worker_host else { return Ok(None) };
+        let project = metadata.project_dir.as_deref().ok_or("Worker host has no project")?;
+        if crate::store::find_cas_root_ignoring_env(Path::new(project)).map_err(|e| e.to_string())?
+            != root.canonicalize().map_err(|e| e.to_string())? {
+            return Err("Worker host belongs to another project".into());
+        }
+        let epic = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
+            .get(&host.train).map_err(|e| e.to_string())?;
+        if host.session != session || epic.epic_verification_owner.as_deref() != Some(host.owner.as_str())
+            || train_owner_generation(&epic)? != host.generation {
+            return Err("Worker host owner generation changed; restart it for the current train owner".into());
+        }
+        Ok(Some(host))
+    }
+}
+
 /// The session that owns a target the caller may not mutate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignOwner {

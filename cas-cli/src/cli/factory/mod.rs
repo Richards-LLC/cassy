@@ -205,6 +205,9 @@ fn parse_num_threads_from_proc_stat(data: &str) -> Option<u32> {
 /// Launch hierarchical multi-agent factory session
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct FactoryArgs {
+    /// Host workers for this train's owning supervisor on another machine.
+    #[arg(long, global = true, value_name = "TRAIN")]
+    pub worker_host: Option<String>,
     /// Factory subcommand
     #[command(subcommand)]
     pub command: Option<FactoryCommands>,
@@ -398,6 +401,7 @@ fn apply_worker_spec_names(
 impl Default for FactoryArgs {
     fn default() -> Self {
         Self {
+            worker_host: None,
             command: None,
             workers: 0,
             name: None,
@@ -1469,6 +1473,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 worker_names.clone(),
                 worker_spec_jsons.clone(),
                 supervisor_spec_json.clone(),
+                args.worker_host.clone(),
             ),
             FactoryCommands::CheckStaleness { branch, fetch } => {
                 worktree_ops::execute_check_staleness(branch.as_deref(), *fetch)
@@ -1739,6 +1744,21 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
         }
     }
+    let worker_host = if let Some(train) = effective_args.worker_host.as_deref() {
+        let root = crate::store::find_cas_root_from(&project_root)?;
+        let host = crate::factory_session_scope::WorkerHost::resolve(&root, train).map_err(anyhow::Error::msg)?;
+        if host.machine == cas_types::Agent::get_or_generate_machine_id() {
+            bail!("Worker-host mode requires a train owner on another machine");
+        }
+        effective_args.name = Some(host.session.clone());
+        if let Ok(bytes) = std::fs::read(crate::ui::factory::metadata_path(&host.session)) {
+            let metadata: crate::ui::factory::SessionMetadata = serde_json::from_slice(&bytes)?;
+            if metadata.worker_host.is_none() && crate::ui::factory::daemon_identity_is_live(&metadata) {
+                bail!("This session hosts a supervisor; stop it safely before starting a worker host");
+            }
+        }
+        Some(host)
+    } else { None };
     let args = &effective_args;
 
     let (session_name, preflight) =
@@ -1778,12 +1798,13 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         (sup, workers)
     };
 
+    let supervisor_name = worker_host.as_ref().map(|host| host.name.clone()).unwrap_or(supervisor_name);
     let orphans_killed = lifecycle::cleanup_orphaned_daemons();
     if orphans_killed > 0 {
         tracing::info!("Cleaned up {} orphaned daemon(s)", orphans_killed);
     }
 
-    if args.name.is_some() {
+    if args.name.is_some() && args.worker_host.is_none() {
         match lifecycle::kill_session_if_running(&session_name) {
             Ok(true) => tracing::info!("Killed existing session: {}", session_name),
             Ok(false) => {}
@@ -1980,7 +2001,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     }
 
     // Build native Agent Teams spawn configs so agents start with Teams CLI flags.
-    let (teams_configs, lead_session_id) = {
+    let (teams_configs, lead_session_id) = if worker_host.is_some() { (Default::default(), String::new()) } else {
         use crate::ui::factory::daemon::runtime::teams::TeamsManager;
         TeamsManager::build_configs_for_mux(&session_name, &supervisor_name, &worker_names)
     };
@@ -1996,7 +2017,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         cwd: project_root.clone(),
         workers: args.workers as usize,
         worker_names: worker_names.clone(),
-        supervisor_name: Some(supervisor_name),
+        supervisor_name: Some(supervisor_name.clone()),
+        worker_host: args.worker_host.clone(),
         supervisor_cli,
         worker_cli: preflight.worker_cli,
         supervisor_model,
@@ -2017,12 +2039,24 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             None
         },
         teams_configs,
-        lead_session_id: Some(lead_session_id),
+        lead_session_id: (!lead_session_id.is_empty()).then_some(lead_session_id),
         minions_theme: is_minions,
         stall_threshold_secs,
         stall_after_secs: cas_config.factory().stall_after_secs,
         ai_enrichment: cas_config.factory().ai_enrichment,
     };
+
+    if let Some(host) = worker_host.as_ref() {
+        crate::ui::factory::validate_daemon_start(&session_name, &project_root)?;
+        let root = crate::store::find_cas_root_from(&project_root)?;
+        // Workers need this route while registering. PID zero records a
+        // pending launch, never a claim that a daemon is already running.
+        let mut metadata = crate::ui::factory::session::create_metadata(&session_name, 0,
+            &supervisor_name, &worker_names, Some(&host.train), project_root.to_str(), None);
+        metadata.worker_host = Some(host.clone());
+        metadata.pinned_epic_id = Some(host.train.clone());
+        crate::ui::factory::SessionManager::new().save_daemon_metadata(metadata, &root)?;
+    }
 
     let phone_home = !args.no_phone_home;
 
@@ -2527,9 +2561,9 @@ fn check_factory_launch(
     let supervisor_cli = match resolve_cli_choice(
         "Supervisor CLI",
         &args.supervisor_cli,
-        claude_installed,
-        grok_installed,
-        cas_factory::probe::codex_available,
+        claude_installed || args.worker_host.is_some(),
+        grok_installed || args.worker_host.is_some(),
+        || args.worker_host.is_some() || cas_factory::probe::codex_available(),
     ) {
         Ok(cli) => Some(cli),
         Err(e) => {

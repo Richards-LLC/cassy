@@ -6532,6 +6532,14 @@ impl CasCore {
             ),
             data: None,
         })?;
+        if requester.role == cas_types::AgentRole::Worker
+            && (requester.metadata.contains_key("train_owner")
+                || crate::factory_session_scope::WorkerHost::current(&self.cas_root, requester.factory_session.as_deref())
+                    .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?.is_some())
+        {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST,
+                "Worker hosts cannot issue verification; park the delivery for its train owner."));
+        }
         if requester.role != cas_types::AgentRole::Worker || requester.factory_session.is_none() {
             return Ok(requester.id);
         }
@@ -29144,6 +29152,10 @@ pub fn retry() {}
             "supervisor-a-id",
             "the dispatch belongs to the worker's live supervisor, not the worker"
         );
+        worker.metadata.insert("train_owner".into(), "remote-owner-id".into());
+        agents.update(&worker).unwrap();
+        assert!(core.verification_dispatch_owner("worker-id").is_err());
+
     }
 
     /// GH #1171: a task whose parent epic branch was deleted (merged and

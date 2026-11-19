@@ -1319,6 +1319,21 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     assert!(train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
     let evidence = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&owner.cas,&task).unwrap();
     assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
+    let delivered_task = task.clone();
+    let delivered_park = park.clone();
+    let ready_row = owner.rows()[0].clone();
+    let (root,row) = (owner.cas.clone(),ready_row.clone());
+    let selected = tokio::task::spawn_blocking(move || {
+        let now = chrono::Utc::now(); let spent = now-chrono::Duration::minutes(10);
+        let cap = crate::config::Config::load(&root).unwrap().factory().supervisor_message_wakes_per_hour.max(1);
+        for lead in 1..=cap { crate::supervisor_message_wakes::record(&root,-(lead as i64),"owner",&[format!("cloud:{REPO}:worker")],spent,spent).unwrap(); }
+        let mut rows = vec![row.clone()];
+        let mut facts = std::collections::HashMap::from([(row.id,crate::ui::factory::daemon::runtime::queue_and_events::RowFacts::default())]);
+        crate::supervisor_message_wakes::schedule(&root,"owner-session","owner",&open_agent_store(&root).unwrap().list(None).unwrap(),&mut rows,&mut facts,now).unwrap();
+        rows
+    }).await.unwrap();
+    assert!(selected.iter().any(|row| row.id == ready_row.id));
+    assert_eq!(crate::prompt_revalidation::parse_worker_action_envelope(&ready_row.prompt).unwrap().task_id.as_deref(),Some(task.id.as_str()));
     let mut competing = Agent::new_with_role("other".into(),"other".into(),AgentRole::Supervisor);
     competing.factory_session = Some("owner-session".into()); competing.machine_id = Some("soundwave".into());
     agents.register(&competing).unwrap();
@@ -1359,5 +1374,49 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     task.deliverables.delivery_cycle += 1;
     tasks.update(&task).unwrap();
     assert!(!train_parks::admitted(&owner.cas, &task, "factory/w", &tip));
+    let mut closed = delivered_task.clone(); closed.status = crate::types::TaskStatus::Closed;
+    let (root,notice,merge_tip) = (owner.cas.clone(),closed.clone(),tip.clone());
+    let notification = tokio::task::spawn_blocking(move || crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_cassy_merge_close_notice(&root,&notice,&merge_tip)).await.unwrap().unwrap().unwrap();
+    let connection = rusqlite::Connection::open(owner.cas.join("cas.db")).unwrap();
+    let payload: String = connection.query_row("SELECT payload FROM peer_message_outbox WHERE id=?1",[notification],|row|row.get(0)).unwrap();
+    let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+    let (_,body) = split_message_intent(&sent.body);
+    let result: serde_json::Value = serde_json::from_str(body.strip_prefix(train_parks::TAG).unwrap()).unwrap();
+    assert_eq!(result["cycle"],0); assert_eq!(result["status"],"closed");
+    let mut result_mail = message("closed-result","worker",REPO,&sent.body);
+    result_mail.sender_agent_id = "owner".into(); result_mail.sender_name = "owner".into();
+    result_mail.sender_machine_id = Some("soundwave".into()); result_mail.sender_session = Some("owner-session".into());
+    let root = host.cas.clone();
+    let receive = move |mail: ClaimedPeerMessage| {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || {
+            let mailbox = FakeMailbox { inbox:Mutex::new(vec![mail]), ..Default::default() };
+            let report = deliver_claimed_with_history(&mailbox,open_prompt_queue_store(&root).unwrap().as_ref(),open_agent_store(&root).unwrap().as_ref(),
+                REPO,&[],"owner-session","prowl:owner-session",&RecipientHistory::default(),Some((&root,"worker")),
+                &|_,mail| Ok(train_parks::queue_key(mail)),&|recipient,mail| train_parks::ingest(&root,recipient,mail),&|_,_| Ok(PeerAckOutcome::Delivered));
+            (report,mailbox.acks.into_inner().unwrap())
+        })
+    };
+    let (waiting,ack) = receive(result_mail.clone()).await.unwrap();
+    assert_eq!((waiting.delivered,waiting.rejected),(0,0)); assert!(ack.is_empty());
+    assert!(waiting.errors.iter().any(|error| error.contains("TRAIN_RESULT_STATE_PENDING")));
+    host_tasks.update(&closed).unwrap();
+    let (result,_) = receive(result_mail.clone()).await.unwrap(); assert_eq!(result.delivered,1);
+    let mut duplicate = result_mail.clone(); duplicate.id = "same-result-new-cloud-id".into();
+    let (duplicate,_) = receive(duplicate).await.unwrap(); assert_eq!(duplicate.duplicates,1);
+    let mut changes = delivered_task; changes.status = crate::types::TaskStatus::Open; changes.deliverables.delivery_cycle = 1;
+    changes.deliverables.historical_factory_branch_anchors.push(delivered_park.tip.clone());
+    changes.deliverables.factory_branch_anchor = None; changes.deliverables.parked_branch = None;
+    host_tasks.update(&changes).unwrap();
+    let (stale,_) = receive(result_mail).await.unwrap(); assert_eq!(stale.rejected,1);
+    let (root,notice) = (owner.cas.clone(),changes);
+    let notification = tokio::task::spawn_blocking(move || crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_request_changes_notice(&root,&notice,"repair fixture","retain branch")).await.unwrap().unwrap();
+    let payload: String = connection.query_row("SELECT payload FROM peer_message_outbox WHERE id=?1",[notification],|row|row.get(0)).unwrap();
+    let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+    let mut correction = message("correction-result","worker",REPO,&sent.body);
+    correction.sender_agent_id = "owner".into(); correction.sender_name = "owner".into();
+    correction.sender_machine_id = Some("soundwave".into()); correction.sender_session = Some("owner-session".into());
+    let (corrected,_) = receive(correction).await.unwrap(); assert_eq!(corrected.delivered,1);
+    assert_eq!(host.rows().len(),2);
     assert!(open_agent_store(&host.cas).unwrap().list(None).unwrap().iter().all(|a| a.role != AgentRole::Supervisor));
 }

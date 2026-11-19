@@ -29,8 +29,9 @@ pub(crate) fn record_tools_listed(cas_root: &Path, session: &str, worker: &str, 
 /// A `tools/list` was answered. Only the external client's listing counts: the
 /// front's private probe precedes the client's own tools (GH #2128).
 pub(crate) fn note_tools_listed(cas_root: &Path, request_id: &str) {
-    let _ = request_id;
-    record_from_environment(cas_root);
+    if !request_id.starts_with(FRONT_PROBE_PREFIX) {
+        record_from_environment(cas_root);
+    }
 }
 
 /// The factory worker identity this process runs as, if it is one.

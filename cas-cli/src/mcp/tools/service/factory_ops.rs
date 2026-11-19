@@ -14454,6 +14454,9 @@ mod spawn_lifecycle_tests {
             ("Assert the error message text says the branch is stale.", vec!["N-106"]),
             ("One test each for the three findings.", vec!["N-107"]),
             ("The PENDING message must name the workflow.", vec!["N-106"]),
+            ("Add one test per item without changing production code.", vec!["N-107"]),
+            ("Assert the error message contains the workflow name, not just its code.", vec!["N-106"]),
+            ("Don't add a test per item.", vec![]),
             ("Extend one existing test; assert behaviour, ids or codes; no message/text assertions; failing-first.", vec![]),
         ] {
             assert_eq!(crate::task_assignment::test_policy_warnings(text), expected, "{text}");

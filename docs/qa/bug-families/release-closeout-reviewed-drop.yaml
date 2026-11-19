@@ -1,0 +1,3 @@
+title: Release closeout accepts a supervisor-reviewed drop for a member a later shipped task superseded
+tasks: [cas-0489]
+journeys: [CLI-RELEASE]

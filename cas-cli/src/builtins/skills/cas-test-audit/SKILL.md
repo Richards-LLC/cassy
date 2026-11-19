@@ -24,7 +24,7 @@ Default: one read-only pass inventories test value, nondeterminism and the proje
 
 A workflow turning green, a green requeue on another SHA or a retry label alone is not proof that a named test flaked. Match native test identity, executed failure and executed pass, plus identical SHA/tree and comparable selection. Preserve first failure evidence; never retry a suite to discover history or turn this audit green.
 
-For timing guesses, fix by waiting on the event, completion or owned resource; use a controlled clock for a timing contract. Repair isolation or delete useless coverage. Remove implementation/style pins; preserve behavioral assertions and named accessibility-property contracts from [cas-playwright-tests](../cas-playwright-tests/references/locators-and-accessibility.md). Computed style alone is not an accessibility outcome. Exact caller payloads and machine protocol identifiers remain data-integrity checks. Never prescribe retry wrapping, quarantine or a guessed longer sleep.
+For timing guesses, apply [Test hygiene](../cas-writing-tests/SKILL.md#test-hygiene) item 4. Repair isolation or delete useless coverage. Remove implementation/style pins; preserve behavioral assertions and named accessibility-property contracts from [cas-playwright-tests](../cas-playwright-tests/references/locators-and-accessibility.md). Computed style alone is not an accessibility outcome. Exact caller payloads and machine protocol identifiers remain data-integrity checks. Never prescribe retry wrapping or quarantine.
 
 ## Approved deletion campaign
 

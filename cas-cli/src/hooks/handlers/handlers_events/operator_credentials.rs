@@ -101,7 +101,13 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
         return true;
     };
-    let names_inert = depth == 0 && listed_names_stay_inert(command);
+    // Names stay names only if every pipe consumer in the whole command reads
+    // just stdin text. Each context below is one statement and cannot see its
+    // pipe neighbours, so this is judged here, once, on the whole command.
+    let names_inert = depth == 0 && no_substitution(command) && {
+        let (arguments, piped) = super::pre_tool::shell_statement_arguments_with_pipes(command);
+        piped.iter().zip(&arguments).all(|(piped, argv)| !*piped || consumer_reads_stdin_only(argv))
+    };
     for mut context in contexts {
         let parents = context.command.matches("..").count().min(16);
         let directories: Vec<PathBuf> = std::mem::take(&mut context.directories).into_iter()
@@ -113,6 +119,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             let Some(index) = super::pre_tool::unwrapped_command_index(words) else { continue; };
             let executable = Path::new(&words[index]).file_name().and_then(|name| name.to_str())
                 .unwrap_or(&words[index]).to_ascii_lowercase();
+            // Per statement: a listing opens no file.
             let names_only = names_inert && statements.len() == arguments.len()
                 && arguments.get(at).is_some_and(|argv| {
                     super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
@@ -366,17 +373,43 @@ fn find_lists_names_only(args: &[String]) -> bool {
     true
 }
 
-/// Only a standalone listing (optionally redirected to a file) qualifies.
-/// A pipeline consumer can open the listed files, even when it also works
-/// as a text filter (`sort --files0-from=-`). Substitutions can likewise
-/// turn names into file operands. Leave those forms to normal inspection.
-fn listed_names_stay_inert(command: &str) -> bool {
-    if command.contains("$(") || command.contains('`') || command.contains("<(")
-        || command.contains(">(")
-    {
-        return false;
+/// Substitutions can turn listed names into file operands, so a command that
+/// has one gets no names-only exemption for any statement.
+fn no_substitution(command: &str) -> bool {
+    !(command.contains("$(") || command.contains('`') || command.contains("<(")
+        || command.contains(">("))
+}
+
+/// A pipe consumer that only filters its stdin text. Anything that can open
+/// the listed names (`xargs`, `sort --files0-from=-`, a `while read` loop) is
+/// not one, and keeps the whole command under normal inspection.
+fn consumer_reads_stdin_only(argv: &[String]) -> bool {
+    let Some(index) = super::pre_tool::unwrapped_command_index(argv) else { return false };
+    let name = Path::new(&argv[index]).file_name().and_then(|name| name.to_str())
+        .unwrap_or(&argv[index]).to_ascii_lowercase();
+    let args = &argv[index + 1..];
+    match name.as_str() {
+        "head" | "tail" | "wc" | "sort" | "uniq" | "cut" | "tr" => {
+            !args.iter().any(|arg| arg.contains("files0"))
+        }
+        // One pattern, no option that names a file or a directory to walk.
+        "rg" | "grep" | "egrep" | "fgrep" => {
+            let mut patterns = 0;
+            for arg in args {
+                if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
+                    if !arg[1..].chars().all(|flag| "ivcnFEwxoqIasHh".contains(flag)) {
+                        return false;
+                    }
+                } else if arg.starts_with('-') {
+                    return false;
+                } else {
+                    patterns += 1;
+                }
+            }
+            patterns <= 1
+        }
+        _ => false,
     }
-    super::pre_tool::shell_statement_words(command).len() == 1
 }
 
 fn cwd_is_store_or_parent(cwd: &Path) -> bool {

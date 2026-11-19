@@ -257,7 +257,6 @@ impl Discovery {
         Ok(current.iter().filter(|test| paths.contains(&test.identity.path)
             && prior.get(&(&test.identity, &test.package, &test.harness)).copied() != Some(&test.source)).cloned().collect())
     }
-
 }
 
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
@@ -422,26 +421,4 @@ mod close_latency_tests {
         assert!(INVENTORY_BUILDS.get() <= 2, "inventory builds: {}", INVENTORY_BUILDS.get());
     }
 
-    // Temporary real-incident measurement; removed after collecting both runs.
-    #[test]
-    fn c199_stability_profile_cas_bc33() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let head = "1955b2b7fe94410bf7e08acbc621320a70755aa9";
-        let target = git(repo, &["rev-parse", "598739a7d2^2"]).unwrap();
-        let ranges: [(String, String); 2] = [
-            (git(repo, &["rev-parse", "7b54e28b1c^1"]).unwrap(), "7b54e28b1c6557764385e5fbb0d08f171c6faa0a".into()),
-            ("598739a7d22754ce2fda5e1e7e5781542d018a27".into(), head.into()),
-        ];
-        let mut paths = BTreeSet::new();
-        for (base, tip) in &ranges {
-            paths.extend(git(repo, &["diff", "--name-only", base, tip]).unwrap().lines().map(str::to_string));
-        }
-        let paths: Vec<_> = paths.into_iter().collect();
-        INVENTORY_BUILDS.set(0);
-        let start = std::time::Instant::now();
-        let (tests, widened) = super::super::requirements(repo, head, &target, &paths, Some(&ranges)).unwrap();
-        eprintln!("G-61 changed-test discovery: elapsed={:?}; builds={}; paths={}; tests={}; widened={:?}; target={target}",
-            start.elapsed(), INVENTORY_BUILDS.get(), paths.len(), tests.len(), widened);
-        assert!(INVENTORY_BUILDS.get() <= 3, "inventory builds: {}", INVENTORY_BUILDS.get());
-    }
 }

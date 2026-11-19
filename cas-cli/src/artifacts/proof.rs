@@ -646,6 +646,15 @@ fn materialize_manifest(
             missing.push(format!("{} (unsafe path)", file.name));
             continue;
         }
+        if sync.strict && let Some(id) = &file.artifact_id {
+            let committed = (|| -> anyhow::Result<()> {
+                let artifact = from_notes(&task.notes, id, &task.id)?.ok_or_else(|| anyhow::anyhow!("no committed artifact record {id}"))?;
+                anyhow::ensure!(artifact.sha256 == file.sha256, "artifact {id} has other bytes");
+                if let Some(local) = store.get(id)? { super::require_available(&local)?; }
+                Ok(())
+            })();
+            if let Err(error) = committed { missing.push(format!("{} ({error})", file.name)); continue; }
+        }
         if identical(file) {
             continue;
         }
@@ -689,7 +698,10 @@ pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task)
     let manifest = task.notes.lines().rev().find_map(|line| {
         serde_json::from_str::<EvidenceSync>(line.strip_prefix(EVIDENCE_SYNC)?).ok()
     });
-    if let Some(sync) = manifest {
+    let sealed = task.notes.lines().any(|line| line.starts_with(crate::cloud::peer_mailbox::train_parks::NOTE));
+    if sealed && manifest.is_none() { return Err("Remote park has no valid complete evidence manifest".into()); }
+    if let Some(mut sync) = manifest {
+        sync.strict |= sealed;
         let restored = materialize_manifest(cas_root, task, &sync);
         if sync.strict {
             return restored;

@@ -1263,6 +1263,16 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
             (report, mailbox.acks.into_inner().unwrap())
         })
     };
+    let active = Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[{
+            "id":"claim", "task_id":crate::cloud::peer_claims::claim_key(REPO,&task.id), "agent_id":"worker", "status":"active",
+            "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(), "renewed_at":chrono::Utc::now().to_rfc3339(),
+            "renewal_count":1, "epoch":1
+        }]}))).mount_as_scoped(&server).await;
+    let (held, ack) = deliver(send("before-claim-release", &park)).await.unwrap();
+    assert_eq!((held.delivered,held.rejected), (0,0)); assert!(ack.is_empty());
+    assert!(owner.rows().is_empty());
+    drop(active);
     let (report, _) = deliver(send("ready", &park)).await.unwrap();
     assert!(report.errors.is_empty(), "{report:?}");
     assert_eq!(report.delivered, 1);

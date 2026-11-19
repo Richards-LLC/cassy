@@ -178,8 +178,14 @@ impl PeerMailboxRuntime {
                 &self.consumer_id,
                 &history,
                 owner.map(|owner| (self.cas_dir.as_path(), owner.id.as_str())),
-                &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
-                &|recipient, message| transcript::serve(&self.cas_dir, &mailbox, recipient, message),
+                &|recipient, message| match train_parks::queue_key(message) {
+                    Some(key) => Ok(Some(key)),
+                    None => crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
+                },
+                &|recipient, message| {
+                    if let Some(outcome) = train_parks::ingest(&self.cas_dir, recipient, message)? { return Ok(Some(outcome)); }
+                    transcript::serve(&self.cas_dir, &mailbox, recipient, message)
+                },
                 &move |recipient, message| {
                     use crate::mcp::tools::core::workflow::premerge_verification::{PeerReceiptIngested, ingest_peer_receipt};
                     match ingest_peer_receipt(&cas_dir, recipient, message)? {

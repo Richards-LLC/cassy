@@ -11,6 +11,7 @@ pub(crate) struct WorkerDirectory {
     workers: Vec<peers_detail::PeerWorkerRef>,
     owners: BTreeMap<String, BTreeSet<String>>,
     agents: Vec<crate::cloud::AgentInfo>,
+    claims: Vec<crate::types::TaskLease>,
     epics: BTreeMap<String, BTreeMap<String, chrono::DateTime<Utc>>>,
 }
 
@@ -72,7 +73,7 @@ impl WorkerDirectory {
             }
             owners.insert(worker.agent_id.clone(), ids);
         }
-        Ok(Self { workers, owners, agents, epics })
+        Ok(Self { workers, owners, agents, claims: locks, epics })
     }
 
     pub(crate) fn matches_local(&self, local: &Agent) -> bool {
@@ -89,10 +90,18 @@ impl WorkerDirectory {
     }
 
     pub(crate) fn owner_message(&self, message: &ClaimedPeerMessage, worker: &str) -> bool {
-        self.owner_of(&message.sender_agent_id, worker)
-            && self.agents.iter().any(|agent| agent.id == message.sender_agent_id
-                && agent.machine_id == message.sender_machine_id
-                && agent.metadata.get(peers::META_FACTORY_SESSION) == message.sender_session.as_ref())
+        self.owner_of(&message.sender_agent_id, worker) && self.sender_matches(message)
+    }
+
+    pub(crate) fn sender_matches(&self, message: &ClaimedPeerMessage) -> bool {
+        self.agents.iter().any(|agent| agent.id == message.sender_agent_id
+            && agent.machine_id == message.sender_machine_id
+            && agent.metadata.get(peers::META_FACTORY_SESSION) == message.sender_session.as_ref())
+    }
+
+    pub(crate) fn claimed(&self, project: &str, task: &str) -> bool {
+        let key = crate::cloud::peer_claims::claim_key(project, task);
+        self.claims.iter().any(|claim| claim.expires_at > Utc::now() && (claim.task_id == task || claim.task_id == key))
     }
 
     pub(crate) fn resolve(&self, target: &str) -> Result<Option<&peers_detail::PeerWorkerRef>, String> {

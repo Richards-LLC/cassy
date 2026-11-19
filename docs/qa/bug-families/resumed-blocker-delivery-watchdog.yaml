@@ -1,0 +1,3 @@
+title: A delivered blocker notice cannot be recreated by a stale emission after resume
+tasks: [cas-25e1]
+journeys: [FACTORY-SUPERVISE]

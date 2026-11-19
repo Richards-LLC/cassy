@@ -3979,7 +3979,8 @@ impl CasCore {
             Ok(supervisor_push::LifecyclePushResult::AlreadyComplete { .. }) => {
                 "\n\n📡 Supervisor lifecycle event already complete (outbox)".to_string()
             }
-            Ok(supervisor_push::LifecyclePushResult::NoSupervisor) => String::new(),
+            Ok(supervisor_push::LifecyclePushResult::NoSupervisor
+                | supervisor_push::LifecyclePushResult::Superseded) => String::new(),
             Err(e) => {
                 let key = supervisor_push::transition_key(
                     &req.id,

@@ -1,0 +1,1 @@
+Blocked-task lifecycle emission rechecks the current task status before constructing an alert episode. A resumed task no longer creates another notice from the cleared hold's fallback event timestamp. Delivered notices retain their receipts; a new blocked episode still alerts the owning supervisor.

@@ -1,0 +1,3 @@
+### Added — Factory
+
+- **/standby parks a supervisor session without ending it** — Was: an idle supervisor with its workers kept using memory, and `/finish` plus `/exit` threw the session away. Now: `/standby` runs the full `finish` flow, stops every worker without losing work (a worker with unsaved work refuses and nothing changes), records the standby, posts one line and goes quiet. Only the operator and CAS lifecycle events wake it. `factory action=standby status=resume` respawns the workers that held tasks and the supervisor reloads its handoff. The Commander Standby badge and Resume button follow in a separate change.

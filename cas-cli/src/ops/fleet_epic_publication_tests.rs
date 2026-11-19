@@ -212,7 +212,7 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             assert_eq!(cas_store::get_latest_worker_delivery(root, &child.id).unwrap().unwrap().1.state,
                 cas_types::WorkerDeliveryState::CloseReady);
             assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
-            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()));
+            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()), "{result:?}");
             conn.execute_batch("DROP TRIGGER hold_focus_close;").unwrap();
 
             crate::mcp::tools::core::task::release_train::mark_cut_trains(

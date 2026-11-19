@@ -2899,6 +2899,23 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
     let copy_config = std::fs::read_to_string(copy_root.join("config.toml")).unwrap();
     assert!(copy_config.contains("min_helpful = 9"), "copy config: {copy_config}");
     assert!(!live_config.contains("min_helpful = 9"), "live config: {live_config}");
+
+    // cas-db72 (GH #1918): `factory worker-check --cas-root` names its store
+    // explicitly, so the same notice must stay silent. The runner refuses this
+    // selection (no -E filter) before running anything; only stderr matters here.
+    let output = cas_cmd(temp.path())
+        .current_dir(&copy)
+        .env("CAS_ROOT", &live_root)
+        .args(["factory", "worker-check", "--cas-root"])
+        .arg(&copy_root)
+        .args(["--", "nextest", "run", "-p", "cas", "--lib"])
+        .output()
+        .expect("cas factory worker-check must run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(&live_root.display().to_string()),
+        "an explicit worker-check --cas-root must not print the CAS_ROOT-override notice.\nstderr: {stderr}"
+    );
 }
 
 /// cas-e1c7: `cas cloud project set`, run inside another project from a shell

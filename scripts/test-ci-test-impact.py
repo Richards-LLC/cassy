@@ -148,6 +148,7 @@ pub fn run() { nested::launch(); }
         self.assertEqual(command["stems"], ["alpha_test", "builtin_archive_portability_test"])
         self.assertNotIn("--lib", command["args"])
 
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
     def test_builtin_agent_doc_edit_selects_the_agent_contract_without_an_import_edge(self):
         # The byte budget lives in a contract test that reads the doc, not a
         # Rust import, so only the embedded-asset rule can select it in a lane.

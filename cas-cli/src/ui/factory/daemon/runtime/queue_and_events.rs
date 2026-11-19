@@ -7914,12 +7914,9 @@ impl FactoryDaemon {
     /// A Codex worker whose Cassy MCP server has not listed its tools yet (GH #2128).
     /// The supervisor, broadcasts and other harnesses are unaffected.
     fn worker_awaits_cassy_tools(&self, pane: &str) -> bool {
-        pane != "supervisor"
-            && pane != self.app.supervisor_name()
-            && pane != "all_workers"
-            && self.app.worker_names().iter().any(|name| name == pane)
-            && self.app.harness_for(pane) == cas_mux::SupervisorCli::Codex
-            && !crate::factory_tools_ready::tools_listed(self.app.cas_dir(), &self.session_name, pane, crate::mcp::daemon::pid_alive)
+        self.app.mux.get(pane).is_some_and(|pane| {
+            matches!(pane.kind(), cas_mux::PaneKind::Worker) && pane.harness() == cas_mux::SupervisorCli::Codex
+        }) && !crate::factory_tools_ready::tools_listed(self.app.cas_dir(), &self.session_name, pane, crate::mcp::daemon::pid_alive)
     }
 
     /// Combine off-loop transcript inputs with the pane's current vetoes.

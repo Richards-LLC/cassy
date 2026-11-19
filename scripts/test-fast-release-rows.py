@@ -728,6 +728,11 @@ esac
         _, path = self.receipt()
         # pin: receipts name the actual comparison commit, while the hook log names its target ref.
         self.assertIn(f"base={fork} ", path.read_text())
+        # Final-tree assembly still compares with main: this tree reverts the
+        # dependency fixture main moved on, which the lane-range base never sees.
+        assembled = self.fast_from("origin/main")
+        self.assertNotEqual(assembled.returncode, 0, assembled.stdout)
+        self.assertIn("FAIL version-literals", assembled.stdout)
         self.write("scripts/example.py", "# this branch now changes the script\n")
         self.commit()
         pushed = self.push()

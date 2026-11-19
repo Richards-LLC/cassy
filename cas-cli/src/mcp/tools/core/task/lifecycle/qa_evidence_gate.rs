@@ -569,10 +569,30 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
                 })
                 .flatten()
         });
+    // cas-cab8: a lane whose tip the target already contains, with no receipt,
+    // recorded boundary or parked anchor naming this task's delivery, has no
+    // delivery of its own (a spike that made no commits, or a lane synced
+    // forward onto its epic). Measuring it as an integrated receipt charged the
+    // target's last commit to the task: a spike was asked for Tier 2 proof and
+    // the Hub journeys because the epic's tip changed `lane.yml`.
+    let nothing_of_its_own = carried_bundle.is_none()
+        && commit_receipt.is_none()
+        && attributed_paths.is_none()
+        && recorded_base.is_none()
+        && !target_branch.is_empty()
+        && task.deliverables.factory_branch_anchor.is_none()
+        && task.deliverables.historical_factory_branch_anchors.is_empty()
+        && Command::new("git")
+            .args(["merge-base", "--is-ancestor", &head, &live_target_ref(repo, target_branch)])
+            .current_dir(repo)
+            .status()
+            .is_ok_and(|status| status.success());
     // An empty attributed set is authoritative: a merge-only or formatting-
     // only task delivered no reviewable UI, even if the branch's merge diff
     // contains UI files from the other parent (GH #1037).
-    let changed = if carried_bundle.is_some() {
+    let changed = if nothing_of_its_own {
+        Some(Vec::new())
+    } else if carried_bundle.is_some() {
         // Exact aggregate equivalence supplies the delivery boundary even
         // when legacy attribution can recover only the final cherry-pick.
         range
@@ -1512,6 +1532,28 @@ mod tests {
             None,
         )
         .expect("an attributed merge-only delivery has no UI change");
+
+        // cas-cab8: a spike that made no commits sits on the target's tip, whose
+        // last commit changed UI and a guard workflow. With nothing naming a
+        // delivery, that tip is not the spike's, so no journey or Tier 2 proof
+        // is owed.
+        git(&repo, &["switch", "-q", "factory/worker"]);
+        git(&repo, &["reset", "-q", "--hard", "origin/main"]);
+        let spike = |id: &str| {
+            let mut spike = Task::new(id.to_string(), "Spike".to_string());
+            spike.task_type = TaskType::Spike;
+            spike.assignee = Some("worker".to_string());
+            spike
+        };
+        qa_evidence_close_gate(&cas_root, &spike("cas-cab8-empty"), &repo, "main", None)
+            .expect("an empty delivery owes no journeys or adversarial probe");
+        // Adversarial probe: the same spike that does change guard code is still
+        // Tier 2, and the target's UI commit is still not charged to it.
+        std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+        commit_file(&repo, ".github/workflows/lane.yml", "name: lane\n");
+        let refusal = qa_evidence_close_gate(&cas_root, &spike("cas-cab8-guard"), &repo, "main", None)
+            .expect_err("a spike that changes guard code is Tier 2");
+        assert!(refusal.contains("no adversarial probe") && refusal.contains("lane.yml"), "{refusal}");
     }
 
     /// cas-e86b: the evidence gate reads the same shared reasons, so a

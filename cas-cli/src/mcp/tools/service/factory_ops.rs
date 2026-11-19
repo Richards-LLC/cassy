@@ -12922,7 +12922,17 @@ pub(crate) fn worker_context_usage(
     agent: &cas_types::Agent,
     path: &std::path::Path,
 ) -> Option<ContextUsage> {
-    read_context_usage_from_tail_for_cli(path, worker_cli_from_agent(agent))
+    let cli = worker_cli_from_agent(agent);
+    if cli == cas_mux::SupervisorCli::Codex {
+        // Codex's synthetic CAS id falls back to a same-cwd rollout. Until
+        // this generation writes, that can still be its predecessor's file.
+        // A retained conversation that keeps writing still reports its usage.
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        if chrono::DateTime::<chrono::Utc>::from(modified) < agent.registered_at {
+            return None;
+        }
+    }
+    read_context_usage_from_tail_for_cli(path, cli)
 }
 
 fn context_notice_buckets() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {

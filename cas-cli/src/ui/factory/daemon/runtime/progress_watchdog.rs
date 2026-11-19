@@ -111,8 +111,7 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         if task.status == TaskStatus::Blocked {
             if is_held(&task.notes) { return false; }
             use crate::mcp::tools::core::task::block_hold;
-            let reason = block_hold::latest_blocker_reason(&task.notes)
-                .or_else(|| block_hold::read(store.as_ref(), &task.id).ok().flatten().map(|hold| hold.reason));
+            let reason = block_hold::current_hold_reason(store.as_ref(), &task.id, &task.notes);
             if reason.is_some_and(|reason| block_hold::reason_is_operator_owned(&reason)) {
                 return false;
             }

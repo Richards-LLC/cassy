@@ -3759,6 +3759,18 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_shutdown_workers_with(ctx, req, false).await
+    }
+
+    /// `keep_in_progress` (standby only, cas-94a0): a worker whose worktree is
+    /// clean and pushed may stop while it holds an in-progress task. The task is
+    /// kept as it is; unsaved work still needs `force`.
+    async fn factory_shutdown_workers_with(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        keep_in_progress: bool,
+    ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_store::SpawnLifecycleState;
         use cas_types::{AgentRole, AgentStatus};
@@ -4047,7 +4059,9 @@ impl CasService {
         let force = req.force.unwrap_or(false);
         let unsafe_snapshots: Vec<&ShutdownWorkerSnapshot> = snapshots
             .iter()
-            .filter(|snapshot| snapshot.requires_force())
+            .filter(|snapshot| {
+                if keep_in_progress { snapshot.unsafe_worktree } else { snapshot.requires_force() }
+            })
             .collect();
         // gate[G-136 shutdown]: Active worker work must be preserved before forced shutdown
         if !force && !unsafe_snapshots.is_empty() {
@@ -4698,28 +4712,7 @@ impl CasService {
         let root = &self.inner.cas_root;
         let internal = |message: String| Self::error(ErrorCode::INTERNAL_ERROR, message);
         if req.status.as_deref() == Some("resume") {
-            let Some(parked) = standby::read(root, &session) else {
-                return Ok(Self::success(format!("Session '{session}' is not on standby; nothing to resume.")));
-            };
-            let mut respawned = Vec::new();
-            for held in &parked.workers {
-                let mut spawn = req.clone();
-                spawn.action = "spawn_workers".into();
-                spawn.status = None;
-                // A stopped worker's branch is preserved, so its name is taken: the
-                // replacement is a fresh worker that inherits the held tasks.
-                spawn.count = Some(1);
-                spawn.worker_names = None;
-                spawn.task_ids = Some(held.tasks.clone());
-                self.factory_spawn_workers_in(&ctx, spawn).await?;
-                respawned.push(format!("{} ({})", held.name, held.tasks.join(", ")));
-            }
-            standby::clear(root, &session).map_err(|error| internal(format!("Could not clear the standby marker: {error}")))?;
-            return Ok(Self::success(format!(
-                "Resumed session '{session}': {} worker(s) queued to respawn from their task queues{}. Reload the handoff next.",
-                respawned.len(),
-                if respawned.is_empty() { String::new() } else { format!(": {}", respawned.join("; ")) },
-            )));
+            return Ok(Self::success(self.standby_resume(&ctx, &session, req).await?));
         }
         if let Some(parked) = standby::read(root, &session) {
             return Ok(Self::success(format!(
@@ -4757,7 +4750,8 @@ impl CasService {
             })
             .collect();
         // Never forced: a worker with unsaved work refuses here, with its state,
-        // and the session stays as it was.
+        // and the session stays as it was. A clean, pushed worker may stop while
+        // it holds an in-progress task: the task stays as it is and resume restores it.
         let mut shutdown = req.clone();
         shutdown.action = "shutdown_workers".into();
         shutdown.status = None;
@@ -4768,7 +4762,7 @@ impl CasService {
         let stopped = if workers.is_empty() {
             String::from("No workers were running.")
         } else {
-            let result = self.factory_shutdown_workers_in(&ctx, shutdown).await?;
+            let result = self.factory_shutdown_workers_with(&ctx, shutdown, true).await?;
             serde_json::to_value(&result)
                 .ok()
                 .and_then(|value| {
@@ -4778,16 +4772,73 @@ impl CasService {
                 })
                 .unwrap_or_default()
         };
+        // The shutdowns are queued; record them now so a resume never meets a
+        // worker still marked live by the time the daemon applies the request.
+        if !workers.is_empty() {
+            let agents = open_agent_store(root).map_err(|error| internal(format!("Failed to open agent store: {error}")))?;
+            for mut worker in workers.iter().cloned() {
+                worker.status = AgentStatus::Shutdown;
+                agents.update(&worker).map_err(|error| internal(format!("Could not record the shutdown of {}: {error}", worker.name)))?;
+            }
+        }
+        let handoff = standby::current_handoff_id(root);
         standby::enter(
             root,
-            &standby::Standby { session: session.clone(), since: chrono::Utc::now(), workers: held.clone() },
+            &standby::Standby { session: session.clone(), since: chrono::Utc::now(), handoff: handoff.clone(), workers: held.clone() },
         )
         .map_err(|error| internal(format!("Workers were stopped but the standby marker was not written: {error}")))?;
         Ok(Self::success(format!(
-            "Session '{session}' is on standby: {} worker(s) stopped, {} held task(s) kept for resume. The daemon now wakes this pane only for the operator and CAS lifecycle events. Post one line and go silent.\n{stopped}",
+            "Session '{session}' is on standby: {} worker(s) stopped, {} held task(s) kept for resume, handoff {}. The daemon now wakes this pane only for the operator and CAS lifecycle events. Post one line and go silent.\n{stopped}",
             workers.len(),
             held.iter().map(|worker| worker.tasks.len()).sum::<usize>(),
+            handoff.as_deref().unwrap_or("none saved"),
         )))
+    }
+
+    /// Resume for the supervisor hook: the same body as `status=resume`, with
+    /// the fleet context read from the environment.
+    pub(crate) async fn standby_resume_from_env(&self, session: &str) -> Result<String, McpError> {
+        let base: FactoryRequest = serde_json::from_value(serde_json::json!({"action": "spawn_workers"}))
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        self.standby_resume(&mcp_fleet_context(), session, base).await
+    }
+
+    /// Resume from standby (cas-94a0): one replacement per worker that held
+    /// tasks, spawned with those task ids, then the marker is cleared. Shared by
+    /// `status=resume` and the supervisor's operator-message hook, so both paths
+    /// bring the same workers back with the same handoff.
+    pub(crate) async fn standby_resume(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        session: &str,
+        base: FactoryRequest,
+    ) -> Result<String, McpError> {
+        use crate::factory_standby as standby;
+        let root = &self.inner.cas_root;
+        let Some(parked) = standby::read(root, session) else {
+            return Ok(format!("Session '{session}' is not on standby; nothing to resume."));
+        };
+        let mut respawned = Vec::new();
+        for held in &parked.workers {
+            let mut spawn = base.clone();
+            spawn.action = "spawn_workers".into();
+            spawn.status = None;
+            // A stopped worker's branch is preserved, so its name is taken: the
+            // replacement is a fresh worker that inherits the held tasks.
+            spawn.count = Some(1);
+            spawn.worker_names = None;
+            spawn.task_ids = Some(held.tasks.clone());
+            self.factory_spawn_workers_in(ctx, spawn).await?;
+            respawned.push(format!("{} ({})", held.name, held.tasks.join(", ")));
+        }
+        standby::clear(root, session)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("Could not clear the standby marker: {error}")))?;
+        Ok(format!(
+            "Resumed session '{session}': {} worker(s) queued to respawn from their task queues{}. Reload handoff {} next.",
+            respawned.len(),
+            if respawned.is_empty() { String::new() } else { format!(": {}", respawned.join("; ")) },
+            parked.handoff.as_deref().unwrap_or("(none was saved)"),
+        ))
     }
 
     pub(super) async fn factory_set_worker_hold(

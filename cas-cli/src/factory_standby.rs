@@ -24,6 +24,9 @@ pub struct HeldWorker {
 pub struct Standby {
     pub session: String,
     pub since: DateTime<Utc>,
+    /// The supervisor's current handoff when the session went on standby.
+    #[serde(default)]
+    pub handoff: Option<String>,
     pub workers: Vec<HeldWorker>,
 }
 
@@ -58,4 +61,31 @@ pub fn clear(cas_root: &Path, session: &str) -> std::io::Result<()> {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
+}
+
+/// The supervisor's current handoff, the one resume tells it to reload.
+pub fn current_handoff_id(cas_root: &Path) -> Option<String> {
+    let entries = crate::store::open_store(cas_root).ok()?.list().ok()?;
+    cas_core::memory::handoff::current_handoff(&entries, "supervisor", None).map(|entry| entry.id.clone())
+}
+
+/// The supervisor's first operator message after standby: bring the workers back
+/// and name the handoff to reload. Runs the same resume as `status=resume`, on its
+/// own runtime because hooks are synchronous. `None` when the session is not on
+/// standby or the resume failed (the marker then stays, so `status=resume` still works).
+pub fn resume_for_operator_message(cas_root: &Path, session: &str) -> Option<String> {
+    if !active(cas_root, session) {
+        return None;
+    }
+    let (root, session) = (cas_root.to_path_buf(), session.to_string());
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+        runtime.block_on(async {
+            let core = crate::mcp::CasCore::with_daemon(root, None, None);
+            crate::mcp::CasService::new(core, None).standby_resume_from_env(&session).await.ok()
+        })
+    })
+    .join()
+    .ok()
+    .flatten()
 }

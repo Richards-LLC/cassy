@@ -1456,4 +1456,14 @@ mod worker_delivery_request_tests {
             Some("https://github.com/pippenz/cas/pull/242")
         );
     }
+
+    #[test]
+    fn request_changes_class_audit_fields_are_additive_at_the_mcp_boundary_cas_bc25() {
+        let request: TaskRequest = serde_json::from_str(
+            r#"{"action":"request_changes","id":"cas-x","reason":"fix","failing_tests":"ui::a","class_audit":"test(ui::)"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.failing_tests.as_deref(), Some("ui::a"));
+        assert_eq!(request.class_audit.as_deref(), Some("test(ui::)"));
+    }
 }

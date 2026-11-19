@@ -1862,6 +1862,14 @@ mod tests {
             "Wait for operator decision"
         );
         assert!(validate_task_execution_state(&state).is_ok());
+        // cas-bc25: a recorded repair class is a string and a null patch clears it.
+        let audited = merge_task_execution_state_patch(
+            &state, &serde_json::json!({"class_audit": "test(ui::)"}),
+        ).unwrap();
+        assert_eq!(audited["class_audit"], "test(ui::)");
+        assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"class_audit": 7})).is_err());
+        assert!(merge_task_execution_state_patch(&audited, &serde_json::json!({"class_audit": null}))
+            .unwrap().get("class_audit").is_none());
         let answered = merge_task_execution_state_patch(&state, &serde_json::json!({
             "blocker_ask": "a".repeat(64), "answered_blocker": {
                 "worker": "worker", "supervisor": "lead", "reason": "Wait for operator decision",

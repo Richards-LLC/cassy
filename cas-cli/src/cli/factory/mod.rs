@@ -2733,6 +2733,14 @@ mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
 
+    #[test]
+    fn worker_host_flag_selects_worker_startup_cas_b674() {
+        let parsed = <Cli as clap::Parser>::try_parse_from([
+            "cas", "factory", "--worker-host", "cas-train", "--workers", "1", "--new",
+        ]);
+        assert!(parsed.is_ok());
+    }
+
     /// GH #2125, #2074: `cas factory train drop` run from the supervisor's
     /// shell sits behind a wrapper (harness -> shell -> cas). The drop must
     /// resolve the registered supervisor from the harness ancestor. The effect

@@ -16155,7 +16155,7 @@ fn reviewed_delivery_drop_reason(reason: Option<&str>) -> Option<&str> {
 /// whose resulting state survives on the target. A re-anchored delivery may
 /// postdate the commits that superseded its earlier content (GH #1160).
 /// The caller supplies a reason only after live supervisor authentication.
-fn validated_delivery_drop_review(
+pub(crate) fn validated_delivery_drop_review(
     repo: &std::path::Path,
     anchor: &str,
     parent: &str,

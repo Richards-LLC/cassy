@@ -784,7 +784,9 @@ def rust_runtime_inputs(source):
             conflicting_identity = True
         # Unknown macros can create an Identity binding without spelling it at
         # the call site. They cannot contribute proof of an unambiguous type.
-        if i + 1 < len(ts) and ts[i + 1].value == '!' and token.value not in equality_macros:
+        if (i + 2 in ps and ts[i + 1].value == '!'
+                and re.fullmatch(r'[A-Za-z_]\w*', token.value)
+                and token.value not in equality_macros):
             ambiguous_scopes.append(scope_at(i))
 
     def arguments(left, right):

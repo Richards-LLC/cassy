@@ -699,7 +699,16 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 'macro-generated binding': 'macro_rules! diagnostic_id { () => { fn id(path: &str, name: &str) -> String { name.to_string() } } } '
                                            f'diagnostic_id!(); assert_eq!(source, id("a.test.ts", "{sentence}"));',
             }
+            shadow_probes.update({
+                'bare constructor wildcard': f'{{ use diagnostic::*; assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}")); }}',
+                'bare constructor alias': f'{{ use diagnostic::Message as Identity; assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}")); }}',
+                'bare constructor unknown macro': f'diagnostic_type!(); assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));',
+            })
             cases.extend((prefix, assertion, 1) for assertion in shadow_probes.values())
+            cases.extend([
+                (prefix, f'{{ use diagnostic::*; }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+                (prefix, f'if !ready {{ }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+            ])
             for setup, assertion, status in cases:
                 probe = next((name for name, body in shadow_probes.items() if body == assertion), 'existing')
                 with self.subTest(probe=probe, assertion=assertion, setup=setup):

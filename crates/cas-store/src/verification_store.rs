@@ -3129,15 +3129,27 @@ fn issue_server_verifier_handoff_with_conn(
         ));
     }
 
-    let dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;
+    let mut dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;
     if dispatch.task_id != task_id
         || dispatch.owner_agent_id != issuer_agent_id
         || dispatch.state != VerificationDispatchState::Pending
-        || dispatch.deadline_at <= now
     {
-        return Err(StoreError::Parse(
-            "verifier handoff requires the exact active owned dispatch".to_string(),
-        ));
+        return Err(StoreError::VerifierHandoffNotActive {
+            dispatch_id: dispatch.id,
+        });
+    }
+    // A replacement is scheduled against a dispatch whose first verifier never
+    // started, so its deadline may already have passed while it is still
+    // pending. Refresh it in this transaction so the claim cannot be refused
+    // for the very expiry the replacement exists to recover from.
+    if dispatch.deadline_at <= now {
+        let deadline = now + Duration::minutes(10);
+        tx.execute(
+            "UPDATE verification_dispatches SET deadline_at = ?2
+             WHERE id = ?1 AND state = 'pending' AND verifier_agent_id IS NULL",
+            params![dispatch.id, deadline.to_rfc3339()],
+        )?;
+        dispatch.deadline_at = deadline;
     }
 
     let issued_at = now;
@@ -5088,6 +5100,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn replacement_handoff_claims_a_pending_dispatch_past_its_deadline_gh_2135() {
+        let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-expired",
+            "owner",
+            "owner",
+            Utc::now() - Duration::minutes(5),
+        )
+        .expect("dispatch");
+        issue_server_verifier_handoff(dir.path(), "cas-handoff-expired", &dispatch.id, "owner", "replacement")
+            .expect("replacement handoff on an expired pending dispatch");
+        let bound = bind_server_verifier_handoff(dir.path(), "owner", "replacement-child")
+            .expect("replacement claims the exact dispatch");
+        assert_eq!(bound.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+        let claimed = get_verification_dispatch(dir.path(), &dispatch.id).unwrap();
+        assert_eq!(claimed.state, VerificationDispatchState::Claimed);
+        assert!(claimed.deadline_at > Utc::now());
+    }
+
+    #[test]
+    fn refused_replacement_handoff_is_typed_not_a_parse_error_gh_2135() {
+        let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-foreign",
+            "owner",
+            "owner",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("dispatch");
+        let child = Agent::new_sub_agent("child".into(), "task-verifier".into(), "not-the-owner".into());
+        let error = issue_and_bind_server_verifier_handoff(
+            dir.path(),
+            "cas-handoff-foreign",
+            &dispatch.id,
+            "daemon:foreign",
+            &child,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, StoreError::VerifierHandoffNotActive { dispatch_id } if *dispatch_id == dispatch.id),
+            "{error:?}"
+        );
     }
 
     #[test]

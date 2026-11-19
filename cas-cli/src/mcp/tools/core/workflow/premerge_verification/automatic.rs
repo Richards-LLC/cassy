@@ -423,6 +423,10 @@ fn launch_with_preparation(
         &child,
     )
     .map_err(|e| e.to_string())?;
+    // Issuing the handoff may have refreshed an expired pending deadline; the
+    // prompt, review budget and recovery guard must use the refreshed row.
+    let live = cas_store::get_verification_dispatch(&core.cas_root, &live.id)
+        .map_err(|e| e.to_string())?;
     let worker = core.clone();
     let task = task.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
@@ -1558,6 +1562,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
                 }).to_string()).unwrap();
                 env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                // GH #2135: the first attempt's deadline lapses before the retry,
+                // so the replacement must refresh and review the same dispatch.
+                rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                    "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
+                    rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
+                ).unwrap();
                 // Retry the merge's automatic handoff once, retaining its join
                 // handle so completion needs no new timer or polling loop.
                 let handle = core.emit_premerge_review_handoff(&task, &claimed).unwrap().unwrap();

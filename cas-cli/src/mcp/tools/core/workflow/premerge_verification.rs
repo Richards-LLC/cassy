@@ -257,7 +257,7 @@ pub(crate) use factory_launch::launch as launch_factory_verifier;
 pub(crate) const VERIFIER_FACTORY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) const VERIFIER_FACTORY_STORE_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
 pub(crate) mod cycle;
-pub(crate) use peer::{PeerReceiptIngested, TAG as PEER_PREMERGE_TAG, ingest_peer_receipt};
+pub(crate) use peer::legacy_peer_approval;
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 

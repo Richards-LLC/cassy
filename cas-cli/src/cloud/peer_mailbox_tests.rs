@@ -1141,6 +1141,7 @@ async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_
         assert!(machine.rows().is_empty());
     }
     env.set("CAS_FACTORY_SESSION", "owner-session");
+    let lifecycle_task = task.clone();
     let root = owner_machine.cas.clone();
     let id = tokio::task::spawn_blocking(move || {
         let closed = supervisor_push::queue_cassy_merge_close_notice(&root, &task, "merged-tip").unwrap().unwrap();
@@ -1159,6 +1160,34 @@ async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_
         let sent: PeerSend = serde_json::from_str(&payload).unwrap();
         assert_eq!((sent.sender_agent_id.as_str(), sent.recipient_agent_id.as_str()), ("owner", "worker"));
     }
+    let root = host_machine.cas.clone();
+    tokio::task::spawn_blocking(move || {
+        use supervisor_push::{LifecycleTransition as Transition, LifecyclePushResult};
+        let core = crate::mcp::CasCore::with_daemon(root.clone(),None,None);
+        core.set_agent_id_for_testing("worker".into());
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for (kind,old,new,occurrence) in [
+            (Transition::Started,crate::types::TaskStatus::Open,crate::types::TaskStatus::InProgress,"started"),
+            (Transition::Blocked,crate::types::TaskStatus::InProgress,crate::types::TaskStatus::Blocked,"blocked"),
+        ] {
+            let mut current = lifecycle_task.clone(); current.status = new; tasks.update(&current).unwrap();
+            let first = core.push_task_lifecycle(&current.id,&current.title,old,new,"worker",Some("fixture lifecycle"),kind,occurrence).unwrap();
+            assert!(matches!(first,LifecyclePushResult::Enqueued { .. }));
+            assert_eq!(core.push_task_lifecycle(&current.id,&current.title,old,new,"worker",Some("fixture lifecycle"),kind,occurrence).unwrap(),first);
+        }
+        let connection = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let payloads = connection.prepare("SELECT payload FROM peer_message_outbox").unwrap()
+            .query_map([],|row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(payloads.len(),3); // explicit message plus two distinct lifecycle occurrences
+        for payload in payloads {
+            let sent: PeerSend = serde_json::from_str(&payload).unwrap();
+            assert_eq!((sent.sender_agent_id.as_str(),sent.recipient_agent_id.as_str()),("worker","owner"));
+        }
+        core.push_task_lifecycle(&lifecycle_task.id,&lifecycle_task.title,crate::types::TaskStatus::InProgress,
+            crate::types::TaskStatus::AwaitingMerge,"worker",None,Transition::AwaitingMerge,"early-ready").unwrap();
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM peer_message_outbox",[],|row| row.get::<_,i64>(0)).unwrap(),3);
+        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+    }).await.unwrap();
     assert!(open_agent_store(&host_machine.cas).unwrap().list(None).unwrap().iter().all(|agent| agent.role != AgentRole::Supervisor));
 }
 
@@ -1168,7 +1197,7 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use sha2::{Digest, Sha256};
-    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let server = MockServer::start().await;
     let host = Machine::new();
     let owner = Machine::new();
@@ -1348,6 +1377,7 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     let request = serde_json::from_value(serde_json::json!({"id":task.id,"reason":"fixture proof"})).unwrap();
     let error = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(request)).await.err().expect("competing supervisor cannot close");
     assert!(error.message.contains("G-113"));
+    env.set("CAS_AGENT_ROLE", "supervisor");
     let request = serde_json::from_value(serde_json::json!({"id":task.id,"reason":"repair fixture"})).unwrap();
     let correction = core.cas_task_request_changes(rmcp::handler::server::wrapper::Parameters(request)).await;
     let service = crate::mcp::tools::service::CasService::new(core,

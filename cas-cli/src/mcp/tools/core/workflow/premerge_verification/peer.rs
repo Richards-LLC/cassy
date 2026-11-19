@@ -1,33 +1,17 @@
 //! Legacy peer approval messages are readable but carry no decision authority.
-use std::path::Path;
-use cas_types::Agent;
 use crate::cloud::peer_mailbox::ClaimedPeerMessage;
 
 pub(crate) const TAG: &str = "CAS_PEER_PREMERGE_V1 ";
 
-#[derive(Debug)]
-pub(crate) enum PeerReceiptIngested {
-    NotAReceipt,
-    Rejected(String),
-}
-
-pub(crate) fn ingest_peer_receipt(
-    _root: &Path,
-    _recipient: &Agent,
-    message: &ClaimedPeerMessage,
-) -> Result<PeerReceiptIngested, String> {
-    Ok(if message.body.starts_with(TAG) {
-        PeerReceiptIngested::Rejected("Peer approvals no longer create verification authority; the train owner must verify this delivery.".into())
-    } else {
-        PeerReceiptIngested::NotAReceipt
-    })
+pub(crate) fn legacy_peer_approval(message: &ClaimedPeerMessage) -> bool {
+    crate::cloud::peer_mailbox::split_message_intent(&message.body).1.starts_with(TAG)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cloud::peer_mailbox::PeerScope;
-    use cas_types::{AgentRole, PeerPremergeReceipt, Task, VerificationStatus};
+    use cas_types::{Agent, AgentRole, PeerPremergeReceipt, Task, VerificationStatus};
     use super::super::{git, portable_plan_digest};
 
     #[tokio::test(flavor = "multi_thread")]
@@ -106,7 +90,7 @@ mod tests {
             let old_message = message(&old, 2);
             // A peer may supply worker evidence, but cannot mint another
             // supervisor's authoritative verification cycle.
-            assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Rejected(_)));
+            assert!(legacy_peer_approval(&old_message));
             assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_none());
             assert!(crate::store::open_verification_store(&root).unwrap().get_latest_for_task(&task.id).unwrap().is_none());
             let local = cas_store::create_verification_dispatch(&root, &task.id, &recipient.id, &recipient.id,

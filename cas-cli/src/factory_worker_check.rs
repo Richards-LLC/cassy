@@ -4911,6 +4911,63 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         head
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn portable_receipts_preserve_relative_stability_and_widened_claims_cas_b674() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let producer = dir.path().join("producer");
+        let producer_root = dir.path().join("producer-store");
+        fixture_commit(&producer);
+        std::fs::create_dir(producer.join("src")).unwrap();
+        std::fs::write(producer.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+        std::fs::write(producer.join("src/lib.rs"), "#[test] fn owned() {}\n").unwrap();
+        fixture_commit_as(&producer, "proof inputs");
+        let head = fixture_head(&producer);
+        let identity = stability::Identity::exact("src/lib.rs", "owned");
+        let scope = widened::Scope::Crate("fixture".into());
+        stability::record(&producer_root, &producer, &head, stability::Proof {
+            runner:"nextest".into(), tests:vec![identity.clone()], consecutive_passes:5, elapsed_ms:42,
+        }).unwrap();
+        widened::record(&producer_root, &producer, &head, widened::Proof {
+            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(),
+        }, 1).unwrap();
+        record_passing_test_with_log_for_tests(&producer_root, &producer, &head, "fixture", "test(owned)");
+        let mut task = cas_types::Task::new("cas-portable".into(), "Portable proof".into());
+        task.deliverables.test_receipts = PassingTests::new(&producer_root, &producer, &head).portable();
+        assert_eq!(task.deliverables.test_receipts.len(), 3);
+        let wire = serde_json::to_vec(&task).unwrap();
+        let task: cas_types::Task = serde_json::from_slice(&wire).unwrap();
+        let owner = dir.path().join("owner");
+        git(dir.path(), &["clone", "-q", producer.to_str().unwrap(), owner.to_str().unwrap()]).unwrap();
+        let owner_root = dir.path().join("owner-store");
+        let passing = PassingTests::new(&owner_root, &owner, &head).with_synced(&task.deliverables.test_receipts);
+        assert!(stability::missing(&passing, &[identity.clone()]).is_empty());
+        assert!(widened::missing(&passing, &[scope.clone()]).is_empty());
+        assert_eq!(passing.packages(), ["fixture"]);
+        // Worker-authored proof is scoped to the immutable Git inputs, and
+        // neither relative traversal nor fewer than five passes grants credit.
+        let mut changed = serde_json::to_value(&task).unwrap();
+        for receipt in changed["deliverables"]["test_receipts"].as_array_mut().unwrap() {
+            if receipt.get("stability").is_some() {
+                receipt["stability"]["tests"][0]["path"] = "../outside.rs".into();
+                receipt["stability"]["consecutive_passes"] = 4.into();
+            }
+        }
+        let changed: cas_types::Task = serde_json::from_value(changed).unwrap();
+        let refused = PassingTests::new(&owner_root, &owner, &head).with_synced(&changed.deliverables.test_receipts);
+        assert_eq!(stability::missing(&refused, &[identity.clone()]), [identity.clone()]);
+        std::fs::write(owner.join("src/lib.rs"), "#[test] fn owned() { assert!(false); }\n").unwrap();
+        fixture_commit_as(&owner, "changed input");
+        let new_head = fixture_head(&owner);
+        let mut rebound = task.deliverables.test_receipts;
+        for receipt in &mut rebound { receipt.head = new_head.clone(); }
+        let refused = PassingTests::new(&owner_root, &owner, &new_head).with_synced(&rebound);
+        assert!(refused.packages().is_empty());
+        assert_eq!(stability::missing(&refused, &[identity.clone()]), [identity]);
+        assert_eq!(widened::missing(&refused, &[scope.clone()]), [scope]);
+    }
+
     fn passing_test_identities(
         root: &Path,
         repo: &Path,

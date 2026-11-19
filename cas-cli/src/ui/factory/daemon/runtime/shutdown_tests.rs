@@ -1751,7 +1751,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         cli,
         model: Some(if cli == cas_mux::SupervisorCli::Claude { "claude-opus-5-5" } else { "gpt-6.1-sol" }.into()),
         effort: Some(cas_mux::Effort::High),
-        config_dir: Some(account.display().to_string()),
+        config_dir: (cli == cas_mux::SupervisorCli::Claude).then(|| account.display().to_string()),
         ..cas_mux::WorkerSpec::builtin_default()
     };
     let request_id = open_spawn_queue_store(&cas_dir)

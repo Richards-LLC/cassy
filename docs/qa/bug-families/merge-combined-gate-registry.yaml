@@ -1,0 +1,3 @@
+title: Disjoint deliveries with duplicate gate IDs must not publish onto a moved train
+tasks: [cas-1273]
+journeys: [FACTORY-SUPERVISE]

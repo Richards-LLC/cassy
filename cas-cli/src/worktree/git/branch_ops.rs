@@ -1284,6 +1284,19 @@ impl GitOperations {
                 };
             }
         };
+        // gate[G-160 merge-admission integrity]: Combined-tree gate registry validity before merge publication
+        // A moved target can add the same id in a different file without a
+        // Git conflict or a change to the delivery's approved patch. Check
+        // the exact combined tree, including any peer-publication retry,
+        // before granting the proven-merge pre-push exemption below.
+        if proven_merge && checkout.path().join("cas-cli/build.rs").is_file()
+            && let Err(error) = crate::gates::declarations::scan(checkout.path())
+        {
+            return TargetPushOutcome::NotPushed {
+                sha: Some(local_sha), remote_sha: self.resolve_commit(&remote_ref),
+                reason: crate::gates::tag("G-160", format!("Merge registry validation failed: {error}")),
+            };
+        }
         let mut cmd = Command::new("git");
         // A relative filesystem remote is relative to the receiver's
         // checkout. Preserve that destination when moving the hook's cwd,

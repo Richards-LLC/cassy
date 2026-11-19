@@ -645,6 +645,31 @@ mod reused_factory_branch_tests {
         assert!(branches.is_empty(), "no task branch may be created: {branches}");
     }
 
+    /// cas-8bc4 adversarial probe: with an origin configured, a target that is
+    /// absent there is still refused by name; a target present only locally or
+    /// only on origin still starts from its own tip, never an empty start point.
+    #[test]
+    fn target_branch_present_only_locally_or_only_on_origin_still_starts() {
+        let repo = repo();
+        let origin = tempfile::tempdir().expect("origin dir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(repo.path(), &["remote", "add", "origin", &origin.path().display().to_string()]);
+        git(repo.path(), &["push", "origin", "main"]);
+        git(repo.path(), &["branch", "epic/local-only"]);
+        git(repo.path(), &["push", "origin", "main:refs/heads/epic/origin-only"]);
+
+        let error = checkout_task_beside_parked_delivery(repo.path(), "test-worker", "cas-0001", "epic/absent", false)
+            .expect_err("a target absent locally and on origin is refused");
+        assert!(error.contains("epic/absent"), "{error}");
+        assert!(git(repo.path(), &["branch", "--list", "factory/*"]).is_empty());
+
+        for (task, target) in [("cas-0002", "epic/local-only"), ("cas-0003", "epic/origin-only")] {
+            let branch = checkout_task_beside_parked_delivery(repo.path(), "test-worker", task, target, false)
+                .expect("a target present in one place starts");
+            assert_eq!(git(repo.path(), &["rev-parse", &branch]), git(repo.path(), &["rev-parse", "main"]));
+        }
+    }
+
     #[test]
     fn merged_prior_delivery_is_reset_to_the_new_target_base() {
         let repo = repo();

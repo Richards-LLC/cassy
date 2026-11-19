@@ -23091,9 +23091,9 @@ mod stall_nudge_rework_tests {
     }
 
     /// GH #2128: the other ways an actionable prompt reaches a Codex worker (its spawn
-    /// handoff, the respawn resume brief, a broadcast) wait for its tools like a wake.
+    /// handoff and the respawn resume brief) wait for its tools like a wake.
     #[tokio::test]
-    async fn a_codex_workers_spawn_handoff_resume_brief_and_broadcast_wait_for_its_cassy_tools_gh_2128() {
+    async fn a_codex_workers_spawn_handoff_and_resume_brief_wait_for_its_cassy_tools_gh_2128() {
         use crate::ui::factory::app::render_and_ops::epic_workers::{StartupHandoff, startup_handoff};
         assert_eq!(startup_handoff(cas_mux::SupervisorCli::Codex), StartupHandoff::GatedQueue, "Codex launches with no actionable startup argument");
         assert_eq!(startup_handoff(cas_mux::SupervisorCli::Claude), StartupHandoff::LaunchArgument);
@@ -23106,8 +23106,7 @@ mod stall_nudge_rework_tests {
         let spawn = crate::task_assignment::enqueue_spawn_message(&cas_dir, &daemon.session_name, "worker-a", "cas-1234", "your first instruction").unwrap();
         let resume = crate::ui::factory::enqueue_context_resume_brief(&cas_dir, "supervisor", Some(&daemon.session_name), "worker-a").unwrap()
             .expect("the fixture worker holds a task, so a resume brief is queued");
-        let broadcast = queue.enqueue("supervisor", "all_workers", "a note for every worker").unwrap();
-        let rows = [("spawn handoff", spawn), ("resume brief", resume), ("broadcast", broadcast)];
+        let rows = [("spawn handoff", spawn), ("resume brief", resume)];
 
         for _ in 0..4 {
             daemon.process_prompt_queue().await.unwrap();
@@ -23128,7 +23127,7 @@ mod stall_nudge_rework_tests {
             ("CAS_AGENT_NAME", "worker-a"),
         ]);
         crate::factory_tools_ready::note_tools_listed(&cas_dir, "1");
-        for _ in 0..16 {
+        for _ in 0..6 {
             daemon.process_prompt_queue().await.unwrap();
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }

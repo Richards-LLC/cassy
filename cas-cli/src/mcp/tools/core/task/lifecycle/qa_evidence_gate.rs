@@ -1553,7 +1553,7 @@ mod tests {
         commit_file(&repo, ".github/workflows/lane.yml", "name: lane\n");
         let refusal = qa_evidence_close_gate(&cas_root, &spike("cas-cab8-guard"), &repo, "main", None)
             .expect_err("a spike that changes guard code is Tier 2");
-        assert!(refusal.contains("no adversarial probe") && refusal.contains("lane.yml"), "{refusal}");
+        assert!(refusal.contains("G-52") && refusal.contains(".github/workflows/lane.yml"), "{refusal}");
     }
 
     /// cas-e86b: the evidence gate reads the same shared reasons, so a

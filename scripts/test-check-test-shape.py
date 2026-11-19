@@ -624,7 +624,7 @@ def test_workflow_command():
             git('add', '.')
             git('commit', '-qm', 'runtime identity fixture')
             command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', git('rev-parse', 'HEAD')]
-            prefix = '''use super::stability::Identity;
+            prefix = '''use crate::factory_worker_check::stability::Identity;
 fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
 #[test] fn check() {
     let source = "fixture";
@@ -673,10 +673,10 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 (prefix, f'assert_eq!(selected.id, id("a.test.ts", "{sentence}").id);', 1),
             ])
             cases.extend([
-                (prefix.replace('super::stability::Identity', 'diagnostic::stability::Identity'),
+                (prefix.replace('crate::factory_worker_check::stability::Identity', 'diagnostic::stability::Identity'),
                  f'assert_eq!(source, Identity::exact("a.test.ts", "{sentence}"));', 1),
-                (prefix.replace('super::stability::Identity', 'super::stability::{Identity, Proof}'),
-                 f'assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+                (prefix.replace('crate::factory_worker_check::stability::Identity', 'super::stability::{Identity, Proof}'),
+                 f'assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 1),
                 (prefix.replace('fn id(', '#[cfg(any())] fn id(').replace('#[test]',
                  'fn id(path: &str, name: &str) -> String { name.to_string() }\n#[test]'),
                  f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1),
@@ -706,7 +706,7 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
             })
             cases.extend((prefix, assertion, 1) for assertion in shadow_probes.values())
             cases.extend([
-                (prefix, f'{{ use diagnostic::*; }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
+                (prefix, f'{{ use diagnostic::*; }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 1),
                 (prefix, f'if !ready {{ }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
             ])
             cases.append(('use crate::factory_worker_check::stability::Identity;\n'

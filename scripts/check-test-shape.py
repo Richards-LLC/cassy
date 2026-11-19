@@ -755,39 +755,47 @@ def rust_runtime_inputs(source):
     ts = tokens(source)
     ps = pairs(ts)
 
-    def scope_at(index):
-        return max(((left, right) for left, right in ps.items()
-                    if ts[left].value == '{' and left < index < right),
-                   default=(-1, len(ts)))
-
     equality_macros = {'assert_eq', 'assert_ne', 'debug_assert_eq', 'debug_assert_ne'}
-    identity_import, conflicting_identity = False, False
-    ambiguous_scopes = []
+    canonical_imports, conflicting_identity = 0, False
     for i, token in enumerate(ts):
         if token.string:
             continue
         if token.value == 'use':
             end = next((j for j in range(i + 1, len(ts)) if ts[j].value == ';'), len(ts))
             names = [t.value for t in ts[i + 1:end]]
-            if '*' in names or 'as' in names:
-                ambiguous_scopes.append(scope_at(i))
+            conflicting_identity |= '*' in names
             if 'Identity' in names:
-                trusted = (re.fullmatch(
-                    r'(?:(?:super::)+|crate::factory_worker_check::)stability::(?:Identity|\{(?:[A-Za-z_]\w*|,)+\})',
-                    ''.join(names)) is not None and 'as' not in names)
-                identity_import |= trusted
+                trusted = ''.join(names) == 'crate::factory_worker_check::stability::Identity'
+                canonical_imports += trusted
                 conflicting_identity |= not trusted
         if token.value == 'Identity' and i:
-            conflicting_identity |= (ts[i - 1].value in ('struct', 'enum', 'type', 'trait', 'mod', 'as')
-                                     or i + 1 < len(ts) and ts[i + 1].value == ':')
+            conflicting_identity |= (ts[i - 1].value in (
+                'struct', 'enum', 'type', 'trait', 'mod', 'fn', 'union', 'const',
+                'static', 'let', 'mut', 'ref', 'as', '|')
+                or i + 1 < len(ts) and ts[i + 1].value in (':', 'in', '@', '|'))
+        if token.value == 'let':
+            end = next((j for j in range(i + 1, len(ts)) if ts[j].value in ('=', ';')), len(ts))
+            conflicting_identity |= any(not t.string and t.value == 'Identity' for t in ts[i + 1:end])
+        # Scan declaration generics as tokens, never resolve names or scopes.
+        if token.value in ('fn', 'struct', 'enum', 'trait', 'type', 'union', 'impl'):
+            opening = i + (1 if token.value == 'impl' else 2)
+            if opening < len(ts) and ts[opening].value == '<':
+                depth, j = 1, opening + 1
+                while j < len(ts) and depth:
+                    current = ts[j]
+                    if not current.string:
+                        if (depth == 1 and current.value == 'Identity'
+                                and ts[j - 1].value in ('<', ',', 'const')):
+                            conflicting_identity = True
+                        depth += (current.value == '<') - (current.value == '>')
+                    j += 1
         if token.value == 'mod' and i + 1 < len(ts) and ts[i + 1].value == 'stability':
             conflicting_identity = True
-        # Unknown macros can create an Identity binding without spelling it at
-        # the call site. They cannot contribute proof of an unambiguous type.
+        # An unknown macro can create a binding anywhere in the file.
         if (i + 2 in ps and ts[i + 1].value == '!'
                 and re.fullmatch(r'[A-Za-z_]\w*', token.value)
                 and token.value not in equality_macros):
-            ambiguous_scopes.append(scope_at(i))
+            conflicting_identity = True
 
     def arguments(left, right):
         start = j = left
@@ -807,8 +815,7 @@ def rust_runtime_inputs(source):
         if token.value == 'git' or (token.value == 'expect' and i > 0 and ts[i - 1].value == '.'):
             yield ts[i + 1].end, ts[close].start
             continue
-        if (not identity_import or conflicting_identity
-                or any(left < i < right for left, right in ambiguous_scopes)):
+        if canonical_imports != 1 or conflicting_identity:
             continue
         if not (i >= 2 and ts[i - 2].value == 'Identity' and ts[i - 1].value == '::'
                 and token.value == 'exact' and (i == 2 or ts[i - 3].value not in ('.', '::'))):

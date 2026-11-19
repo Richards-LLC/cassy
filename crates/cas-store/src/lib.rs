@@ -269,7 +269,7 @@ pub use verification_store::{
     extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
-    has_active_verification_dispatch, import_peer_premerge_verification, inspect_bound_server_verifier_handoff,
+    has_active_verification_dispatch, import_peer_premerge_verification, verification_dispatch_is_stale, inspect_bound_server_verifier_handoff,
     inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
     invalidate_verification_dispatch_for_new_cycle, release_failed_verifier_dispatch,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
@@ -827,6 +827,19 @@ pub trait TaskStore: Send + Sync {
         Err(StoreError::Other(
             "trusted task-note append is unsupported by this store".into(),
         ))
+    }
+
+    /// Move `updated_at` from `expected` back to `to`, only while the row still
+    /// carries `expected`. Sync apply bookkeeping (proof and provenance notes)
+    /// uses it so restoring a note is not a new edit (GH #2105). Returns
+    /// whether the clock moved.
+    fn rewind_sync_clock(
+        &self,
+        _task_id: &str,
+        _expected: DateTime<Utc>,
+        _to: DateTime<Utc>,
+    ) -> Result<bool> {
+        Ok(false)
     }
 
     fn append_trusted_note_with_mutation_receipt(

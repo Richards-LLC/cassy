@@ -3,6 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
 
 describe("supervisor slash commands", () => {
+  it("offers Standby with one confirmation on every supported harness", () => {
+    for (const harness of ["claude", "codex"]) {
+      const standby = commandsForHarness(harness).find(command => command.id === "standby");
+      expect(standby?.confirm).toBeTruthy();
+    }
+    expect(commandsForHarness("grok")).toEqual([]);
+  });
   it("routes /mcp to Reload Cassy only for Claude and names unsupported harnesses", async () => {
     for (const harness of ["claude", "codex", "grok", "other", undefined]) {
       document.body.innerHTML = '<section><textarea></textarea></section>';

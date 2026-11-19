@@ -889,4 +889,22 @@ describe("history cursor across a reattach (cas-2093)", () => {
     applyHistoryCursor(cursor, { has_earlier: true, next_before: 5 });
     expect(cursor).toMatchObject({ nextBefore: 5, loading: false });
   });
+  it('shows a Standby badge and a Resume action only for a standby session (cas-0699)', () => {
+    const base = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', when: '10:00', attention: 0, selected: false };
+    document.body.replaceChildren();
+    const container = document.createElement('nav'); document.body.append(container);
+    const resume = vi.fn(); const list = new ConversationList();
+    list.render(container, [base], vi.fn(), undefined, undefined, resume);
+    expect(container.querySelector('.conversation-standby')).toBeNull();
+    expect(container.querySelector('[data-resume-standby]')).toBeNull();
+    list.render(container, [{ ...base, standby: true }], vi.fn(), undefined, undefined, resume);
+    expect(container.querySelector('.conversation-standby')).not.toBeNull();
+    const button = container.querySelector<HTMLButtonElement>('[data-resume-standby]')!;
+    button.click();
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({ session: 's', standby: true }));
+    // Resuming clears both on the next catalog read.
+    list.render(container, [base], vi.fn(), undefined, undefined, resume);
+    expect(container.querySelector('.conversation-standby')).toBeNull();
+    expect(container.querySelector('[data-resume-standby]')).toBeNull();
+  });
 });

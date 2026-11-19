@@ -939,6 +939,7 @@ large_artifact_dir = \"before\"\n",
         // plain success; the honoured parent grant is not flagged.
         {
             use crate::store::KnownRepoStore;
+            crate::store::known_repos::ensure_host_schema().unwrap();
             crate::store::known_repos::open_host_known_repo_store().unwrap().upsert(project.parent().unwrap()).unwrap();
         }
         let change = set_project_write_roots(&both, &crate::config::host_config_dir(), PANE_CGROUP).unwrap();

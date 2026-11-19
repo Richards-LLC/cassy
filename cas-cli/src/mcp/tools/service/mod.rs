@@ -672,7 +672,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\"; the train supervisor's decision=lift with a reason is audited and sent to the operator; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\"; decision=promote promotes an open epic first; the train supervisor's decision=lift with a reason is audited and sent to the operator; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
     )]
     pub async fn factory(
         &self,
@@ -1440,13 +1440,13 @@ impl CasService {
                 // lift. Neither is a temporary CI hold.
                 "train_freeze" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_freeze requires id=<release-train epic>"))?;
-                    if req.decision.as_deref().is_some_and(|decision| decision != "lift") {
-                        return Err(Self::error(ErrorCode::INVALID_PARAMS, "train_freeze decision must be lift or omitted"));
+                    if req.decision.as_deref().is_some_and(|decision| !matches!(decision, "lift" | "promote")) {
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, "train_freeze decision must be lift, promote or omitted"));
                     }
                     let inner = this.inner.clone();
                     tokio::task::spawn_blocking(move || match req.decision.as_deref() {
                         Some("lift") => inner.train_lift(&train, req.reason.as_deref()),
-                        _ => inner.train_freeze(&train, req.reason.as_deref()),
+                        decision => inner.train_freeze(&train, req.reason.as_deref(), decision.is_some()),
                     })
                         .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                         .map(Self::success)

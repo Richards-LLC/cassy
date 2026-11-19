@@ -1,0 +1,4 @@
+title: Forced takeover after a peer supervisor exits routes follow-up advice to the replacement's own supervisor while ordinary peer claims still refuse start
+tasks: [cas-c2b0]
+journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+invariants: [FACTORY-SOURCE-WORK-DELEGATION]

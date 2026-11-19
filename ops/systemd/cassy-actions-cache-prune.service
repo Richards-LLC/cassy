@@ -1,5 +1,5 @@
 [Unit]
-Description=Bound Cassy Actions caches when both runner slots are idle
+Description=Bound Cassy Actions caches when all runner slots are idle
 Documentation=https://github.com/Richards-LLC/cassy/issues/721
 After=local-fs.target
 ConditionPathIsMountPoint=/var/lib/cassy-actions/cache

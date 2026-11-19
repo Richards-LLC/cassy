@@ -291,6 +291,31 @@ async fn cas_d697_round2_handoff_owner_cannot_record() {
 }
 
 #[tokio::test]
+async fn shared_checkout_handoff_names_the_recorder_only_with_delivery_commits_cas_1b7d() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    let anchor = task.deliverables.factory_branch_anchor.clone().unwrap();
+    task.deliverables.handoff_branches.push("factory/batch-supervisor".into());
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: cas::types::WorkTarget { repo_selector: "project".into(), target_branch: "main".into() },
+        assignee: "test-agent".into(),
+        branch: "factory/test-agent".into(),
+        base_sha: git(&fx.repo, &["rev-list", "--max-parents=0", "HEAD"]),
+    });
+    tasks.update(&task).unwrap();
+    // The recorder's shared checkout carries this delivery's commit: it implemented.
+    git(&fx.repo, &["branch", "factory/batch-supervisor", &anchor]);
+    fx.reject(serde_json::json!({}), "no self-review").await;
+    // The v4.21 shape: the handoff names the supervisor's checkout, which carries nothing.
+    git(&fx.repo, &["branch", "-D", "factory/batch-supervisor"]);
+    fx.record().await;
+    let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
+    assert!(receipts.iter().any(|receipt| receipt.task_heads.contains_key("cas-bq01")));
+}
+
+#[tokio::test]
 async fn cas_d697_round2_stale_origin_cannot_defer_integrated_delivery() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);

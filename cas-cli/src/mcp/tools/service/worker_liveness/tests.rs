@@ -111,6 +111,36 @@ fn fixed_cpu_evidence_agrees_while_cold_to_warm_sampling_changes_liveness() {
         // PID reuse cannot borrow the prior process's CPU activity.
         assert_eq!(record_cpu_sample(&mut samples, 42, "replacement", 900), None);
     }
+    // cas-0125: a finished turn is waiting for input only while nothing the
+    // worker owns is advancing. A background build or test keeps it executing,
+    // and a quiet or unsampled process table still reads as idle.
+    for (cli, event) in [
+        (SupervisorCli::Codex, serde_json::json!({
+            "timestamp": at, "type": "event_msg", "payload": {"type": "task_complete"},
+        })),
+        (SupervisorCli::Claude, serde_json::json!({
+            "timestamp": at, "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "end_turn"},
+        })),
+    ] {
+        std::fs::write(&path, format!("{event}\n")).unwrap();
+        let mut samples = std::collections::HashMap::new();
+        let cold = record_cpu_sample(&mut samples, 77, "build", 100);
+        let quiet = record_cpu_sample(&mut samples, 77, "build", 100);
+        let warm = record_cpu_sample(&mut samples, 77, "build", 130);
+        assert_eq!((cold, quiet, warm), (None, Some(false), Some(true)));
+        for (cpu_busy, expected) in [
+            (None, Liveness::WaitingForInput),
+            (quiet, Liveness::WaitingForInput),
+            (warm, Liveness::Executing),
+        ] {
+            let evidence = ProcessEvidence {
+                alive: Some(true), cpu_busy, detail: format!("fixed cpu sample: {cpu_busy:?}"),
+            };
+            let got = observe(cli, Some(&path), evidence, now(), 300);
+            assert_eq!(got.state, expected, "{cli:?} finished turn, cpu {cpu_busy:?}: {}", got.detail());
+        }
+    }
 }
 
 #[test]

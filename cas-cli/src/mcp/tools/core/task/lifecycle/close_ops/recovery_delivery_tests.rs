@@ -557,6 +557,13 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
     let state = tasks.get_execution_state(TASK).unwrap().unwrap();
     assert_eq!(state["class_audit"], "test(ui::list::) | test(ui::grid::)");
     require_class(tasks.as_ref(), TASK, None).unwrap();
+    // A repeat decline that omits the class keeps the stored one: the park obligation survives.
+    let mut parked = tasks.get(TASK).unwrap();
+    parked.status = TaskStatus::AwaitingMerge;
+    tasks.update(&parked).unwrap();
+    supervisor.cas_task_request_changes(request(None)).await.unwrap();
+    let state = tasks.get_execution_state(TASK).unwrap().unwrap();
+    assert_eq!(state["class_audit"], "test(ui::list::) | test(ui::grid::)");
 }
 
 /// GH #1543/#1548: a supervisor-required release import may itself contain

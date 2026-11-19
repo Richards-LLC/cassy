@@ -1040,6 +1040,16 @@ mod tests {
             "half the class is not the class");
         record("cas", "test(gates::) | test(ui::) | test(extra)");
         assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
+
+        // An exact receipt cannot cover a substring class: auth_refresh stays uncovered.
+        crate::store::open_task_store(&root).unwrap().patch_execution_state(
+            &task.id, &serde_json::json!({"class_audit": "test(auth)"}),
+        ).unwrap();
+        record("cas", "test(=auth)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_some(),
+            "test(=auth) selects one test, not the class");
+        record("cas", "test(auth)");
+        assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
     }
 
     #[test]

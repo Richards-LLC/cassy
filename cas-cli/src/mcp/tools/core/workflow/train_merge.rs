@@ -692,6 +692,7 @@ mod tests {
             let mut epic = Task::new("cas-train".into(), "train".into());
             epic.task_type = TaskType::Epic;
             epic.branch = Some("epic/train".into());
+            epic.epic_verification_owner = Some(actor.id.clone());
             tasks.add(&epic).unwrap();
             let ids: Vec<String> = (1..=3).map(|i| format!("cas-delivery-{i}")).collect();
             let mut shas = vec![String::new(); 3];
@@ -762,10 +763,10 @@ mod tests {
         }
     }
 
-    /// GH #2074: a supervisor row still marked active whose process is gone
-    /// does not own the train; a new live supervisor takes it over.
+    /// A dead process releases no train authority. Only the pinned owner
+    /// may admit this train, even when another supervisor can run locally.
     #[tokio::test]
-    async fn dead_active_supervisor_does_not_block_train_takeover_gh_2074() {
+    async fn train_owner_remains_required_after_previous_process_exits_cas_b674() {
         let fixture = Fixture::new();
         fixture.start().await;
         let agents = fixture.core.open_agent_store().unwrap();
@@ -796,8 +797,10 @@ mod tests {
         owner.pid = Some(child.id());
         child.wait().unwrap();
         agents.update(&owner).unwrap();
-        let result = takeover().await.unwrap();
-        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let held = takeover().await;
+        assert!(held.is_err() || held.unwrap().is_error == Some(true));
+        let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap()).unwrap().unwrap();
+        assert_eq!(queue.supervisor, "supervisor");
     }
 
     #[tokio::test]

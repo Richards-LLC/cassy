@@ -9010,13 +9010,36 @@ impl CasCore {
                 Some(gone) => epic_autoclose::retarget_children(&subtasks, gone, &target_branch),
                 None => subtasks,
             };
-            match run_epic_close_merge_gate(
-                &task,
-                &req,
-                &target_branch,
-                &close_project_root,
-                &subtasks,
-            ) {
+            // cas-9452: closed children prove the content reached the epic
+            // branch, not the default branch. Release closes carry their own
+            // batch receipt, so only a close outside one is measured here.
+            let unshipped = if crate::qa_batch::release_close::target(&self.cas_root, &task.id).is_none() {
+                resolve_close_gate_default_branch(&close_project_root).ok().and_then(|default_branch| {
+                    epic_branch_commits_absent_from_default(&close_project_root, &target_branch, &default_branch)
+                        .map(|count| (default_branch, count))
+                })
+            } else {
+                None
+            };
+            let epic_gate = match unshipped {
+                Some((default_branch, count)) => EpicCloseGateOutcome::Reject(format!(
+                    "⚠️ EPIC NOT SHIPPED\n\n\
+                     Epic {} closes against `{target_branch}`, which carries {count} commit(s) \
+                     that `{default_branch}` does not have. Its children are closed because \
+                     they merged into that branch, not because the work shipped.\n\n\
+                     Merge `{target_branch}` into `{default_branch}` (or ship it in a release), \
+                     then close the epic again.",
+                    req.id
+                )),
+                None => run_epic_close_merge_gate(
+                    &task,
+                    &req,
+                    &target_branch,
+                    &close_project_root,
+                    &subtasks,
+                ),
+            };
+            match epic_gate {
                 EpicCloseGateOutcome::Proceed => {}
                 EpicCloseGateOutcome::ProceedWithNote(note) => {
                     close_notes.record(&mut task, &note);
@@ -19363,6 +19386,63 @@ fn resolve_close_gate_default_branch(repo_path: &std::path::Path) -> Result<Stri
          then retry.",
         repo_path.display()
     )))
+}
+
+/// cas-9452: commits on an epic's own branch that the default branch lacks.
+///
+/// Children merge into the epic branch and close there, so "every child is
+/// closed" says nothing about whether the epic's content ever shipped. A ref
+/// counts as shipped when any copy of the default branch (local or
+/// origin-tracking) already holds it, so a stale local default never makes a
+/// merged epic look unshipped. Unresolvable refs answer `None`: the check only
+/// blocks on positive evidence.
+fn epic_branch_commits_absent_from_default(
+    repo_path: &std::path::Path,
+    epic_branch: &str,
+    default_branch: &str,
+) -> Option<usize> {
+    use std::process::Command;
+    if epic_branch == default_branch
+        || !is_safe_git_refname(epic_branch)
+        || !is_safe_git_refname(default_branch)
+    {
+        return None;
+    }
+    let resolve = |name: &str| -> Vec<String> {
+        [format!("refs/remotes/origin/{name}"), format!("refs/heads/{name}")]
+            .into_iter()
+            .filter(|reference| {
+                Command::new("git")
+                    .args(["show-ref", "--verify", "--quiet", reference])
+                    .current_dir(repo_path)
+                    .measurement_status()
+                    .is_ok_and(|status| status.success())
+            })
+            .collect()
+    };
+    let epic_refs = resolve(epic_branch);
+    let default_refs = resolve(default_branch);
+    let ahead = |epic: &str, default: &str| -> Option<usize> {
+        let output = Command::new("git")
+            .args(["rev-list", "--no-merges", "--count", &format!("{default}..{epic}")])
+            .current_dir(repo_path)
+            .measurement_output()
+            .ok()?;
+        output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok()).flatten()
+    };
+    let mut worst: Option<usize> = None;
+    for epic in &epic_refs {
+        let mut best: Option<usize> = None;
+        for default in &default_refs {
+            if let Some(count) = ahead(epic, default) {
+                best = Some(best.map_or(count, |current| current.min(count)));
+            }
+        }
+        if let Some(count) = best {
+            worst = Some(worst.map_or(count, |current| current.max(count)));
+        }
+    }
+    worst.filter(|count| *count > 0)
 }
 
 /// cas-cf64: resolve the real integration target for a non-epic task with

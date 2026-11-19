@@ -869,9 +869,21 @@ mod tests {
 
     #[test]
     fn matched_comment_error_does_not_file_duplicate_cas_47f7() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        // The project tracker, and a gh that lists a matching open issue but
+        // refuses the evidence comment: the real matcher, comment and filer.
+        let mut config = crate::config::Config::load(&root).unwrap();
+        config.set("issues.repo", "example/repo").unwrap();
+        config.save(&root).unwrap();
+        let gh = dir.path().join("gh-fixture");
+        crate::test_paths::warm_stub(
+            &gh,
+            "#!/bin/sh\ncase \"$1 $2\" in\n  'issue list') printf '%s\\n' '[{\"url\":\"https://github.com/example/repo/issues/7\",\"title\":\"t\",\"body\":\"HTTP_503_FIXTURE: matched issue comment failed\"}]' ;;\n  'issue comment') echo 'HTTP_503_FIXTURE: comment refused' >&2; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        env.set(crate::github_issue_attach::GH_BIN_ENV, gh);
         let store = crate::store::open_task_store(&root).unwrap();
         store.init().unwrap();
         let delivery = cas_types::Task::new("cas-delivery".into(), "Delivery".into());
@@ -892,9 +904,8 @@ mod tests {
             affected: "Fixture caller".into(), ..Default::default()
         };
         let failure = "HTTP_503_FIXTURE";
-        let output = service.file_pre_existing_follow_ups_with_matcher(&delivery.id, &pass, &[issue.clone()], "LEDGER.md",
-            |_| Err(failure.into()));
-        assert_eq!(store.list(None).unwrap().len(), 1);
+        let output = service.file_pre_existing_follow_ups(&delivery.id, &pass, &[issue.clone()], "LEDGER.md");
+        assert_eq!(store.list(None).unwrap().len(), 1, "a failed comment must not file a duplicate task: {output}");
         assert!(output.contains(failure), "dependency failure code must survive: {output}");
         service.file_pre_existing_follow_ups_with_matcher(&delivery.id, &pass, &[issue.clone()], "LEDGER.md",
             |_| Ok(Some("https://github.com/example/repo/issues/7".into())));

@@ -99,19 +99,28 @@ impl SqliteAgentStore {
                 if let Some(expires) = Self::parse_datetime(&expires_str) {
                     if expires > now {
                         // Lease is still valid - check if worker can take over from supervisor
-                        let can_takeover = if held_by != agent_id {
-                            // Check if requesting agent's parent is the current holder
-                            let parent: Option<Option<String>> = tx
-                                .query_row(
-                                    "SELECT parent_id FROM agents WHERE id = ?",
-                                    params![agent_id],
-                                    |row| row.get(0),
-                                )
-                                .optional()?;
-                            matches!(parent, Some(Some(ref pid)) if pid == &held_by)
+                        let takeover_reason = if held_by == agent_id {
+                            None
                         } else {
-                            false
+                            // Worker taking over from its supervisor, or a recycled
+                            // worker reclaiming from its own dead predecessor session
+                            // (same name, holder retired).
+                            tx.query_row(
+                                "SELECT CASE
+                                   WHEN (SELECT parent_id FROM agents WHERE id = ?1) = ?2
+                                     THEN 'worker_takeover'
+                                   WHEN EXISTS (
+                                     SELECT 1 FROM agents me, agents old
+                                     WHERE me.id = ?1 AND old.id = ?2
+                                       AND lower(old.name) = lower(me.name)
+                                       AND old.status IN ('stale', 'shutdown'))
+                                     THEN 'recycled_worker_reclaim'
+                                   END",
+                                params![agent_id, &held_by],
+                                |row| row.get::<_, Option<String>>(0),
+                            )?
                         };
+                        let can_takeover = takeover_reason.is_some();
 
                         if can_takeover {
                             // Worker taking over from supervisor - release supervisor's lease
@@ -127,7 +136,8 @@ impl SqliteAgentStore {
                                 "transferred",
                                 current_epoch as u64,
                                 Some(&format!(
-                                    r#"{{"to_agent":"{agent_id}","reason":"worker_takeover"}}"#
+                                    r#"{{"to_agent":"{agent_id}","reason":"{}"}}"#,
+                                    takeover_reason.as_deref().unwrap_or("worker_takeover")
                                 )),
                                 Some(agent_id),
                                 None,

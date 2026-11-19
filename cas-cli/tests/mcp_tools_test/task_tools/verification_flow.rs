@@ -7731,6 +7731,112 @@ async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
     );
 }
 
+/// cas-9452: an epic whose own branch carries commits that never reached the
+/// default branch is not shipped, whatever its children's status says. Close
+/// refuses it; once the branch is merged, the same close goes through.
+#[tokio::test]
+async fn test_epic_close_refuses_an_epic_branch_that_never_reached_the_default_branch_cas_9452() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    let gh = ci_check_run::green_ci_queue_unconfirmed(test_env.home());
+    test_env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n")
+        .expect("disable verification for the unshipped-epic close");
+
+    let repo = temp.path();
+    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+    proof_boundary_git(
+        repo,
+        &["remote", "add", "origin", "git@github.com:org/cas-9452.git"],
+    );
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    proof_boundary_git(repo, &["add", "seed.txt"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "seed"]);
+    proof_boundary_git(repo, &["checkout", "-q", "-b", "epic/cas-9452"]);
+    std::fs::write(repo.join("epic-delivery.rs"), "pub fn epic_delivery() {}\n").unwrap();
+    proof_boundary_git(repo, &["add", "epic-delivery.rs"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "feat: epic delivery"]);
+    proof_boundary_git(repo, &["checkout", "-q", "main"]);
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let mut epic = cas::types::Task::new(
+        "cas-9452-unshipped".to_string(),
+        "epic branch not in main".to_string(),
+    );
+    epic.status = TaskStatus::InProgress;
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/cas-9452".to_string());
+    // No declared target: the gate falls back to the epic's own branch.
+    task_store.add(&epic).expect("persist epic fixture");
+    // The board reads the same determination: merged-to-epic is not shipped.
+    let board_dir = cas_dir.clone();
+    let epic_status_of = |id: String| {
+        let board_dir = board_dir.clone();
+        async move {
+        let request: cas_mcp::types::FactoryRequest = serde_json::from_value(
+            serde_json::json!({"action": "epic_status", "id": id}),
+        )
+        .expect("a valid epic_status request");
+        extract_text(
+            CasService::new(cas::mcp::CasCore::with_daemon(board_dir, None, None), None)
+                .factory_request(Parameters(request))
+                .await
+                .expect("epic_status returns"),
+        )
+        }
+    };
+    let epic_status = || epic_status_of(epic.id.clone());
+    // The same branch under an epic that names `main` as its destination: the
+    // destination alone must not make it look shipped.
+    let mut declared = cas::types::Task::new(
+        "cas-9452-declared".to_string(),
+        "epic branch with an explicit main target".to_string(),
+    );
+    declared.status = TaskStatus::InProgress;
+    declared.task_type = TaskType::Epic;
+    declared.branch = Some("epic/cas-9452".to_string());
+    declared.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/cas-9452".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&declared).expect("persist declared-target epic");
+    let close = |reason: &str| {
+        service.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
+            stranded_branch_override: None,
+            id: epic.id.clone(),
+            reason: Some(reason.to_string()),
+            supervisor_override: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
+    };
+
+    let refused = extract_text(close("children are closed").await.expect("epic close returns"));
+    assert!(!refused.contains("Closed task:"), "an unshipped epic must not close: {refused}");
+    assert!(refused.contains("epic/cas-9452"), "the refusal names the unshipped branch: {refused}");
+    assert_ne!(
+        task_store.get(&epic.id).expect("read epic").status,
+        TaskStatus::Closed
+    );
+
+    let board = epic_status().await;
+    assert!(board.contains("epic_shipping: unshipped commits=1 default=main"), "{board}");
+    let board = epic_status_of(declared.id.clone()).await;
+    assert!(board.contains("epic_shipping: unshipped commits=1 default=main"), "{board}");
+
+    // The merge reached the remote's default branch while the local one still
+    // lags: a stale local copy must not make a shipped epic look unshipped.
+    proof_boundary_git(repo, &["update-ref", "refs/remotes/origin/main", "refs/heads/epic/cas-9452"]);
+    let board = epic_status().await;
+    assert!(board.contains("epic_shipping: shipped default=main"), "{board}");
+    let board = epic_status_of(declared.id.clone()).await;
+    assert!(board.contains("epic_shipping: shipped default=main"), "{board}");
+    let closed = extract_text(close("epic branch merged").await.expect("epic close returns"));
+    assert!(closed.contains("Closed task:"), "a merged epic closes: {closed}");
+}
+
 #[tokio::test]
 async fn test_task_lifecycle_with_verification() {
     let mut test_env = TestEnvGuard::temp_home();

@@ -65,6 +65,11 @@ pub enum StoreError {
     #[error("premerge_repair_requires_new_commit: automatic repair for {dispatch_id} needs a new provable source commit")]
     PremergeRepairRequiresNewCommit { dispatch_id: String },
 
+    /// A verifier handoff was refused because its dispatch is not the exact
+    /// pending dispatch owned by the issuer. Not a parse failure.
+    #[error("verifier_handoff_not_active: dispatch {dispatch_id} is not the exact pending dispatch owned by this issuer")]
+    VerifierHandoffNotActive { dispatch_id: String },
+
     #[error(
         "local {entity_type} {operation} committed, but cloud sync is degraded; durable retry intent retained for {entity_id}: {reason}"
     )]

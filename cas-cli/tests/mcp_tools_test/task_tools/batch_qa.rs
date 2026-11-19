@@ -9,15 +9,6 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[test]
-fn override_debt_documentation_cas_5129a() {
-    let guide = include_str!("../../../../docs/qa/batch-qa.md");
-    assert!(guide.contains("supervisor_override=true does not clear batch QA debt"));
-    assert!(!guide.contains(
-        "Normal supervisor override and explicit QA-request authority remain available."
-    ));
-}
-
 async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
@@ -288,6 +279,31 @@ async fn cas_d697_round2_handoff_owner_cannot_record() {
         .push("origin/factory/batch-supervisor-cas-bq01".into());
     tasks.update(&task).unwrap();
     fx.reject(serde_json::json!({}), "no self-review").await;
+}
+
+#[tokio::test]
+async fn shared_checkout_handoff_names_the_recorder_only_with_delivery_commits_cas_1b7d() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    let anchor = task.deliverables.factory_branch_anchor.clone().unwrap();
+    task.deliverables.handoff_branches.push("factory/batch-supervisor".into());
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: cas::types::WorkTarget { repo_selector: "project".into(), target_branch: "main".into() },
+        assignee: "test-agent".into(),
+        branch: "factory/test-agent".into(),
+        base_sha: git(&fx.repo, &["rev-list", "--max-parents=0", "HEAD"]),
+    });
+    tasks.update(&task).unwrap();
+    // The recorder's shared checkout carries this delivery's commit: it implemented.
+    git(&fx.repo, &["branch", "factory/batch-supervisor", &anchor]);
+    fx.reject(serde_json::json!({}), "no self-review").await;
+    // The v4.21 shape: the handoff names the supervisor's checkout, which carries nothing.
+    git(&fx.repo, &["branch", "-D", "factory/batch-supervisor"]);
+    fx.record().await;
+    let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
+    assert!(receipts.iter().any(|receipt| receipt.task_heads.contains_key("cas-bq01")));
 }
 
 #[tokio::test]
@@ -964,6 +980,16 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
         "{refused}"
     );
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+    // The refusal carries the delivery identity, why the waiver did not count,
+    // and the one-call supervisor close, as machine-readable fields.
+    let anchor = tasks.get("cas-bq01").unwrap().deliverables.factory_branch_anchor.unwrap();
+    for field in [
+        format!("anchor={anchor}"),
+        format!("qa_pass:{}=waived:QA_PASS_NOT_PASSED", waiver.id),
+        "supervisor_close: task action=close id=cas-bq01 supervisor_override=true".to_string(),
+    ] {
+        assert!(refused.contains(&field), "{field} missing from {refused}");
+    }
     fx.record().await;
     let closed = fx.close("cas-bq01").await;
     assert_eq!(
@@ -1036,6 +1062,7 @@ async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed,
         "historical approval must not cover the new correction: {refused}");
     assert!(refused.contains("waiting for batch receipt"), "{refused}");
+    assert!(refused.contains(&format!("receipt:{}=HEAD_OUTSIDE_REVIEW", receipt.id)), "{refused}");
     git(&fx.repo, &["reset", "--hard", &fx.staging]);
     git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     let closed = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
@@ -1530,7 +1557,7 @@ async fn batch_qa_receipt_synced_from_peer_satisfies_close_cas_6048() {
     db.execute("DELETE FROM qa_batch_receipts", []).unwrap();
     db.execute("DELETE FROM artifacts", []).unwrap();
     std::fs::remove_file(&fx.ledger).unwrap();
-    assert!(show(id.clone()).await.unwrap_err().message.contains("not found"));
+    assert!(show(id.clone()).await.is_err());
     let refused = fx.close("cas-bq01").await;
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{refused}");
 

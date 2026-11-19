@@ -50,7 +50,7 @@ Read runtime API configuration and validate the resolved origin, including redir
 
 Use [locators-and-accessibility.md](locators-and-accessibility.md) for the single Quasar selector map. Hidden teleported options need semantic .visible() narrowing; link-rendering q-btn needs the link role. Shared-data failures need isolated fixtures or a justified lock, not blanket serialization or retries.
 
-For passkeys, use the supported virtual-authenticator API and the allowed relying-party origin; do not patch navigator.credentials. For time-dependent auth/expiry behavior, install page.clock before app code reads time. Keep real network completion event-driven.
+For passkeys, use the supported virtual-authenticator API and the allowed relying-party origin; do not patch navigator.credentials. For time-dependent auth/expiry behavior, install page.clock before app code reads time. For real network completion, apply [Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene) item 4.
 
 ## Stories and gallery
 

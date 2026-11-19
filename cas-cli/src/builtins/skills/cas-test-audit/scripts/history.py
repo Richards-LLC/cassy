@@ -16,7 +16,7 @@ def command(args, cwd=None):
 def finding(pattern, test, evidence, confidence='low', **extra):
     return {'class':'flake-prone','pattern':pattern,'file':extra.pop('file','history'),'line':extra.pop('line',0),
             'test':test,'evidence':evidence,'confidence':confidence,'status':'review',
-            'fix':'Inspect named native failure/pass evidence on identical source; wait on the event or repair isolation, or delete useless coverage. Never retry-wrap or quarantine.',**extra}
+            'fix':'Inspect named native failure/pass evidence on identical source; apply cas-writing-tests Test hygiene item 4 or repair isolation, or delete useless coverage. Never retry-wrap or quarantine.',**extra}
 
 
 def analyze(runs, issues, tree_for_sha=lambda sha: None):

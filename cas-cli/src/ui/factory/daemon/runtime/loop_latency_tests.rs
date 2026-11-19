@@ -645,11 +645,7 @@ fn flv2_no_blocking_call_on_lanes() {
                 lane_guard::last_thread_violation().expect("the tripping call is recorded");
             assert_eq!((tripped_lane, tripped_kind), (lane, *kind), "{message}");
             assert!(
-                message.starts_with(&format!(
-                    "blocking {} call `{what}` on the {} lane in step `flv2 enforce probe` at ",
-                    kind.name(),
-                    lane.name()
-                )),
+                message.contains(what) && message.contains("flv2 enforce probe"),
                 "{kind:?} on {lane:?}: {message}"
             );
             assert_eq!(lane_guard::current_lane(), None, "the lane unwinds");

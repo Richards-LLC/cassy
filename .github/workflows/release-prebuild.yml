@@ -45,7 +45,7 @@ permissions:
 # Never cancel a prebuild: its artifacts are what the release adopts, and a
 # cancelled prebuild silently sends the release to the fallback build.
 concurrency:
-  group: release-prebuild-${{ github.run_id }}
+  group: release-prebuild-${{ github.run_id }}-${{ inputs.platform }}
   cancel-in-progress: false
 
 env:

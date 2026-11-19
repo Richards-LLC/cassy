@@ -415,14 +415,35 @@ def test_workflow_command():
                 self.assertEqual(bool(hits), expected_pin, hits)
 
     def test_git_inputs_and_expect_diagnostics_cas_26f3(self):
-        for rejected, code in [
-            (False, '#[test] fn t() { assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head); }'),
-            (False, '#[test] fn t() { let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id) && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state"); }'),
-            (True, '#[test] fn t() { assert_eq!(git(&["show", &format!("refs/heads/{source}")]), "When a test fails, name the responsible boundary and preserve its first result."); }'),
-            (True, '#[test] fn t() { assert!(source.contains("uses: actions/checkout@v4")); }'),
+        # GH #2102: source selects the mock scenario, not source text.
+        mock = '''#[tokio::test] async fn mock_auth_response() {
+                for source in ["route_unauthorized", "retry_unauthorized"] {
+                    Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                            "error": if source == "route_unauthorized" { "unauthorized" } else { "Invalid API key" }})))
+                        .expect(1).mount(&server).await;
+                }
+            }'''
+        # The same name bound to file text is a source search again.
+        read = mock.replace('for source in ["route_unauthorized", "retry_unauthorized"] {',
+                            'let source = std::fs::read_to_string("skill.md").unwrap(); {')
+        for rejected, path, code in [
+            (False, 'tests/probe.rs', mock),
+            (True, 'tests/test_skill.sh', 'source=$(cat skill.md); [[ $source == "Always merge staging first" ]]'),
+            (True, 'tests/probe.rs', read.replace('source == "route_unauthorized"', 'source.contains("Always merge staging first")')),
+            (True, 'tests/probe.rs', read.replace('source == "route_unauthorized"', 'source.contains(if staging { "Always merge staging first" } else { "Always merge main first" })')),
+            (True, 'tests/probe.rs', read.replace('source == "route_unauthorized"', 'source == if staging { "Always merge staging first" } else { "Always merge main first" }')),
+            (True, 'tests/probe.rs', mock + '\n' + read.replace('source == "route_unauthorized"', 'source.contains("Always merge staging first")').replace('let source = std::fs::read_to_string("skill.md").unwrap();', 'let (source, _) = (std::fs::read_to_string("skill.md").unwrap(), 401);')),
+            (True, 'tests/probe.rs', mock.replace('source == "route_unauthorized"', 'source.contains("Always merge staging first")').replace('{\n                    Mock', '{\n                    let (source, _) = (std::fs::read_to_string("skill.md").unwrap(), 401);\n                    Mock', 1)),
+            (True, 'tests/probe.rs', '#[test] fn t() { let same = read_to_string(path).unwrap() == "Always merge staging first"; }'),
+            (False, 'tests/probe.rs', '#[test] fn t() { assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head); }'),
+            (False, 'tests/probe.rs', '#[test] fn t() { let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id) && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state"); }'),
+            (True, 'tests/probe.rs', '#[test] fn t() { assert_eq!(git(&["show", &format!("refs/heads/{source}")]), "When a test fails, name the responsible boundary and preserve its first result."); }'),
+            (True, 'tests/probe.rs', '#[test] fn t() { assert!(source.contains("uses: actions/checkout@v4")); }'),
         ]:
-            with self.subTest(code=code):
-                self.assertEqual(bool(self.hits(code, 'tests/probe.rs')), rejected)
+            with self.subTest(path=path, code=code):
+                hits = self.hits(code, path) if path.endswith('.rs') else shape.lint_text_pins(code, path)
+                self.assertEqual(bool(hits), rejected)
 
     def test_python_file_read_inputs_leave_output_pins_in_scope_cas_c49b(self):
         cases = [

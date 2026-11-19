@@ -35,6 +35,18 @@ pub(super) fn test_file(path: &str) -> bool {
         || path.split('/').any(|part| matches!(part, "__tests__" | "tests" | "test" | "e2e"))
 }
 
+/// Files a runner's default matcher runs as tests (GH #2116, #2127): a test
+/// name suffix, or jest's `__tests__` directory; declarations never are.
+/// `test_file` stays the wide net for files that may hold tests. A file only
+/// that net catches is a support module: a `File` run of it finds no tests,
+/// so it widens to its package, whose run covers its consumers.
+pub(super) fn test_match(path: &str) -> bool {
+    let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    !stem.ends_with(".d")
+        && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
+            || path.split('/').any(|part| part == "__tests__"))
+}
+
 /// A scoped JavaScript stability command, however the shell names its runner.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Invocation {
@@ -286,13 +298,61 @@ fn title(node: Node<'_>, source: &str) -> Option<String> {
     }
     let raw = text(node, source);
     let contents = raw.get(1..raw.len().checked_sub(1)?)?;
-    if raw.starts_with('"') {
-        return serde_json::from_str(raw).ok();
+    if raw.starts_with('"')
+        && let Ok(decoded) = serde_json::from_str(raw)
+    {
+        return Some(decoded);
     }
-    if contents.contains('\\') || (raw.starts_with('`') && contents.contains("${")) {
+    if raw.starts_with('`') && contents.contains("${") {
         return None;
     }
-    Some(contents.to_string())
+    unescape(contents)
+}
+
+/// Simple single-character JavaScript escapes (GH #2093: `'it\'s'`); anything
+/// else, such as `\u0041` or a line continuation, is not a static identity.
+fn unescape(contents: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(contents.len());
+    let mut chars = contents.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        decoded.push(match chars.next()? {
+            escaped @ ('\'' | '"' | '`' | '\\' | '/' | '$') => escaped,
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            _ => return None,
+        });
+    }
+    Some(decoded)
+}
+
+/// GH #2112: a suite title built at runtime (`describe(api, …)`, a template
+/// with `${…}`) names a family of suites. Literal parts are kept and each
+/// dynamic part becomes a `%s` placeholder of the parameterized identity.
+/// `None` for a static title.
+fn dynamic_suite_title(node: Option<Node<'_>>, source: &str) -> Option<String> {
+    let Some(node) = node else { return Some("%s".into()) };
+    if title(node, source).is_some() {
+        return None;
+    }
+    if node.kind() != "template_string" {
+        return Some("%s".into());
+    }
+    let mut cursor = node.walk();
+    let mut pattern = String::new();
+    for part in node.children(&mut cursor) {
+        match part.kind() {
+            "string_fragment" | "string_content" => pattern.push_str(&unescape(text(part, source))?),
+            "template_substitution" => pattern.push_str("%s"),
+            "escape_sequence" => pattern.push_str(&unescape(text(part, source))?),
+            _ => {}
+        }
+    }
+    Some(pattern)
 }
 
 /// `(suite, supported, parameterized)` for a test registration call.
@@ -882,11 +942,16 @@ fn walk(
         if node.child_by_field_name("function").is_some_and(|function| skipped_registration(function, source)) {
             return Ok(());
         }
-        let templated = templated || each;
         let args = node
             .child_by_field_name("arguments")
             .context("test arguments")?;
-        let name = args.named_child(0).and_then(|name| title(name, source));
+        let first = args.named_child(0);
+        let mut name = first.and_then(|name| title(name, source));
+        let mut templated = templated || each;
+        if suite && supported && name.is_none() && let Some(pattern) = dynamic_suite_title(first, source) {
+            name = Some(pattern);
+            templated = true;
+        }
         let unresolved = unresolved || !supported || name.is_none();
         let mut cursor = args.walk();
         let callback = args
@@ -1176,27 +1241,81 @@ fn runner_config(dir: &Path, runner: &str) -> Option<PathBuf> {
         })
 }
 
+/// Whether the local Jest, run with `config`, lists `spec`: Jest's own
+/// discovery (`roots`, `projects`, `testMatch`, `testRegex`) decides ownership.
+fn jest_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> bool {
+    let Ok(jest) = runner_path(repo, dir, "jest") else { return false };
+    let Ok(output) = Command::new(jest)
+        .current_dir(dir)
+        .env("CI", "1")
+        .arg("--config")
+        .arg(config)
+        .args(["--listTests", "--json"])
+        .output()
+    else {
+        return false;
+    };
+    let (Ok(listed), Ok(spec)) = (serde_json::from_slice::<Vec<String>>(&output.stdout), spec.canonicalize()) else {
+        return false;
+    };
+    output.status.success()
+        && listed.iter().any(|path| Path::new(path).canonicalize().is_ok_and(|path| path == spec))
+}
+
+/// The repository-relative Jest config that lists `path`, when Jest can be asked.
+pub(crate) fn jest_owner(repo: &Path, path: &str) -> Option<PathBuf> {
+    let (dir, config) = runner_root(repo, path, "jest").ok()?;
+    let config = config?;
+    if !jest_config_selects(repo, &dir, &config, &repo.join(path)) {
+        return None;
+    }
+    config.strip_prefix(repo).ok().map(Path::to_path_buf)
+}
+
+/// The runner configs in `dir`, nearest default first. Jest repositories keep
+/// further configs beside it (`jest-integration.config.js`) for other specs.
+fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
+    let mut configs: Vec<PathBuf> = runner_config(dir, runner).into_iter().collect();
+    if runner == "jest" {
+        let mut extra: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.contains("jest") && name.contains(".config.") && !JEST_CONFIGS.contains(&name.as_str())
+            })
+            .map(|entry| entry.path())
+            .collect();
+        extra.sort();
+        configs.extend(extra);
+    }
+    configs
+}
+
 /// The runner's working directory and explicit config for a test file: the
 /// nearest ancestor holding that runner's config, else the nearest
 /// package.json. A nested package.json must not hide the config and its
-/// transforms (cas-1468).
+/// transforms (cas-1468). For Jest the config must select the file: a spec
+/// outside the default config's `testRegex` belongs to the config that
+/// matches it (GH #2058); with no such config the nearest one stays.
 fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
-    let mut current = repo
-        .join(path)
-        .parent()
-        .context("test parent")?
-        .to_path_buf();
-    let mut package = None;
+    let spec = repo.join(path);
+    let mut current = spec.parent().context("test parent")?.to_path_buf();
+    let (mut package, mut nearest) = (None, None);
     loop {
-        if let Some(config) = runner_config(&current, runner) {
-            return Ok((current, Some(config)));
+        for config in runner_configs(&current, runner) {
+            if runner != "jest" || jest_config_selects(repo, &current, &config, &spec) {
+                return Ok((current, Some(config)));
+            }
+            nearest.get_or_insert_with(|| (current.clone(), Some(config)));
         }
         if package.is_none() && current.join("package.json").is_file() {
             package = Some(current.clone());
         }
         if current == repo || !current.pop() {
-            return package
-                .map(|package| (package, None))
+            return nearest
+                .or_else(|| package.map(|package| (package, None)))
                 .with_context(|| format!("no package.json found for {path}"));
         }
     }
@@ -2086,6 +2205,55 @@ mod tests {
         assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
     }
 
+    /// GH #2116, #2127: a data module, a `.d.mts` declaration and a helper under
+    /// `test/` or `tests/` hold no tests. The gate widened them to a `File`
+    /// scope whose printed `worker-check -- <runner> <file>` run finds nothing
+    /// and writes no report. They widen to their package, which runs their
+    /// consumers; a real spec stays a `File` scope.
+    #[test]
+    fn support_files_under_test_dirs_widen_to_the_package_gh2116() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let support = [
+            "test/scenarios/conversation-flows/flows.mjs",
+            "tests/config/staging-target.d.mts",
+            "tests/qa/journeys/staging-guard.ts",
+        ];
+        let spec = "tests/scenarios/flows.scenario.spec.ts";
+        for (index, path) in support.iter().chain([&spec]).enumerate() {
+            let full = repo.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, format!("export const value = {index};\n")).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        for path in support {
+            std::fs::write(repo.path().join(path), "export const value = 'changed';\n").unwrap();
+        }
+        git(&["commit", "--quiet", "-am", "head"]);
+        let paths = support.map(str::to_owned);
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
+        assert_eq!(
+            super::super::widened::scope(repo.path(), spec),
+            super::super::widened::Scope::File(spec.into())
+        );
+    }
+
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
     /// apps/backend/jest.config.js and its ts-jest transform.
     #[test]
@@ -2110,6 +2278,90 @@ mod tests {
             runner_root(repo.path(), spec, "vitest").unwrap(),
             (backend.join("scripts"), None)
         );
+    }
+
+    /// GH #2058 (and #2066, #2117, #2122): an integration spec that only a
+    /// sibling Jest config selects ran under the default `.spec.ts` config and
+    /// found no tests, so no stability proof could ever be earned.
+    #[test]
+    fn jest_spec_runs_under_the_config_that_selects_it_gh_2058() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let backend = repo.path().join("apps/backend");
+        let test = backend.join("test");
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(&["init", "--quiet"]);
+        write(&repo.path().join("package.json"), "{}");
+        write(&backend.join("package.json"), "{}");
+        // The default config selects `.spec.ts`; a sibling config selects the integration spec.
+        write(&backend.join("jest.config.js"),
+            r"module.exports = { testRegex: '.*\\.spec\\.ts$' };");
+        let sibling = test.join("jest-inbox-tools.integration.config.js");
+        write(&sibling, r"module.exports = { testRegex: '.*\\.integration\\.ts$' };");
+        // A stand-in Jest: lists the files its config selects under its own directory and
+        // runs a spec only when its config lists it ("No tests found" otherwise).
+        let jest = backend.join("node_modules/.bin/jest");
+        write(&jest, r#"#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
+const config = path.resolve(at('--config')), pattern = new RegExp(require(config).testRegex);
+const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+  entry.name === 'node_modules' ? [] : entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
+const listed = walk(path.dirname(config)).filter((file) => pattern.test(file));
+if (a.includes('--listTests')) { console.log(JSON.stringify(listed)); process.exit(0); }
+const spec = a[a.indexOf('--runTestsByPath') + 1], ok = listed.includes(spec);
+fs.writeFileSync(at('--outputFile'), JSON.stringify({ success: ok, testResults: ok ? [{ name: spec, status: 'passed',
+  assertionResults: [{ fullName: 'pool drains', status: 'passed' }] }] : [] }));
+process.exit(ok ? 0 : 1);
+"#);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&jest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = "apps/backend/test/inbox-analysis-pool.integration.ts";
+        let source = |body: &str| format!("describe('pool', () => {{\n  it('drains', () => {{ {body} }});\n}});\n");
+        write(&repo.path().join(spec), &source("throw 0;"));
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        write(&repo.path().join(spec), &source(""));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        // The real path: changed-test identity, the prescribed command, five capped runs, close's receipt read.
+        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
+        assert_eq!(tests, [id(spec, "pool drains")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let config = "apps/backend/test/jest-inbox-tools.integration.config.js";
+        let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        assert_eq!(super::super::stability::missing(&passing(), &tests), tests);
+
+        // Worker-check discovers the owning config and counts the spec's tests five times.
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
+        assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
+        // The prescribed rerun names that config, and running it as printed passes the same way.
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        assert_eq!(prescribed.len(), 1);
+        assert!(prescribed[0].contains(&format!("-- jest --config {config} {spec}`")), "{prescribed:?}");
+        let args: Vec<String> = ["jest", "--config", config, spec].map(String::from).into();
+        let invocation = invocation(&args).expect("the prescribed command is a capped runner");
+        let explicit = repo.path().join(invocation.config.as_deref().unwrap());
+        execute_tests(cas_root.path(), repo.path(), &head, "jest", Some(&explicit), &tests, None, &[]).unwrap();
+        assert!(super::super::stability::missing(&passing(), &tests).is_empty());
+        assert_eq!(passing().receipts().len(), 1);
     }
 
     /// A config-free global test resolves its runner from package metadata;
@@ -2184,7 +2436,6 @@ mod tests {
         );
         for source in [
             "test(title, () => {});",
-            "describe(title, () => { test('child', () => {}); });",
             "test('case_id', callback);",
             "describe('suite_id', declareTests);",
         ] {
@@ -2199,6 +2450,26 @@ mod tests {
         assert_eq!(source_tests("a.test.ts", rows, &[(2, 2)]).unwrap(), [template.clone()]);
         let runtime = [id("a.test.ts", "suite x row 2"), id("a.test.ts", "suite x other 2")];
         assert_eq!(runtime.map(|row| template.selects(&row)), [true, false]);
+        // GH #2093: escaped quotes in a static literal are still a static title.
+        let escaped = "it('reads each post\\'s \\\"depth\\\" from its creator\\'s capture', () => {});";
+        assert_eq!(
+            source_tests("a.test.ts", escaped, &[(1, 1)]).unwrap(),
+            [id("a.test.ts", "reads each post's \"depth\" from its creator's capture")]
+        );
+        let unicode = "it('a\\u0041', () => {});";
+        assert!(source_tests("a.test.ts", unicode, &[(1, 1)]).is_err());
+        // GH #2112: a parameterized describe around a static test title selects
+        // that test under every runtime suite name; the test title stays literal.
+        let looped = "for (const [mode, api] of rows) test.describe(api, () => {\n  test('p100%_ok', () => {});\n});\ntest.describe(`ssr_${mode}_run`, () => {\n  test('defers_ok', () => {});\n});";
+        let wildcard = |name: &str| Identity { parameterized: true, ..id("a.test.ts", name) };
+        let (dynamic, interpolated) = (wildcard("%s p100%_ok"), wildcard("ssr_%s_run defers_ok"));
+        assert_eq!(source_tests("a.test.ts", looped, &[(2, 2)]).unwrap(), [dynamic.clone()]);
+        assert_eq!(source_tests("a.test.ts", looped, &[(5, 5)]).unwrap(), [interpolated]);
+        assert_eq!(
+            [("a.test.ts", "api_hangs p100%_ok"), ("a.test.ts", "p100%_ok_x")]
+                .map(|(path, name)| dynamic.selects(&id(path, name))),
+            [true, false]
+        );
         // GH #1973: a TypeScript generic over an import type parses.
         let generic = "vi.mock('vue-i18n', async importOriginal => ({\n  ...(await importOriginal<typeof import('vue-i18n')>()),\n}));\nit('a', () => { expect(1).toBe(1); });";
         assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);

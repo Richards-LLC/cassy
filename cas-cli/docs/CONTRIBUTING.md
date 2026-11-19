@@ -2229,6 +2229,13 @@ continuation outcome is recorded in task notes. Receipts and tracing include
 inclusive merge-tree, push, close-gate, dispatch and note timings; `+` means a
 phase is still running and zero means no measured work in that phase yet.
 
+Background task closes hold backend retirement until their `CLOSE_OUTCOME`
+note is saved, including final inclusive phase timings. A locked local journal
+under `.cas/close-continuations/` owns each pending outcome. Cancellation records
+an unknown outcome and wakes the supervisor; daemon startup and heartbeats
+recover unlocked journals after process loss. Recovery retries note/notice
+persistence with the same continuation identity, never the close mutation.
+
 Optional resource notifications and factory recall have bounded response waits.
 Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;
@@ -5122,6 +5129,14 @@ needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
 release freeze, not a temporary CI hold: a published release covering its tip,
 the operator's Commander lift or the train supervisor's audited lift ends it.
+For an open epic that is not yet a release train, the refusal returns the exact
+`factory action=train_freeze id=<epic> decision="promote"
+reason="release-freeze: <reason>"` retry payload. This single call validates
+that the lane exists and has not diverged from another open train, then writes
+`release-train`, the repository's integration work target, and the freeze in one
+update. Divergence refuses with the epic ids before changing the task. Promotion
+preserves the epic lane and repository selector. This promotion mode is MCP-only;
+there is no separate CLI train-freeze command.
 Commander's `freeze_train` operation does the same for the operator. Both
 `freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
 `machine:read` scope, without worker-management permissions. Preview pairings
@@ -5140,7 +5155,10 @@ completed impact failure still refuses, and missing freeze or check evidence
 falls back to ordinary lane admission. After publishing the merge, Cassy
 cancels that lane run only when its remaining unfinished jobs are all impact
 jobs; a failed cancel does not undo the merge
-(`worktree_ops/frozen_train_ci.rs`). Task create retargets new work aimed at a
+(`worktree_ops/frozen_train_ci.rs`). A cut train also admits its own nonterminal
+`release-repair` child while its freeze is active and its red is recorded; this leaves
+both cut and freeze markers intact, and ordinary work, another train's repair and
+repairs without red evidence remain refused. Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), through the operator's Commander

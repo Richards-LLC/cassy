@@ -726,9 +726,9 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     await chooseConversation(page);
     await hub.waitFor(() => hub.attaches.filter((session) => session === PELICAN).length > attachesBeforeReload);
 
-    await expect(bubble("Send this when it's back")).not.toContainText(/Sending…|Delivered/);
+    await expect(bubble("Send this when it's back")).not.toHaveAttribute("data-state", "delivered");
 
-    await expect(bubble("Did this one land?")).not.toContainText(/Sending…|Delivered/);
+    await expect(bubble("Did this one land?")).toHaveAttribute("data-state", "unconfirmed");
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
   await journey.stage("The session is back: the waiting one goes out once, the other is not resent", async () => {
@@ -739,7 +739,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     expect((await next).text).toBe("Send this when it's back");
     await expect(held).toHaveCount(0);
     hub.deliverLatest(PELICAN);
-    await expect(bubble("Send this when it's back")).toContainText("Delivered");
+    await expect(bubble("Send this when it's back")).toHaveAttribute("data-state", "delivered");
     await clock.advance(30_000);
     expect(sentTimes(hub, "Send this when it's back")).toBe(1);
     expect(sentTimes(hub, "Did this one land?")).toBe(1);
@@ -1146,7 +1146,7 @@ test("HUB-J12 network switch: kept messages show before the session attaches aft
     await expect(page.locator(".conversation-thread-slot")).toHaveCount(0);
     await expect.poll(persistedState, { message: "the saved waiting message remains held while Welcome is withheld" }).toBe("held");
 
-    await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
+    await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toHaveAttribute("data-state", "delivered");
     expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
     // A keyboard reader is in the thread when the session comes back.
     await page.locator(".conversation-reading.thread").focus();

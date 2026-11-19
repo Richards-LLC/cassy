@@ -244,6 +244,8 @@ fn contended(error: &str) -> bool {
     error.contains("already awaiting SubagentStart")
         || error.contains("wait budget is spent")
         || error.contains("verifier_factory_store_busy")
+        || error.contains("verifier_factory_launch_dropped")
+        || error.contains("QueuedDroppedOldest")
         || error.contains("database is locked")
 }
 
@@ -266,7 +268,8 @@ fn request_with_retry(
             Ok(()) => return Ok(()),
             Err(error) => {
                 let permanent = error.contains("verifier_factory_scope")
-                    || error.contains("verifier_factory_task_terminal");
+                    || error.contains("verifier_factory_task_terminal")
+                    || error.contains("verifier_handoff_not_active");
                 if !permanent && contended(&error) {
                     let pause = delay.saturating_mul(1 << waits.min(16)).min(CONTENTION_BACKOFF_CAP);
                     if started.elapsed() + pause >= window {
@@ -423,6 +426,10 @@ fn launch_with_preparation(
         &child,
     )
     .map_err(|e| e.to_string())?;
+    // Issuing the handoff may have refreshed an expired pending deadline; the
+    // prompt, review budget and recovery guard must use the refreshed row.
+    let live = cas_store::get_verification_dispatch(&core.cas_root, &live.id)
+        .map_err(|e| e.to_string())?;
     let worker = core.clone();
     let task = task.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
@@ -903,6 +910,19 @@ mod tests {
             Err("verifier_factory_launch: busy".into())
         });
         assert_eq!((exhausted.map_err(|(attempts, _)| attempts), calls.get()), (Err(4), 4));
+        // GH #2148: six store refusals still leave the first launch attempt
+        // available. An exact-dispatch ownership/state mismatch is terminal.
+        for refusal in ["verifier_factory_store_busy", "database is locked", "wait budget is spent",
+            "verifier_factory_launch_dropped", "QueuedDroppedOldest"] {
+            calls.set(0);
+            let result = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::from_secs(5), || {
+                calls.set(calls.get() + 1);
+                if calls.get() <= 6 { Err(refusal.into()) }
+                else { Err("verifier_handoff_not_active: vdispatch-test".into()) }
+            });
+            assert_eq!((result.map_err(|(attempts, _)| attempts), calls.get()), (Err(1), 7));
+        }
+
     }
 
     #[test]
@@ -1558,6 +1578,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
                 }).to_string()).unwrap();
                 env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                // GH #2135: the first attempt's deadline lapses before the retry,
+                // so the replacement must refresh and review the same dispatch.
+                rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                    "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
+                    rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
+                ).unwrap();
                 // Retry the merge's automatic handoff once, retaining its join
                 // handle so completion needs no new timer or polling loop.
                 let handle = core.emit_premerge_review_handoff(&task, &claimed).unwrap().unwrap();

@@ -168,18 +168,26 @@ impl CodexLive {
         };
 
         // The first turn must end NORMALLY (task_complete), so the idle state
-        // under test is a real post-completion idle, not a cancel. The rollout
-        // records both the turn's end and the idle that follows it.
-        let mut turns = cas_mux::readiness::RolloutTurnObserver::new(&live.rollout);
-        let done = turns.wait_for_turns_ended(1, Instant::now() + Duration::from_secs(60), || {
-            let _ = live.mux.poll_batch();
-        });
+        // under test is a real post-completion idle, not a cancel.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut done = false;
+        while Instant::now() < deadline {
+            live.pump(Duration::from_millis(300));
+            let c = live.rollout_contents();
+            if c.contains("FIRST-TURN-DONE") && c.contains("\"type\":\"task_complete\"") {
+                done = true;
+                break;
+            }
+        }
         assert!(
-            done.is_ok(),
-            "first turn must complete normally before the idle case can be tested: {done:?} — tail:\n{}",
+            done,
+            "first turn must complete normally before the idle case can be tested — tail:\n{}",
             live.rollout_tail(20)
         );
 
+        // Go genuinely idle, well past the quiescence poll's STABILITY_WINDOW
+        // (300ms) and MAX_EXTRA_WAIT (4s).
+        live.pump(Duration::from_secs(8));
         Some(live)
     }
 

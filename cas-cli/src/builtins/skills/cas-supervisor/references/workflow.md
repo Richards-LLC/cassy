@@ -181,11 +181,13 @@ as a hotfix release.
 ## Before freeze
 
 <!-- cas-src:begin -->
-At the exact train tip, dispatch `gh workflow run ci.yml --ref <train branch>`
-(train branches have no push CI) and read green for that SHA. On that tip run
+At the exact train tip, `train_freeze` dispatches or adopts `full-validation.yml`
+and returns its run URL (train branches have no push CI). Read green for that
+SHA. If no run is reported, read its skip/failure reason; the manual command is
+`gh workflow run full-validation.yml --ref <train branch>`. On that tip run
 `cargo tree -i aws-lc-rs --target x86_64-unknown-linux-gnu` (empty graph), capped
 `cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'`, and
-`python3 scripts/check-test-shape.py` before `train_freeze`. Lint the committed
+`python3 scripts/check-test-shape.py`. Lint the committed
 notes with `python3 scripts/release-train-announce.py --lint <draft>`.
 <!-- cas-src:end -->
 
@@ -215,7 +217,7 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    <!-- cas-src:end -->
 4. Run the final assembled-tree gate:
    <!-- cas-src:begin -->
-   On Cassy's release train, the daemon dispatches the full set (`full-validation.yml`: six Rust shards, web, journeys and doctests) once per frozen train tip; a repair tip gets one run of its own, and a run that stays queued with zero jobs for ninety seconds is replaced once at the same head. Read the complete log artifact and failure list. A known red holds `train_merge` until green or a visible supervisor override for that run; do not treat a baseline red as safe. A repair targeting the frozen train merges once its lane's two no-build checks pass, without waiting for its unfinished Rust impact jobs (a finished red one still refuses), because the frozen tip's full set supplies its Rust proof. `scripts/release.sh` requires a green full-set receipt for the train tip before version preparation, so run no local pre-cut full suite. The merge queue remains the final-tree gate and proves the version commit once. Workers run only touched tests before park; batch QA owns the release's user-path walk.
+   On Cassy's release train, `train_freeze` immediately dispatches or adopts the full set (`full-validation.yml`: six Rust shards, web, journeys and doctests) once per frozen train tip; a repair tip gets one run of its own, and a run that stays queued with zero jobs for ninety seconds is replaced once at the same head. Read the complete log artifact and failure list. A known red holds `train_merge` until green or a visible supervisor override for that run; do not treat a baseline red as safe. A repair targeting the frozen train merges once its lane's two no-build checks pass, without waiting for its unfinished Rust impact jobs (a finished red one still refuses), because the frozen tip's full set supplies its Rust proof. `scripts/release.sh` requires a green full-set receipt for the train tip before version preparation, so run no local pre-cut full suite. The merge queue remains the final-tree gate and proves the version commit once. Workers run only touched tests before park; batch QA owns the release's user-path walk.
    <!-- cas-src:else -->
    the epic's single full-suite run on the tree that lands; skip it when CI already ran it. Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Without check-runs on the exact default-branch SHA, run the project's full suite (the commands its CLAUDE.md or AGENTS.md names) on that SHA. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
    <!-- cas-src:end -->

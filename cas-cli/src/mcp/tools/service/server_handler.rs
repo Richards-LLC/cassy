@@ -2074,6 +2074,32 @@ mod tests {
         let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert_eq!(prompts.len(), 3);
         assert!(prompts.iter().all(|p| crate::supervisor_notices::is_action_envelope(&p.prompt)));
+
+        // The terminal commit lands between the grace poll's first check
+        // and its next 20ms wake. The 10ms response deadline wins while
+        // follow-up is still held; COMMITTED must retain its writer too.
+        tasks.add(&crate::types::Task::new("cas-committed-deadline".into(), "committed before deadline".into())).unwrap();
+        let args = serde_json::json!({"action":"close", "id":"cas-committed-deadline"});
+        let store = tasks.clone();
+        let (release, held) = tokio::sync::oneshot::channel();
+        tokio::time::pause();
+        let error = service.call_with_deadline_and_grace("task", args.as_object(),
+            std::time::Duration::from_millis(10), std::time::Duration::ZERO, async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                let mut task = store.get("cas-committed-deadline").unwrap();
+                task.status = crate::types::TaskStatus::Closed;
+                store.update(&task).unwrap();
+                super::super::mutation_receipt::task_disposition_committed(&task.id, "closed");
+                held.await.unwrap();
+                Ok(rmcp::model::CallToolResult::success(vec![]))
+            }).await.unwrap_err();
+        tokio::time::resume();
+        assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
+        release.send(()).unwrap();
+        service.tool_work.wait_idle().await;
+        let committed = tasks.get("cas-committed-deadline").unwrap();
+        assert_eq!(committed.status, crate::types::TaskStatus::Closed);
+        assert_eq!(committed.notes.matches("CLOSE_OUTCOME:").count(), 1, "{}", committed.notes);
     }
 
     /// cas-3b81 (GH #1142): a close still running at the deadline with

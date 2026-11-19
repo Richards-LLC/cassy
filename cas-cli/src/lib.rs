@@ -71,6 +71,7 @@ pub mod factory_preflight;
 pub mod factory_daemon_health;
 pub mod factory_standby;
 pub(crate) mod factory_binary_skew;
+pub(crate) mod factory_tools_ready;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub(crate) mod supervisor_notices;

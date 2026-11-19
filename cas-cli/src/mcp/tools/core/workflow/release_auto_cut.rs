@@ -130,12 +130,27 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: b
     if let Some(reason) = declined_setup(root, train) {
         return Ok(Outcome::Declined(reason));
     }
+    // The synced verification owner pins the machine whose project policy
+    // governs this train. A peer's enabled defaults cannot override its off
+    // switch. Keep successor recovery on that same machine, never elsewhere.
+    let machine = crate::types::Agent::get_or_generate_machine_id();
+    let mut agents = crate::store::open_agent_store(root)?.list(None)?;
+    if !agents.iter().any(|agent| {
+        train.epic_verification_owner.as_deref() == Some(agent.id.as_str())
+            && agent.role == crate::types::AgentRole::Supervisor
+            && agent.machine_id.as_deref() == Some(machine.as_str())
+    }) {
+        return Ok(Outcome::Declined(crate::gates::tag("G-122", format!(
+            "auto-cut belongs to train verification owner {}; its machine's project config governs this train",
+            train.epic_verification_owner.as_deref().unwrap_or("unassigned")
+        ))));
+    }
+    agents.retain(|agent| agent.machine_id.as_deref() == Some(machine.as_str()));
     let started = format!("{STARTED_LABEL}{tip}");
     if train.labels.contains(&started) {
         report_failure(root, train, lane, tip)?;
         return Ok(Outcome::Handled);
     }
-    let agents = crate::store::open_agent_store(root)?.list(None)?;
     let supervisor = supervisor_notices::resolve(&agents, train.epic_verification_owner.as_deref(), None);
     if supervisor.id == "operator" {
         return Ok(Outcome::Declined("no live registered supervisor on this machine".into()));

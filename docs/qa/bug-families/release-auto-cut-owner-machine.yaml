@@ -1,0 +1,3 @@
+title: Peer auto-cut defaults must not override the train owner's disabled policy
+tasks: [cas-3416]
+journeys: [FACTORY-SUPERVISE]

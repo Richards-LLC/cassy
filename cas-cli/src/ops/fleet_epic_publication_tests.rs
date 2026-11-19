@@ -175,8 +175,12 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             let source = "factory/focus-held";
             git(repo, &["branch", source, base]);
             git(repo, &["push", "origin", source]);
+            let mut worker = cas_types::Agent::new_with_role("focus-worker".into(), "focus-held".into(), cas_types::AgentRole::Worker);
+            worker.factory_session = owner.factory_session.clone();
+            agents.register(&worker).unwrap();
             let mut child = cas_types::Task::new("cas-focus-held".into(), "Held close".into());
             child.status = cas_types::TaskStatus::InProgress;
+            child.assignee = Some(worker.name.clone());
             child.risk = vec![cas_types::TaskRisk::None];
             child.deliverables.work_target = Some(cas_types::WorkTarget {
                 repo_selector: "project:publication-test".into(),
@@ -185,7 +189,7 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             tasks.add(&child).unwrap();
             let receipt = cas_store::build_worker_completion_receipt(&cas_types::WorkerCompletionReceiptInput {
                 task_id: child.id.clone(),
-                worker_agent_id: "focus-worker".into(),
+                worker_agent_id: worker.id.clone(),
                 repo_selector: "project:publication-test".into(),
                 source_branch: source.into(),
                 commit_sha: base.into(),

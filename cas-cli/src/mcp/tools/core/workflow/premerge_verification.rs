@@ -2025,7 +2025,7 @@ mod tests {
         store.update(&task).unwrap();
         run(repo, &["checkout", "-q", "epic/next"]);
         let dispatch_count = || rusqlite::Connection::open(root.join("cas.db")).unwrap()
-            .query_row("SELECT COUNT(*) FROM verification_dispatches WHERE task_id=?1", [&task.id], |row| row.get::<_, u64>(0)).unwrap();
+            .query_row("SELECT COUNT(*) FROM verification_dispatches WHERE task_id=?1", [&task.id], |row| row.get::<_, i64>(0)).unwrap();
         let before = dispatch_count();
         let carried = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next");
         assert_eq!(dispatch_count(), before);

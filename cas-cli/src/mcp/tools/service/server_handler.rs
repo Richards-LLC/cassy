@@ -2001,6 +2001,7 @@ mod tests {
 
     #[tokio::test]
     async fn late_close_continuation_loss_cas_eeda() {
+        use crate::mcp::{CasCore, CasService};
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);

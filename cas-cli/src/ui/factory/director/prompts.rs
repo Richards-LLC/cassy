@@ -733,20 +733,23 @@ pub(crate) fn idle_worker_liveness(
     )
 }
 
+/// The production consumer of an idle relay at delivery time: the worker's
+/// observed liveness applied against the live task snapshot.
+pub(crate) fn idle_relay_deliverable(
+    prompt: &mut Prompt,
+    worker: &str,
+    observation: &crate::mcp::tools::service::worker_liveness::Observation,
+    _live: &DirectorData,
+) -> bool {
+    apply_idle_liveness(prompt, worker, observation)
+}
+
 pub(crate) fn apply_idle_liveness(
     prompt: &mut Prompt,
     worker: &str,
     observation: &crate::mcp::tools::service::worker_liveness::Observation,
-    named_task_in_progress: bool,
 ) -> bool {
     use crate::mcp::tools::service::worker_liveness::Liveness;
-    // cas-97dc: a delivery relay names a task parked for merge. Live state
-    // that shows that task in progress again (reassigned or restarted after
-    // the idle basis) has no delivery to report, and the observation's idle
-    // basis belongs to an earlier task; claiming "pending delivery" is untrue.
-    if prompt.retract_task.is_some() && named_task_in_progress {
-        return false;
-    }
     // A pending merge remains actionable even if the harness starts another
     // turn. Report that state instead of dropping the delivery notification.
     if prompt.retract_task.is_none() && observation.state != Liveness::WaitingForInput {
@@ -2418,7 +2421,7 @@ mod tests {
         }
     }
 
-    fn task_with_status(id: &str, assignee: Option<&str>, status: TaskStatus) -> TaskSummary {
+    pub(super) fn task_with_status(id: &str, assignee: Option<&str>, status: TaskStatus) -> TaskSummary {
         TaskSummary {
             status,
             ..open_task(id, assignee)
@@ -6801,21 +6804,32 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
             evidence: "recorded event; pid 42 S".into(),
         };
         assert_eq!(
-            apply_idle_liveness(&mut prompt.clone(), "wolf", &observed, false),
+            apply_idle_liveness(&mut prompt.clone(), "wolf", &observed),
             state == Liveness::WaitingForInput
         );
         let mut merge = prompt.clone();
         merge.retract_task = Some("t".into());
-        assert!(apply_idle_liveness(&mut merge, "wolf", &observed, false));
+        assert!(apply_idle_liveness(&mut merge, "wolf", &observed));
         assert!(merge.text.starts_with(&observed.detail()));
-        // cas-97dc: the named task was started after the idle basis, so no
-        // delivery exists for it; the relay must not claim one.
+        // cas-97dc: the worker was idle since an earlier task_complete, was
+        // assigned the named task and started it (live state: in progress,
+        // nothing parked or pushed). The production consumer must suppress
+        // the relay for that task, not rewrite it as a pending delivery.
+        let mut started = tests::make_data(0);
+        started.in_progress_tasks.push(tests::task_with_status("t", Some("wolf"), TaskStatus::InProgress));
+        let stale_basis = Observation {
+            state: Liveness::WaitingForInput,
+            evidence: "task_complete 7740s ago; last write 7740s ago".into(),
+        };
         let mut fresh = prompt.clone();
         fresh.retract_task = Some("t".into());
-        assert!(!apply_idle_liveness(&mut fresh, "wolf", &observed, true));
-        assert!(!fresh.text.contains("pending delivery"));
+        assert!(!idle_relay_deliverable(&mut fresh, "wolf", &stale_basis, &started));
+        // The same relay with no live evidence against it is still delivered.
+        let mut parked = prompt.clone();
+        parked.retract_task = Some("t".into());
+        assert!(idle_relay_deliverable(&mut parked, "wolf", &stale_basis, &tests::make_data(0)));
         let mut ordinary = prompt.clone();
-        apply_idle_liveness(&mut ordinary, "wolf", &Observation { state: Liveness::WaitingForInput, evidence: "idle".into() }, false);
+        apply_idle_liveness(&mut ordinary, "wolf", &Observation { state: Liveness::WaitingForInput, evidence: "idle".into() });
         assert_eq!(ordinary.text.lines().last(), prompt.text.lines().last());
     }
 }

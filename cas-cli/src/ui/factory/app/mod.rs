@@ -1919,12 +1919,7 @@ impl FactoryApp {
                     // delivered; it is never observed here, on the loop.
                     let observation = idle_liveness.get(worker).cloned().flatten();
                     if let Some(observation) = observation {
-                        let named_task_in_progress = prompt.retract_task.as_deref().is_some_and(|id| {
-                            unfiltered_data.in_progress_tasks.iter().any(|task| {
-                                task.id == id && task.status == cas_types::TaskStatus::InProgress
-                            })
-                        });
-                        if !super::director::apply_idle_liveness(&mut prompt, worker, &observation, named_task_in_progress)
+                        if !super::director::idle_relay_deliverable(&mut prompt, worker, &observation, &unfiltered_data)
                         {
                             continue;
                         }

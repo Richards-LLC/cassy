@@ -121,7 +121,8 @@ fn owner_authority(core: &CasCore) -> Result<(), String> {
     use crate::mcp::tools::core::task::lifecycle::close_ops::SupervisorAuthorityError;
     let owner = core.resolve_live_supervisor_authority().map_err(|error| match error {
         SupervisorAuthorityError::NotLive(agent) => format!(
-            "verifier_factory_owner: live registered supervisor required ({agent:?})"
+            "verifier_factory_owner: live registered supervisor required (agent {} is {} with status {:?})",
+            agent.id, agent.role, agent.status
         ),
         SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
             "verifier_factory_owner: live registered supervisor required (agent {caller_id} is not registered: {error})"
@@ -131,7 +132,19 @@ fn owner_authority(core: &CasCore) -> Result<(), String> {
             format!("verifier_factory_owner_lookup: {error}")
         }
     })?;
-    let _ = (&owner, LivenessOutcome::NoPidRecorded);
+    let local = owner
+        .machine_id
+        .as_deref()
+        .is_none_or(|machine| machine == cas_types::Agent::get_or_generate_machine_id());
+    if local
+        && let LivenessOutcome::Dead { cc_pid, .. } =
+            evaluate_liveness(&owner, pid_alive, pid_matches_fingerprint)
+    {
+        return Err(format!(
+            "verifier_factory_owner: live registered supervisor required (agent {} process {cc_pid} is not running)",
+            owner.id
+        ));
+    }
     Ok(())
 }
 

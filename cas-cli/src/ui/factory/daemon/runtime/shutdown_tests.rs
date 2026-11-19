@@ -1338,6 +1338,25 @@ async fn same_name_spawn_recovers_dead_pane_cas_35f6() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6() {
+    if let Some(root) = std::env::var_os("CAS_63ED_BUILD") {
+        use std::io::Read;
+        let root = std::path::PathBuf::from(root);
+        let worker = std::path::PathBuf::from(std::env::var_os("CAS_63ED_WORKTREE").unwrap());
+        let run = std::env::var("CAS_63ED_RUN").unwrap();
+        let mut env = crate::test_env_guard::TestEnvGuard::new();
+        env.set_current_dir(&worker);
+        // Simulate a compiler still draining after a stop request.
+        unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN); }
+        crate::factory_worker_runs::bind(&root, &run, std::process::id()).unwrap();
+        let lease = crate::factory_target_cache::owner::acquire(&root, &worker).unwrap().unwrap();
+        std::fs::write(root.join("build-ready"), std::process::id().to_string()).unwrap();
+        let mut release = [0_u8];
+        std::io::stdin().read_exact(&mut release).unwrap();
+        assert_eq!(release, [1]);
+        drop(lease);
+        crate::factory_worker_runs::finish(&root, &run, 0, chrono::Utc::now()).unwrap();
+        return;
+    }
     if !run_hermetic_recycle_child("recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6") {
         for status in [cas_types::AgentStatus::Stale, cas_types::AgentStatus::Shutdown] {
             recover_dead_worker(true, status).await;
@@ -1351,6 +1370,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     env.set("CAS_FACTORY_SESSION", SESSION);
     env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
     let account = env.home().join(".codex");
     std::fs::create_dir(&account).unwrap();
     std::fs::write(account.join("auth.json"), "{}").unwrap();
@@ -1365,7 +1385,9 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     git(&repo, &["init", "-qb", "main"]);
     git(&repo, &["config", "user.name", "Fixture"]);
     git(&repo, &["config", "user.email", "fixture@example.invalid"]);
-    git(&repo, &["commit", "--allow-empty", "-qm", "base"]);
+    std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-qm", "base"]);
     let cas = crate::store::init_cas_dir(&repo).unwrap();
     // Recovery tests preserve unpublished work; disk admission has its own
     // coverage and must not depend on the runner's available tmpfs space.
@@ -1397,6 +1419,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     let agents = open_agent_store(&cas).unwrap();
     let mut old = agents.get(&format!("agent-{name}")).unwrap();
     old.factory_session = Some(SESSION.into());
+    old.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
     old.metadata.insert("clone_path".into(), worker.display().to_string());
     old.metadata.insert("worker_cli".into(), "codex".into());
     old.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
@@ -1412,6 +1435,29 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     daemon.app.adopt_worker_pane_for_test(pane);
     assert!(daemon.app.prepare_worker_spawn(Some(name), true, None).is_err(),
         "a live same-name worker is never replaced by spawn");
+    struct Build(std::process::Child);
+    impl Drop for Build {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let mut build = if recycle {
+        let log = cas.join("build.log");
+        std::fs::write(&log, "").unwrap();
+        let run = crate::factory_worker_runs::register(&cas, &worker, &log, chrono::Utc::now()).unwrap().unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ui::factory::daemon::runtime::shutdown_tests::recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6", "--test-threads=1"])
+            .env("CAS_63ED_BUILD", &cas).env("CAS_63ED_WORKTREE", &worker).env("CAS_63ED_RUN", run)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null())
+            .spawn().unwrap();
+        let mut child = Build(child);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !cas.join("build-ready").exists() {
+                assert!(child.0.try_wait().unwrap().is_none());
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(crate::factory_target_cache::owner::for_retirement(&cas, &worker).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+        Some(child)
+    } else { None };
     // Kill only this fixture's child; consume its real PTY exit event.
     assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1441,10 +1487,34 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
         service.factory_request(rmcp::handler::server::wrapper::Parameters(req))
             .await.expect("supervisor can recycle a dead worker with unpublished work");
         daemon.enqueue_spawn_requests().unwrap();
+        let request_id = match daemon.pending_spawns.front().unwrap() {
+            super::super::PendingSpawn::Recycle { request_id, .. } => *request_id,
+            _ => panic!("unexpected lifecycle action"),
+        };
+        let supervisor_rows = || open_prompt_queue_store(&cas).unwrap().peek_all(100).unwrap()
+            .into_iter().filter(|row| row.target == daemon.app.supervisor_name()).map(|row| row.id).collect::<Vec<_>>();
+        let before = supervisor_rows();
+        daemon.process_pending_spawns().await;
+        assert!(daemon.pending_spawns.iter().any(|pending| matches!(pending,
+            super::super::PendingSpawn::Recycle { request_id: id, name: held, .. } if *id == request_id && held == name)));
+        assert_eq!(shutdown_row_state(&cas, request_id).0.as_deref(), Some(SpawnLifecycleState::Provisioning.as_str()));
+        assert!(!daemon.spawn_verifications.contains_key(name));
+        assert_eq!(supervisor_rows(), before);
+        use std::io::Write;
+        let child = build.as_mut().unwrap();
+        child.0.stdin.as_mut().unwrap().write_all(&[1]).unwrap();
+        assert!(child.0.wait().unwrap().success());
         daemon.process_pending_spawns().await;
         daemon.app.join_worker_worktree_cleanups();
         daemon.process_pending_spawns().await;
         assert!(daemon.spawn_verifications.contains_key(name), "replacement launched: {:?}", daemon.app.error_message);
+        let mut replacement = cas_types::Agent::new_with_role(
+            daemon.app.mux.get(name).unwrap().harness_session_id().unwrap(), name.into(), cas_types::AgentRole::Worker);
+        replacement.factory_session = Some(SESSION.into());
+        agents.register(&replacement).unwrap();
+        daemon.reconcile_spawn_verifications().await;
+        assert_eq!(shutdown_row_state(&cas, request_id).0.as_deref(), Some(SpawnLifecycleState::Registered.as_str()));
+        assert_eq!(supervisor_rows(), before);
     } else {
         // The named spawn consumer uses this same prepare/provision/finish path.
         let prep = daemon.app.prepare_worker_spawn(Some(name), true, None).unwrap();

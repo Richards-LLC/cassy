@@ -2279,6 +2279,19 @@ pub(crate) fn enqueue_recycle_resume_brief(
     enqueue_context_resume_brief(cas_dir, supervisor_name, Some(factory_session), worker_name)
 }
 
+/// How a new worker's first assignment reaches its harness. A Codex worker's Cassy
+/// tools may not exist when it launches (GH #2128), so it starts with no actionable
+/// prompt and its assignment travels the readiness-gated prompt queue.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StartupHandoff {
+    LaunchArgument,
+    GatedQueue,
+}
+
+pub(crate) fn startup_handoff(_cli: cas_mux::SupervisorCli) -> StartupHandoff {
+    StartupHandoff::LaunchArgument
+}
+
 /// Shared by daemon recycle completion and a confirmed in-place context reset.
 /// Legacy callers without a factory session still receive their task brief;
 /// received-message history requires an authenticated session.

@@ -23097,7 +23097,7 @@ mod stall_nudge_rework_tests {
         let (_root, cas_dir, _worker, _nudge) = fixture(false);
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
         make_worker_ready(&mut daemon).await;
-        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        crate::factory_tools_ready::await_listing(&cas_dir, &daemon.session_name, "worker-a");
         let queue = open_prompt_queue_store(&cas_dir).unwrap();
         let wake = queue.enqueue("supervisor", "worker-a", "your next instruction").unwrap();
 
@@ -23139,7 +23139,7 @@ mod stall_nudge_rework_tests {
             child.wait().unwrap();
             child.id()
         };
-        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        crate::factory_tools_ready::await_listing(&cas_dir, &daemon.session_name, "worker-a");
         env.set(crate::factory_tools_ready::FRONT_PID_ENV, &std::process::id().to_string());
         crate::factory_tools_ready::note_listed_by_backend_for_test(&cas_dir, "1", retired_backend);
         let after_swap = queue.enqueue("supervisor", "worker-a", "after the swap").unwrap();
@@ -23148,6 +23148,19 @@ mod stall_nudge_rework_tests {
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }
         assert!(queue.queued_prompt(after_swap).unwrap().unwrap().processed_at.is_some(), "a backend swap does not hold the worker's wakes");
+
+        // GH #2185: an upgraded daemon adopts an idle Codex worker whose server listed its
+        // tools before any record existed and never lists again. Its message is typed in.
+        std::fs::remove_file(crate::factory_tools_ready::path_for_test(&cas_dir, &daemon.session_name, "worker-a")).unwrap();
+        let adopted = queue.enqueue("supervisor", "worker-a", "after the upgrade").unwrap();
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        let (transported, wake): (Option<String>, Option<String>) = conn.query_row(
+            "SELECT transport_delivered_at, wake_attempt FROM prompt_queue WHERE id = ?", [adopted], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert!(transported.is_some() && wake.is_some(), "an adopted worker's message reaches its pane: transported={transported:?} wake={wake:?}");
     }
 
     /// GH #2128: the other ways an actionable prompt reaches a Codex worker (its spawn
@@ -23157,7 +23170,7 @@ mod stall_nudge_rework_tests {
         let (_root, cas_dir, _worker, _nudge) = fixture(false);
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
         make_worker_ready(&mut daemon).await;
-        crate::factory_tools_ready::forget_for_test(&cas_dir, &daemon.session_name, "worker-a");
+        crate::factory_tools_ready::await_listing(&cas_dir, &daemon.session_name, "worker-a");
         let queue = open_prompt_queue_store(&cas_dir).unwrap();
         let spawn = crate::task_assignment::enqueue_spawn_message(&cas_dir, &daemon.session_name, "worker-a", "cas-1234", "your first instruction").unwrap();
         let resume = crate::ui::factory::enqueue_context_resume_brief(&cas_dir, "supervisor", Some(&daemon.session_name), "worker-a").unwrap()

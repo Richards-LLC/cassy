@@ -3686,42 +3686,35 @@ async fn test_clear_context_unconfirmed_reset_names_action_without_claiming_succ
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
 
-/// cas-a622: unsaved work still refuses a recycle, and the refusal names what
-/// to do instead of suggesting a `force=true` that recycling never honours.
+/// GH #2185: a recycle keeps the worktree and branch, so a clean worker whose
+/// commits are only local is recycled, and its branch head is untouched.
 #[tokio::test]
-async fn test_recycle_worker_refuses_unpushed_commits_without_suggesting_force_cas_a622() {
+async fn test_recycle_worker_keeps_unpushed_commits_gh_2185() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
     let env = FactoryTestEnv::new();
     let worker_path = init_pushed_worker_repo(&env, "ahead-worker");
     std::fs::write(worker_path.join("local.txt"), "not pushed\n").expect("write");
-    for args in [&["add", "local.txt"][..], &["commit", "-qm", "local only"][..]] {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&worker_path)
-            .status()
-            .expect("git");
-        assert!(status.success());
-    }
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(&worker_path).output().expect("git");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&["add", "local.txt"]);
+    git(&["commit", "-qm", "local only"]);
+    let head = git(&["rev-parse", "HEAD"]);
     register_codex_worker_at(&env, "ahead-worker", "session-a622-unpushed", &worker_path);
 
-    for force in [None, Some(true)] {
-        let mut req = factory_req("recycle_worker");
-        req.target = Some("ahead-worker".to_string());
-        req.force = force;
-        let error = env
-            .service
-            .factory_request(Parameters(req))
-            .await
-            .expect_err("an unpushed worker must not be recycled");
-        assert!(error.message.contains("unpushed_commits=1"), "{error:?}");
-        assert!(
-            !error.message.contains("force=true"),
-            "the refusal must not suggest a flag that cannot work: {error:?}"
-        );
-    }
-    assert!(
-        env.spawn_queue().peek(10).expect("peek queue").is_empty(),
-        "refusal must not queue a lifecycle action"
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("ahead-worker".to_string());
+    env.service
+        .factory_request(Parameters(req))
+        .await
+        .expect("a clean worker with only local commits is recycled");
+    let queued = env.spawn_queue().peek(10).expect("peek queue");
+    assert_eq!(
+        (queued.len(), queued[0].action, git(&["rev-parse", "HEAD"])),
+        (1, cas_store::SpawnAction::Recycle, head),
+        "(queued actions, action, branch head)"
     );
 }
 

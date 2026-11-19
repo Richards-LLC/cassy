@@ -229,17 +229,18 @@ mod tests {
         assert_eq!((observer.turns_started(), observer.turns_ended()), (2, 2));
     }
 
-    /// The readiness a sleeping test would have guessed never arrives: the
-    /// wait fails at once, naming what the rollout did show.
+    /// A rollout cannot tell "never starts" from "has not started yet", so a
+    /// wait that sees no start returns the typed timeout at its deadline,
+    /// naming what the rollout did show, instead of passing on elapsed time.
     #[test]
-    fn a_turn_that_never_starts_fails_the_wait_deterministically() {
+    fn a_wait_that_sees_no_start_returns_a_typed_timeout_at_its_deadline() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("rollout.jsonl");
         append(&path, &row("user_message"));
         let mut observer = RolloutTurnObserver::new(&path);
         let error = observer
-            .wait_for_turns_started(1, Instant::now(), || {})
-            .expect_err("no task_started row exists");
+            .wait_for_turns_started(1, Instant::now() + Duration::from_millis(50), || {})
+            .expect_err("no task_started row exists before the deadline");
         assert_eq!(
             (error.phase, error.turns_started, error.turns_ended),
             (TurnPhase::Idle, 0, 0)

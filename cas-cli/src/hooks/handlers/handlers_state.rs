@@ -1285,6 +1285,17 @@ mod supervisor_handoff_tests {
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         // Ordinary handoff mail was already delivered during the held startup.
         let context = format!("{held}\n{context}");
+        // cas-516f: over the SessionStart budget the lane degrades to counts plus
+        // receipt paths, so every row is reachable inline or through a receipt.
+        let reachable = |agent: &str| {
+            let mut text = std::fs::read_to_string(root.join("supervisor-recovery").join(format!("{agent}.txt"))).unwrap_or_default();
+            for entry in std::fs::read_dir(root.join("supervisor-handoffs")).unwrap() {
+                text.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+            }
+            text
+        };
+        let inline = context.clone();
+        let context = format!("{inline}\n{}", reachable("successor-id"));
         // GH #1487: integration alone does not prove the remaining close gates.
         for gate in ["ledger", "upkeep", "branch attribution"] {
             assert!(context.contains(gate), "recovery must disclose {gate}: {context}");
@@ -1316,7 +1327,7 @@ mod supervisor_handoff_tests {
             assert!(context.contains(expected), "startup lost {expected}: {context}");
         }
         assert!(context[handoff_start..handoff_end].lines().count() <= 30, "handoff must bound short historical rows too: {context}");
-        assert!(!context.contains("{\""), "startup handoff must use readable rows: {context}");
+        assert!(!inline.contains("{\""), "startup handoff must use readable rows: {inline}");
         let receipts = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap();
         let receipt: serde_json::Value = serde_json::from_slice(
             &std::fs::read(receipts.into_iter().next().unwrap().unwrap().path()).unwrap(),
@@ -1342,6 +1353,7 @@ mod supervisor_handoff_tests {
         let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();
         let third = serde_json::to_value(third).unwrap();
         let context = third["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let context = format!("{context}\n{}", reachable("third-id"));
         let receipts: Vec<_> = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap().map(|r| std::fs::read_to_string(r.unwrap().path()).unwrap()).collect();
         assert!(receipts.iter().any(|r| r.contains("cas-owned-id") && r.contains("inherited_handoff")), "unadopted inherited epics must remain retrievable");
         assert!(context.contains("live-worker"), "the inherited live worker must remain visible: {context}");

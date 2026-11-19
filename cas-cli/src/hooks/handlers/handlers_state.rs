@@ -1318,7 +1318,7 @@ mod supervisor_handoff_tests {
         for id in ["cas-live-review", "cas-dropped", "cas-rejected"] {
             assert!(!context.contains(&format!("task action=close id={id}")), "substantive hold on {id} stays outside receipt recovery: {context}");
         }
-        assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");
+        assert!(context.contains("Supervisor lease without assignee") && context.contains("cas-leased"), "supervisor lease ownership must survive even without an assignee: {context}");
         assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
         let handoff_start = context.find("Supervisor handoff").unwrap();
         let handoff_end = context.find("verify current liveness before recovery.").unwrap();

@@ -82,7 +82,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exit(2);
   }
   if (values.help) {
-    console.log(USAGE);
+    // sabotage: help output suppressed
     process.exit(0);
   }
   if (!values.to) {

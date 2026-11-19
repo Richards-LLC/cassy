@@ -3227,6 +3227,7 @@ async fn standby_stops_every_worker_and_resume_respawns_the_ones_holding_tasks_c
     }
     let mut resume = factory_req("standby");
     resume.status = Some("resume".to_string());
+    resume.cli = Some("claude".to_string());
     env.service.factory_request(Parameters(resume)).await.expect("resume");
     assert!(!cas::factory_standby::active(&env.cas_root, STANDBY_SESSION));
     let respawned: Vec<_> = env

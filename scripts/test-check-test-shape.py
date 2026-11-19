@@ -709,6 +709,13 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
                 (prefix, f'{{ use diagnostic::*; }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
                 (prefix, f'if !ready {{ }} assert_eq!(selected, Identity::exact("a.test.ts", "{sentence}"));', 0),
             ])
+            cases.append(('use crate::factory_worker_check::stability::Identity;\n'
+                          '#[cfg(test)] mod tests {\n'
+                          'trait Diagnostic { fn exact(path: &str, name: &str) -> String { name.to_string() } }\n'
+                          'impl<T> Diagnostic for T {}\n'
+                          'fn check<Identity>() { let source = "fixture";\n',
+                          f'assert_eq!(source, Identity::exact("a.test.ts", "{sentence}")); }}\n'
+                          '#[test] fn run() { check::<()>(); }', 1))
             for setup, assertion, status in cases:
                 probe = next((name for name, body in shadow_probes.items() if body == assertion), 'existing')
                 with self.subTest(probe=probe, assertion=assertion, setup=setup):

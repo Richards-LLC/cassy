@@ -963,10 +963,14 @@ fn command_store_guard(command: &Option<Commands>) -> StoreGuard {
     }
 }
 
-/// cas-008b: with `--store here` or `--store cas-root` given, the choice is
-/// made, so the ambient "CAS_ROOT supplies the default" notice must not print.
+/// cas-008b/cas-db72: with `--store here` or `--store cas-root` given, or for
+/// `factory worker-check` (which always names its store with `--cas-root`), the
+/// choice is made, so the ambient "CAS_ROOT supplies the default" notice must
+/// not print.
 pub fn silence_notice_for_explicit_store(command: &Option<Commands>) {
-    if matches!(command_store_guard(command), Some((_, Some(_)))) {
+    let worker_check = matches!(command, Some(Commands::Factory(args))
+        if matches!(args.command, Some(factory::FactoryCommands::WorkerCheck { .. })));
+    if worker_check || matches!(command_store_guard(command), Some((_, Some(_)))) {
         crate::store::detect::suppress_root_override_notice();
     }
 }

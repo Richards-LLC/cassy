@@ -2950,6 +2950,60 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
     let copy_config = std::fs::read_to_string(copy_root.join("config.toml")).unwrap();
     assert!(copy_config.contains("min_helpful = 9"), "copy config: {copy_config}");
     assert!(!live_config.contains("min_helpful = 9"), "live config: {live_config}");
+
+    // cas-db72 (GH #1918): `factory worker-check --cas-root B` under CAS_ROOT=A
+    // runs a permitted named check in a fixture worktree of B, writes its receipt
+    // under B and none under A, and prints no CAS_ROOT-override notice (which
+    // names both stores' paths).
+    let worktree = copy_root.join("worktrees").join("fixture");
+    std::fs::create_dir_all(worktree.join("src")).unwrap();
+    std::fs::write(
+        worktree.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        worktree.join("src/lib.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn named_case() {}\n}\n",
+    )
+    .unwrap();
+    // Build outputs must not dirty the fixture: the runner needs a clean commit.
+    std::fs::write(worktree.join(".gitignore"), "target/\nCargo.lock\n").unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["add", "."],
+        vec!["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fixture"],
+    ] {
+        let status = std::process::Command::new("git").args(&args).current_dir(&worktree).status().unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    let output = cas_cmd(temp.path())
+        .current_dir(&worktree)
+        .env("CAS_ROOT", &live_root)
+        .args(["factory", "worker-check", "--cas-root"])
+        .arg(&copy_root)
+        .args(["--", "nextest", "run", "-p", "fixture", "--lib", "-E", "test(named_case)"])
+        .output()
+        .expect("cas factory worker-check must run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a permitted named check must succeed.\nstderr: {stderr}\nstdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !stderr.contains(&live_root.display().to_string()),
+        "an explicit worker-check --cas-root must not print the CAS_ROOT-override notice.\nstderr: {stderr}"
+    );
+    let receipts = |root: &std::path::Path| {
+        walkdir::WalkDir::new(root.join("worker-checks"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count()
+    };
+    assert!(receipts(&copy_root) > 0, "the receipt must land under the explicit store B");
+    assert_eq!(receipts(&live_root), 0, "no worker-check receipt may land under CAS_ROOT's store A");
 }
 
 /// cas-e1c7: `cas cloud project set`, run inside another project from a shell

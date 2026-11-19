@@ -1,0 +1,4 @@
+title: The disk-pressure capacity notice counts verifier review scratch queued for deletion in its reclaimable total instead of reporting none found
+tasks: [cas-7a37]
+journeys: [FACTORY-SUPERVISE]
+invariants: [FACTORY-CAPACITY-NOTICES]

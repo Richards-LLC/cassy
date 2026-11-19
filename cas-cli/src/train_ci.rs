@@ -296,70 +296,156 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
 /// CI proved each delivery; a frozen train accepts no merge that could
 /// supersede the run. A repair or plumbing commit on a frozen train is a new
 /// tip and gets its own single run.
-fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &mut Value) -> Result<()> {
+fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &mut Value) -> Result<Value> {
+    use fs2::FileExt;
+    let out = directory(root, &epic.id)?;
+    std::fs::create_dir_all(&out)?;
+    // Freeze and the daemon can reach this path concurrently. Keep accepted
+    // requests outside state.json, which the Python observer also replaces.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false)
+        .read(true).write(true).open(out.join("dispatch.lock"))?;
+    lock.lock_exclusive()?;
+    let path = out.join("dispatches.json");
+    state["dispatches"] = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            state["dispatches"].as_object().cloned().map(Value::Object)
+                .unwrap_or_else(|| serde_json::json!({}))
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let report = dispatch_frozen_locked(root, epic, repo, branch, head, state)
+        .unwrap_or_else(|error| dispatch_report(head, None, Some("dispatch_failed"), &error.to_string()));
+    state["dispatches"][head]["report"] = report.clone();
+    crate::cli::integrate::fs::atomic_write(&path, &serde_json::to_string_pretty(&state["dispatches"])?)?;
+    Ok(report)
+}
+
+fn dispatch_report(head: &str, run: Option<&Value>, reason: Option<&str>, detail: &str) -> Value {
+    serde_json::json!({
+        "head": head,
+        "run_id": run.and_then(|run| run["id"].as_u64()).map(|id| id.to_string()),
+        "run_url": run.and_then(|run| run["html_url"].as_str()),
+        "status": run.map(|run| &run["status"]),
+        "conclusion": run.map(|run| &run["conclusion"]),
+        "skip_reason": reason, "detail": detail,
+    })
+}
+
+/// Metadata establishes run identity only; it never creates a suite verdict.
+fn frozen_run(repo: &Path, branch: &str, head: &str, dead: Option<&str>) -> Result<Option<Value>> {
+    let endpoint = format!(
+        "repos/{{owner}}/{{repo}}/actions/workflows/full-validation.yml/runs?branch={}&event=workflow_dispatch&per_page=100",
+        urlencoding::encode(branch),
+    );
+    let response = gh_json(repo, &endpoint)?;
+    let runs = response["workflow_runs"].as_array().context("train run lookup returned no workflow_runs")?;
+    Ok(runs.iter().filter(|run| {
+        run["head_sha"] == head && run["head_branch"] == branch && run["event"] == "workflow_dispatch"
+            && !matches!(run["conclusion"].as_str(), Some("cancelled" | "skipped"))
+            && run["id"].as_u64().is_some_and(|id| dead != Some(id.to_string().as_str()))
+    }).max_by_key(|run| (run["id"].as_u64(), run["run_attempt"].as_u64())).cloned())
+}
+
+fn dispatch_frozen_locked(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &mut Value) -> Result<Value> {
+    if crate::mcp::tools::core::workflow::release_freeze::active(root, epic).is_none() {
+        return Ok(dispatch_report(head, None, Some("not_frozen"), "Train is not frozen; no run dispatched."));
+    }
+    if state["outcome"] != "PENDING" {
+        return Ok(serde_json::json!({
+            "head": head, "run_id": state["run_id"], "run_url": state["run_url"],
+            "status": "completed", "conclusion": if state["outcome"] == "PASS" { "success" } else { "failure" },
+            "skip_reason": "receipt_available", "detail": "Train suite receipt already observed.",
+        }));
+    }
+    let workflow = Command::new("git").current_dir(repo)
+        .args(["cat-file", "-e", &format!("{head}:.github/workflows/full-validation.yml")]).output()?;
+    if !workflow.status.success() {
+        return Ok(dispatch_report(head, None, Some("workflow_missing"), "Frozen tip has no .github/workflows/full-validation.yml; no run dispatched."));
+    }
     let history = state["dispatches"][head].clone();
-    // A replacement may take a scan to appear in GitHub's list. Never count
-    // the abandoned run as pending again, including after a daemon restart.
-    if history["dead_run_id"].is_string()
-        && state["pending_run_id"] == history["dead_run_id"]
-    {
+    let dead = history["dead_run_id"].as_str();
+    if dead.is_some() && state["pending_run_id"].as_str() == dead {
         state["pending_run_id"] = Value::Null;
     }
-    if state["outcome"] != "PENDING"
-        || crate::mcp::tools::core::workflow::release_freeze::active(root, epic).is_none()
-    {
-        return Ok(());
-    }
     let marker = directory(root, &epic.id)?.join("dispatched-head");
-    let pending = state["pending_run_id"].as_str().map(str::to_owned);
-    if let Some(run_id) = pending.as_deref() {
-        state["dispatches"][head]["run_id"] = run_id.into();
-        // cas-7d684: one replacement per frozen head, never a retry chain.
-        if history["dead_run_id"].is_string() {
-            return Ok(());
-        }
-        let endpoint = format!("repos/{{owner}}/{{repo}}/actions/runs/{run_id}");
-        let run = gh_json(repo, &endpoint)?;
+    let pending = frozen_run(repo, branch, head, dead)?;
+    let mut replaced = None;
+    if let Some(run) = pending.as_ref() {
+        let run_id = run["id"].as_u64().context("train run has no id")?.to_string();
+        state["dispatches"][head]["run_id"] = run_id.clone().into();
+        // Adopt manual runs as well as Cassy's requests before considering a
+        // new dispatch. A completed failed run needs a repair, not a retry.
+        std::fs::write(&marker, head)?;
         let old = run["created_at"].as_str()
             .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
             .is_some_and(|created| chrono::Utc::now().signed_duration_since(created)
                 >= chrono::Duration::seconds(90));
-        if run["status"] != "queued" || run["head_sha"] != head || !old {
-            return Ok(());
+        let stalled = dead.is_none() && run["status"] == "queued" && old
+            && gh_json(repo, &format!("repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs?per_page=1"))?["total_count"].as_u64() == Some(0);
+        if !stalled {
+            return Ok(dispatch_report(head, Some(run), Some("existing_run"), "Adopted the existing full-validation.yml run at this tip."));
         }
-        let jobs = gh_json(repo, &format!("{endpoint}/jobs?per_page=1"))?;
-        if jobs["total_count"].as_u64() != Some(0) {
-            return Ok(());
-        }
-    } else if history["dead_run_id"].is_string()
+        replaced = Some(run_id);
+    } else if dead.is_some() || history["requested_at"].is_string()
         || std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == head)
     {
-        return Ok(());
+        return Ok(dispatch_report(head, None, Some("already_dispatched"), "A dispatch was already accepted for this tip, but its run is not visible; no duplicate dispatched."));
     }
     let mut command = Command::new(crate::github_repo::gh_binary());
-    command
-        .args(["workflow", "run", "full-validation.yml", "--ref", branch])
-        .current_dir(repo);
+    command.args(["workflow", "run", "full-validation.yml", "--ref", branch]).current_dir(repo);
     let timeout = Duration::from_secs(30);
     let output = crate::bounded_process::run_command(
-        &mut command,
-        crate::bounded_process::Deadline::after(timeout),
-        timeout,
-    )
-    .map_err(|error| anyhow::anyhow!("train suite dispatch failed: {error:?}"))?;
-    ensure!(
-        output.status.success(),
-        "train suite dispatch failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if let Some(run_id) = pending {
+        &mut command, crate::bounded_process::Deadline::after(timeout), timeout,
+    ).map_err(|error| anyhow::anyhow!("train suite dispatch failed: {error:?}"))?;
+    ensure!(output.status.success(), "train suite dispatch failed: {}", String::from_utf8_lossy(&output.stderr));
+    if let Some(run_id) = replaced {
         state["dispatches"][head]["dead_run_id"] = run_id.into();
         state["dispatches"][head]["run_id"] = Value::Null;
         state["pending_run_id"] = Value::Null;
     }
+    // Persist acceptance before the follow-up API call: GitHub may take time
+    // to list a new run, or the lookup can fail after a successful dispatch.
+    state["dispatches"][head]["requested_at"] = chrono::Utc::now().to_rfc3339().into();
     std::fs::write(&marker, head)?;
+    let run = frozen_run(repo, branch, head, state["dispatches"][head]["dead_run_id"].as_str());
+    let report = match run {
+        Ok(Some(run)) => dispatch_report(head, Some(&run), None, "Dispatched full-validation.yml at the frozen tip."),
+        Ok(None) => dispatch_report(head, None, Some("awaiting_run_visibility"), "Dispatch accepted; GitHub has not listed its run yet."),
+        Err(error) => dispatch_report(head, None, Some("run_lookup_failed"), &format!("Dispatch accepted; {error}")),
+    };
     tracing::info!(train=%epic.id, %head, "train suite dispatched at frozen tip");
-    Ok(())
+    Ok(report)
+}
+
+/// Start/adopt the suite during freeze itself, without running the receipt
+/// observer or waiting for its daemon session to scan this train.
+pub(crate) fn freeze_dispatch(root: &Path, epic: &cas_types::Task) -> Value {
+    let result = (|| -> Result<Value> {
+        let branch = epic.effective_epic_branch().context("train has no lane")?;
+        let repo = crate::train_guardrails::train_repo_root(root, epic)?;
+        let git = crate::worktree::GitOperations::new(repo.clone());
+        let head = git.fetch_merge_target(branch)?.or_else(|| git.resolve_commit(branch)).context("train tip missing")?;
+        let mut state: Value = std::fs::read(directory(root, &epic.id)?.join("state.json"))
+            .ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        state["outcome"] = "PENDING".into();
+        dispatch_frozen(root, epic, &repo, branch, &head, &mut state)
+    })();
+    result.unwrap_or_else(|error| dispatch_report("", None, Some("dispatch_failed"), &error.to_string()))
+}
+
+/// The current lane tip's last dispatch observation, shared by freeze output
+/// and the Commander card. Never carry an earlier tip's URL or ETA forward.
+pub(crate) fn current_run(root: &Path, epic: &cas_types::Task) -> Option<Value> {
+    let repo = crate::train_guardrails::train_repo_root(root, epic).ok()?;
+    let branch = epic.effective_epic_branch()?;
+    let git = crate::worktree::GitOperations::new(repo);
+    let head = git.resolve_commit(&format!("refs/remotes/origin/{branch}"))
+        .or_else(|| git.resolve_commit(branch))?;
+    let bytes = std::fs::read(directory(root, &epic.id).ok()?.join("dispatches.json")).ok()?;
+    let history: Value = serde_json::from_slice(&bytes).ok()?;
+    Some(history[head]["report"].clone())
 }
 
 /// Read run metadata without ever cancelling a GitHub run.
@@ -372,7 +458,7 @@ fn gh_json(repo: &Path, endpoint: &str) -> Result<Value> {
         crate::bounded_process::Deadline::after(timeout),
         timeout,
     ).map_err(|error| anyhow::anyhow!("train run lookup failed: {error:?}"))?;
-    ensure!(output.status.success(), "train run lookup failed ({})", output.status);
+    ensure!(output.status.success(), "train run lookup failed ({}): {}", output.status, String::from_utf8_lossy(&output.stderr));
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
@@ -771,6 +857,22 @@ else: sys.exit(1)
         ).unwrap()).unwrap();
         assert_eq!(failed["train_ci"]["skip_reason"], "dispatch_failed");
         assert!(failed["train_ci"]["run_url"].is_null());
+        let train = crate::store::open_task_store(&root).unwrap().get("cas-train").unwrap();
+        let card = crate::mcp::tools::core::workflow::release_freeze::card(&root, &train).unwrap();
+        assert!(card["eta"].is_null());
+        assert_eq!(card["train_ci"]["skip_reason"], "dispatch_failed");
+        // A legacy accepted request without a visible run must explain the
+        // skip, and must not create another dispatch after a restart.
+        let head = String::from_utf8(Command::new("git").current_dir(repo)
+            .args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap();
+        std::fs::write(directory(&root, "cas-train").unwrap().join("dispatched-head"), head.trim()).unwrap();
+        let before = dispatches();
+        let skipped: Value = serde_json::from_str(&core.train_freeze(
+            "cas-train", Some("release-freeze: accepted request"), false,
+        ).unwrap()).unwrap();
+        assert_eq!(dispatches(), before);
+        assert_eq!(skipped["train_ci"]["skip_reason"], "already_dispatched");
+        assert!(skipped["train_ci"]["run_url"].is_null());
     }
 
     #[test]

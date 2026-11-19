@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import runpy
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -739,6 +740,9 @@ def main():
         if args.command == 'check' and state['outcome'] != 'PASS':
             if state.get('failure_kind') == 'run_failed_before_receipt':
                 raise ValueError(f'train tip {state["head"]}: run failed before receipt ({state["run_url"]}); repair the train')
+            if state['outcome'] == 'PENDING' and not state.get('pending_run_id'):
+                dispatch = shlex.join(['gh', 'workflow', 'run', WORKFLOW, '--ref', state['branch']])
+                raise ValueError(f'train tip {state["head"]} has no green full-set receipt (PENDING): no {WORKFLOW} run; dispatch with `{dispatch}`')
             raise ValueError(f'train tip {state["head"]} has no green full-set receipt ({state["outcome"]}); wait for CI or repair the train')
         if args.command == 'check' and state.get('main_baseline') != git(args.repo, 'rev-parse', 'origin/' + os.environ.get('GITHUB_DEFAULT_BRANCH', 'main')):
             raise ValueError('train full-set receipt predates the current main baseline')

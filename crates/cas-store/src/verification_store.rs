@@ -3134,9 +3134,9 @@ fn issue_server_verifier_handoff_with_conn(
         || dispatch.owner_agent_id != issuer_agent_id
         || dispatch.state != VerificationDispatchState::Pending
     {
-        return Err(StoreError::Parse(
-            "verifier handoff requires the exact active owned dispatch".to_string(),
-        ));
+        return Err(StoreError::VerifierHandoffNotActive {
+            dispatch_id: dispatch.id,
+        });
     }
     // A replacement is scheduled against a dispatch whose first verifier never
     // started, so its deadline may already have passed while it is still

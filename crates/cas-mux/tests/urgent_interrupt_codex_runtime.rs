@@ -167,8 +167,13 @@ fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
     )
     .expect("rollout file for this scratch cwd must appear");
 
-    // Give the turn a moment to actually be in flight before interrupting.
-    std::thread::sleep(Duration::from_millis(1500));
+    // Interrupt only once the rollout says the turn is actually in flight.
+    let mut turns = cas_mux::readiness::RolloutTurnObserver::new(&rollout);
+    turns
+        .wait_for_turns_started(1, std::time::Instant::now() + Duration::from_secs(30), || {
+            let _ = mux.poll_batch();
+        })
+        .expect("the long turn must start before it is interrupted");
 
     // The exact conditions that reproduced the bug manually: a deliberately
     // tiny floor (the daemon's real 1200ms floor is not the point under
@@ -354,28 +359,22 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
     )
     .expect("rollout file for this scratch cwd must appear");
 
-    // Wait for the first turn to genuinely end on its own — both the reply
-    // text AND an explicit `task_complete` record, so we know this is a
-    // normal completion and not us racing a still-in-flight turn.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut contents = String::new();
-    let mut first_turn_done = false;
-    while std::time::Instant::now() < deadline {
+    // Wait for the first turn to genuinely end on its own: the rollout's own
+    // `task_complete` record, so this is a normal completion and not us racing
+    // a still-in-flight turn. The same record puts the pane in a real idle, so
+    // this urgent cannot benefit from any leftover in-flight state.
+    let mut turns = cas_mux::readiness::RolloutTurnObserver::new(&rollout);
+    let done = turns.wait_for_turns_ended(1, std::time::Instant::now() + Duration::from_secs(30), || {
         let _ = mux.poll_batch();
-        contents.clear();
-        if let Ok(mut f) = std::fs::File::open(&rollout) {
-            let _ = f.read_to_string(&mut contents);
-        }
-        if contents.contains("FIRST-TURN-DONE") && contents.contains("\"type\":\"task_complete\"") {
-            first_turn_done = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(300));
+    });
+    let mut contents = String::new();
+    if let Ok(mut f) = std::fs::File::open(&rollout) {
+        let _ = f.read_to_string(&mut contents);
     }
     assert!(
-        first_turn_done,
+        done.is_ok() && contents.contains("FIRST-TURN-DONE"),
         "first turn must complete normally (task_complete) before we can test the \
-         idle case — rollout tail:\n{}",
+         idle case: {done:?} — rollout tail:\n{}",
         contents
             .lines()
             .rev()
@@ -383,15 +382,6 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-
-    // Let the pane go genuinely idle: no more PTY output, well past the
-    // v2.31.0 quiescence poll's own STABILITY_WINDOW (300ms) and MAX_EXTRA_WAIT
-    // (4s), so this urgent cannot benefit from any leftover in-flight state.
-    let idle_until = std::time::Instant::now() + Duration::from_secs(8);
-    while std::time::Instant::now() < idle_until {
-        let _ = mux.poll_batch();
-        std::thread::sleep(Duration::from_millis(200));
-    }
 
     let first_user_messages = contents.matches("\"type\":\"user_message\"").count();
     let first_completions = contents.matches("\"type\":\"task_complete\"").count();
@@ -435,12 +425,13 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
             .join("\n")
     );
 
-    // Return to a genuinely idle prompt before testing urgent delivery.
-    let idle_until = std::time::Instant::now() + Duration::from_secs(8);
-    while std::time::Instant::now() < idle_until {
-        let _ = mux.poll_batch();
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    // Return to a genuinely idle prompt before testing urgent delivery: the
+    // rollout shows the second turn ended and no turn is in flight.
+    turns
+        .wait_for_turns_ended(2, std::time::Instant::now() + Duration::from_secs(30), || {
+            let _ = mux.poll_batch();
+        })
+        .expect("the non-urgent turn must end before the urgent case");
     let before_urgent_user_messages = contents.matches("\"type\":\"user_message\"").count();
     let before_urgent_completions = contents.matches("\"type\":\"task_complete\"").count();
 

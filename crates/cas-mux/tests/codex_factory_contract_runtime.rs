@@ -574,7 +574,12 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
             "Write a long explanation of terminal multiplexing. Keep working until interrupted.",
         ))
         .expect("start interruptible turn");
-    std::thread::sleep(Duration::from_millis(1200));
+    // Interrupt only once the rollout shows the third turn in flight.
+    cas_mux::readiness::RolloutTurnObserver::new(&rollout)
+        .wait_for_turns_started(3, Instant::now() + Duration::from_secs(30), || {
+            let _ = mux.poll_batch();
+        })
+        .expect("the interruptible turn must start before it is interrupted");
     runtime
         .block_on(mux.interrupt_and_inject(
             PANE,

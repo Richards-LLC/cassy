@@ -23062,7 +23062,21 @@ mod stall_nudge_rework_tests {
         let reason: Option<String> = conn.query_row("SELECT last_pending_reason FROM prompt_queue WHERE id = ?", [wake], |r| r.get(0)).unwrap();
         assert_eq!(reason.as_deref(), Some("gated_not_ready"));
 
-        crate::factory_tools_ready::record_tools_listed(&cas_dir, &daemon.session_name, "worker-a", std::process::id()).unwrap();
+        // The front lists tools privately before Codex has any: that does not release the wake.
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_AGENT_ROLE", "worker"),
+            ("CAS_FACTORY_SESSION", daemon.session_name.as_str()),
+            ("CAS_AGENT_NAME", "worker-a"),
+        ]);
+        crate::factory_tools_ready::note_tools_listed(&cas_dir, &format!("{}probe", crate::factory_tools_ready::FRONT_PROBE_PREFIX));
+        for _ in 0..4 {
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        }
+        assert!(queue.queued_prompt(wake).unwrap().unwrap().processed_at.is_none(), "a private probe listing does not release the wake");
+
+        // The external client's own tools/list does.
+        crate::factory_tools_ready::note_tools_listed(&cas_dir, "1");
         for _ in 0..4 {
             daemon.process_prompt_queue().await.unwrap();
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;

@@ -189,7 +189,7 @@ impl ServerHandler for CasService {
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
@@ -203,7 +203,7 @@ impl ServerHandler for CasService {
                 "MCP tools/list DONE"
             );
             // GH #2128: the daemon holds this worker's first wake until its tools are listed.
-            crate::factory_tools_ready::record_from_environment(&self.inner.cas_root);
+            crate::factory_tools_ready::note_tools_listed(&self.inner.cas_root, &context.id.to_string());
 
             Ok(ListToolsResult::with_all_items(tools))
         }

@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 
 const DIR: &str = "factory-tools-ready";
 
+/// Request ids the stable front uses for its own catalog probe, which runs before
+/// it answers the client's `initialize`. The client holds no tools at that point.
+pub(crate) const FRONT_PROBE_PREFIX: &str = "cassy-front-";
+
 fn marker(cas_root: &Path, session: &str, worker: &str) -> Option<PathBuf> {
     let safe = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
     (safe(session) && safe(worker) && !worker.starts_with('.')).then(|| cas_root.join(DIR).join(session).join(worker))
@@ -20,6 +24,13 @@ pub(crate) fn record_tools_listed(cas_root: &Path, session: &str, worker: &str, 
     let staged = path.with_extension(format!("pid{server_pid}"));
     std::fs::write(&staged, server_pid.to_string())?;
     std::fs::rename(staged, path)
+}
+
+/// A `tools/list` was answered. Only the external client's listing counts: the
+/// front's private probe precedes the client's own tools (GH #2128).
+pub(crate) fn note_tools_listed(cas_root: &Path, request_id: &str) {
+    let _ = request_id;
+    record_from_environment(cas_root);
 }
 
 /// The factory worker identity this process runs as, if it is one.

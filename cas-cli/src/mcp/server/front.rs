@@ -293,7 +293,7 @@ impl Connection {
     }
 
     async fn rpc(&mut self, method: &str, params: Option<Value>) -> Result<Value> {
-        let id = format!("cassy-front-{}", uuid::Uuid::new_v4());
+        let id = format!("{}{}", crate::factory_tools_ready::FRONT_PROBE_PREFIX, uuid::Uuid::new_v4());
         self.private.insert(serde_json::to_string(&id)?);
         let mut request = json!({"jsonrpc":"2.0", "id":id, "method":method});
         if let Some(params) = params { request["params"] = params; }

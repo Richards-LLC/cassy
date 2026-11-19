@@ -152,6 +152,114 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
             assert!(receipt.contains("CAS_PUSH_EPIC_BRANCH=0"), "{receipt}");
             let repeated = focus(root);
             assert!(!repeated.contains("FAST-FORWARDED"), "{repeated}");
+
+            // GH #2173: the real train-merge entry restores an unset focus,
+            // and the cut boundary moves that session to its successor.
+            let agents = crate::store::open_agent_store(root).unwrap();
+            let mut owner = cas_types::Agent::new_with_role("train-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+            owner.factory_session = Some("publication-test".into());
+            owner.pid = Some(std::process::id());
+            agents.register(&owner).unwrap();
+            epic.epic_verification_owner = Some(owner.id.clone());
+            epic.labels.push("release-train".into());
+            tasks.update(&epic).unwrap();
+            std::fs::write(root.join("config.toml"),
+                "[project]\ncanonical_id = \"publication-test\"\n[factory]\nrelease_train = true\n[verification]\nenabled = true\n").unwrap();
+            let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+            core.set_agent_id_for_testing(owner.id.clone());
+            focus_epic(root, "publication-test", FocusEpic::Clear).unwrap();
+            core.train_merge(&epic.id, Some(&[]), false, None).unwrap();
+            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()));
+
+            // A published transactional delivery can still owe its final
+            // close. Resume it through worktree_merge with focus cleared.
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let source = "factory/focus-held";
+            git(repo, &["branch", source, base]);
+            git(repo, &["push", "origin", source]);
+            let mut worker = cas_types::Agent::new_with_role("focus-worker".into(), "focus-held".into(), cas_types::AgentRole::Worker);
+            worker.factory_session = owner.factory_session.clone();
+            agents.register(&worker).unwrap();
+            let mut child = cas_types::Task::new("cas-focus-held".into(), "Held close".into());
+            child.status = cas_types::TaskStatus::InProgress;
+            child.assignee = Some(worker.name.clone());
+            child.risk = vec![cas_types::TaskRisk::None];
+            child.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:publication-test".into(),
+                target_branch: "epic/unpublished".into(),
+            });
+            tasks.add(&child).unwrap();
+            let receipt = cas_store::build_worker_completion_receipt(&cas_types::WorkerCompletionReceiptInput {
+                task_id: child.id.clone(),
+                worker_agent_id: worker.id.clone(),
+                repo_selector: "project:publication-test".into(),
+                source_branch: source.into(),
+                commit_sha: base.into(),
+                merge_base_sha: base.into(),
+                target_branch: "epic/unpublished".into(),
+                target_sha: base.into(),
+                proof_reference: "fixture:published-delivery".into(),
+                scope_summary: "Resume published delivery with held close".into(),
+                artifact_path: None,
+            }, "focus-held", chrono::Utc::now());
+            cas_store::create_worker_delivery(root, &receipt, cas_types::WorkerDeliveryState::CloseReady, &owner.id).unwrap();
+            focus_epic(root, "publication-test", FocusEpic::Clear).unwrap();
+            let result = runtime.block_on(core.worktree_merge(source, false, Some(&child.id), false, Some(false), false, None)).unwrap();
+            assert!(!result.is_error.unwrap_or(false), "{result:?}");
+            assert_ne!(tasks.get(&child.id).unwrap().status, cas_types::TaskStatus::Closed);
+            assert_eq!(cas_store::get_latest_worker_delivery(root, &child.id).unwrap().unwrap().1.state,
+                cas_types::WorkerDeliveryState::CloseReady);
+            assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
+            assert_eq!(tasks.get(&epic.id).unwrap().status, cas_types::TaskStatus::Open);
+            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(epic.id.as_str()), "{result:?}");
+
+            crate::mcp::tools::core::task::release_train::mark_cut_trains(
+                root, repo, tasks.as_ref(), &epic.id, base, "main", &[],
+            ).unwrap();
+            let cut = tasks.get(&epic.id).unwrap();
+            let next_id = cut.labels.iter().find_map(|label| label.strip_prefix("release-train-successor:")).unwrap();
+            assert_eq!(super::pinned_epic("publication-test").as_deref(), Some(next_id));
+
+            // GH #2174: a peer can pin the same train locally, but must not
+            // register a renewable Cloud focus claim against its live owner.
+            let server = runtime.block_on(wiremock::MockServer::start());
+            let lock = cas_types::TaskLease::new("train-lock".into(), owner.id.clone(), 600);
+            let mut lock_record = serde_json::to_value(&lock).unwrap();
+            lock_record["id"] = serde_json::json!("owner-lock");
+            runtime.block_on(async {
+                use wiremock::{Mock, ResponseTemplate};
+                use wiremock::matchers::{method, path_regex};
+                Mock::given(method("POST")).and(path_regex("/claim$"))
+                    .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                        "status":"conflict", "error":"already_claimed", "owner_agent_id":owner.id,
+                        "agent_id":owner.id, "expires_at":lock.expires_at,
+                    }))).mount(&server).await;
+                Mock::given(method("GET")).and(path_regex("/lock$"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock":lock_record})))
+                    .mount(&server).await;
+            });
+            let peer_repo = tempfile::tempdir().unwrap();
+            let peer_root = crate::store::init_cas_dir(peer_repo.path()).unwrap();
+            std::fs::write(peer_root.join("config.toml"), "[project]\ncanonical_id = \"publication-test\"\n").unwrap();
+            let cloud_config = crate::cloud::CloudConfig {
+                endpoint: server.uri(), token: Some("fixture-token".into()), ..Default::default()
+            };
+            std::fs::write(peer_root.join("cloud.json"), serde_json::to_vec(&cloud_config).unwrap()).unwrap();
+            let mut peer = cas_types::Agent::new_with_role("peer-owner".into(), "peer".into(), cas_types::AgentRole::Supervisor);
+            peer.factory_session = Some("peer-focus".into());
+            let peer_agents = crate::store::open_agent_store(&peer_root).unwrap();
+            peer_agents.register(&peer).unwrap();
+            crate::store::open_task_store(&peer_root).unwrap().add(&tasks.get(next_id).unwrap()).unwrap();
+            let metadata = crate::ui::factory::metadata_path("peer-focus");
+            let data = crate::ui::factory::create_metadata("peer-focus", 12345, "peer", &[], None, peer_repo.path().to_str(), None);
+            std::fs::write(metadata, serde_json::to_vec(&data).unwrap()).unwrap();
+            focus_epic(&peer_root, "peer-focus", FocusEpic::Pin { epic_id: next_id, delivery_mode: None }).unwrap();
+            crate::cloud::peer_claims::claim_epic_focus(&peer_root, next_id, &peer.id);
+            assert_eq!(super::pinned_epic("peer-focus").as_deref(), Some(next_id));
+            assert_eq!(peer_agents.get(&peer.id).unwrap().metadata.get(crate::cloud::peer_claims::META_FOCUS_CLAIM), None);
+            let coordinator = crate::cloud::CloudCoordinator::new(cloud_config).unwrap().with_agent_id(&peer.id);
+            assert_eq!(coordinator.get_lock("train-lock").unwrap().unwrap().agent_id, owner.id);
+            assert!(runtime.block_on(server.received_requests()).unwrap().iter().all(|request| request.method == "GET"));
         });
     }
 }

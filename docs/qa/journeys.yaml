@@ -1615,10 +1615,6 @@ bug_families:
     tasks: [cas-0010]
     invariants: [FACTORY-ISOLATED-PLAYWRIGHT]
     journeys: [FACTORY-SPAWN]
-  operator-claim-evidence:
-    title: Supervisor operator claims carry current-turn tool evidence or explicit uncertainty
-    tasks: [cas-ab79]
-    journeys: [FACTORY-SUPERVISE]
   park-proof-after-checkpoint-rebase:
     title: Fresh park evaluates the measured delivery after a checkpoint rebase and ancestry restore
     tasks: [cas-28c5]
@@ -1673,11 +1669,6 @@ bug_families:
     title: Prepared train pushes and queue entries adopt full-suite proof only across verified release plumbing
     tasks: [cas-976f]
     journeys: [FACTORY-MERGE]
-  claude-visible-operator-evidence:
-    title: Claude Code supervisor replies use visible same-turn evidence without hidden tool-use IDs
-    statement: Matching numbers and SHAs pass; unsupported literals, failed or stale results, and clipboard claims without a fresh read remain refused.
-    tasks: [cas-1f5f]
-    journeys: [HUB-J5]
   deterministic-history-recovery:
     title: History recovery keeps fixed chronological timestamps and settles scroll before viewport checks
     tasks: [cas-4452f]
@@ -1959,6 +1950,47 @@ bug_families:
     tasks: [cas-d0f6]
     journeys: [FACTORY-MERGE, FACTORY-CLOSE]
     invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+  approved-clean-carryover:
+    title: A clean retargeted merge reuses the original approved verdict through publication and close without dispatching another verifier
+    tasks: [cas-5cfe]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  codex-recycle-continuity:
+    title: Worker recycling preserves assignments through startup and excludes predecessor context usage
+    tasks: [cas-b39fa]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+    invariants: [FACTORY-WORKER-RESPAWN]
+  cut-train-rollover:
+    title: A cut moves unfinished children to its successor and closes reject unmergeable targets before proof or dispatch
+    tasks: [cas-3d3b]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  factory-board-refresh-rereads-every-task:
+    title: The factory board's two-second refresh re-reads every task row on a long-lived project instead of only the tasks that changed
+    tasks: [cas-ddbe]
+    journeys: [FACTORY-SUPERVISE]
+  release-auto-cut-owner-machine:
+    title: Peer auto-cut defaults must not override the train owner's disabled policy
+    tasks: [cas-3416]
+    journeys: [FACTORY-SUPERVISE]
+  runtime-test-identity-prose-pin:
+    title: Test-shape checks distinguish runtime test identity data from diagnostic prose
+    tasks: [cas-047d]
+    journeys: [FACTORY-CLOSE]
+  task-brief-latest-artifact-newest-published:
+    title: The task brief names the newest published artifact, not the last note
+    tasks: [cas-50e0]
+    journeys: [FACTORY-SUPERVISE]
+  train-freeze-dispatch:
+    title: A freeze immediately starts or adopts full-validation at its current tip and exposes a run URL or explicit reason without a speculative ETA
+    tasks: [cas-1d66]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  verifier-launch-owner-liveness-and-refusal-class:
+    title: Verifier launch refuses a gone owner process and retries by typed refusal code
+    tasks: [cas-4fd6]
+    journeys: [FACTORY-MERGE, FACTORY-CLOSE]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1997,14 +2029,6 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
-  CLI-RELEASE-EPIC-PROMOTION:
-    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
-    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and the auto-cut poll on a published lane, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
-    bug: {task: cas-e49f}
-  CI-LIGHT-RUNNER-CAPACITY:
-    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
-    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
-    bug: {task: cas-91b0}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -2316,7 +2340,7 @@ invariants:
     bug: {task: cas-8bb3}
   HUB-J4-TABLE-COPY:
     statement: Evidence, including short status replies, uses native table headers and cells; adjacent plain progress stays quiet, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.
-    check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts, including its short status and headerless status stages; read back both clipboard formats, verify quiet adjacent plain progress, commas and quotes, long paths at desktop/phone in both schemes, and empty cells. Run the answer/status clipboard regression in conversation-view.test.ts. Native proof queues a short kind=status table through a candidate hub and verifies live and reloaded headers/cells and copied contents.'
+    check: 'Run the HUB-J4 copy real tables case in read-history.journey.ts, including its headerless status stage; read back both clipboard formats, commas and quotes, long paths at desktop/phone in both schemes, and empty cells. Run the answer/status clipboard regression in conversation-view.test.ts. Native proof queues a short kind=status table through a candidate hub and verifies live and reloaded headers/cells and copied contents.'
     task: cas-0952
     bug: {task: cas-2656}
   HUB-J4-SAFE-CSV-COPY:
@@ -2814,6 +2838,14 @@ invariants:
     statement: Accounting report entries use saved ledger identities, numeric debit and credit rows, balanced totals, source-or-hypothetical amounts and visible revision changes; internal QBO IDs are never chart account numbers.
     check: Run scripts/test-accounting-journals.py through the shipped CLI with saved chart/source fixtures, including disabled or blank AcctNum, imbalance, invalid accounts, missing or mismatched sources and revised amounts. Open the generated simple and compound before-after page in light/dark desktop/phone, print and JS-disabled modes; inspect indentation, totals and memo placement.
     bug: {task: cas-b1f3}
+  CI-LIGHT-RUNNER-CAPACITY:
+    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
+    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
+    bug: {task: cas-91b0}
+  CLI-RELEASE-EPIC-PROMOTION:
+    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
+    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and the auto-cut poll on a published lane, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
+    bug: {task: cas-e49f}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS

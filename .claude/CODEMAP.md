@@ -46,14 +46,14 @@
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` — exact-SHA prechecks and dispatch recovery.
 - `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters; shared default-train election in `cas-cli/src/mcp/tools/core/task/release_train.rs` uses origin history and cut admission markers.
 - `cas-cli/src/cli/release_notice_failure.rs`, `cas-cli/src/issue_reconcile.rs` — exhausted release notices and issue reconciliation.
-- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch and shared schemas; pre-tool admission in `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs`, operator evidence in `cas-cli/src/hooks/handlers/operator_evidence.rs`.
+- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch and shared schemas; pre-tool admission in `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs`.
 - `cas-cli/src/config/`, `cas-cli/src/harness_policy.rs` — runtime settings and harness policy projections.
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/knowledge/`, `cas-cli/src/extraction/` — composed retrieval, distillation and extraction.
 - `cas-cli/src/retrieval_parity/`, `cas-cli/src/daemon/` — retrieval capture/replay and idle maintenance/indexing.
 - `cas-cli/src/consolidation/`, `cas-cli/src/sync/`, `cas-cli/src/memory_migration/` — memory maintenance and harness synchronization.
 - `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` — artifact publication, proof capture and report finalization; `cas-cli/src/artifacts/proof.rs` restores a peer's committed evidence before review.
 - `cas-cli/src/builtins/` — canonical skills, agents, harness catalogs and reference-history manifest.
-- `cas-cli/src/builtins/skills/cas-writing-tests/`, `cas-cli/src/builtins/skills/cas-playwright-tests/` — general test quality and browser Faith contracts; old names redirect.
+- `cas-cli/src/builtins/skills/cas-writing-tests/`, `cas-cli/src/builtins/skills/cas-playwright-tests/` — general test quality and browser Faith contracts; brief-warning patterns in `cas-cli/src/builtins/skills/cas-writing-tests/references/brief-test-phrases.txt`; old names redirect.
 - `cas-cli/src/builtins/skills/cas-test-audit/`, `cas-cli/src/builtins/skills/cas-playwright-debug/` — test-value audit and measured failure diagnosis; audit/history scripts live in `cas-cli/src/builtins/skills/cas-test-audit/scripts/`.
 - `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` — rule-marker navigation.
 - `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` — dataset proofs and verifier replay fixtures.
@@ -69,6 +69,8 @@
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/`, `cas-cli/src/ui/factory/server_registry.rs` — attach and server ownership.
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` — command admission and execution evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs`, `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` — transcript mirrors and turn accounting.
+- `cas-cli/src/factory_standby.rs`, `cas-cli/src/builtins/skills/standby/` — standby markers, held-task resume and the operator-only supervisor workflow.
+- `cas-cli/src/factory_tools_ready.rs` — live MCP tools-list readiness markers that release a worker’s assignment wake.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` — task binding and ordered backlogs.
 - `cas-cli/src/coordination.rs`, `cas-cli/src/coordination/`, `cas-cli/src/orchestration/` — external-thread authority, binding repair and agent names.
 - `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_review_scratch.rs` — authentication, candidate and review checkout ownership.
@@ -98,8 +100,9 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs` — shared delivery snapshots and finding-bound decisions used by report quality; registry enforcement is lane lint.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` — post-merge close and recovery-owner notices.
 - `cas-cli/src/mcp/tools/core/task/close_refusal.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` — close refusal facts and trusted note markers.
+- `cas-cli/src/mcp/tools/core/task/repair_class.rs` — recorded failing-test classes and matching repair-proof selectors.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs` — branch and delivery recovery.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs`, `cas-cli/src/mcp/tools/core/workflow/premerge_verification/` — review dispatch, background candidate preparation, verification and cycle-bound approval stamps (`cas-cli/src/mcp/tools/core/workflow/premerge_verification/cycle.rs`).
+- `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs`, `cas-cli/src/mcp/tools/core/workflow/premerge_verification/` — review dispatch, background candidate preparation, verification and cycle-bound approval stamps (`cas-cli/src/mcp/tools/core/workflow/premerge_verification/cycle.rs`); immutable approval carry mappings in `cas-cli/src/mcp/tools/core/workflow/premerge_verification/carryover.rs`.
 - `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs`, `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` — candidate merges and protected publication.
 - `cas-cli/src/mcp/tools/core/workflow/train_merge.rs`, `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs` — ordered train merges and release freeze admission.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs`, `cas-cli/src/cloud/peer_claims.rs`, `cas-cli/src/cloud/epic_split.rs` — source claims and cross-machine work shares.
@@ -134,7 +137,7 @@
 
 - **Tests:** inline Rust modules and `cas-cli/tests/`; process isolation uses `cas-cli/src/test_env_guard.rs`. Workers run capped named nextest filters; the merge queue runs the Rust suite.
 - **Browser proof:** Vitest under `hub-web/src/`, Playwright under `hub-web/e2e/`; affected selection in `scripts/journeys-for-diff.py`.
-- **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/release-reports/`.
+- **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/release-notes/`, `docs/release-reports/`.
 - **Generated docs:** `docs/product-overview.d/`, `docs/qa/bug-families/`, `scripts/doc-fragments.py` — fragments, lane lint and release compilation.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py`, `scripts/check-changed-markdown.py`; `scripts/test-test-audit.py` with `scripts/fixtures/test-audit/` covers the audit detectors.

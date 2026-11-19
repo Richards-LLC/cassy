@@ -545,7 +545,7 @@ fn track_on_train(
     // reminder availability. New tasks must not join the frozen lane.
     let tasks = open_task_store(root)?;
     crate::mcp::tools::core::task::release_train::mark_cut_trains(
-        root, repo, tasks.as_ref(), &train.id, &args.commit, &expected.integration,
+        root, repo, tasks.as_ref(), &train.id, &args.commit, &expected.integration, &scope.included_task_ids,
     ).map_err(anyhow::Error::msg).context("could not persist release train cut markers")?;
     // Review gaps belong to the cut receipt even when reminders are unavailable.
     save(&path, &expected)?;
@@ -976,6 +976,13 @@ pub(super) mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-b", "main"]).unwrap();
+        // Keep real Git publication local. Per-case rewrites of a complete
+        // URL have a longer prefix and retain their own disposable origin.
+        let origin = repo.join(".git/fixture-origin");
+        let bare = origin.join("Example/Repo.git");
+        fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["config", &format!("url.{}/.insteadOf", origin.display()), "https://github.com/"]).unwrap();
         // CI runners have no global identity; annotated tags and merges need one.
         git(repo, &["config", "user.name", "Fixture"]).unwrap();
         git(repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
@@ -1818,6 +1825,12 @@ pub(super) mod tests {
         let (temp, root, train, _, mut args) = fixture();
         let repo = temp.path();
         let store = open_task_store(&root).unwrap();
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "--bare"]).unwrap();
+        git(repo, &["config", &format!("url.{}.insteadOf", origin.path().display()), "https://github.com/Example/Repo.git"]).unwrap();
+        let mut worker = Agent::new_with_role("rollover-worker-id".into(), "rollover-worker".into(), AgentRole::Worker);
+        worker.factory_session = Some("rollover-session".into());
+        open_agent_store(&root).unwrap().register(&worker).unwrap();
         let old_main = git(repo, &["rev-parse", "main"]).unwrap();
         git(repo, &["branch", "-f", "main", "HEAD"]).unwrap();
         git(repo, &["update-ref", "refs/remotes/origin/main", "main"]).unwrap();
@@ -1847,8 +1860,52 @@ pub(super) mod tests {
         // Trains are opt-in (GH #1613); this case covers the next train.
         fs::write(root.join("config.toml"),
             "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nrelease_train = true\n").unwrap();
+        let compatible = git(repo, &["commit-tree", "main^{tree}", "-p", "main", "-m", "unmerged current-base delivery"]).unwrap();
+        let incompatible = git(repo, &["commit-tree", &format!("{old_main}^{{tree}}"), "-p", &old_main, "-m", "unmerged old-base delivery"]).unwrap();
+        let mut carry = Vec::new();
+        for (id, status, anchor) in [
+            ("cas-c001", TaskStatus::Open, None),
+            ("cas-c002", TaskStatus::InProgress, None),
+            ("cas-c003", TaskStatus::AwaitingMerge, Some(compatible)),
+            ("cas-c004", TaskStatus::AwaitingMerge, Some(incompatible)),
+        ] {
+            let mut child = Task::new(id.into(), "Unfinished delivery".into());
+            child.status = status;
+            child.assignee = Some(worker.name.clone());
+            child.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: train.branch.clone().unwrap() });
+            if let Some(anchor) = anchor {
+                let branch = format!("factory/{id}");
+                git(repo, &["branch", &branch, &anchor]).unwrap();
+                child.deliverables.factory_branch_anchor = Some(anchor);
+                child.deliverables.parked_branch = Some(branch);
+            }
+            store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+            carry.push(child);
+        }
         let _cwd = env.enter_dir(temp.path());
         track(&args, &root).unwrap();
+        let successor = store.get_parent_epic(&carry[0].id).unwrap().unwrap();
+        assert_ne!(successor.id, train.id);
+        let lane = successor.effective_epic_branch().unwrap();
+        assert_eq!(git(repo, &["rev-parse", lane]).unwrap(), git(repo, &["rev-parse", "main"]).unwrap());
+        for child in &carry {
+            let moved = store.get(&child.id).unwrap();
+            assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, successor.id);
+            assert_eq!(moved.deliverables.work_target.as_ref().unwrap().target_branch, lane);
+            assert_eq!(moved.deliverables.factory_branch_anchor, child.deliverables.factory_branch_anchor);
+            assert_eq!(moved.status, if child.id == "cas-c004" { TaskStatus::Open } else { child.status });
+        }
+        assert_eq!(store.get_parent_epic("cas-b007").unwrap().unwrap().id, successor.id);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let notices: Vec<serde_json::Value> = queue.peek_all(100).unwrap().iter()
+            .filter_map(|row| row.prompt.lines().last().and_then(|line| serde_json::from_str(line).ok())).collect();
+        for child in &carry {
+            let notice = notices.iter().find(|row| row["task_id"] == child.id).unwrap();
+            assert_eq!(notice["target_train"], successor.id);
+            assert_eq!(notice["target_branch"], lane);
+            assert_eq!(notice["requires_target_merge"], child.id == "cas-c004", "{}", child.id);
+        }
+
         for (id, _, _, _, retired) in rows {
             let sibling = store.get(id).unwrap();
             assert_eq!(crate::mcp::tools::core::task::release_train::is_cut_train(&sibling), retired, "{id}");
@@ -1881,6 +1938,7 @@ pub(super) mod tests {
         assert_eq!(open_reminder_store(&root).unwrap().list_all_pending().unwrap().len(), 2);
         let recorded: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
         assert_eq!(recorded.train_id, train.id);
+        assert_eq!(queue.peek_all(100).unwrap().len(), notices.len());
     }
     #[test]
     fn release_tracking_owner_fallback_never_blocks() {

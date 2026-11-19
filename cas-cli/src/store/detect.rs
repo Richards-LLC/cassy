@@ -203,9 +203,18 @@ fn canonical_or_owned(path: &Path) -> PathBuf {
 ///
 /// The comparison itself is also done at most once: resolving the competing root
 /// walks the directory tree, and that cost should not ride on every lookup.
+/// The notice is announced at most once per process.
+static ROOT_NOTICE_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// cas-008b: an explicit `--store` choice has settled which store the command
+/// acts on, so the "CAS_ROOT supplies the default" notice would contradict it.
+/// Spend the one announcement before anything can make it.
+pub(crate) fn suppress_root_override_notice() {
+    ROOT_NOTICE_ONCE.call_once(|| {});
+}
+
 fn announce_root_override_once(env_root: &Path, start: &Path) {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
+    ROOT_NOTICE_ONCE.call_once(|| {
         let Ok(cwd_root) = find_cas_root_ignoring_env(start) else {
             // No competing store at all — CAS_ROOT is the only candidate and
             // there is nothing for the operator to be confused about.

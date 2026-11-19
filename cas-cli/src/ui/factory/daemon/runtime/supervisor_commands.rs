@@ -255,7 +255,7 @@ fn record_supervisor_model(root: &std::path::Path, session: &str, supervisor: &s
 
 /// A recorded request alone is still only submission. Observe its own native
 /// turn end; never interpret the model's prose as proof of a successful wrap-up.
-fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> bool {
+fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, after: DateTime<Utc>, skill: &str) -> bool {
     let mut requested = false;
     for row in rows {
         if row["isSidechain"] == true || !row["timestamp"].as_str()
@@ -264,7 +264,7 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
             cas_mux::SupervisorCli::Claude => {
                 if row["type"] == "user" && row["isMeta"] != true {
                     if let Some(text) = row.pointer("/message/content").and_then(|v| v.as_str()) {
-                        requested = text.contains("<command-name>/finish</command-name>");
+                        requested = text.contains(&format!("<command-name>/{skill}</command-name>"));
                     }
                 }
                 if requested && row["type"] == "assistant" && row.pointer("/message/stop_reason").is_some_and(|v| v == "end_turn") { return true; }
@@ -273,7 +273,7 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
                 if row["type"] == "response_item" && row["payload"]["type"] == "message" && row["payload"]["role"] == "user" {
                     let text = row["payload"]["content"].as_array().map(|blocks| blocks.iter()
                         .filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-                    requested = matches!(text.trim(), "finish" | "$finish");
+                    requested = text.trim() == skill || text.trim().strip_prefix('$') == Some(skill);
                 }
                 if requested && row["type"] == "event_msg" && row["payload"]["type"] == "task_complete" { return true; }
             }
@@ -364,7 +364,7 @@ fn native_turn_idle(path: &std::path::Path, cli: cas_mux::SupervisorCli) -> Opti
     else { None }
 }
 
-fn finish_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli, after: DateTime<Utc>) -> Option<String> {
+fn finish_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli, after: DateTime<Utc>, skill: &str) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let path = supervisor_transcript(cas_dir, session, supervisor, cli)?;
     let mut file = std::fs::File::open(path).ok()?;
@@ -373,7 +373,7 @@ fn finish_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str
     let mut bytes = Vec::new(); file.take(512 * 1024).read_to_end(&mut bytes).ok()?;
     let rows = String::from_utf8_lossy(&bytes).lines().skip(usize::from(start > 0))
         .filter_map(|line| serde_json::from_str(line).ok()).collect::<Vec<_>>();
-    finish_turn_handled(&rows, cli, after).then(|| "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.".into())
+    finish_turn_handled(&rows, cli, after, skill).then(|| format!("The harness completed the {skill} request. Review its reply for the wrap-up result; this does not imply the session exited."))
 }
 
 /// The hook is an independent source: SessionStart(source=compact|clear) says
@@ -520,7 +520,7 @@ impl FactoryDaemon {
                 }
                 anyhow::bail!("/{name} is still pending. Use Dismiss command status on its card to cancel it. An open native chooser can also be closed with Close chooser.");
             }
-            if *command == Command::Finish {
+            if matches!(*command, Command::Finish | Command::Standby) {
                 let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
                 anyhow::ensure!(!pane.has_exited(), "The supervisor has ended.");
                 anyhow::ensure!(command.mapping(pane.harness()).is_some(), "This harness does not support that command.");
@@ -605,7 +605,7 @@ impl FactoryDaemon {
         if record.receipt.phase == Phase::Submitted || record.receipt.interactive
             // Finish may complete after the short confirmation deadline. A
             // caller-owned Status can still observe it without typing again.
-            || record.receipt.phase == Phase::Unconfirmed && matches!(record.receipt.command, Command::Usage | Command::Finish) {
+            || record.receipt.phase == Phase::Unconfirmed && matches!(record.receipt.command, Command::Usage | Command::Finish | Command::Standby) {
             let current = screen(pane);
             if pane.has_exited() && matches!(record.receipt.command, Command::Exit | Command::Finish) {
                 record.receipt.phase = Phase::Observed;
@@ -654,7 +654,7 @@ impl FactoryDaemon {
                             None, Some(&record.receipt.device_id), None);
                     }
                 }
-            } else if record.hook.is_none() && matches!(record.receipt.command, Command::Compact | Command::Clear | Command::Finish | Command::ReloadCassy) {
+            } else if record.hook.is_none() && matches!(record.receipt.command, Command::Compact | Command::Clear | Command::Finish | Command::Standby | Command::ReloadCassy) {
                 let root = self.app.cas_dir().to_path_buf();
                 let session = self.session_name.clone(); let supervisor = self.app.supervisor_name().to_owned();
                 let command = record.receipt.command; let after = record.at;
@@ -662,7 +662,8 @@ impl FactoryDaemon {
                 let cli = pane.harness();
                 record.hook = Some(tokio::task::spawn_blocking(move || {
                     if command == Command::ReloadCassy { reload_before.and_then(|pid| reload_observation(&root, &session, &supervisor, pid)) }
-                    else if command == Command::Finish { finish_observation(&root, &session, &supervisor, cli, after) }
+                    else if command == Command::Finish { finish_observation(&root, &session, &supervisor, cli, after, "finish") }
+                    else if command == Command::Standby { finish_observation(&root, &session, &supervisor, cli, after, "standby") }
                     else { hook_observation(&root, &session, &supervisor, command, after) }
                 }));
             }
@@ -1013,8 +1014,8 @@ mod tests {
         std::fs::write(projects.join("finish-fixture.jsonl"), format!("{}\n{}\n",
             serde_json::json!({"type":"user","timestamp":at,"message":{"content":"<command-name>/finish</command-name>"}}),
             serde_json::json!({"type":"assistant","timestamp":at,"message":{"stop_reason":"end_turn"}}))).unwrap();
-        assert!(finish_observation(cas_dir, &daemon.session_name, &name, cas_mux::SupervisorCli::Claude, at).is_some());
-        assert!(finish_observation(cas_dir, "another-session", &name, cas_mux::SupervisorCli::Claude, at).is_none());
+        assert!(finish_observation(cas_dir, &daemon.session_name, &name, cas_mux::SupervisorCli::Claude, at, "finish").is_some());
+        assert!(finish_observation(cas_dir, "another-session", &name, cas_mux::SupervisorCli::Claude, at, "finish").is_none());
         let (root, mut codex) = super::super::supervisor_single_turn_tests::fixture_for(cas_mux::SupervisorCli::Codex).await;
         let name = codex.app.supervisor_name().to_owned();
         codex.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[19;1H• Model changed to old-model high for this conversation\r\n›".as_bytes()).unwrap();
@@ -1175,10 +1176,12 @@ mod tests {
             (Codex, json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"finish"}]}}),
                 json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete"}})),
         ] {
-            assert!(!finish_turn_handled(&[prompt.clone()], cli, at));
-            assert!(!finish_turn_handled(&[done.clone()], cli, at));
-            assert!(finish_turn_handled(&[prompt.clone(), done.clone()], cli, at));
-            assert!(!finish_turn_handled(&[prompt, done], cli, at + chrono::Duration::seconds(1)));
+            assert!(!finish_turn_handled(&[prompt.clone()], cli, at, "finish"));
+            assert!(!finish_turn_handled(&[done.clone()], cli, at, "finish"));
+            assert!(finish_turn_handled(&[prompt.clone(), done.clone()], cli, at, "finish"));
+            // The standby request is its own turn: a finish turn never satisfies it.
+            assert!(!finish_turn_handled(&[prompt.clone(), done.clone()], cli, at, "standby"));
+            assert!(!finish_turn_handled(&[prompt, done], cli, at + chrono::Duration::seconds(1), "finish"));
         }
     }
     #[test]

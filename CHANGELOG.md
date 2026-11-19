@@ -7,6 +7,138 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.38.0] - 2026-11-19
+
+### Fixed — Release
+
+- **A reviewed drop releases a member a later task superseded** — Was: release closeout held every member whose lines a later shipped task deleted or moved as reverted, with no way to accept the loss, so the member stayed open on the board (v4.28: two members). Now: the release review ledger can carry a `reviewed-drop: <commit>[,<commit>...] -- <why>` row for the task, checked by the same review a normal close uses: the named commits must exist, reach the release and touch the dropped files. A drop without that review, or one naming commits that do not fit, stays held.
+- **The tool list is back under its byte budget** — Was: the factory tool's description and its `decision` parameter both explained `train_freeze decision=promote` (added by the promote-and-freeze delivery, a887c96531), pushing `tools/list` to 59037 bytes against the 59000 budget, so the train suite and merge queue failed. Now: the parameter keeps the one explanation and the description drops the duplicate; `tools/list` is under budget with the budget unchanged. Measured: the same test fails at the delivery base c2a1c18109 with "tools/list is 59037 bytes; budget 59000" and passes with this change.
+- **Merging an epic child no longer fails on repository identity** — Was: `worktree_merge` refused an epic child whose task target was the epic's base branch with "WORKTREE REPOSITORY MISMATCH" (the task target and the resolved epic lane disagreed), and refused a re-parked peer delivery because a stale local branch ref from an earlier merge attempt conflicted with the live origin tip. Now: the repository check uses the one resolved merge destination, and a local ref that is an ancestor of the live origin tip is fast-forwarded; a local ref with its own commits still refuses.
+- **A replacement verifier can claim a dispatch whose first verifier never started** — Was: once the first verifier's deadline passed with no verdict, every replacement launch failed with "verifier handoff requires the exact active owned dispatch" (GH #2135), so the supervisor had to record the verdict by hand; the refusal was also reported as a "parse error". Now: issuing the replacement's handoff refreshes the still-pending dispatch's deadline in the same transaction, so the replacement claims the same dispatch, and a refused handoff reports its own `verifier_handoff_not_active` kind.
+- **Release cut skips the local candidate build** — Was: a cut from a green frozen train still compiled a full candidate on the cutter's machine (171 seconds in the v4.37.0 cut). Now: it takes the CLI the green train run already built for that exact tip (a 3-second download); with no green receipt the cut still refuses, and if that artifact is gone it retries once and previews with the installed CLI; a green receipt never causes a local build.
+- **Parallel platform fallbacks and cache-key coverage** — Scope prebuild concurrency by platform and select the existing release test suite when dependency-cache key inputs change. Publication docs now describe adoption after a proven platform upload and retained runner-image cache identity.
+- **Two-machine merges find the parking machine's evidence and parks** — Was: a delivery parked on one machine could stay "in progress" on the merge owner after a proof-bearing sync (GH #2105), and its nested captures (`proof/…`) and top-level logs never reached the owner, so the merge refused with a missing PASS capture (GH #2079). Now: restoring synced proof no longer outranks the park, and every park lists its evidence files by task-relative path so the owner restores each one where the ledger cites it, without a manual copy or a new gate.
+- **Release closeout closes every issue, or names the ones it could not** — Was: closeout built one 6-second deadline for the whole GitHub pass, so one slow call timed out every later `gh issue close` (22 of 22 on v4.22, 5 of 6 on v4.21) and the issues stayed open until someone closed them by hand. Now: each close gets its own 30-second deadline and up to three attempts with a growing pause, and an issue that still fails is listed by number in the closeout notice, stays open, so the next closeout pass reads it as open again.
+
+### Fixed — Factory
+
+- **A withdrawn merge alert no longer shows up as MERGE REQUIRED** — Was: a Director merge alert queued while a delivery waited was shown at the next turn start under its original heading even after the supervisor had asked for changes or the work had merged, so the supervisor could act on a decision that no longer stood. Now: the turn-start inbox holds back a Director alert whose task is no longer parked or active, marks it read, and still shows every other message; only a row the daemon itself queued is held back.
+- **Resumed blockers stay resolved** — Stale blocked-task emissions now stop when the task has resumed, preventing duplicate notices and false delivery-watchdog escalations for a blocker the supervisor already received.
+- **A spawn request whose task-queue binding fails is no longer dropped silently** — Was: the daemon accepted the request, hit the binding error, and returned without a supervisor notice or a freed spawn slot, so the worker never appeared and nobody was told. Now: the request ends FAILED with the reason, the supervisor gets a notice naming the request, and the slot is released so the next request proceeds.
+- **A supervisor's startup message no longer overflows the harness inline cap** — Was: a predecessor with a large lane (100+ pending rows, 25 integrated deliveries) pushed the supervisor SessionStart to 10–15 KB, so the harness showed a 2 KB preview. Now: the full integrated-delivery list is also written to a recovery receipt file named in the message, and an over-budget start collapses the handoff and that list to counts plus receipt paths.
+- **Python source edits can mention credential fixtures** — The worker credential guard distinguishes literal replacement text from the file a validated pathlib source-edit program reads or writes. Direct, constructed and nested credential reads keep their H-09 refusal. A script with any byte outside printable ASCII, newline and tab, a PEP 263 coding cookie, or a parse error never takes the source-edit path, because CPython and the parser could read its lines differently; neither does a heredoc body behind an unquoted delimiter, which the shell expands first, nor one read by anything other than `python` on stdin: a shell-read body that names a store path anywhere is refused.
+- **An epic no longer closes while its work has not shipped** — Was: tasks close as delivered when they merge into their epic's branch, and the epic then closed on its children's status alone, so finished work sat in epic branches that never reached main, three whole epics for days, while the board reported it done. Now: closing an epic outside a release checks the epic's own branch against its destination, and refuses with the commit count when the destination lacks it; a release close keeps its batch-receipt path. `epic_status` also prints the answer as an `epic_shipping` line, so the board shows it before anyone tries to close.
+- **Faster changed-test discovery at close** — Reuse Rust inventories within one close evaluation and compile discovery patterns once, avoiding repeated full-crate scans for each delivered file. Missing tests, uncertain inputs and five-pass evidence retain their existing gates. Timing logs identify the task, delivery head and changed-test discovery phase.
+- **Actionable takeover advice** — Was: a forced takeover told the replacement to message the former worker, even after that worker's supervisor exited and the peer route refused. Now: the notice directs the replacement to its own supervisor to coordinate the handoff. Active peer claims still refuse an ordinary start.
+- **Recycled workers start their kept task** — Was: a recycled worker's task start was refused for up to 30 minutes by its retired predecessor's lease. Now: the new session of the same worker name reclaims it at once.
+- **Train commands see the live supervisor** — Was: `cas factory train drop` and `train merge` run from the supervisor's shell refused with "requires a live registered supervisor", and a dead supervisor still marked active blocked train takeover. Now: both resolve the supervisor from the harness, and takeover checks the recorded process is still running.
+- **A supervisor's "merged", "landed", "shipped" or "green" now needs delivery proof** — Was: any successful tool result from the turn satisfied a completion claim, and "green", "fixed" and "landed" were not checked at all. Now: those three words count as claims, and a delivery claim needs a same-turn `git merge-base --is-ancestor` success, a gh check or run result with nothing pending or failing, a Cassy task close or status, or a merge receipt. Only what actually ran counts: an executed `git merge-base --is-ancestor` (not the same words in an `echo`), a gh run or check status (not `gh pr view`), or a Cassy task or inbox result (not a file read or other output that mentions "landed"). An unrelated command no longer counts, and `[unverified]` still labels an uncertain paragraph.
+- **Background close outcomes survive lost continuations** — Late closes keep backend retirement waiting until their outcome is saved. Cancelled continuations record a failure and alert the supervisor; surviving daemons recover pending outcomes after a backend exits.
+
+### Fixed — Park
+
+- **Unpushed branch refused at park** — Was: a delivery whose branch was never pushed parked, passed two reviews, and failed to merge only afterward with "PUSH FIRST". Now: park refuses first and names `git push -u origin <branch>`.
+
+### Fixed — QA
+
+- **Release receipts no longer mistake a supervisor's handoff for its own work** — Was:
+  if a delivery's handoff list named the supervisor's shared checkout
+  (`factory/<supervisor>`), recording a release review receipt was refused
+  as self-review, even when the supervisor never committed to that delivery.
+  Now: that handoff counts only when the branch carries the delivery's
+  commits. Per-task handoffs, leases, completion receipts and commit authors
+  still block a reviewer who implemented the delivery.
+- **Batch evidence stays with the batch** — Worker parks honor resolved `qa.mode=batch` when target ancestry is unknown, instead of requesting a per-task QA bundle. Proven integrated deliveries retain their final-close evidence path; per-task evidence and final-close batch receipt requirements remain enforced.
+- **A refused close over deferred batch QA now says why** — Was: the refusal named only a batch receipt or a passed QA round, so a supervisor who had recorded a waiver and a receipt could not tell why neither counted. Now: it lists the delivery anchor, each recorded receipt and QA round with the reason it does not count, and the one-call supervisor close that clears the debt.
+
+### Fixed — Stall watchdog
+
+- **A task the supervisor holds for the operator no longer wakes the supervisor or pages the operator at night** — Was: the progress watchdog read the worker's older blocker note ahead of the supervisor's later `status=blocked` hold, so a delivery held for the operator's morning decision (its worker shut down) was listed as waiting and the operator was warned of a page (GH #1904). Now: the newer of the structured hold and the latest blocker note decides who owns the block, so an operator hold recorded after a worker's blocker is excluded, while a worker- or supervisor-owned hold still wakes the supervisor and pages once as before. Measured: the extended watchdog test fails at the delivery base (the queue is not empty with an operator-held task present) and passes with this change.
+
+### Changed — Pre-push
+
+- **A refused push names its failing rows and where their logs are** — Was: the final "pre-push: refused" line said only that fast rows failed, so a worker who saw just the last lines of the push (or a supervisor reading a relayed refusal) could not tell which row failed or find its output; the log path and row names were printed earlier in the output. Now: the refusal line carries the failing row ids and the `.git/cas/fast-rows/<sha>.logs.*` directory that holds each row's log. Measured: the extended pre-push test fails at the delivery base (the refusal line named neither) and passes with this change.
+
+### Fixed — CI
+
+- **Portable step watchdog diagnostics** — Find build processes through the system process table on Linux and macOS. Failed process telemetry no longer prevents deadline cleanup or the one allowed retry, and the watchdog self-test runs on both platforms.
+- **Lane CI pins the agent-doc budget check** — Was: nothing pinned that a lane editing a builtin agent doc runs the agent-definition contract test, so a byte-budget breach surfaced first in the merge queue. Now: a fixture proves the lane selector runs it for a builtin agent doc edit and not for an unrelated edit.
+
+### Fixed — Hooks
+
+- **Worker file-name searches no longer blocked inside compound commands** — Was: the operator-credentials guard let a worker list file names under the home directory only as a lone command, so `ls /opt; tail install.log && rg --files ~/.local /opt -g initdb` or `find ~ -path '*SKILL.md' | head -20` was refused as credential access. Now: each statement is judged on its own, a listing stays allowed when it only feeds `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `rg` or `grep` reading stdin, and any statement that names or opens a credential file, or feeds the listing to `xargs`, `cat` or another reader, still blocks.
+
+### Fixed — Release installation
+
+- **Explain installer adapter timeouts** — A release adapter killed at its deadline now logs a readable message naming the installed or published phase and elapsed deadline, alongside its structured timeout event.
+
+### Fixed — Workers
+
+- **Worker check no longer goes silent before build admission** — Was: a capped worker check classifying changed tests printed nothing until admission, so a long classification (16 minutes observed) looked hung. Now: it prints a "still classifying changed tests" line with elapsed time every 30 seconds until classification ends.
+
+### Fixed — Close gates
+
+- **Park and the capped worker-check name the same changed tests** — Was: after a queued successor rebased onto a merged predecessor, park diffed from a stale local target ref and demanded the predecessor's unchanged tests, which the worker-check command could not cover; rerunning one test also dropped the five-pass credit of every other test in the same receipt. Now: both read one shared proof base (the newest merge-base with the target), and a rerun withdraws credit only from the tests it reran.
+
+### Fixed — Capacity notice
+
+- **The disk-pressure notice counts verifier review scratch as reclaimable** — Was: the notice listed only target caches, so with finished review walks still holding their build output it reported "Reclaimable target caches: none found" while that output filled the disk. Now: the reclaimable total includes the build output of finished review walks and output already queued for deletion, measured through the same guarded review inventory as `gc_report` (a walk a guard retains counts nothing), and the notice lists it on its own line. Measured: with a finished review walk holding 11 bytes of build output, the new test fails at the delivery base with a total of 0 against the expected 11 and passes with this change.
+
+### Fixed — Release trains
+
+- **Repair an ejected cut train** — A frozen cut train now accepts its own named `release-repair` child when red CI evidence is recorded. The cut and freeze remain in place, and unrelated work stays refused.
+- **Promote the chosen release epic** — Freezing an open epic now returns a complete promotion command. One retry validates the lane, sets its train label and integration target, and freezes it so automatic release cutting can see it. Divergent open train lanes refuse with their epic ids before changing state.
+
+### Fixed — Task start
+
+- **Starting a task whose epic branch was never pushed now names the missing branch** — Was: `task action=start` passed an empty start point to git and failed with "start point '' does not resolve to a commit", naming nothing. Now: start refuses with the missing target branch name and the remedy (ask the supervisor to create or push it), and creates no task branch. Measured: the new test fails at the delivery base with the empty start point error and passes with this change.
+
+### Fixed — Release verification
+
+- **Tag verdicts reuse reviewed delivery drops** — A published tag now accepts the same validated supersession review as release closeout. The stored review must cover the exact delivery, its ledger bytes must match, and its named replacement commits must reach the tag and account for the dropped files. Missing, unrelated or altered reviews keep the delivery held.
+
+### Added — Operations
+
+- **Six light runner lanes on soundwave** — The installer supports light slots 3–8, with matching units for slots 5–8 and a one-shot operator script that uses one sudo prompt, repository tokens without token logging, and a final online/busy report. Cache pruning checks all eight runner slots.
+
+### Changed — Skills
+
+- **One rule for timing in tests** — Was: the test-writing skill said to use event barriers and not to replace synchronization with sleeps, and the reviewer guidance separately listed sleeps as a finding, so a test could still assert that a port or file was already gone, or set a wall-clock deadline tighter than the event it waited for. Now: Test hygiene item 4 states the rule once (no fixed sleeps, no instant presence or absence assertions on a port, process or file, no deadline tighter than the event; wait on the event with a generous ceiling), and the reviewer guidance links to that item instead of repeating it.
+
+### Fixed — Worker check
+
+- **Support files under test folders no longer demand impossible test runs** — Was: a data module, `.d.mts` declaration or helper under `test/` or `tests/` made the close gate print a run of that file, which finds no tests and writes no report. Now: such files widen to their package, whose run covers their consumers; real specs still run alone.
+- **Test titles with escaped quotes or a runtime suite name resolve** — Was: `it('reads each post\'s data')` or a static test inside `describe(api, …)` made the close gate refuse with "dynamic/parameterized test title". Now: escaped quotes decode as a static title, and a runtime-named suite selects its test under every suite name; a runtime-named test title still needs a static identity.
+- **Jest specs run under the config that owns them** — Was: a changed spec outside the nearest `jest.config.*` (such as an integration spec with its own config) ran under that config, found no tests and could not earn stability. Now: worker-check and the stability run pick the Jest config whose `roots`, `projects` and `testRegex`/`testMatch` own the spec, so the prescribed command runs and counts its tests.
+
+### Fixed — Developer tooling
+
+- **Mock response scenarios pass test-shape lint** — A Rust loop variable such as `for source in ["a", "b"]` that iterates only string literals is no longer treated as source text inside that loop's own body, so a mock API error response keyed on it is not flagged as a text pin. Code outside the loop, and a body that rebinds the name with `let` or closure parameters, keep every existing check.
+
+### Added — Mux
+
+- **A native turn observer for Codex rollouts** — Was: the mux had no way to wait on a harness's own record of a turn starting or ending, so tests and callers guessed from sleeps or PTY quiet, which cannot tell a long tool call from idle. Now: `cas_mux::readiness::RolloutTurnObserver` tails the Codex rollout's `task_started`, `task_complete` and `turn_aborted` rows, and a wait that sees no start returns a typed timeout at its deadline, naming what the rollout did show. Measured: with row reading removed 2 of the 3 observer tests fail (909f5a9e3e); with it all 3 pass. The live-provider tests still sleep and are converted in a follow-up after an opt-in provider run.
+
+### Fixed — Factory verification
+
+- **Verifier launch leaves the input loop** — Local verifier requests run their exact dispatch claim on the factory's external job lane, so the input loop's store deadline cannot refuse startup. Shared SQLite contention reports the holding operation and acquisition site, including task close. Late handoff ownership changes report a dispatch conflict; contention waits and dropped queue jobs retain the launch attempt budget. The daemon's store wait ends before the client's request deadline.
+
+### Fixed — Close proof guard
+
+- **A source line or design revision citation in a close reason no longer reads as a missing receipt file** — Was: a close reason that cited `scripts/journeys-for-diff.py:743` or `hub-web/DESIGN.md@3c25c3fb3` next to a real artifact receipt was refused with "Cannot resolve receipt", because the guard looked for a file with that literal name. Now: a `file:line`, `file:line-line` or `file@revision` citation is neither checked as a receipt file nor accepted as one; a real receipt path that does not exist is still refused. Measured: the new test fails at the delivery base with the incident's "no file at the cited path" refusal and passes with this change.
+
+### Fixed — Release gate
+
+- **The journey-catalog row no longer fails because the GitHub API quota is spent** — Was: when a diff needed registry validation and no cas was set, `scripts/release-gate.sh` ran `scripts/cas-install.sh`, which asked the unauthenticated GitHub API for the latest release; on shared runners the 60-per-hour quota was spent, the answer was a 403 the installer hid, and the row failed with "no Cassy validator is available" (lane run 44483014710, and again on the next run). The FIX line also told people to put a cas on PATH, which the gate never looked at. Now: the installer reads the latest release from the `releases/latest` redirect when no token is set, uses `GITHUB_TOKEN`/`GH_TOKEN` with retries when one is, and prints the HTTP status and body when it still fails; the gate accepts a cas on PATH that answers `qa journeys --help`; and the lane and CI steps that run the fast rows pass `GH_TOKEN`. A released validator is still required. Measured: the PATH test fails at the delivery base (the installer ran although a working cas was on PATH), and the installer test fails with the exact CI error (API 403, no token) and passes with this change.
+
+### Fixed — Hub
+
+- **Hub status and the journal now say why Tailscale publishing failed** — Was: with publishing denied, `cas hub status` printed only "Tailscale Serve: WARN - unavailable; hub remains loopback-only" and the hub wrote nothing to stderr, so the cause was only in `--json` or `hub.log`. Now: status adds a `Cause:` row under the warning, and the running hub writes one stderr line (the journal on Linux) each time the failure cause changes, not on every retry.
+
+### Added — Release
+
+- **The next release train syncs with main by itself** — Was: after a release landed, the next train stayed behind main until someone merged by hand; the Nov 12-13 manual sync hit 14 conflicts and cost a night, and a spawn only found out through EPIC BASE REFRESH REFUSED. Now: the daemon merges the integration branch into every open, unfrozen train within one CI poll and publishes the lane, then tells workers with unfinished deliveries on it; a conflict changes nothing and files one sync task under the train naming the conflicting files, with one notice to the supervisor.
+
 ## [4.37.0] - 2026-11-18
 
 ### Fixed — Factory capacity

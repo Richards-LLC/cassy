@@ -631,6 +631,12 @@ impl TaskStore for SyncingTaskStore {
         self.inner.update_from_sync(task, expected)
     }
 
+    fn rewind_sync_clock(
+        &self, task_id: &str, expected: DateTime<Utc>, to: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.inner.rewind_sync_clock(task_id, expected, to)
+    }
+
     /// cas-a836: request_changes, reopen and proof-scope corrections commit
     /// through cas-store directly, so no intent was staged and the peer
     /// never saw the change. Stage one now and bind it to the committed

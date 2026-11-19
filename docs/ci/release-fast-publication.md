@@ -113,17 +113,29 @@ The publication audits remain required before either platform is published.
 
 ### Why adoption is fail-safe and publication is fail-closed
 
-`scripts/find-release-prebuild.sh` matches only a **successful** Release
-Prebuild run whose head commit is the commit being published or has exactly
-its tree, with both artifacts present and unexpired. The queue may land before
-its non-required builds finish, so the lookup waits up to 30 minutes for a
-matching run in progress. Every degraded input (no run, a partial run, expired
-artifacts, an API outage) reports `found=false` with a loud warning, and the
-workflow builds the archives by calling `release-prebuild.yml`. The prebuild
-is an accelerator; it can never be the reason a release cannot ship.
+`scripts/find-release-prebuild.sh` matches a Release Prebuild run whose head
+commit is the commit being published or has exactly its tree. Linux and macOS
+look up their archives independently. A completed successful run is eligible;
+for a single platform, a running workflow is also eligible once the Jobs API
+proves one unambiguous platform job successfully reached its artifact upload.
+The requested archive must be present and unexpired. The sibling build and
+later cache housekeeping do not delay that platform's adoption. The default
+`all` lookup still requires a successful completed run with both archives.
+
+The queue may land before its non-required builds finish, so the release
+workflow waits up to 30 minutes for a matching run in progress. Degraded
+inputs (no usable run, failed upload, expired artifacts or an API outage)
+report `found=false` with a warning, and only that platform falls back to
+`release-prebuild.yml`. The prebuild is an accelerator; it can never be the
+reason a release cannot ship.
+
+The dependency-cache key retains the runner image (`ImageOS` and
+`ImageVersion`), along with the target, toolchain and build configuration. A
+runner-image change deliberately misses the cache rather than restoring
+incompatible dependencies; cache identity never authorizes archive adoption.
 
 Publication is the opposite. The `release` job runs only when both audit jobs
-passed on the archives about to be uploaded, from exactly one supply path.
+passed on the archives about to be uploaded, each from exactly one supply path.
 `scripts/release-publish.sh` refuses an existing release object, refuses a tag
 that peels to another commit, and requires both platform archives.
 

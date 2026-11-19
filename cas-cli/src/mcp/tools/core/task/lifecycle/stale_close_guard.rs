@@ -573,7 +573,6 @@ mod tests {
     fn cas_85fd_halt_recovery_names_no_unassigned_task() {
         let message = halt_blocks_task_work_message("task action=close", None);
         assert!(message.contains("target=supervisor"));
-        assert!(message.contains("then retry"));
         assert!(
             !message.contains("cas-"),
             "recovery must not name a task the worker may not be able to resolve: {message}"

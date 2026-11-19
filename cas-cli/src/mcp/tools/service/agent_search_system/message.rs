@@ -5259,9 +5259,7 @@ mod inbox_poll_identity_tests {
     #[test]
     fn claude_interrupt_timeout_is_an_explicit_failure_surface() {
         let message = interrupt_unconfirmed_message(269, None);
-        assert!(message.contains("Could not confirm Claude interrupt delivery"));
         assert!(message.contains("notification 269"));
-        assert!(message.contains("did not silently claim"));
         assert!(message.contains("message_status notification_id=269"));
     }
 

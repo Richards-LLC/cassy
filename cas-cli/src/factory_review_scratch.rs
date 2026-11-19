@@ -1246,6 +1246,18 @@ pub(crate) fn collect_until(
     report
 }
 
+/// Bytes a review pass could free now: eligible walks with their build output
+/// in place plus output already queued for deletion, through the same guarded
+/// inventory as `gc_report` (a walk a guard retains counts nothing). `None`
+/// when the scan budget ran out.
+pub(crate) fn reclaimable_bytes_until(
+    cas: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Option<u64> {
+    let report = collect_until(cas, false, deadline);
+    (!report.incomplete).then_some(report.reclaimable_bytes)
+}
+
 /// Inventory-only evidence for the ad-hoc siblings that motivated this GC.
 pub(crate) fn unmanaged_large(cas: &Path) -> String {
     unmanaged_large_until(cas, None)

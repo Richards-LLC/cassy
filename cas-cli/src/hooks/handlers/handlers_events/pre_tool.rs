@@ -4126,6 +4126,11 @@ pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
 /// Command arguments for browser selection, without shell redirections. Keep
 /// this opt-in: workspace/effect guards must still inspect redirect targets.
 pub(super) fn shell_statement_arguments(command: &str) -> Vec<Vec<String>> {
+    shell_statement_arguments_with_pipes(command).0
+}
+
+/// `shell_statement_arguments` plus, per statement, whether a pipe feeds it.
+pub(super) fn shell_statement_arguments_with_pipes(command: &str) -> (Vec<Vec<String>>, Vec<bool>) {
     let command = shell_command_without_heredoc_bodies(command);
     let (tokens, _) = factory_shell_tokens_for_projection(&command, true);
     let mut tokens = tokens.into_iter().peekable();
@@ -4151,56 +4156,80 @@ pub(super) fn shell_statement_arguments(command: &str) -> Vec<Vec<String>> {
         }
         arguments.push(token);
     }
-    shell_statements_from_tokens(arguments)
+    shell_statements_with_pipes(arguments)
 }
 
 fn shell_statements_from_tokens(tokens: Vec<ShellToken>) -> Vec<Vec<String>> {
+    shell_statements_with_pipes(tokens).0
+}
+
+/// Statements plus, for each, whether a single `|` (not `||`) feeds it.
+/// Grouping tokens between the pipe and the statement (`| (`) still count.
+fn shell_statements_with_pipes(tokens: Vec<ShellToken>) -> (Vec<Vec<String>>, Vec<bool>) {
     let mut statements = Vec::new();
+    let mut piped = Vec::new();
     let mut words: Vec<String> = Vec::new();
+    let mut separators = String::new();
+    let mut words_piped = false;
     // One entry per open `(`: the enclosing statement an argument
     // substitution returns to, or `None` when `)` starts a new statement.
-    let mut open: Vec<Option<Vec<String>>> = Vec::new();
+    let mut open: Vec<Option<(Vec<String>, bool)>> = Vec::new();
     for token in tokens {
         match token {
-            ShellToken::Word(word) => words.push(word),
+            ShellToken::Word(word) => {
+                if words.is_empty() {
+                    words_piped = separators.contains('|') && separators != "||";
+                }
+                separators.clear();
+                words.push(word);
+            }
             ShellToken::Operator('(') => {
                 let argument_substitution = words.last().is_some_and(|word| word.ends_with('$'))
                     && unwrapped_command_index(&words).is_some_and(|index| index + 1 < words.len());
                 if argument_substitution {
-                    open.push(Some(std::mem::take(&mut words)));
+                    open.push(Some((std::mem::take(&mut words), words_piped)));
                 } else {
                     if !words.is_empty() {
                         statements.push(std::mem::take(&mut words));
+                        piped.push(words_piped);
                     }
                     open.push(None);
                 }
+                separators.push('(');
             }
             ShellToken::Operator(')') => {
                 if !words.is_empty() {
                     statements.push(std::mem::take(&mut words));
+                    piped.push(words_piped);
                 }
-                if let Some(Some(enclosing)) = open.pop() {
+                if let Some(Some((enclosing, enclosing_piped))) = open.pop() {
                     words = enclosing;
+                    words_piped = enclosing_piped;
                 }
+                separators.push(')');
             }
-            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+            ShellToken::Operator(operator @ (';' | '|' | '&')) => {
                 if !words.is_empty() {
                     statements.push(std::mem::take(&mut words));
+                    piped.push(words_piped);
                 }
+                separators.push(operator);
             }
             ShellToken::Operator(_) => {}
         }
     }
     if !words.is_empty() {
         statements.push(words);
+        piped.push(words_piped);
     }
     // An unclosed argument substitution still reports its enclosing words.
-    for enclosing in open.into_iter().flatten().rev() {
+    for (enclosing, enclosing_piped) in open.into_iter().flatten().rev() {
         if !enclosing.is_empty() {
             statements.push(enclosing);
+            piped.push(enclosing_piped);
         }
     }
-    statements
+    (statements, piped)
 }
 
 fn shell_word_basename(word: &str) -> &str {
@@ -4953,11 +4982,28 @@ fn shell_command_projection(command: &str, preserve_offsets: bool) -> String {
 }
 
 pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
-    let mut pending: std::collections::VecDeque<(HeredocDelimiter, String)> =
+    shell_heredoc_bodies_with_consumer(command).into_iter().map(|body| body.text).collect()
+}
+
+/// One heredoc body and how its consumer reads it.
+pub(super) struct HeredocBody {
+    pub(super) text: String,
+    /// Unchanged Python source: the delimiter is quoted (no shell expansion) and
+    /// the one command on the introducing line is Python reading `-`.
+    pub(super) python_source: bool,
+    /// A shell reads the body as commands.
+    pub(super) shell_commands: bool,
+}
+
+/// Each heredoc body with its consumer. Anything else (an unknown tool, several
+/// heredocs on one line) reads or executes the body in a way not judged here,
+/// so it is never Python source data.
+pub(super) fn shell_heredoc_bodies_with_consumer(command: &str) -> Vec<HeredocBody> {
+    let mut pending: std::collections::VecDeque<(HeredocDelimiter, String, (bool, bool))> =
         std::collections::VecDeque::new();
     let mut bodies = Vec::new();
     for line in command.split_inclusive('\n') {
-        if let Some((delimiter, body)) = pending.front_mut() {
+        if let Some((delimiter, body, _)) = pending.front_mut() {
             let candidate = line.trim_end_matches('\n').trim_end_matches('\r');
             let candidate = if delimiter.strip_leading_tabs {
                 candidate.trim_start_matches('\t')
@@ -4966,20 +5012,38 @@ pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
             };
             let is_delimiter = candidate == delimiter.value;
             if is_delimiter {
-                let (_, body) = pending.pop_front().expect("heredoc body is pending");
-                bodies.push(body);
+                let (delimiter, text, (python, shell)) = pending.pop_front().expect("heredoc body is pending");
+                bodies.push(HeredocBody {
+                    text,
+                    python_source: delimiter.literal_body && python,
+                    shell_commands: shell,
+                });
             } else {
                 body.push_str(line);
             }
             continue;
         }
-        pending.extend(
-            heredoc_delimiters(line)
-                .into_iter()
-                .map(|delimiter| (delimiter, String::new())),
-        );
+        let delimiters = heredoc_delimiters(line);
+        let consumer = if delimiters.len() == 1 { heredoc_consumer(line) } else { (false, false) };
+        pending.extend(delimiters.into_iter().map(|delimiter| (delimiter, String::new(), consumer)));
     }
     bodies
+}
+
+/// `(python_stdin, shell)` for the command a heredoc on `line` feeds: Python
+/// reading its program from stdin as the only command, or a shell last in the
+/// line.
+fn heredoc_consumer(line: &str) -> (bool, bool) {
+    let statements = shell_statement_arguments(line);
+    let Some(last) = statements.last() else { return (false, false) };
+    let Some((executable, args)) = last.split_first() else { return (false, false) };
+    let name = shell_word_basename(executable);
+    let shell = matches!(name, "bash" | "sh" | "zsh" | "dash" | "ksh");
+    let python = statements.len() == 1
+        && name.strip_prefix("python").is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        && args.last().is_some_and(|last| last == "-")
+        && args.iter().all(|arg| matches!(arg.as_str(), "-" | "-u" | "-B" | "-I" | "-S" | "-s" | "-E"));
+    (python, shell)
 }
 
 /// Extract targets from known script write APIs only. The script itself is

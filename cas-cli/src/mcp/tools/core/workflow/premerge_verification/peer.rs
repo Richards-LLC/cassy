@@ -346,9 +346,14 @@ fn import_receipt(
     // superseded by its source's fresh review, never by rebinding old proof.
     let existing = cas_store::get_latest_verification_dispatch(root, &task.id)
         .map_err(ReceiptFailure::retry)?;
+    // A local cycle nobody can still resolve (timed out, or past its deadline)
+    // yields to the peer approval; the store re-checks atomically (GH #1913).
     if existing.as_ref().is_some_and(|dispatch| {
-        dispatch.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref()).is_none()
-            || !matches!(dispatch.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+        if dispatch.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref()).is_none() {
+            !cas_store::verification_dispatch_is_stale(dispatch, chrono::Utc::now())
+        } else {
+            !matches!(dispatch.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+        }
     }) {
         return Err(ReceiptFailure::reject("an existing local verification cycle owns this task"));
     }
@@ -617,6 +622,20 @@ mod tests {
                 chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Rejected(_)));
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, local.id);
+
+            // GH #1913: once that local verifier is gone (its dispatch timed
+            // out), the owner's cycle is stale and the peer's approval of the
+            // delivered tip supersedes it instead of stalling the close.
+            let timed_out = cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now() + chrono::Duration::minutes(11))
+                .unwrap().expect("the local dispatch passed its deadline");
+            assert_eq!(timed_out.id, local.id);
+            let stale = receipt(&task, &repaired, &old_sha, "stale-local");
+            let imported = ingest_peer_receipt(&root, &recipient, &message(&stale, 0)).unwrap();
+            assert!(matches!(imported, PeerReceiptIngested::Imported), "{imported:?}");
+            let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert_eq!(current.id, stale.dispatch_id);
+            assert!(verify_peer_promotion(&root, &task, &current, &stale.verdict_id).unwrap());
+            assert_eq!(cas_store::get_verification_dispatch(&root, &local.id).unwrap().state, VerificationDispatchState::Invalidated);
         }).await.unwrap();
     }
 }

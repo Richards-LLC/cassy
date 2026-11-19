@@ -1856,6 +1856,109 @@ bug_families:
     tasks: [cas-08db]
     invariants: [FACTORY-FRESH-WORKER-CAPACITY]
     journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  background-close-continuation-loss:
+    title: Background close continuation loss records an outcome and wakes its supervisor
+    tasks: [cas-eeda]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-REFUSED-CLOSE-CORRECTION]
+  batch-qa-park-evidence:
+    title: Resolved batch mode keeps park evidence with the batch across target ancestry states
+    tasks: [cas-72c6]
+    journeys: [FACTORY-CLOSE, FACTORY-QA-RECEIPT]
+  capacity-notice-review-scratch:
+    title: The disk-pressure capacity notice counts verifier review scratch queued for deletion in its reclaimable total instead of reporting none found
+    tasks: [cas-7a37]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-CAPACITY-NOTICES]
+  close-proof-source-citation-not-receipt:
+    title: Close proof guard does not read a source file:line or DESIGN.md@revision citation as a receipt path, while a genuinely missing receipt path still refuses
+    tasks: [cas-d1c1]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-REFUSED-CLOSE-CORRECTION]
+  close-stability-repeated-rust-inventory:
+    title: Large returned deliveries share Rust inventories without weakening changed-test proof or close snapshot safety
+    tasks: [cas-bc33]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-REFUSED-CLOSE-CORRECTION]
+  cross-machine-park-evidence:
+    title: A park on one machine is mergeable from the other with its evidence at the cited paths
+    tasks: [cas-e442]
+    journeys: [FACTORY-CLOSE, FACTORY-QA-RECEIPT]
+  cut-train-red-repair:
+    title: A frozen cut train admits only its own named repair of recorded red CI without lifting its control markers
+    tasks: [cas-82e4]
+    journeys: [FACTORY-MERGE]
+  epic-closes-before-its-branch-ships:
+    title: An epic whose own branch carries commits the default branch lacks is refused at close as not shipped
+    tasks: [cas-9452]
+    journeys: [FACTORY-CLOSE]
+  idle-relay-pending-delivery-for-started-task:
+    title: The director idle relay does not claim a pending delivery for a task that live state shows in progress again, such as one just assigned after an earlier task parked
+    tasks: [cas-97dc]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-UNDELIVERED-RELAY-ACTION]
+  inactive-peer-takeover-advice:
+    title: Forced takeover after a peer supervisor exits routes follow-up advice to the replacement's own supervisor while ordinary peer claims still refuse start
+    tasks: [cas-c2b0]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+    invariants: [FACTORY-SOURCE-WORK-DELEGATION]
+  installer-adapter-timeout-diagnostic:
+    title: Release adapter deadlines log their phase and duration before retrying
+    tasks: [cas-3e9a]
+    journeys: [CLI-RELEASE]
+    invariants: [CLI-RELEASE-INSTALLED-RECONCILER, CLI-RELEASE-NOTICE-EXHAUSTION]
+  merge-identity-epic-lane-stale-ancestor:
+    title: Merge resolves one repository identity for an epic lane and recovers a stale ancestor local ref
+    tasks: [cas-1184d]
+    journeys: [FACTORY-MERGE]
+  missing-epic-target-start:
+    title: Task start refuses a target branch that exists neither locally nor on origin, naming it, instead of passing an empty start point to git
+    tasks: [cas-8bc4]
+    journeys: [FACTORY-SPAWN]
+    invariants: [FACTORY-DETACHED-SUCCESSOR]
+  operator-hold-after-worker-blocker-stall:
+    title: A newer supervisor hold for the operator outranks a worker's older blocker note, so the stall watchdog neither wakes nor pages for it
+    tasks: [cas-285a]
+    journeys: [HUB-J26]
+    invariants: [HUB-J26-GOAL]
+  python-source-edit-credential-data:
+    title: Python replacement-source literals are data while live credential reads remain refused
+    tasks: [cas-5d392]
+  release-closeout-issue-close-timeout:
+    title: Release closeout closes every referenced issue under its own deadline and names any it could not close
+    tasks: [cas-f162]
+    journeys: [CLI-RELEASE]
+  release-closeout-reviewed-drop:
+    title: Release closeout accepts a supervisor-reviewed drop for a member a later shipped task superseded
+    tasks: [cas-0489]
+    journeys: [CLI-RELEASE]
+  release-epic-promotion:
+    title: An operator-chosen release epic can become a visible train and freeze in one validated MCP call
+    tasks: [cas-e49f]
+    invariants: [CLI-RELEASE-EPIC-PROMOTION]
+    journeys: [CLI-RELEASE]
+  release-regenerated-docs-source-revert:
+    title: Regenerated release docs preserve shipped source evidence without hiding a source revert
+    tasks: [cas-895d3]
+    journeys: [CLI-RELEASE]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
+  release-tag-reviewed-drop:
+    title: Published tag verdicts honor validated closeout reviews for superseded deliveries
+    tasks: [cas-8f6f]
+    journeys: [CLI-RELEASE]
+  resumed-blocker-delivery-watchdog:
+    title: A delivered blocker notice cannot be recreated by a stale emission after resume
+    tasks: [cas-25e1]
+    journeys: [FACTORY-SUPERVISE]
+  supervisor-startup-over-budget:
+    title: A large predecessor handoff and integrated-delivery list no longer push the supervisor SessionStart past the inline cap; overflow is reached by receipt path
+    tasks: [cas-516f]
+    journeys: [FACTORY-SUPERVISE]
+  verifier-launch-store-contention:
+    title: Verifier startup waits outside client input and retains its exact dispatch through contention
+    tasks: [cas-d0f6]
+    journeys: [FACTORY-MERGE, FACTORY-CLOSE]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1894,6 +1997,14 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  CLI-RELEASE-EPIC-PROMOTION:
+    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
+    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and the auto-cut poll on a published lane, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
+    bug: {task: cas-e49f}
+  CI-LIGHT-RUNNER-CAPACITY:
+    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
+    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
+    bug: {task: cas-91b0}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -2767,7 +2878,7 @@ journeys:
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train, Verify the final tree, Resolve exact-SHA shipped deliveries and proof references, Preview member decisions before push and refuse unreviewed included deliveries or zero closable members, Read older-release missing-review residuals in the cut receipt, Read the release publication receipt]
   owners: [cas-cli/src/qa_batch.rs, cas-cli/src/qa_batch/release_close.rs, cas-cli/src/qa_batch/release_close_tests.rs, scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/release_reconcile.rs, crates/cas-store/src/release_reconcile_store.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs, cas-cli/src/cli/release_automation.rs, cas-cli/src/mcp/tools/core/task/release_train.rs, cas-cli/src/cli/release_notice_failure.rs, cas-cli/src/cli/release_adapters.rs, scripts/release.sh, scripts/release_changelog.py, scripts/test-release-completion.py, cas-cli/src/finding_triage.rs]
-  invariants: [CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
+  invariants: [CLI-RELEASE-EPIC-PROMOTION, CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SPAWN
@@ -4774,3 +4885,14 @@ journeys:
   invariants: [REPORT-JOURNAL-GRID]
   spec: scripts/test-accounting-journals.py
   traffic: {share_pct: null, basis: New report-authoring capability; no per-journey usage instrumentation.}
+
+- id: OPS-LIGHT-RUNNERS
+  name: Provision six soundwave light runner lanes
+  status: live
+  kind: cli
+  entry: {url: 'cli:ops/install-light-lanes-5-8.sh', trigger: Operator adds light runner capacity}
+  steps: [Authenticate operator once, Register and start slots 5-8 with repository tokens, Refresh all-slot prune idle guard, Report slots 3-8 online and busy]
+  owners: [ops/install-light-lanes-5-8.sh, 'ops/systemd/cassy-actions-runner*.service', ops/systemd/cassy-actions-cache-prune.service, scripts/install-cassy-actions-runner.sh, scripts/prune-cassy-actions-cache.sh, scripts/test-cassy-actions-runner-registration.sh, scripts/test-prune-cassy-actions-cache.sh, scripts/test-cassy-actions-cache-job-lock.sh]
+  invariants: [CI-LIGHT-RUNNER-CAPACITY]
+  spec: scripts/test-cassy-actions-runner-registration.sh
+  traffic: {share_pct: null, basis: Operator-only provisioning; no invocation telemetry.}

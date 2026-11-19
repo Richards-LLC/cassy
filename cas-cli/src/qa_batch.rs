@@ -422,8 +422,9 @@ pub(crate) fn resolve_release_inventory(
     for (delivery, measured) in members {
         if measured
             && let Some(anchor) = delivery.anchor.as_deref()
-            && let Err(code) = release_delivery_effect(
+            && let Err(code) = release_delivery_effect_reviewed(
                 repo, delivery.base_sha.as_deref(), anchor, &scope.final_release_sha, &delivery.task_id,
+                review.reviewed_drop(&delivery.task_id, Some(anchor)).as_deref(),
             )
         {
             inventory.exceptions.push(ReleaseInventoryException { task_id: delivery.task_id, code });
@@ -751,25 +752,28 @@ pub(crate) fn implementation_lineage(
     actors.extend(task.assignee.clone());
     // cas-f497: the recorded start still names the implementer once the assignee is cleared.
     actors.extend(task.deliverables.factory_branch_start.as_ref().map(|start| start.assignee.clone()));
-    for branch in task
-        .deliverables
-        .parked_branch
-        .iter()
-        .chain(task.deliverables.handoff_branches.iter())
-    {
-        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-        if let Some(owner) = branch.strip_prefix("factory/") {
-            actors.push(owner.strip_suffix(&format!("-{id}")).unwrap_or(owner).into());
-        }
-    }
-    for anchor in task
+    let anchors: Vec<String> = task
         .deliverables
         .factory_branch_anchor
         .iter()
         .chain(task.deliverables.historical_factory_branch_anchors.iter())
         .chain(task.deliverables.declined_factory_branch_anchors.iter().flatten())
-    {
-        if let Some(anchor) = commit(repo, anchor) {
+        .filter_map(|anchor| commit(repo, anchor))
+        .collect();
+    let handoffs = task.deliverables.handoff_branches.iter().map(|branch| (branch, true));
+    for (branch, handoff) in task.deliverables.parked_branch.iter().map(|branch| (branch, false)).chain(handoffs) {
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        let Some(owner) = branch.strip_prefix("factory/") else { continue };
+        if let Some(owner) = owner.strip_suffix(&format!("-{id}")) {
+            actors.push(owner.into());
+        } else if !handoff || branch_contributed(repo, branch, &anchors, task) {
+            // cas-1b7d: a bare factory/<agent> handoff is that agent's shared
+            // checkout; it names an implementer only when it carries delivery commits.
+            actors.push(owner.into());
+        }
+    }
+    for anchor in anchors {
+        {
             let out = Command::new("git")
                 .args(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", &anchor])
                 .current_dir(repo)
@@ -782,6 +786,27 @@ pub(crate) fn implementation_lineage(
         }
     }
     Ok(actors)
+}
+
+/// Whether `branch` (local or on origin) shares a commit with a delivery anchor
+/// beyond the task's recorded start base. A missing branch carries nothing; an
+/// unknown start base keeps the owner counted.
+fn branch_contributed(repo: &Path, branch: &str, anchors: &[String], task: &Task) -> bool {
+    let Some(tip) = commit(repo, branch).or_else(|| commit(repo, &format!("origin/{branch}"))) else {
+        return false;
+    };
+    let Some(base) = task.deliverables.factory_branch_start.as_ref().and_then(|start| commit(repo, &start.base_sha)) else {
+        return true;
+    };
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(repo).output().ok();
+    anchors.iter().any(|anchor| {
+        git(&["merge-base", &tip, anchor])
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .is_some_and(|shared| {
+                git(&["merge-base", "--is-ancestor", &shared, &base]).is_some_and(|out| !out.status.success())
+            })
+    })
 }
 
 /// Whether the identity `token` (agent id or name) is one of `actors`.
@@ -1028,6 +1053,7 @@ pub(crate) fn prepare_release_tag_receipt(
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let reviews = release_close::read_receipts(root, &project)?;
     let mut heads = BTreeMap::new();
     let mut tag_sha = None;
     for id in task_ids {
@@ -1044,9 +1070,10 @@ pub(crate) fn prepare_release_tag_receipt(
         tag_sha.get_or_insert(candidate.clone());
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| crate::gates::tag("G-117", format!("task {id} has no resolvable delivery anchor")))?;
-        if release_delivery_effect(&repo,
+        let reviewed_drop = release_close::reviewed_drop_for_tag(&reviews, &repo, id, &anchor, &candidate);
+        if release_delivery_effect_reviewed(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
-            &anchor, &candidate, &task.id).is_err() {
+            &anchor, &candidate, &task.id, reviewed_drop.as_deref()).is_err() {
             return Err(crate::gates::tag("G-117", format!("release tag {tag} does not contain task {id}'s delivery tree effect")));
         }
         heads.insert(id.clone(), anchor);
@@ -1080,6 +1107,16 @@ pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor
 pub(crate) fn release_delivery_effect(
     repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
 ) -> Result<(), ReleaseInventoryCode> {
+    release_delivery_effect_reviewed(repo, base, anchor, target, task_id, None)
+}
+
+/// As [`release_delivery_effect`], where a supervisor's reviewed drop may
+/// accept measured loss. The default stays held: the review must name
+/// commits that resolve, reach the target and touch the dropped paths.
+pub(crate) fn release_delivery_effect_reviewed(
+    repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
+    reviewed_drop: Option<&str>,
+) -> Result<(), ReleaseInventoryCode> {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{self, DeliveryContentPresence};
     // An explicitly empty delivery has no content that can be reverted.
     let Some((base, shipped)) = release_effect_range(repo, base, anchor, target)? else { return Ok(()) };
@@ -1100,6 +1137,9 @@ pub(crate) fn release_delivery_effect(
                     Err(ReleaseInventoryCode::UnprovenContent)
                 } else { Ok(()) }
             },
+        DeliveryContentPresence::Dropped { paths } if reviewed_drop.is_some_and(|reason| matches!(
+            close_ops::validated_delivery_drop_review(repo, anchor, target, &paths, Some(reason)),
+            Ok(Some(_)))) => Ok(()),
         DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
         DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
     }
@@ -1173,8 +1213,6 @@ pub(crate) fn satisfying_deferred_receipt(
 }
 
 /// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
-// gate-audit[author_override]: selector Read-only validation of issued QA evidence; the accepting batch-receipt producer records G-116, not coverage replays.
-// gate-audit[release_author_waiver]: selector Read-only replay of release-bound evidence; verification_batch_receipt records G-116 when issuing evidence under that waiver.
 fn covering_receipt(
     root: &Path,
     task: &Task,
@@ -1183,12 +1221,36 @@ fn covering_receipt(
     head: &str,
     receipts_for_task: fn(&Path, &str, &str) -> cas_store::Result<Vec<QaBatchReceipt>>,
 ) -> Result<Option<QaBatchReceipt>, String> {
+    let mut covering = None;
+    walk_receipts(root, task, repo, target, head, receipts_for_task, |receipt, gap| {
+        if gap.is_none() {
+            covering = Some(receipt.clone());
+        }
+        gap.is_none()
+    })?;
+    Ok(covering)
+}
+
+/// Judge each recorded receipt against the delivery in order, handing the
+/// visitor the receipt and the first reason it does not cover (`None`: it
+/// covers). The visitor stops the walk by returning true.
+// gate-audit[author_override]: selector Read-only validation of issued QA evidence; the accepting batch-receipt producer records G-116, not coverage replays.
+// gate-audit[release_author_waiver]: selector Read-only replay of release-bound evidence; verification_batch_receipt records G-116 when issuing evidence under that waiver.
+fn walk_receipts(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+    receipts_for_task: fn(&Path, &str, &str) -> cas_store::Result<Vec<QaBatchReceipt>>,
+    mut visit: impl FnMut(&QaBatchReceipt, Option<&'static str>) -> bool,
+) -> Result<(), String> {
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
-        return Ok(None);
+        return Ok(());
     }
     let Some(anchor) = resolved_delivery_anchor(repo, task, target) else {
-        return Ok(None);
+        return Ok(());
     };
     // Retired history can recover only reviewed delivery. Without an active
     // park, a later integrated head may be an unreviewed correction, rather
@@ -1204,68 +1266,73 @@ fn covering_receipt(
     let fixed_target = release_close::target(root, &task.id);
     let target = fixed_target.as_deref().unwrap_or(target);
     for receipt in receipts {
-        if !release_close::receipt_allowed(root, task, &receipt) { continue; }
-        let Some(reviewed) = receipt.task_heads.get(&task.id) else { continue };
-        let known = *reviewed == anchor || retired.contains(reviewed);
-        if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
-            let Some(tag) = receipt.release_tag.as_deref() else { continue };
-            let tag_ref = format!("refs/tags/{tag}");
-            if !known
-                || ![anchor.as_str(), head].contains(&reviewed.as_str())
-                || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
-                || !release_tag_ships_delivery(repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, &task.id)
-            {
-                continue;
+        let gap = 'judge: {
+            if !release_close::receipt_allowed(root, task, &receipt) { break 'judge Some("RECEIPT_NOT_ALLOWED"); }
+            let Some(reviewed) = receipt.task_heads.get(&task.id) else { break 'judge Some("TASK_NOT_LISTED"); };
+            let known = *reviewed == anchor || retired.contains(reviewed);
+            if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
+                let Some(tag) = receipt.release_tag.as_deref() else { break 'judge Some("TAG_UNBOUND"); };
+                let tag_ref = format!("refs/tags/{tag}");
+                if !known
+                    || ![anchor.as_str(), head].contains(&reviewed.as_str())
+                    || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
+                    || !release_tag_ships_delivery(repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, &task.id)
+                {
+                    break 'judge Some("TAG_UNBOUND");
+                }
+                break 'judge None;
             }
-            return Ok(Some(receipt));
-        }
-        let inside_review = active == Some(reviewed.as_str())
-            || head == reviewed
-            || ancestor(repo, head, &receipt.staging_sha) == Some(true);
-        if !known
-            || !inside_review
-            || receipt.project_id != project
-            || ancestor(repo, reviewed, head) != Some(true)
-            || ancestor(repo, reviewed, &receipt.staging_sha) != Some(true)
-            || !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
+            if !known { break 'judge Some("ANCHOR_MISMATCH"); }
+            let inside_review = active == Some(reviewed.as_str())
+                || head == reviewed
+                || ancestor(repo, head, &receipt.staging_sha) == Some(true);
+            if !inside_review { break 'judge Some("HEAD_OUTSIDE_REVIEW"); }
+            if receipt.project_id != project { break 'judge Some("PROJECT_MISMATCH"); }
+            if ancestor(repo, reviewed, head) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_HEAD"); }
+            if ancestor(repo, reviewed, &receipt.staging_sha) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_STAGING"); }
+            if !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
                 || (ancestor(repo, &receipt.staging_sha, head) == Some(true)
                     && integration_state(repo, head, target) == Some(true)))
-            || integration_state(repo, &receipt.staging_sha, target) != Some(true)
-        {
-            continue;
-        }
-        // cas-26ac: lineage can grow after recording, so recheck the author.
-        // Receipts from before authors were recorded carry none.
-        if let Some(author) = receipt.ledger_author_id.as_deref()
-            && !receipt.author_overrides.contains_key(&task.id)
-            && author_override(root, task).is_none()
-            && !author_is_independent(root, task, repo, author)?
-            && !(receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA
-                && release_author_waiver(root, task, repo, reviewed)?.is_some())
-        {
-            continue;
-        }
-        // A post-review integration receipt may be later than staging. The
-        // immutable task anchor, rather than that umbrella merge, binds QA.
-        let ledger_ok = match validate_ledger(
-            root,
-            &receipt.ledger_artifact_id,
-            Path::new(&receipt.ledger_path),
-        ) {
-            Ok((artifact, _)) => {
-                artifact.sha256 == receipt.ledger_sha256
-                    && artifact.size_bytes == receipt.ledger_size_bytes
+            {
+                break 'judge Some("STAGING_NOT_COVERING_HEAD");
             }
-            // cas-6048: a peer's receipt names a ledger published on the
-            // machine that recorded it, which validated those bytes there.
-            // Without a local copy, its recorded SHA-256 and size stand.
-            Err(_) => receipt.imported,
+            if integration_state(repo, &receipt.staging_sha, target) != Some(true) {
+                break 'judge Some("STAGING_NOT_ON_TARGET");
+            }
+            // cas-26ac: lineage can grow after recording, so recheck the author.
+            // Receipts from before authors were recorded carry none.
+            if let Some(author) = receipt.ledger_author_id.as_deref()
+                && !receipt.author_overrides.contains_key(&task.id)
+                && author_override(root, task).is_none()
+                && !author_is_independent(root, task, repo, author)?
+                && !(receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA
+                    && release_author_waiver(root, task, repo, reviewed)?.is_some())
+            {
+                break 'judge Some("AUTHOR_IN_LINEAGE");
+            }
+            // A post-review integration receipt may be later than staging. The
+            // immutable task anchor, rather than that umbrella merge, binds QA.
+            let ledger_ok = match validate_ledger(
+                root,
+                &receipt.ledger_artifact_id,
+                Path::new(&receipt.ledger_path),
+            ) {
+                Ok((artifact, _)) => {
+                    artifact.sha256 == receipt.ledger_sha256
+                        && artifact.size_bytes == receipt.ledger_size_bytes
+                }
+                // cas-6048: a peer's receipt names a ledger published on the
+                // machine that recorded it, which validated those bytes there.
+                // Without a local copy, its recorded SHA-256 and size stand.
+                Err(_) => receipt.imported,
+            };
+            (!ledger_ok).then_some("LEDGER_CHANGED")
         };
-        if ledger_ok {
-            return Ok(Some(receipt));
+        if visit(&receipt, gap) {
+            break;
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 // gate-audit[author_override]: selector Read-only evidence lookup replays operator authorization; no new approval or delivery accepted.
@@ -1305,10 +1372,53 @@ pub(crate) fn covering_pass(
     Ok(None)
 }
 
-pub(crate) fn debt_refusal(task: &str) -> String {
+/// The deferred-debt refusal, with the delivery identity, each recorded piece of
+/// evidence and why it does not count, and the one-call supervisor close. The
+/// `debt:` line is machine-readable: `anchor=` and `head=` are commits,
+/// `receipt:<id>=` and `qa_pass:<id>=` carry a gap code (see `walk_receipts`,
+/// `pass_gap`), and `supervisor_close=` is the call that clears the debt.
+pub(crate) fn debt_refusal(root: &Path, task: &Task, repo: &Path, target: &str, head: Option<&str>) -> String {
+    let anchor = resolved_delivery_anchor(repo, task, target);
+    let mut evidence = Vec::new();
+    if let Some(head) = head {
+        let _ = walk_receipts(root, task, repo, target, head, cas_store::qa_batch_receipts_for_task, |receipt, gap| {
+            evidence.push(format!("receipt:{}={}", receipt.id, gap.unwrap_or("COVERS")));
+            false
+        });
+        for pass in cas_store::list_qa_passes(root, &task.id).unwrap_or_default() {
+            evidence.push(format!("qa_pass:{}={}:{}", pass.id, pass.state, pass_gap(root, task, repo, anchor.as_deref(), &pass)));
+        }
+    }
+    if evidence.is_empty() {
+        evidence.push("none".into());
+    }
     format!(
-        "waiting for batch receipt: {task} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor or a covering passed independent QA round is required before close"
+        "waiting for batch receipt: {id} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor or a covering passed independent QA round is required before close\n\
+         debt: task={id} anchor={anchor} head={head} evidence={evidence}\n\
+         supervisor_close: task action=close id={id} supervisor_override=true reason=\"<why>\"{receipt}",
+        id = task.id,
+        anchor = anchor.as_deref().unwrap_or("none"),
+        head = head.unwrap_or("none"),
+        evidence = evidence.join(","),
+        receipt = head.map(|head| format!(" commit_receipt={head}")).unwrap_or_default(),
     )
+}
+
+/// Why a recorded QA round does not satisfy deferred debt (`COVERS`: it does,
+/// so the debt is on the head's integration, not the round).
+// gate-audit[author_override]: selector Read-only diagnosis of recorded QA rounds replays operator authorization; no new approval or delivery accepted.
+fn pass_gap(root: &Path, task: &Task, repo: &Path, anchor: Option<&str>, pass: &cas_types::QaPass) -> &'static str {
+    if pass.state != cas_types::QaPassState::Passed {
+        return "QA_PASS_NOT_PASSED";
+    }
+    if anchor.is_none() || commit(repo, &pass.bound_head).as_deref() != anchor {
+        return "QA_PASS_ANCHOR_MISMATCH";
+    }
+    match pass.reviewer_agent_id.as_deref() {
+        Some(reviewer) if author_override(root, task).is_none()
+            && !author_is_independent(root, task, repo, reviewer).unwrap_or(true) => "QA_REVIEWER_IN_LINEAGE",
+        _ => "COVERS",
+    }
 }
 
 /// Final transition guard, independent of QA mode, classification, merge
@@ -1338,7 +1448,7 @@ pub(crate) fn ensure_deferred_close(
         Some(head) => commit(&repo, head),
         None => delivery_anchor(&repo, task),
     }
-    .ok_or_else(|| debt_refusal(&task.id))?;
+    .ok_or_else(|| debt_refusal(root, task, &repo, &target, None))?;
     let satisfies = |head: &str| -> Result<bool, String> {
         Ok(
             satisfying_deferred_receipt(root, task, &repo, &target, head)?.is_some()
@@ -1357,7 +1467,7 @@ pub(crate) fn ensure_deferred_close(
     {
         return Ok(());
     }
-    Err(debt_refusal(&task.id))
+    Err(debt_refusal(root, task, &repo, &target, Some(&head)))
 }
 
 #[cfg(test)]

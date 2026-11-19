@@ -10,7 +10,13 @@ process is added.
 
 In batch mode, an implementer's pre-merge close still checks added test skip
 and focus markers, then parks the delivery with evidence deferred. Cassy does
-not automatically dispatch a per-task QA pass. A supervisor can still request
+not automatically dispatch a per-task QA pass. Resolved batch mode owns park
+proof even when target refs are unavailable; unavailable ancestry does not
+require an implementer's per-task bundle. Proven integrated deliveries retain
+their final-close evidence path rather than acquiring new deferral. Repeated parks
+with unknown ancestry remain deferred. Known integrated deliveries with recorded
+debt still require the batch receipt before they close, and the final transition
+guard enforces that debt independently of QA mode. A supervisor can still request
 one explicitly with `verification action=qa_request`. A pending or failed explicit
 round still binds: re-parking a changed tip opens the next round. A logged
 waiver ends that per-task obligation; deferred batch evidence is still owed.
@@ -186,10 +192,12 @@ obligation survives changes to surface classification, gate settings and
 target or its origin tracking ref can prove integration; a stale origin cannot
 authorize another evidence deferral for code already on the local target.
 Skip/focus safeguards remain active for deferred parks and receipts.
-supervisor_override=true does not clear batch QA debt. A waived QA round also
-does not fulfill it; only a valid listed receipt or a passed independent round
-covering the current delivery anchor does. Explicit QA-request authority remains
-available.
+A waived QA round does not fulfill the debt; only a valid listed receipt or a
+passed independent round covering the current delivery anchor does. A live
+supervisor can instead clear it in one call with `task action=close
+supervisor_override=true reason="<why>"` (cas-bc15); the waiver is recorded on
+the task. Direct `task update status=closed` has no override. Explicit
+QA-request authority remains available.
 
 Batch receipts and deferred obligations are local project records in
 `.cas/cas.db` (migration 276). They do not create a cloud synchronization lane.

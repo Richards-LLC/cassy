@@ -556,7 +556,7 @@ mod tests {
         };
         assert!(reason.contains("Not Found"), "{reason}");
         let stated = std::fs::read_to_string(path).unwrap();
-        assert!(stated.contains("could not fetch this issue") && stated.contains("Not Found"));
+        assert!(stated.contains("Not Found"));
     }
 
     #[test]

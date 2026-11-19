@@ -65,7 +65,8 @@ lockfile and execution environment. Cite the original receipt/log paths in the
 round bundle and ledger; preserve their producer and timestamps. Reuse matching
 unit/typecheck receipts as well. Read the tests the delivery adds against
 [Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests): bloat, restated
-implementation, sleeps and retry-wrapped flakes are Normal findings, and a test
+implementation, breaches of [Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene)
+(timing guesses included) and retry-wrapped flakes are Normal findings, and a test
 that steps around its asserted invariant is at least Normal.
 
 Where the project has a journey registry, the QA task's journey table is the

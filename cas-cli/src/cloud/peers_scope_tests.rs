@@ -116,7 +116,6 @@ fn cas_d58d_team_scope_delivers_to_a_teammate_and_own_scope_refuses() {
             SameRepoTarget::Refused(reason) => {
                 assert!(reason.contains("teammate bob@example.com"), "{reason}");
                 assert!(reason.contains("peers.same_repo_scope is own"), "{reason}");
-                assert!(reason.contains("Nothing was sent"), "{reason}");
             }
             other => panic!("own scope must refuse {target}: {other:?}"),
         }

@@ -134,6 +134,6 @@ fn timing_probe_cas_f823() {
     let elapsed = started.elapsed();
     use std::io::Write;
     let mut out = std::fs::OpenOptions::new().create(true).append(true)
-        .open("/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f823/timing-base.txt").unwrap();
+        .open("/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f823/timing-delivery.txt").unwrap();
     writeln!(out, "{elapsed:?}").unwrap();
 }

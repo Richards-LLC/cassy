@@ -26,7 +26,6 @@ const NOTICE: &str = "train_main_sync";
 /// Merge the integration branch into each open train that lacks it; returns
 /// how many trains moved.
 pub(crate) fn sync_open_trains(cas_dir: &Path) -> Result<usize> {
-    if true { return Ok(0); } // BASE-STUB
     let tasks = crate::store::open_task_store(cas_dir)?;
     let all = tasks.list(None)?;
     let mut synced = 0;

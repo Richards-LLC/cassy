@@ -2062,14 +2062,19 @@ pub(crate) fn settle_retired_worker_bindings_reporting(
     // runs before the legacy binding cleanup. The supervisor asked for this
     // stop, so it gets one shutdown receipt naming these tasks instead of a
     // Critical death alarm per worker (cas-b06f, spec-6194 P2.6).
-    let recovered = crate::mcp::tools::service::orphan_recovery::recover_worker_retired_on_request(
-        cas_dir,
-        agent_store,
-        agent,
-        held_task_ids,
-        "worker terminated by shutdown request",
-    )
-    .recovered_task_ids;
+    // cas-94a0: a standby worker's tasks stay as they are, for Resume.
+    let recovered = if crate::factory_standby::holds(cas_dir, &agent.name) {
+        Vec::new()
+    } else {
+        crate::mcp::tools::service::orphan_recovery::recover_worker_retired_on_request(
+            cas_dir,
+            agent_store,
+            agent,
+            held_task_ids,
+            "worker terminated by shutdown request",
+        )
+        .recovered_task_ids
+    };
 
     // cas-7a94: clear pure Open pre-assigns and any binding the recovery
     // path could not inspect. Assignees are display names (cas-dbbb), so

@@ -7184,6 +7184,9 @@ impl FactoryDaemon {
             // supervisor action. Unchanged in substance — but the authority is
             // now that CAS wrote the row, not that the row says so.
             WakeSender::Daemon => {
+                if crate::cloud::peer_mailbox::train_parks::ready_wake(source, prompt) {
+                    return Some(SupervisorWakeClass::Lifecycle);
+                }
                 if source == super::teams::DIRECTOR_AGENT_NAME
                     && super::delivery::parse_director_prompt(supervisor_name, prompt).is_some()
                 {
@@ -12806,6 +12809,16 @@ impl FactoryDaemon {
                         .map_err(|error| anyhow::anyhow!(
                             "launch refused before stopping {name}; the worker keeps running: {error}"
                         ))?;
+                    if !stopped && crate::factory_worker_runs::recycle_waits_for_build(
+                        self.app.cas_dir(), &name, &self.session_name,
+                    )? {
+                        // Keep the same request pending; the next daemon pass
+                        // resumes it once its own producer releases the lease.
+                        self.pending_spawns.push_back(PendingSpawn::Recycle {
+                            request_id, name: name.clone(), spec: Some(spec), dead_worker_recovery, stopped,
+                        });
+                        return Ok(None);
+                    }
                     self.pane_buffers.remove(&name);
                     self.forget_probe_pane(&name);
                     if !stopped {

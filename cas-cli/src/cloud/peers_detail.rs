@@ -253,14 +253,14 @@ fn belongs_to_peer(
                     .is_none_or(|id| agent.team_id.as_ref() == Some(id))
         })
         && meta(agent, peers::META_FACTORY_SESSION) == peer.session.as_deref()
-        && match (&agent.machine_id, &peer.machine_id) {
+        && (meta(agent, "train_owner") == Some(peer.agent_id.as_str()) || match (&agent.machine_id, &peer.machine_id) {
             (Some(worker_machine), Some(peer_machine)) => worker_machine == peer_machine,
             (None, None) => {
                 meta(agent, peers::META_HOSTNAME) == Some(peer.machine.as_str())
                     && peer.machine != "unknown"
             }
             _ => false,
-        }
+        })
         && meta(agent, peers::META_CANONICAL_ID).is_some_and(|repo| {
             peer.canonical_id.as_deref().is_some_and(|peer_repo| {
                 super::project_ids_match_with_aliases(repo, peer_repo, aliases)
@@ -276,6 +276,7 @@ pub struct PeerWorkerRef {
     pub agent_id: String,
     pub name: String,
     pub machine: String,
+    pub machine_id: Option<String>,
     pub supervisor: Peer,
 }
 
@@ -290,7 +291,6 @@ impl PeerWorkerRef {
             && machine.is_none_or(|machine| {
                 self.machine.eq_ignore_ascii_case(machine)
                     || self
-                        .supervisor
                         .machine_id
                         .as_deref()
                         .is_some_and(|id| id.eq_ignore_ascii_case(machine))
@@ -312,7 +312,8 @@ pub fn live_peer_workers(
             let owner = agents.iter().find(|a| a.id == supervisor.agent_id);
             agents
                 .iter()
-                .filter(move |agent| belongs_to_peer(agent, supervisor, owner, aliases))
+                .filter(move |agent| belongs_to_peer(agent, supervisor, owner, aliases)
+                    && (supervisor.live || meta(agent, "train_owner") == Some(supervisor.agent_id.as_str())))
                 .filter(move |agent| {
                     matches!(agent.status.as_str(), "active" | "idle")
                         && heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS)
@@ -320,7 +321,9 @@ pub fn live_peer_workers(
                 .map(move |agent| PeerWorkerRef {
                     agent_id: agent.id.clone(),
                     name: agent.name.clone(),
-                    machine: supervisor.machine.clone(),
+                    machine: meta(agent, peers::META_HOSTNAME).map(str::to_owned)
+                        .or_else(|| agent.machine_id.clone()).unwrap_or_else(|| supervisor.machine.clone()),
+                    machine_id: agent.machine_id.clone(),
                     supervisor: supervisor.clone(),
                 })
         })

@@ -24,6 +24,8 @@ export type Session = {
   started_at?: string;
   dismissed?: boolean;
   dormant?: boolean;
+  /** Parked by /standby: set when the daemon observes the standby command, cleared by the operator's next message (cas-0699). */
+  standby?: boolean;
   /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
   last_activity_at?: string;
   last_activity?: string;
@@ -1466,8 +1468,20 @@ export class HubDouble {
         this.forwardPendingReplies(session, ws);
       }
     }
+    if (message.SupervisorCommand) {
+      // The daemon's side of /standby: once the supervisor has run it, the session is parked and the catalog says so.
+      const request = message.SupervisorCommand as { client_ref: string; command: string; confirmed?: boolean };
+      const row = this.sessionsFor(machineId).find((candidate) => candidate.name === session);
+      if (request.command === "standby" && request.confirmed && row) {
+        row.standby = true;
+        ws.send(JSON.stringify({ SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "standby", phase: "observed", detail: "Standby", output: "", interactive: false } } }));
+      }
+    }
     if (message.SendMessage) {
       const m = message.SendMessage;
+      // The supervisor's prompt hook: the operator's first message brings a standby session back.
+      const parked = this.sessionsFor(machineId).find((candidate) => candidate.name === session);
+      if (parked?.standby) parked.standby = false;
       this.sends.push({
         machine: machineId, session, client_ref: String(m.client_ref), target: String(m.target), text: String(m.text),
         ...(typeof m.in_reply_to === "number" ? { in_reply_to: m.in_reply_to } : {}),

@@ -189,6 +189,40 @@ pub(crate) fn bind(root: &Path, id: &str, pid: u32) -> Result<()> {
     save(root, &run)
 }
 
+/// The queue can wait only for this session's current worker and its actual
+/// live producer. An unknown or leaked lease retains the normal refusal.
+pub(crate) fn recycle_waits_for_build(root: &Path, worker: &str, session: &str) -> Result<bool> {
+    let agents = crate::store::open_agent_store(root)?.list(None)?;
+    let Some(owner) = agents.iter().filter(|agent| {
+        agent.name == worker
+            && agent.role == cas_types::AgentRole::Worker
+            && agent.factory_session.as_deref() == Some(session)
+            && agent.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
+    }).max_by_key(|agent| agent.registered_at) else {
+        return Ok(false);
+    };
+    let repo = owner.metadata.get("clone_path").map(PathBuf::from)
+        .unwrap_or_else(|| root.join("worktrees").join(worker));
+    // Non-isolated workers need not have a conventional private checkout.
+    if !repo.exists() { return Ok(false); }
+    let repo = repo.canonicalize()?;
+    if repo.parent() != root.join("worktrees").canonicalize().ok().as_deref() {
+        return Ok(false);
+    }
+    if let Ok(Some((pid, fingerprint))) = crate::factory_target_cache::owner::builder_identity(root, &repo)
+        && entries(root)?.iter().any(|run| {
+            run.worker_id == owner.id && run.worker == worker
+                && run.session.as_deref() == Some(session) && run.repo == repo
+                && run.finished_at.is_none() && run.exit_code.is_none()
+                && run.pid == Some(pid) && run.fingerprint == Some(fingerprint)
+        })
+    {
+        return Ok(true);
+    }
+    crate::factory_target_cache::owner::for_retirement(root, &repo)?;
+    Ok(false)
+}
+
 /// Stop the registered producer before recycle can kill its worker cgroup.
 /// Cargo may be in a sibling scope, so killing only the producer strands its
 /// inherited target lease. The producer's TERM handler drains that tree first.

@@ -837,6 +837,7 @@ pub fn create_metadata(
     held_workers.dedup();
 
     SessionMetadata {
+        worker_host: previous_metadata.as_ref().and_then(|metadata| metadata.worker_host.clone()),
         name: session_name.to_string(),
         created_at: Local::now().to_rfc3339(),
         daemon_pid,

@@ -549,6 +549,9 @@ pub struct HubSession {
     /// default, but can be revealed for recovery.
     #[serde(default)]
     pub dormant: bool,
+    /// The session's existing standby marker; cleared by the resume flow.
+    #[serde(default)]
+    pub standby: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<crate::ui::factory::SessionEndOutcome>,
     /// Hub-owned navigation preference; the session and its history remain readable.
@@ -745,6 +748,8 @@ impl LocalSessionReadModel {
             .map(|session| {
                 let mut projected = hub_session(session);
                 let cas_root = session_cas_root(session);
+                projected.standby = cas_root.as_deref()
+                    .is_some_and(|root| crate::factory_standby::active(root, &session.name));
                 projected.cloud_project_id = cas_root.as_deref().and_then(cloud_project_id);
                 projected.project = projected.cloud_project_id.clone().or_else(|| {
                     cas_root
@@ -819,6 +824,7 @@ impl LocalSessionReadModel {
                 ws_port: None,
                 liveness: DaemonLiveness::StaleMetadata,
                 dormant: false,
+                standby: false,
                 last_activity_at: Some(receipt.ended.at.clone()),
                 last_activity: Some("Session ended".into()),
                 started_at: Some(receipt.metadata.created_at),
@@ -978,6 +984,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
             DaemonLiveness::Live
         },
         dormant: !has_live_supervisor(session),
+        standby: false,
         ended: None,
         dismissed: false,
         last_activity_at: None,
@@ -1261,6 +1268,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         ws_port: Some(12345),
         liveness: DaemonLiveness::Live,
         dormant: false,
+        standby: false,
         ended: None,
         dismissed: false,
         last_activity_at: None,

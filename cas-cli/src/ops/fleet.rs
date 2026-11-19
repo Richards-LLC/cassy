@@ -371,6 +371,58 @@ pub(crate) fn pinned_epic(factory_session: &str) -> Option<String> {
         .pinned_epic_id
 }
 
+fn persist_epic_focus(factory_session: &str, epic: &cas_types::Task) -> Result<(), OperationError> {
+    let path = crate::ui::factory::metadata_path(factory_session);
+    crate::ui::factory::persist_session_metadata_pinned_epic_id_at(&path, Some(&epic.id))
+        .map_err(|error| OperationError::Failed(format!("Failed to persist pinned epic focus: {error}")))?;
+    crate::ui::factory::persist_session_metadata_delivery_mode_at(&path, epic.delivery_mode)
+        .map_err(|error| OperationError::Failed(format!("Failed to persist factory delivery mode: {error}")))
+}
+
+/// Restore a durable focus, following any cuts that happened during the handoff.
+/// This is local session state, never an epic ownership transfer.
+pub(crate) fn restore_epic_focus(root: &Path, session: &str, epic_id: &str) -> String {
+    let Ok(tasks) = crate::store::open_task_store(root) else { return String::new() };
+    let Ok(mut epic) = tasks.get(epic_id) else { return String::new() };
+    let mut seen = std::collections::HashSet::new();
+    while crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
+        if !seen.insert(epic.id.clone()) { return String::new() }
+        let Some(next) = epic.labels.iter().find_map(|label| label.strip_prefix("release-train-successor:")) else { return String::new() };
+        let Ok(next) = tasks.get(next) else { return String::new() };
+        epic = next;
+    }
+    if epic.task_type != cas_types::TaskType::Epic || epic.is_terminal()
+        || pinned_epic(session).as_deref() == Some(epic.id.as_str())
+    { return String::new() }
+    if let Err(error) = persist_epic_focus(session, &epic) {
+        return format!("\nEpic focus could not be restored: {error}");
+    }
+    record_focus_epic_event(root, session, Some(&epic.id), Some(epic.delivery_mode));
+    format!("\nPinned epic focus to {} for factory session {session}.", epic.id)
+}
+
+/// Keep an intentional live focus; recover an unset, missing or retired focus.
+pub(crate) fn auto_focus_epic(root: &Path, session: &str, epic_id: &str) -> String {
+    if let Some(current) = pinned_epic(session)
+        && let Ok(tasks) = crate::store::open_task_store(root)
+        && let Ok(epic) = tasks.get(&current)
+        && !epic.is_terminal()
+        && !crate::mcp::tools::core::task::release_train::is_cut_train(&epic)
+    { return String::new() }
+    restore_epic_focus(root, session, epic_id)
+}
+
+pub(crate) fn auto_focus_target(root: &Path, actor: &str, target: &str) -> String {
+    let Some(agent) = crate::store::open_agent_store(root).ok().and_then(|agents| agents.get(actor).ok()) else { return String::new() };
+    if agent.role != cas_types::AgentRole::Supervisor { return String::new() }
+    let Some(session) = agent.factory_session.as_deref() else { return String::new() };
+    let Some(epic) = crate::store::open_task_store(root).ok().and_then(|tasks| tasks.list(None).ok())
+        .and_then(|tasks| tasks.into_iter().find(|task| task.task_type == cas_types::TaskType::Epic
+            && task.effective_epic_branch() == Some(target) && !task.is_terminal()))
+    else { return String::new() };
+    auto_focus_epic(root, session, &epic.id)
+}
+
 /// O2: focus a factory session on an epic, or clear the focus. The body of
 /// MCP `factory action=focus_epic`; its success text is that action's reply.
 pub(crate) fn focus_epic(
@@ -380,7 +432,7 @@ pub(crate) fn focus_epic(
 ) -> Result<String, OperationError> {
     use crate::store::open_task_store;
     use crate::ui::factory::{
-        metadata_path, persist_session_metadata_delivery_mode_at,
+        metadata_path,
         persist_session_metadata_pinned_epic_id_at,
     };
     use cas_types::{TaskStatus, TaskType};
@@ -430,11 +482,7 @@ pub(crate) fn focus_epic(
         })?;
     }
 
-    persist_session_metadata_pinned_epic_id_at(&metadata_path, Some(epic_id))
-        .map_err(|e| OperationError::Failed(format!("Failed to persist pinned epic focus: {e}")))?;
-    persist_session_metadata_delivery_mode_at(&metadata_path, delivery_mode).map_err(|e| {
-        OperationError::Failed(format!("Failed to persist factory delivery mode: {e}"))
-    })?;
+    persist_epic_focus(factory_session, &epic)?;
     let branch_receipt = focus_epic_branch_receipt(cas_root, &epic);
     record_focus_epic_event(
         cas_root,

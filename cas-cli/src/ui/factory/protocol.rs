@@ -1053,6 +1053,9 @@ impl From<cas_mux::PaneKind> for PaneKind {
 /// Session metadata persisted to disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMetadata {
+    /// Remote train owner; this daemon hosts workers without a supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_host: Option<crate::factory_session_scope::WorkerHost>,
     /// Session name
     pub name: String,
     /// When the session was created

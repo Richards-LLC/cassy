@@ -401,14 +401,15 @@ impl DaemonInitPhase {
 
         // Send supervisor progress (clone to avoid borrow conflicts)
         let supervisor_name = self.supervisor_name.clone();
-        self.send_agent_progress(&supervisor_name, true, 0.0, false)?;
+        let worker_host = self.factory_config.worker_host.is_some();
+        if !worker_host { self.send_agent_progress(&supervisor_name, true, 0.0, false)?; }
 
-        // Create mux - this spawns all Claude PTYs with reader threads
-        let mut mux = Mux::factory(mux_config)?;
-        mux.focus(&supervisor_name);
+        // Create mux - this spawns the selected agent PTYs.
+        let mut mux = if worker_host { Mux::worker_host(mux_config)? } else { Mux::factory(mux_config)? };
+        if !worker_host { mux.focus(&supervisor_name); }
 
         // Supervisor done
-        self.send_agent_progress(&supervisor_name, true, 1.0, true)?;
+        if !worker_host { self.send_agent_progress(&supervisor_name, true, 1.0, true)?; }
 
         // Workers were spawned by Mux::factory, send their progress
         let worker_names = self.worker_names.clone();
@@ -438,6 +439,7 @@ impl DaemonInitPhase {
             self.factory_config.session_id.clone(),
             self.factory_config.lead_session_id.clone(),
             self.factory_config.cwd.clone(),
+            worker_host,
         )?;
         app.set_factory_session(self.session_name.clone());
 
@@ -456,7 +458,7 @@ impl DaemonInitPhase {
         super::runtime::teams::TeamsManager::cleanup_orphans();
 
         // Initialize native Agent Teams for inter-agent messaging.
-        let teams = {
+        let teams = if worker_host { None } else {
             let tm = super::runtime::teams::TeamsManager::new(&self.session_name);
             let worker_cwds: std::collections::HashMap<String, std::path::PathBuf> = app
                 .worktree_manager()

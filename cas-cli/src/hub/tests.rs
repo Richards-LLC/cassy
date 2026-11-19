@@ -3786,6 +3786,21 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     assert_eq!(mapped.epic_id.as_deref(), Some("cas-5d94"));
     assert_eq!(mapped.liveness, DaemonLiveness::Live);
 
+    // cas-0699: Commander reads the same per-session marker as the daemon,
+    // and the next catalog read reflects Resume without caching standby.
+    let model = LocalSessionReadModel::default();
+    let catalog_row = || serde_json::to_value(model.project(std::slice::from_ref(&session)).remove(0)).unwrap();
+    assert_eq!(catalog_row()["standby"], false);
+    crate::factory_standby::enter(&cas_root, &crate::factory_standby::Standby {
+        session: session_name.into(),
+        since: chrono::Utc::now(),
+        handoff: None,
+        workers: vec![],
+    }).unwrap();
+    assert_eq!(catalog_row()["standby"], true);
+    crate::factory_standby::clear(&cas_root, session_name).unwrap();
+    assert_eq!(catalog_row()["standby"], false);
+
     let mut dead_supervisor = agents.get("roster-supervisor-id").unwrap();
     dead_supervisor.status = AgentStatus::Stale;
     dead_supervisor.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(31);

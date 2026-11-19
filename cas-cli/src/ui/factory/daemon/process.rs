@@ -105,6 +105,10 @@ pub(crate) fn daemon_relaunch_args(config: &DaemonConfig) -> Vec<std::ffi::OsStr
     if config.boot_progress {
         args.push("--boot-progress".into());
     }
+    if let Some(train) = &factory.worker_host {
+        args.push("--worker-host".into());
+        args.push(train.into());
+    }
     if let Some(ref supervisor_name) = factory.supervisor_name {
         args.push("--supervisor-name".into());
         args.push(supervisor_name.clone().into());
@@ -344,7 +348,7 @@ pub(super) fn from_app_after_fork(
     if handoff.is_none() { super::runtime::teams::TeamsManager::cleanup_orphans(); }
 
     // Initialize native Agent Teams for inter-agent messaging.
-    let teams = if let Some(handoff) = handoff {
+    let teams = if app.is_worker_host() { None } else if let Some(handoff) = handoff {
         handoff.teams_present.then(|| super::runtime::teams::TeamsManager::new(&session_name))
     } else {
         let tm = super::runtime::teams::TeamsManager::new(&session_name);
@@ -611,6 +615,7 @@ mod tests {
 
     fn relaunch_config() -> DaemonConfig {
         let mut factory = FactoryConfig::default();
+        factory.worker_host = Some("cas-owner-train".into());
         factory.workers = 2;
         factory.worker_names = vec!["alice".into(), "bob".into()];
         factory.supervisor_name = Some("lead".into());
@@ -674,6 +679,7 @@ mod tests {
         argv.extend(args.iter().cloned());
         crate::cli::Cli::try_parse_from(argv).expect("relaunch arguments parse as `cas factory daemon`");
 
+        assert_eq!(flag_values(&args, "--worker-host"), ["cas-owner-train"]);
         let worker_jsons = flag_values(&args, "--worker-spec-json");
         assert_eq!(worker_jsons.len(), 2, "{args:?}");
         let missing = std::path::PathBuf::from("/nonexistent/cas-a5c0/config.toml");

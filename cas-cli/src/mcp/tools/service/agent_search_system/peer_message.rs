@@ -95,7 +95,7 @@ impl CasService {
             let directory = peer_mailbox::WorkerDirectory::load(&root, &sender.id)?;
             let Some(to) = directory.resolve(&target)? else { return Ok(None) };
             if !directory.matches_local(&sender) { return Err("worker sender registration is not live or does not match Cloud identity".into()); }
-            let (from,to) = directory.pair(&sender.id, &to.agent_id)?;
+            directory.pair(&sender.id, &to.agent_id)?;
             let queue = crate::store::open_prompt_queue_store(&root).map_err(|e| e.to_string())?;
             let reply = if let Some(id) = in_reply_to {
                 let row = queue.queued_prompt(id).map_err(|e| e.to_string())?
@@ -112,17 +112,6 @@ impl CasService {
             let label = format!("{}@{}", to.name, to.machine);
             let receipt = peer_mailbox::send_raw(&root, &sender.id, &to.agent_id, &body,
                 Some(&summary), reply.as_deref(), &label).map_err(|e| e.to_string())?;
-            // Legacy advisory contracts keep quiet observers; bound worker
-            // hosts report directly to their sole owner instead.
-            if !directory.owner_of(&from.supervisor.agent_id,&from.agent_id)
-                && !directory.owner_of(&to.supervisor.agent_id,&to.agent_id) {
-                let copy = peer_mailbox::attach_message_intent(&format!("Peer worker message copy — {label}\n{body}"),Some("receipt"),false)?;
-                for owner in [&from.supervisor,&to.supervisor] {
-                    if let Err(error) = peer_mailbox::send_raw(&root,&sender.id,&owner.agent_id,&copy,Some(&summary),None,&format!("{}@{}",owner.name,owner.machine)) {
-                        tracing::warn!(%error,"legacy worker contract observer copy failed");
-                    }
-                }
-            }
             if let Some(id) = in_reply_to { queue.ack(id).map_err(|e| format!("sent, but reply ack failed: {e}"))?; }
             Ok(Some((label, receipt)))
         }).await.map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?

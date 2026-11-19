@@ -1516,7 +1516,11 @@ fn deliver_claimed_with_history(
         ) {
             Ok(admitted) => {
                 let recorded = if recipient.role == AgentRole::Worker {
-                    Ok(PeerAckOutcome::Delivered)
+                    let directory = directory.as_ref().expect("worker authorization was checked");
+                    if directory.owner_message(message, &recipient.id) { Ok(PeerAckOutcome::Delivered) } else {
+                        directory.copy_to_supervisors(workers.expect("worker route was checked").0, queue, message)
+                            .map(|()| PeerAckOutcome::Delivered)
+                    }
                 } else { on_admitted(recipient, message) };
                 match recorded {
                     Ok(PeerAckOutcome::Delivered) => {}

@@ -135,7 +135,32 @@ impl WorkerDirectory {
         Ok(Some((from, to)))
     }
 
-
+    // Observe only admitted contracts; stable keys collapse receiver retries.
+    pub(crate) fn copy_to_supervisors(&self, root: &Path, queue: &dyn PromptQueueStore, message: &ClaimedPeerMessage) -> Result<(), String> {
+        let (from, to) = self.pair(&message.sender_agent_id, &message.recipient_agent_id)?;
+        // Owner-bound workers report only to their sole owner.
+        if self.owners.contains_key(&from.agent_id) || self.owners.contains_key(&to.agent_id) { return Ok(()); }
+        let (_, original) = split_message_intent(&message.body);
+        let copy = format!("Peer worker message copy — from {}@{} to {}@{}.\n\n{}",
+            from.name, from.machine, to.name, to.machine,
+            crate::prompt_revalidation::neutralize_worker_authored_envelope_tags(original));
+        let body = attach_message_intent(&copy, Some("receipt"), false)?;
+        let mut local = message.clone();
+        local.recipient_agent_id = to.supervisor.agent_id.clone();
+        local.body = body.clone();
+        queue.enqueue_idempotent(&format!("peer:{}@{}", from.name, from.machine), &to.supervisor.name,
+            &render_prompt(&local), to.supervisor.session.as_deref(), message.summary.as_deref(),
+            Some(NotificationPriority::Normal), &format!("peer-worker-copy:{}", message.id), Some(&QueueOrigin::Daemon))
+            .map_err(|e| e.to_string())?;
+        outbox::enqueue_and_send(root, PeerSend {
+            project_id: message.project_id.clone(), sender_agent_id: to.agent_id.clone(),
+            recipient_agent_id: from.supervisor.agent_id.clone(), body,
+            summary: message.summary.clone(), in_reply_to: None,
+            dedupe_key: format!("peer-worker-copy:{}", message.id),
+            scope: PeerScope::Project, recipient_project_id: None,
+        }, &from.supervisor.name).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 pub(super) fn allowed_intent(body: &str) -> bool {

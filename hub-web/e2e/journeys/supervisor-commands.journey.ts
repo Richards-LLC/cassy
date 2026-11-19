@@ -88,7 +88,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     test("HUB-J27 standby shows the badge and Resume clears it (cas-0699)", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
-      const row = page.locator(".conversation-row").filter({ hasText: /cas-src/ });
+      const row = page.getByRole("navigation", { name: "Choose a supervisor" })
+        .getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
       await journey.stage("Go on standby from the header menu", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
@@ -98,6 +99,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await page.getByRole("alertdialog").getByRole("button", { name: "Standby", exact: true }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         expect(hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body).toMatchObject({ command: "standby", confirmed: true });
+        if (viewport.width < 600) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
         await expect(row.locator(".conversation-standby")).toBeVisible();
         await expect(page.locator("[data-resume-standby]")).toBeVisible();
       });

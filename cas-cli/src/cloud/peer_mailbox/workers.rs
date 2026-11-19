@@ -172,12 +172,9 @@ pub(crate) fn owned_route(root: &Path, sender: &Agent, target: &str) -> Result<O
         .is_some_and(|agents| agents.iter().any(|agent| agent.id == target || agent.name.eq_ignore_ascii_case(target)))
     { return Ok(None); }
     if !CloudConfig::load_from_cas_dir(root).is_ok_and(|config| config.is_logged_in()) { return Ok(None); }
-    // Ordinary supervisors and unknown targets keep the existing peer route
-    // and its diagnostics; worker account/generation checks belong to workers.
-    if !matches!(peers::discover_peers(root,Some(&sender.id)),
-        Ok(peers::PeerDiscovery::Found { workers, .. }) if workers.iter().any(|worker| worker.matches(target)))
-    { return Ok(None); }
-    let directory = WorkerDirectory::load(root, &sender.id)?;
+    // This is an optional supervisor-to-worker route. If worker authority is
+    // unavailable, ordinary peer discovery owns the target/error diagnosis.
+    let Ok(directory) = WorkerDirectory::load(root, &sender.id) else { return Ok(None) };
     Ok(directory.resolve(target)?.filter(|worker| directory.owner_of(&sender.id, &worker.agent_id))
         .map(|worker| (worker.agent_id.clone(), format!("{}@{}", worker.name, worker.machine))))
 }

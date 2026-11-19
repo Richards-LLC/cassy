@@ -3753,7 +3753,6 @@ impl CasService {
     /// [`Self::factory_shutdown_workers`] with the factory context passed in rather than read
     /// from this process's environment, so the Commander hub's operator
     /// facade runs the same body (cas-9b08).
-    // gate-audit[force]: bypass G-136 Accepts stopping an active worker only after preserving work.
     pub(crate) async fn factory_shutdown_workers_in(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
@@ -3765,6 +3764,8 @@ impl CasService {
     /// `keep_in_progress` (standby only, cas-94a0): a worker whose worktree is
     /// clean and pushed may stop while it holds an in-progress task. The task is
     /// kept as it is; unsaved work still needs `force`.
+    // gate-audit[force]: bypass G-136 Accepts stopping an active worker only after preserving work.
+    // gate-audit[keep_in_progress]: bypass G-136 Accepts stopping a worker that holds an in-progress task only when its worktree is clean and pushed; unsaved work still needs force.
     async fn factory_shutdown_workers_with(
         &self,
         ctx: &crate::ops::fleet::FleetContext,

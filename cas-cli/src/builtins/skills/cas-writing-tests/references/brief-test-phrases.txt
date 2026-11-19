@@ -19,5 +19,4 @@
 \b(?:no|not|never|nor|without|avoid|don't|do not|instead of|rather than)\b
 
 [clause-boundary]
-[,:]
-\b(?:and|but|or)\b
+,|:|\b(?:and|but|or)\b

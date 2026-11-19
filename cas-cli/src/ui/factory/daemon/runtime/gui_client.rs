@@ -830,3 +830,56 @@ impl FactoryDaemon {
         }
     }
 }
+
+#[cfg(test)]
+mod verifier_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn verifier_store_lookup_runs_outside_client_input_cas_d0f6() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(
+            root.clone(), daemon.app.project_scope(),
+        );
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        daemon.gui_clients.insert(7, GuiConnection {
+            stream, read_buf: Vec::new(), write_buf: VecDeque::new(), pane_sizes: HashMap::new(),
+        });
+        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let before = cas_store::wait_budget::store_access_violations();
+        {
+            let _forbid = cas_store::wait_budget::forbid_store_access();
+            let _budget = cas_store::wait_budget::bound_waits_for(Duration::ZERO);
+            daemon.handle_gui_message(7, ClientMessage::LaunchVerifier {
+                dispatch_id: "missing-d0f6".into(),
+            }).await;
+        }
+        // Release even on the red path, so an assertion never strands the lane.
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(cas_store::wait_budget::store_access_violations(), before);
+        // No reply is sent before the real store lookup has finished off-loop.
+        assert!(daemon.gui_clients[&7].write_buf.is_empty());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_gui_client_input().await;
+                if !daemon.gui_clients[&7].write_buf.is_empty() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let bytes: Vec<_> = daemon.gui_clients.get_mut(&7).unwrap().write_buf.drain(..).collect();
+        let reply: DaemonMessage = serde_json::from_slice(&bytes[FRAME_HEADER_SIZE..]).unwrap();
+        assert!(matches!(reply, DaemonMessage::Error { client_ref: Some(id), .. } if id == "missing-d0f6"));
+    }
+}

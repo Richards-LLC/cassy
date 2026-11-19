@@ -688,8 +688,21 @@ fn id(path: &str, name: &str) -> Identity { Identity::exact(path, name) }
             cases.append((prefix.replace('#[test] fn check() {',
                                          '#[cfg(test)] fn check<T>(id: fn(&str, &str) -> String) {'),
                           f'assert_eq!(source, id("a.test.ts", "{sentence}"));', 1))
+            shadow_probes = {
+                'block-local wildcard': f'{{ use diagnostic::*; assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'aliased use': f'{{ use diagnostic::message as id; assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'local let': f'{{ let id = |path: &str, name: &str| name.to_string(); assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'local fn': f'{{ fn id(path: &str, name: &str) -> String {{ name.to_string() }} assert_eq!(source, id("a.test.ts", "{sentence}")); }}',
+                'nested-module glob': f'mod nested {{ use super::diagnostic::*; #[test] fn check() {{ let source = "fixture"; assert_eq!(source, id("a.test.ts", "{sentence}")); }} }}',
+                'closure parameter': f'let check = |id: fn(&str, &str) -> String| assert_eq!(source, id("a.test.ts", "{sentence}"));',
+                'projection': f'assert_eq!(source, id("a.test.ts", "{sentence}").name);',
+                'macro-generated binding': 'macro_rules! diagnostic_id { () => { fn id(path: &str, name: &str) -> String { name.to_string() } } } '
+                                           f'diagnostic_id!(); assert_eq!(source, id("a.test.ts", "{sentence}"));',
+            }
+            cases.extend((prefix, assertion, 1) for assertion in shadow_probes.values())
             for setup, assertion, status in cases:
-                with self.subTest(assertion=assertion, setup=setup):
+                probe = next((name for name, body in shadow_probes.items() if body == assertion), 'existing')
+                with self.subTest(probe=probe, assertion=assertion, setup=setup):
                     path.write_text(setup + assertion + '\n}\n')
                     result = subprocess.run(command, cwd=root, capture_output=True, text=True)
                     kinds = {line.split(': ', 1)[1].split(';', 1)[0]

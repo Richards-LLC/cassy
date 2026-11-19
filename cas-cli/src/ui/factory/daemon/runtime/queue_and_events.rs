@@ -1691,6 +1691,7 @@ pub(super) fn report_provision_failure(
     supervisor_name: &str,
     request_id: Option<i64>,
     worker_name: &str,
+    task_id: Option<&str>,
     detail: &str,
 ) {
     append_spawn_audit(
@@ -1717,6 +1718,7 @@ pub(super) fn report_provision_failure(
     let supervisor = supervisor_name.to_owned();
     let session = factory_session.to_owned();
     let worker = worker_name.to_owned();
+    let task = task_id.map(str::to_owned);
     let detail = detail.to_owned();
     super::store_worker::persist_or_defer("notify supervisor of provision failure", move || {
         enqueue_spawn_outcome_notice(
@@ -1725,6 +1727,7 @@ pub(super) fn report_provision_failure(
             &session,
             request_id,
             &worker,
+            task.as_deref(),
             "provision",
             false,
             &detail,
@@ -1807,6 +1810,7 @@ fn enqueue_spawn_outcome_notice(
     factory_session: &str,
     request_id: Option<i64>,
     worker_name: &str,
+    task_id: Option<&str>,
     stage: &str,
     success: bool,
     detail: &str,
@@ -1840,6 +1844,7 @@ fn enqueue_spawn_outcome_notice(
     let request = request_id
         .map(|id| format!("request {id}"))
         .unwrap_or_else(|| "direct spawn".to_string());
+    let task = task_id.map(|id| format!(" (task {id})")).unwrap_or_default();
     let (summary, message) = if success {
         (
             format!("Worker spawn verified: {worker_name}"),
@@ -1852,7 +1857,7 @@ fn enqueue_spawn_outcome_notice(
         (
             format!("Worker spawn failed at {stage}: {worker_name}"),
             format!(
-                "Factory spawn {request} for worker '{worker_name}' failed: \
+                "Factory spawn {request} for worker '{worker_name}'{task} failed: \
                  stage={stage}. {detail}"
             ),
         )
@@ -1861,7 +1866,7 @@ fn enqueue_spawn_outcome_notice(
         queue.enqueue_urgent_with_outcome(
             "director",
             supervisor_name,
-            &crate::prompt_revalidation::attach_blocker_envelope(&message, worker_name, None),
+            &crate::prompt_revalidation::attach_blocker_envelope(&message, worker_name, task_id),
             Some(factory_session),
             Some(&summary),
             Some(cas_store::NotificationPriority::Critical),
@@ -4755,6 +4760,7 @@ impl FactoryDaemon {
                     &session,
                     None,
                     &agent.name,
+                    None,
                     "harness_auth",
                     false,
                     &detail,
@@ -6101,6 +6107,7 @@ impl FactoryDaemon {
                     &session,
                     request_id,
                     &worker,
+                    None,
                     "register",
                     false,
                     &detail,
@@ -6807,6 +6814,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 verification.request_id,
                 &worker,
+                None,
                 "register",
                 success,
                 &detail,
@@ -6840,6 +6848,7 @@ impl FactoryDaemon {
                         &self.session_name,
                         verification.request_id,
                         &worker,
+                        None,
                         "preassign",
                         false,
                         &detail,
@@ -11560,6 +11569,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             Some(request.id),
                             "unresolved",
+                            None,
                             "validate",
                             false,
                             &detail,
@@ -11724,6 +11734,30 @@ impl FactoryDaemon {
         });
     }
 
+    /// cas-3766: a dequeued request whose task-queue binding failed has no
+    /// worker and will never register. End it FAILED, tell the supervisor which
+    /// request it was, and free the slot it holds so the queue keeps draining.
+    fn fail_unbound_spawn(
+        &mut self,
+        request_id: i64,
+        worker_name: &str,
+        task_id: Option<&str>,
+        error: &str,
+    ) {
+        let detail = format!("Task queue binding failed: {error}");
+        self.app.set_error(detail.clone());
+        report_provision_failure(
+            self.app.cas_dir(),
+            &self.session_name,
+            self.app.supervisor_name(),
+            Some(request_id),
+            worker_name,
+            task_id,
+            &detail,
+        );
+        self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+    }
+
     pub(super) async fn process_pending_spawns(&mut self) {
         self.poll_worker_cleanup_jobs_at(Instant::now());
         // Step 1: Check if in-flight background spawn completed
@@ -11795,6 +11829,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 request_id,
                 &pending_name,
+                None,
                 "provision",
                 false,
                 &detail,
@@ -12090,6 +12125,7 @@ impl FactoryDaemon {
                                 &self.session_name,
                                 request_id,
                                 &pending_name,
+                                None,
                                 "launch",
                                 false,
                                 &detail,
@@ -12145,6 +12181,7 @@ impl FactoryDaemon {
                         self.app.supervisor_name(),
                         request_id,
                         &pending_name,
+                        None,
                         &e.to_string(),
                     );
                 }
@@ -12167,6 +12204,7 @@ impl FactoryDaemon {
                         self.app.supervisor_name(),
                         request_id,
                         &pending_name,
+                        None,
                         &e.to_string(),
                     );
                 }
@@ -12238,8 +12276,7 @@ impl FactoryDaemon {
                                     .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
                             });
                             if let Err(error) = bound {
-                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
-                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                self.fail_unbound_spawn(request_id, &worker_name, task_id.as_deref(), &error.to_string());
                                 return;
                             }
                         }
@@ -12297,6 +12334,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             request_id,
                             "unresolved",
+                            None,
                             stage,
                             false,
                             &detail,
@@ -12335,8 +12373,7 @@ impl FactoryDaemon {
                                     .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
                             });
                             if let Err(error) = bound {
-                                append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
-                                    Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
+                                self.fail_unbound_spawn(request_id, &worker_name, task_id.as_deref(), &error.to_string());
                                 return;
                             }
                         }
@@ -12391,6 +12428,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             request_id,
                             &name,
+                            None,
                             stage,
                             false,
                             &detail,
@@ -13976,7 +14014,7 @@ mod tests {
         worker.status = cas_types::AgentStatus::Shutdown;
         crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
         assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", None,
-            &worker.name, "register", false, "boot failed").unwrap().is_none());
+            &worker.name, None, "register", false, "boot failed").unwrap().is_none());
         assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
         let spawns = crate::store::open_spawn_queue_store(&root).unwrap();
         let mut task = cas_types::Task::new("cas-replaced".into(), "replacement active".into());
@@ -13987,7 +14025,7 @@ mod tests {
             Some("factory-session"), Some(&task.id)).unwrap();
         for stage in ["register", "preassign"] {
             assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", Some(request),
-                "never-registered", stage, false, "boot failed").unwrap().is_none());
+                "never-registered", None, stage, false, "boot failed").unwrap().is_none());
         }
     }
 
@@ -19540,6 +19578,7 @@ mod tests {
             "factory-session",
             verification.request_id,
             "short-lived-worker",
+            None,
             "register",
             false,
             "Worker process exited before Cassy agent registration.",
@@ -19577,6 +19616,7 @@ mod tests {
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = || queue.peek_all(20).unwrap().into_iter().map(|row| row.summary.unwrap_or_default()).collect::<Vec<_>>();
         enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(1), "tender-owl-85",
+            None,
             "register", true, "Worker is active in the Cassy agent registry for this factory session.").unwrap();
         super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(2),
             &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
@@ -19590,6 +19630,7 @@ mod tests {
         assert!(rows().is_empty(), "nothing here asks the supervisor to act: {:?}", rows());
 
         enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(4), "happy-shark-29",
+            None,
             "provision", false, "worktree add failed").unwrap();
         super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(5),
             &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {

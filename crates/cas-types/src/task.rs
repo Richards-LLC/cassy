@@ -1423,6 +1423,7 @@ impl TaskDeliverables {
             && !self.merge_conflicted
             && self.green_merge_commit.is_none()
             && self.merge_ci_admission.is_none()
+            && self.test_receipts.is_empty()
     }
 }
 

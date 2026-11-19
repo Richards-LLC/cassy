@@ -4958,6 +4958,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         assert_eq!(task.deliverables.test_receipts.len(), 3);
         let wire = serde_json::to_vec(&task).unwrap();
         let task: cas_types::Task = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(task.deliverables.test_receipts.len(), 3);
         let owner = dir.path().join("owner");
         git(dir.path(), &["clone", "-q", producer.to_str().unwrap(), owner.to_str().unwrap()]).unwrap();
         let owner_root = dir.path().join("owner-store");

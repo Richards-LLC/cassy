@@ -1,1 +1,3 @@
+## Core Concepts
+
 Factory repair spawns accept an optional structural `class_audit` nextest selector with `task_id` and `spawn_brief`. Cassy validates coverage of recorded failures and saves the effective selector before enqueueing; an omitted selector retains the task's recorded class. Park requires capped proof covering that class.

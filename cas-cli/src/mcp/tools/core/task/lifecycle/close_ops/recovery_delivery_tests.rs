@@ -571,11 +571,11 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
         "class_audit": class,
     })).unwrap();
     let queue = crate::store::open_spawn_queue_store(&root).unwrap();
-    let refused = service.factory_spawn_workers(spawn(None)).await.unwrap_err();
+    let refused = service.factory(Parameters(spawn(None))).await.unwrap_err();
     assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
     assert_eq!(queue.pending_count().unwrap(), 0);
     assert!(tasks.get_execution_state(TASK).unwrap().unwrap().get("class_audit").is_none());
-    let accepted = service.factory_spawn_workers(spawn(Some("  test(ui::list::) | test(ui::grid::)  ")))
+    let accepted = service.factory(Parameters(spawn(Some("  test(ui::list::) | test(ui::grid::)  "))))
         .await.unwrap();
     assert_ne!(accepted.is_error, Some(true));
     let queued = queue.peek(10).unwrap();

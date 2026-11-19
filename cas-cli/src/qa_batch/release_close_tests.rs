@@ -279,8 +279,13 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             task.deliverables.factory_branch_anchor.as_deref().unwrap(), &scope.final_release_sha, id),
             ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved"].contains(&id), "{id}");
     }
-    assert!(prepare_release_tag_receipt(&root, &["cas-retained".into()], &tag).is_ok());
-    for id in ["cas-reverted", "cas-partial", "cas-unfolded"] {
+    // cas-8f6f: the published tag consumes the same reviewed drop as closeout.
+    for id in ["cas-retained", "cas-superseded"] {
+        let verdict = prepare_release_tag_receipt(&root, &[id.into()], &tag).unwrap();
+        assert_eq!(verdict.task_heads.get(id), anchors.get(id));
+        assert_eq!(verdict.release_tag.as_deref(), Some(tag.as_str()));
+    }
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-foreign-cut", "cas-wrong-review"] {
         assert!(prepare_release_tag_receipt(&root, &[id.into()], &tag).is_err());
     }
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());

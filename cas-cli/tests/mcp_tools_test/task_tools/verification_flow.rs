@@ -7789,7 +7789,9 @@ async fn test_epic_close_refuses_an_epic_branch_that_never_reached_the_default_b
         TaskStatus::Closed
     );
 
-    proof_boundary_git(repo, &["merge", "-q", "--ff-only", "epic/cas-9452"]);
+    // The merge reached the remote's default branch while the local one still
+    // lags: a stale local copy must not make a shipped epic look unshipped.
+    proof_boundary_git(repo, &["update-ref", "refs/remotes/origin/main", "refs/heads/epic/cas-9452"]);
     let closed = extract_text(close("epic branch merged").await.expect("epic close returns"));
     assert!(closed.contains("Closed task:"), "a merged epic closes: {closed}");
 }

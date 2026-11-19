@@ -450,6 +450,17 @@ pub(crate) fn serving_state(root: &std::path::Path, front_pid: u32) -> Option<Se
         .then_some(state)
 }
 
+/// The private backend's launch command, before its stdio is wired.
+#[cfg(unix)]
+fn backend_command(program: &std::path::Path, standby: bool, control_fd: std::os::fd::RawFd) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    command.args(["serve", "--backend", "--control-fd", &control_fd.to_string()]);
+    if standby { command.arg("--standby"); }
+    // A hot update swaps backends while the front lives on; readiness records outlive the swap by naming the front.
+    command.env(crate::factory_tools_ready::FRONT_PID_ENV, std::process::id().to_string());
+    command
+}
+
 #[cfg(unix)]
 fn spawn_backend(program: &std::path::Path, standby: bool) -> Result<Backend> {
     use std::os::fd::AsRawFd;
@@ -457,11 +468,7 @@ fn spawn_backend(program: &std::path::Path, standby: bool) -> Result<Backend> {
     let image = crate::mcp::socket::ExeIdentity::from_exe_path(program.to_owned());
     let (control, child_control) = std::os::unix::net::UnixStream::pair()?;
     let fd = child_control.as_raw_fd();
-    let mut command = tokio::process::Command::new(program);
-    command.args(["serve", "--backend", "--control-fd", &fd.to_string()]);
-    if standby { command.arg("--standby"); }
-    // A hot update swaps backends while the front lives on; readiness records outlive the swap by naming the front.
-    command.env(crate::factory_tools_ready::FRONT_PID_ENV, std::process::id().to_string());
+    let mut command = backend_command(program, standby, fd);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true);
     // SAFETY: after fork this closure performs only the async-signal-safe
     // fcntl call. Exactly the intentional private control socket survives exec.

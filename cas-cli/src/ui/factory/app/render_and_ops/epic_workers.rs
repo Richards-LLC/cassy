@@ -7999,6 +7999,10 @@ mod tests {
             (false, 1, false, false),
             "(launched with a startup brief argument, spawn rows, row marked delivered, stale readiness record kept); argv: {argv}"
         );
+        // The readiness record is written by the MCP child from these, so they must reach it.
+        for entry in [format!("mcp_servers.cs.env.CAS_AGENT_NAME=\"{name}\""), "mcp_servers.cs.env.CAS_AGENT_ROLE=\"worker\"".to_string()] {
+            assert!(argv.lines().any(|line| line == entry), "{entry} missing from the Codex launch: {argv}");
+        }
     }
 
     // --- cas-6913 / cas-7a94: spawn-time task pre-assignment ------------

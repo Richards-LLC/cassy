@@ -35,6 +35,18 @@ pub(super) fn test_file(path: &str) -> bool {
         || path.split('/').any(|part| matches!(part, "__tests__" | "tests" | "test" | "e2e"))
 }
 
+/// Files a runner's default matcher runs as tests (GH #2116, #2127): a test
+/// name suffix, or jest's `__tests__` directory; declarations never are.
+/// `test_file` stays the wide net for files that may hold tests. A file only
+/// that net catches is a support module: a `File` run of it finds no tests,
+/// so it widens to its package, whose run covers its consumers.
+pub(super) fn test_match(path: &str) -> bool {
+    let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    !stem.ends_with(".d")
+        && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
+            || path.split('/').any(|part| part == "__tests__"))
+}
+
 /// A scoped JavaScript stability command, however the shell names its runner.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Invocation {
@@ -286,13 +298,61 @@ fn title(node: Node<'_>, source: &str) -> Option<String> {
     }
     let raw = text(node, source);
     let contents = raw.get(1..raw.len().checked_sub(1)?)?;
-    if raw.starts_with('"') {
-        return serde_json::from_str(raw).ok();
+    if raw.starts_with('"')
+        && let Ok(decoded) = serde_json::from_str(raw)
+    {
+        return Some(decoded);
     }
-    if contents.contains('\\') || (raw.starts_with('`') && contents.contains("${")) {
+    if raw.starts_with('`') && contents.contains("${") {
         return None;
     }
-    Some(contents.to_string())
+    unescape(contents)
+}
+
+/// Simple single-character JavaScript escapes (GH #2093: `'it\'s'`); anything
+/// else, such as `\u0041` or a line continuation, is not a static identity.
+fn unescape(contents: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(contents.len());
+    let mut chars = contents.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        decoded.push(match chars.next()? {
+            escaped @ ('\'' | '"' | '`' | '\\' | '/' | '$') => escaped,
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            _ => return None,
+        });
+    }
+    Some(decoded)
+}
+
+/// GH #2112: a suite title built at runtime (`describe(api, …)`, a template
+/// with `${…}`) names a family of suites. Literal parts are kept and each
+/// dynamic part becomes a `%s` placeholder of the parameterized identity.
+/// `None` for a static title.
+fn dynamic_suite_title(node: Option<Node<'_>>, source: &str) -> Option<String> {
+    let Some(node) = node else { return Some("%s".into()) };
+    if title(node, source).is_some() {
+        return None;
+    }
+    if node.kind() != "template_string" {
+        return Some("%s".into());
+    }
+    let mut cursor = node.walk();
+    let mut pattern = String::new();
+    for part in node.children(&mut cursor) {
+        match part.kind() {
+            "string_fragment" | "string_content" => pattern.push_str(&unescape(text(part, source))?),
+            "template_substitution" => pattern.push_str("%s"),
+            "escape_sequence" => pattern.push_str(&unescape(text(part, source))?),
+            _ => {}
+        }
+    }
+    Some(pattern)
 }
 
 /// `(suite, supported, parameterized)` for a test registration call.
@@ -882,11 +942,16 @@ fn walk(
         if node.child_by_field_name("function").is_some_and(|function| skipped_registration(function, source)) {
             return Ok(());
         }
-        let templated = templated || each;
         let args = node
             .child_by_field_name("arguments")
             .context("test arguments")?;
-        let name = args.named_child(0).and_then(|name| title(name, source));
+        let first = args.named_child(0);
+        let mut name = first.and_then(|name| title(name, source));
+        let mut templated = templated || each;
+        if suite && supported && name.is_none() && let Some(pattern) = dynamic_suite_title(first, source) {
+            name = Some(pattern);
+            templated = true;
+        }
         let unresolved = unresolved || !supported || name.is_none();
         let mut cursor = args.walk();
         let callback = args
@@ -2086,6 +2151,55 @@ mod tests {
         assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
     }
 
+    /// GH #2116, #2127: a data module, a `.d.mts` declaration and a helper under
+    /// `test/` or `tests/` hold no tests. The gate widened them to a `File`
+    /// scope whose printed `worker-check -- <runner> <file>` run finds nothing
+    /// and writes no report. They widen to their package, which runs their
+    /// consumers; a real spec stays a `File` scope.
+    #[test]
+    fn support_files_under_test_dirs_widen_to_the_package_gh2116() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let support = [
+            "test/scenarios/conversation-flows/flows.mjs",
+            "tests/config/staging-target.d.mts",
+            "tests/qa/journeys/staging-guard.ts",
+        ];
+        let spec = "tests/scenarios/flows.scenario.spec.ts";
+        for (index, path) in support.iter().chain([&spec]).enumerate() {
+            let full = repo.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, format!("export const value = {index};\n")).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        for path in support {
+            std::fs::write(repo.path().join(path), "export const value = 'changed';\n").unwrap();
+        }
+        git(&["commit", "--quiet", "-am", "head"]);
+        let paths = support.map(str::to_owned);
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
+        assert_eq!(
+            super::super::widened::scope(repo.path(), spec),
+            super::super::widened::Scope::File(spec.into())
+        );
+    }
+
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
     /// apps/backend/jest.config.js and its ts-jest transform.
     #[test]
@@ -2184,7 +2298,6 @@ mod tests {
         );
         for source in [
             "test(title, () => {});",
-            "describe(title, () => { test('child', () => {}); });",
             "test('case_id', callback);",
             "describe('suite_id', declareTests);",
         ] {
@@ -2199,6 +2312,26 @@ mod tests {
         assert_eq!(source_tests("a.test.ts", rows, &[(2, 2)]).unwrap(), [template.clone()]);
         let runtime = [id("a.test.ts", "suite x row 2"), id("a.test.ts", "suite x other 2")];
         assert_eq!(runtime.map(|row| template.selects(&row)), [true, false]);
+        // GH #2093: escaped quotes in a static literal are still a static title.
+        let escaped = "it('reads each post\\'s \\\"depth\\\" from its creator\\'s capture', () => {});";
+        assert_eq!(
+            source_tests("a.test.ts", escaped, &[(1, 1)]).unwrap(),
+            [id("a.test.ts", "reads each post's \"depth\" from its creator's capture")]
+        );
+        let unicode = "it('a\\u0041', () => {});";
+        assert!(source_tests("a.test.ts", unicode, &[(1, 1)]).is_err());
+        // GH #2112: a parameterized describe around a static test title selects
+        // that test under every runtime suite name; the test title stays literal.
+        let looped = "for (const [mode, api] of rows) test.describe(api, () => {\n  test('p100%_ok', () => {});\n});\ntest.describe(`ssr_${mode}_run`, () => {\n  test('defers_ok', () => {});\n});";
+        let wildcard = |name: &str| Identity { parameterized: true, ..id("a.test.ts", name) };
+        let (dynamic, interpolated) = (wildcard("%s p100%_ok"), wildcard("ssr_%s_run defers_ok"));
+        assert_eq!(source_tests("a.test.ts", looped, &[(2, 2)]).unwrap(), [dynamic.clone()]);
+        assert_eq!(source_tests("a.test.ts", looped, &[(5, 5)]).unwrap(), [interpolated]);
+        assert_eq!(
+            [("a.test.ts", "api_hangs p100%_ok"), ("a.test.ts", "p100%_ok_x")]
+                .map(|(path, name)| dynamic.selects(&id(path, name))),
+            [true, false]
+        );
         // GH #1973: a TypeScript generic over an import type parses.
         let generic = "vi.mock('vue-i18n', async importOriginal => ({\n  ...(await importOriginal<typeof import('vue-i18n')>()),\n}));\nit('a', () => { expect(1).toBe(1); });";
         assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);

@@ -590,7 +590,7 @@ fn reconcile_reused_factory_branch(
 
 #[cfg(test)]
 mod reused_factory_branch_tests {
-    use super::{reconcile_reused_factory_branch, ReusedFactoryBranchStart};
+    use super::{checkout_task_beside_parked_delivery, reconcile_reused_factory_branch, ReusedFactoryBranchStart};
     use std::path::Path;
     use std::process::Command;
 
@@ -617,6 +617,24 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["add", "base"]);
         git(repo.path(), &["commit", "-m", "base"]);
         repo
+    }
+
+    /// cas-8bc4: an epic target branch that exists neither locally nor on
+    /// origin must be refused naming that branch, never passed to git as an
+    /// empty start point, and must leave no task branch behind.
+    #[test]
+    fn missing_target_branch_is_refused_by_name_and_creates_no_task_branch() {
+        let repo = repo();
+        let target = "epic/never-pushed";
+        for require_fresh_base in [false, true] {
+            let error = checkout_task_beside_parked_delivery(
+                repo.path(), "test-worker", "cas-8bc4", target, require_fresh_base,
+            )
+            .expect_err("missing target must be refused");
+            assert!(error.contains(target), "{error}");
+        }
+        let branches = git(repo.path(), &["branch", "--list", "factory/*"]);
+        assert!(branches.is_empty(), "no task branch may be created: {branches}");
     }
 
     #[test]

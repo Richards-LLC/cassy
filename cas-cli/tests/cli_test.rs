@@ -2967,6 +2967,8 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
         "#[cfg(test)]\nmod tests {\n    #[test]\n    fn named_case() {}\n}\n",
     )
     .unwrap();
+    // Build outputs must not dirty the fixture: the runner needs a clean commit.
+    std::fs::write(worktree.join(".gitignore"), "target/\nCargo.lock\n").unwrap();
     for args in [
         vec!["init", "-q", "-b", "main"],
         vec!["add", "."],

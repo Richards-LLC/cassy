@@ -26,6 +26,73 @@ pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the f
      through the real path, replaying the real incident; extend an existing test before adding one, and fix or delete a flaky test \
      instead of retrying it (cas-writing-tests, Fewest tests).";
 
+/// cas-5bf1: what a supervisor's brief, request_changes reason or acceptance
+/// criteria may not ask for under cas-writing-tests ("Fewest tests", "assert
+/// outcomes, not wording"). The phrases live in that skill's
+/// `references/brief-test-phrases.txt`, which the skill owns and ships; this reads
+/// them. A hit warns and never refuses; a negation in the clause before the ask
+/// ("no message text assertions") is the rule itself, never a violation.
+// gate[N-106 notice]: A brief asks to assert message or output text
+const TEXT_ASSERTION_CODE: &str = "N-106";
+// gate[N-107 notice]: A brief asks for a test per item
+const PER_ITEM_TEST_CODE: &str = "N-107";
+
+const BRIEF_TEST_PHRASES: &str = include_str!("builtins/skills/cas-writing-tests/references/brief-test-phrases.txt");
+
+/// The phrase file's `[section]` as one case-insensitive pattern.
+fn phrase_section(section: &str) -> regex::Regex {
+    let mut current = "";
+    let patterns: Vec<&str> = BRIEF_TEST_PHRASES
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter(|line| match line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            Some(name) => { current = name; false }
+            None => current == section,
+        })
+        .collect();
+    regex::Regex::new(&format!("(?i){}", patterns.iter().map(|pattern| format!("(?:{pattern})")).collect::<Vec<_>>().join("|")))
+        .expect("brief-test-phrases.txt holds valid patterns")
+}
+
+static PHRASES: std::sync::LazyLock<[(&'static str, regex::Regex); 2]> = std::sync::LazyLock::new(|| {
+    [(TEXT_ASSERTION_CODE, phrase_section(TEXT_ASSERTION_CODE)), (PER_ITEM_TEST_CODE, phrase_section(PER_ITEM_TEST_CODE))]
+});
+static NEGATION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| phrase_section("negation"));
+static CLAUSE_BOUNDARY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| phrase_section("clause-boundary"));
+
+/// The warning codes `text` earns, each at most once, in the file's order. A
+/// match is forgiven only by a negation in its own clause before it: from the
+/// previous clause boundary to the match start.
+pub(crate) fn test_policy_warnings(text: &str) -> Vec<&'static str> {
+    let mut codes = Vec::new();
+    for sentence in text.split(['.', ';', '\n']) {
+        for (code, pattern) in PHRASES.iter() {
+            let asks = pattern.find_iter(sentence).any(|found| {
+                let before = &sentence[..found.start()];
+                let clause = CLAUSE_BOUNDARY.find_iter(before).last().map_or(before, |boundary| &before[boundary.end()..]);
+                !NEGATION.is_match(clause)
+            });
+            if asks && !codes.contains(code) {
+                codes.push(*code);
+            }
+        }
+    }
+    codes
+}
+
+/// The warnings appended to a response, empty when `text` complies. Each names
+/// its rule through its code; the request is never refused.
+pub(crate) fn test_policy_note(text: &str) -> String {
+    test_policy_warnings(text)
+        .into_iter()
+        .map(|code| match code {
+            TEXT_ASSERTION_CODE => crate::gates::tag("N-106", "\nWarning: this asks to assert message or output text; cas-writing-tests rules out wording assertions. Nothing was refused."),
+            _ => crate::gates::tag("N-107", "\nWarning: this asks for a test per item; cas-writing-tests (Fewest tests) extends one existing test. Nothing was refused."),
+        })
+        .collect()
+}
+
 /// Carried by every assignment and spawn brief. It points at the principle
 /// rather than repeating it, since the task start the worker runs next
 /// carries it (cas-d9db).

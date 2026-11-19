@@ -23128,7 +23128,7 @@ mod stall_nudge_rework_tests {
             ("CAS_AGENT_NAME", "worker-a"),
         ]);
         crate::factory_tools_ready::note_tools_listed(&cas_dir, "1");
-        for _ in 0..6 {
+        for _ in 0..16 {
             daemon.process_prompt_queue().await.unwrap();
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         }

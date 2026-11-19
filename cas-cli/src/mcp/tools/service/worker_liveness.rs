@@ -389,7 +389,12 @@ pub(crate) fn observe(
     {
         Liveness::Executing
     } else if let Some(event) = &last {
-        if event.state == Liveness::WaitingForInput && expired_background > 0 {
+        if event.state == Liveness::WaitingForInput
+            && (expired_background > 0 || process.cpu_busy == Some(true))
+        {
+            // A finished turn is only idle while nothing the worker owns is
+            // advancing: its own background build or test keeps it executing
+            // (cas-0125). Unconfirmed background jobs with no activity stall.
             if process.cpu_busy == Some(true) {
                 Liveness::Executing
             } else {

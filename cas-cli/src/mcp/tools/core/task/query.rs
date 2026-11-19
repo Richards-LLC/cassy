@@ -1339,5 +1339,27 @@ mod tests {
         let rendered = task_show_notes(notes, "cas-9568", &mut ReadClipping::default());
         assert!(rendered.contains("first paragraph\n\nsecond paragraph"));
         assert!(rendered.contains("latest"));
+
+        // cas-50e0: the artifact named is the newest published, whichever
+        // order synced notes arrive in. A receipt with no time never wins.
+        let proof = |id: &str, at: Option<&str>| {
+            let mut value = serde_json::json!({"id": id});
+            if let Some(at) = at {
+                value["created_at"] = at.into();
+            }
+            format!("ARTIFACT_PROOF: {value}")
+        };
+        let notes = format!(
+            "[2026-11-17 13:44] published\n{}\n\n[2026-11-17 13:30] published\n{}\n\n{}\n\n[2026-11-13 08:00] resynced\n{}\n\n[2026-11-17 14:00] {}",
+            proof("art-newest", Some("2026-11-17T13:44:00+00:00")),
+            proof("art-middle", Some("2026-11-17T13:30:00+00:00")),
+            proof("art-untimed", None),
+            proof("art-oldest", Some("2026-11-13T08:00:00+00:00")),
+            "x".repeat(800),
+        );
+        let rendered = task_show_notes(&notes, "cas-50e0", &mut ReadClipping::default());
+        assert!(rendered.contains("Latest artifact: art-newest\n"), "{rendered}");
+        let rendered = task_show_notes(&notes.replace("art-newest", "art-oldest2"), "cas-50e0", &mut ReadClipping::default());
+        assert!(rendered.contains("Latest artifact: art-oldest2\n"), "{rendered}");
     }
 }

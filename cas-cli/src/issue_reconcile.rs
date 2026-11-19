@@ -1097,7 +1097,7 @@ mod tests {
         let broken = env.home().join("close-110-broken");
         let closed = env.home().join("closed-issues");
         std::fs::write(&broken, "").unwrap();
-        let candidates: Vec<String> = [7, 9, 15296].into_iter().chain(101..=122).map(|n| n.to_string()).collect();
+        let candidates: Vec<String> = [7, 9, 15296].into_iter().chain(101..=125).map(|n| n.to_string()).collect();
         let script = r#"#!/bin/sh
 echo "$@" >> '@LOG@'
 if [ "$2" = list ]; then
@@ -1125,8 +1125,7 @@ exit 0
         env.set(GH_BIN_ENV, &gh);
 
         let mut fix = task("cas-5eef", TaskStatus::Closed, "GH #7: release repair");
-        fix.description = format!("Also routes Richards-LLC/violet_ps#9. Related: {}.",
-            (101..=122).map(|n| format!("example/issue-fixture#{n}")).collect::<Vec<_>>().join(", "));
+        fix.description = "Also routes Richards-LLC/violet_ps#9.".into();
         fix.external_ref = Some("https://github.com/actions/runner-images/issues/15296".into());
         fix.origin_project = Some("issue-fixture".into());
         fix.deliverables.factory_branch_anchor = Some(published.clone());
@@ -1134,23 +1133,35 @@ exit 0
             work_target: WorkTarget { repo_selector: "project:issue-fixture".into(), target_branch: "main".into() },
             branch: "factory/worker".into(), assignee: "worker".into(), base_sha: published.clone(),
         });
-        crate::store::open_task_store(&root).unwrap().add(&fix).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.add(&fix).unwrap();
+        // One task cites at most five issues, so 25 more come from five tasks.
+        let mut shipped = vec![fix.id.clone()];
+        for (k, chunk) in (101..=125).collect::<Vec<u64>>().chunks(5).enumerate() {
+            let mut bulk = task(&format!("cas-5ee{k}"), TaskStatus::Closed, &format!("GH #{}: bulk fix {k}", chunk[0]));
+            bulk.description = format!("Also fixes {}.",
+                chunk[1..].iter().map(|n| format!("example/issue-fixture#{n}")).collect::<Vec<_>>().join(", "));
+            bulk.origin_project = fix.origin_project.clone();
+            bulk.deliverables = fix.deliverables.clone();
+            store.add(&bulk).unwrap();
+            shipped.push(bulk.id.clone());
+        }
         let scope = crate::qa_batch::ReleaseScope {
             project_id: "issue-fixture".into(), repository: "example/issue-fixture".into(),
             release_id: "v9.99.0".into(), reviewed_sha: published.clone(), final_release_sha: published,
             promotion_pr: None, release_tag: None, constituent_epic_ids: vec![],
-            included_task_ids: vec![fix.id.clone()], no_code_members: BTreeMap::new(), proof_refs: vec![],
+            included_task_ids: shipped, no_code_members: BTreeMap::new(), proof_refs: vec![],
         };
         let inventory = crate::qa_batch::resolve_release_inventory(&root, &repo, &scope).unwrap();
 
-        // Pass one: 25 referenced issues, one third-party. #110 exhausts its retries.
+        // Pass one: 28 referenced issues, one third-party. #110 exhausts its retries.
         let outcomes = reconcile_release_issues(&root, &repo, &inventory, &BTreeMap::new());
         let mut expected: BTreeMap<String, IssueAction> = BTreeMap::from([
             ("actions/runner-images#15296".into(), IssueAction::Skipped),
             ("Richards-LLC/violet_ps#9".into(), IssueAction::Closed),
             ("example/issue-fixture#7".into(), IssueAction::Closed),
         ]);
-        expected.extend((101..=122).map(|n| (format!("example/issue-fixture#{n}"),
+        expected.extend((101..=125).map(|n| (format!("example/issue-fixture#{n}"),
             if n == 110 { IssueAction::Failed } else { IssueAction::Closed })));
         let actions: BTreeMap<String, IssueAction> = outcomes.iter().map(|o| (o.issue.clone(), o.action.clone())).collect();
         assert_eq!(actions, expected, "{outcomes:?}");

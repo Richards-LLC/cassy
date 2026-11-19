@@ -389,7 +389,7 @@ mod close_latency_tests {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let head = "1955b2b7fe94410bf7e08acbc621320a70755aa9";
         let target = git(repo, &["rev-parse", "598739a7d2^2"]).unwrap();
-        let ranges = [
+        let ranges: [(String, String); 2] = [
             (git(repo, &["rev-parse", "7b54e28b1c^1"]).unwrap(), "7b54e28b1c6557764385e5fbb0d08f171c6faa0a".into()),
             ("598739a7d22754ce2fda5e1e7e5781542d018a27".into(), head.into()),
         ];

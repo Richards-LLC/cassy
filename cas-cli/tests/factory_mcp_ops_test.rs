@@ -3690,7 +3690,9 @@ async fn test_clear_context_unconfirmed_reset_names_action_without_claiming_succ
 /// commits are only local is recycled, and its branch head is untouched.
 #[tokio::test]
 async fn test_recycle_worker_keeps_unpushed_commits_gh_2185() {
+    if run_authenticated_recycle_child("test_recycle_worker_keeps_unpushed_commits_gh_2185") { return; }
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
+    write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
     let env = FactoryTestEnv::new();
     let worker_path = init_pushed_worker_repo(&env, "ahead-worker");
     std::fs::write(worker_path.join("local.txt"), "not pushed\n").expect("write");

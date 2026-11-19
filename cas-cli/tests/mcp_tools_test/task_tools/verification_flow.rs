@@ -7767,10 +7767,7 @@ async fn test_epic_close_refuses_an_epic_branch_that_never_reached_the_default_b
     epic.status = TaskStatus::InProgress;
     epic.task_type = TaskType::Epic;
     epic.branch = Some("epic/cas-9452".to_string());
-    epic.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "remote:github.com/org/cas-9452".to_string(),
-        target_branch: "main".to_string(),
-    });
+    // No declared target: the gate falls back to the epic's own branch.
     task_store.add(&epic).expect("persist epic fixture");
     let close = |reason: &str| {
         service.cas_task_close(Parameters(TaskCloseRequest {

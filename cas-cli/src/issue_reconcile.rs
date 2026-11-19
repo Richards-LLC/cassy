@@ -33,6 +33,17 @@ use regex::Regex;
 
 /// Total time one reconciliation may spend in `gh`.
 pub const GH_BUDGET: Duration = Duration::from_secs(6);
+/// Longest one `gh issue close` attempt may run.
+const GH_CLOSE_CAP: Duration = Duration::from_secs(30);
+/// Attempts per issue, with a pause that grows by this step between them.
+const GH_CLOSE_ATTEMPTS: u32 = 3;
+const GH_CLOSE_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Fixture override for the close cap and backoff, in milliseconds.
+fn env_millis(name: &str) -> Option<Duration> {
+    std::env::var(name).ok()?.trim().parse().ok().map(Duration::from_millis)
+}
+
 /// Most repositories one reconciliation lists.
 const MAX_REPOS: usize = 3;
 
@@ -77,19 +88,30 @@ impl GhIssueStates {
         }
     }
 
+    /// Close one issue. Each attempt gets its own deadline: sharing the list
+    /// call's deadline let one slow `gh` time out every later close (v4.22:
+    /// 22 of 22, v4.21: 5 of 6). A failed or hung attempt is retried with a
+    /// growing pause, and the last error names the issue for the report.
     fn close_completed(&self, issue: &IssueRef, comment: &str) -> Result<(), String> {
         let repo = repo_key(&issue.owner, &issue.repo);
-        let mut command = Command::new(&self.binary);
-        command.args(["issue", "close", &issue.number.to_string(), "--repo", &repo,
-            "--reason", "completed", "--comment", comment]).env("GH_PROMPT_DISABLED", "1");
-        let output = run_command(&mut command, self.deadline, GH_BUDGET)
-            .map_err(|error| format!("gh issue close {} did not complete: {error:?}", issue.display()))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!("gh issue close {} failed: {}", issue.display(),
-                String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("").trim()))
+        let cap = env_millis("CAS_GH_CLOSE_CAP_MS").unwrap_or(GH_CLOSE_CAP);
+        let backoff = env_millis("CAS_GH_CLOSE_BACKOFF_MS").unwrap_or(GH_CLOSE_BACKOFF);
+        let mut last = String::new();
+        for attempt in 0..GH_CLOSE_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(backoff * attempt);
+            }
+            let mut command = Command::new(&self.binary);
+            command.args(["issue", "close", &issue.number.to_string(), "--repo", &repo,
+                "--reason", "completed", "--comment", comment]).env("GH_PROMPT_DISABLED", "1");
+            last = match run_command(&mut command, Deadline::after(cap), cap) {
+                Ok(output) if output.status.success() => return Ok(()),
+                Ok(output) => format!("gh issue close {} failed: {}", issue.display(),
+                    String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("").trim()),
+                Err(error) => format!("gh issue close {} did not complete: {error:?}", issue.display()),
+            };
         }
+        Err(format!("{last} (after {GH_CLOSE_ATTEMPTS} attempts)"))
     }
 }
 

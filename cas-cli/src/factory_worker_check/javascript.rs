@@ -10,6 +10,8 @@ use tree_sitter::{Node, Parser};
 
 use super::stability::{Identity, Proof};
 
+mod web_attribution;
+
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
 struct IsolatedCheckoutRequired;
@@ -1445,6 +1447,7 @@ fn execute_tests(
         by_file.insert(file, Vec::new());
     }
     let mut count = 0;
+    let mut attribution_notes = Vec::new();
     let reports = tempfile::tempdir()?;
     for (path, selected) in by_file {
         // One config path: the caller's own `--config` wins over the
@@ -1501,7 +1504,7 @@ fn execute_tests(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        count += verify_repeats(runner, repo, &selected, |iteration| {
+        let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
             command.current_dir(&package).env("CI", "1").envs(environment.iter().copied());
@@ -1548,7 +1551,7 @@ fn execute_tests(
                             "--retries",
                             "0",
                             "--max-failures",
-                            "1",
+                            if widened.is_some() { "0" } else { "1" },
                             "--workers",
                             "1",
                             "--reporter=json",
@@ -1587,7 +1590,18 @@ fn execute_tests(
                     format!("{runner} did not produce a stability report for {path}")
                 })?)?;
             Ok((success, value))
-        })?;
+        };
+        count += if widened.is_some() && runner == "playwright" {
+            let (success, report) = run(0)?;
+            let inherited = if success { BTreeSet::new() } else {
+                let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
+                    &executable, &config, &report, &environment, high)
+                    .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-61", format!("{error:#}"))))?;
+                attribution_notes.push(note);
+                inherited
+            };
+            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
+        } else { verify_repeats(runner, repo, &selected, run)? };
     }
     if super::clean_head(repo)? != head {
         bail!("repository changed during JavaScript stability run");
@@ -1599,7 +1613,7 @@ fn execute_tests(
         elapsed_ms: start.elapsed().as_millis(),
     };
     if let Some((scope, _, cause)) = widened {
-        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause}") }, count as u64)?;
+        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")) }, count as u64)?;
         println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
@@ -1810,6 +1824,13 @@ fn validate_report(
     tests: &[Identity],
     repeats: usize,
 ) -> Result<usize> {
+    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new())
+}
+
+fn validate_report_with_inherited(
+    runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
+    inherited: &BTreeSet<(Identity, String)>,
+) -> Result<usize> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
     if runner == "playwright" {
         let root = report
@@ -1825,6 +1846,7 @@ fn validate_report(
             report.get("suites").context("Playwright suites missing")?,
             &[],
             &mut projects,
+            inherited,
         )?;
         for ((identity, _project), count) in projects {
             if count != repeats {
@@ -1936,6 +1958,7 @@ fn playwright_results(
     suites: &Value,
     ancestry: &[String],
     results: &mut BTreeMap<(Identity, String), usize>,
+    inherited: &BTreeSet<(Identity, String)>,
 ) -> Result<()> {
     for suite in suites.as_array().context("Playwright suites array")? {
         let mut names = ancestry.to_vec();
@@ -1980,9 +2003,12 @@ fn playwright_results(
                     .get("results")
                     .and_then(Value::as_array)
                     .context("test results")?;
+                let project = test.get("projectId").or_else(|| test.get("projectName"))
+                    .and_then(Value::as_str).unwrap_or_default();
                 if test.get("expectedStatus").and_then(Value::as_str) != Some("passed")
                     || attempts.len() != 1
-                    || attempts[0].get("status").and_then(Value::as_str) != Some("passed")
+                    || (attempts[0].get("status").and_then(Value::as_str) != Some("passed")
+                        && !inherited.contains(&(id.clone(), project.to_string())))
                     || attempts[0]
                         .get("retry")
                         .and_then(Value::as_u64)
@@ -1991,18 +2017,13 @@ fn playwright_results(
                 {
                     bail!("playwright stability failed: {} :: {}", id.path, id.name);
                 }
-                let project = test
-                    .get("projectId")
-                    .or_else(|| test.get("projectName"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
                 *results
                     .entry((id.clone(), project.to_string()))
                     .or_default() += 1;
             }
         }
         if let Some(nested) = suite.get("suites") {
-            playwright_results(repo, root, nested, &names, results)?;
+            playwright_results(repo, root, nested, &names, results, inherited)?;
         }
     }
     Ok(())

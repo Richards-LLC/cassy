@@ -1080,7 +1080,7 @@ impl SqliteTaskStore {
                  closed_at, NULL, external_ref, content_hash, branch, worktree_id,
                  pending_verification, pending_worktree_merge, epic_verification_owner, team_id,
                  CASE WHEN status IN ('closed', 'cancelled') AND task_type <> 'epic'
-                      AND instr(deliverables, '"evidence_only"') = 0 AND instr(deliverables, '"negative_result"') = 0
+                      AND instr(deliverables, '\"evidence_only\"') = 0 AND instr(deliverables, '\"negative_result\"') = 0
                       THEN '{}' ELSE deliverables END,
                  '', execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door, review_dispatch_id
                  FROM tasks ORDER BY priority, created_at DESC",

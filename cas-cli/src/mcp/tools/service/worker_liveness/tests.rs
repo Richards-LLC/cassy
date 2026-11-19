@@ -111,46 +111,6 @@ fn fixed_cpu_evidence_agrees_while_cold_to_warm_sampling_changes_liveness() {
         // PID reuse cannot borrow the prior process's CPU activity.
         assert_eq!(record_cpu_sample(&mut samples, 42, "replacement", 900), None);
     }
-    // cas-0125: a finished turn is waiting for input only while nothing the
-    // worker owns is advancing. A background build or test keeps it executing,
-    // and a quiet or unsampled process table still reads as idle.
-    for (cli, event) in [
-        (SupervisorCli::Codex, serde_json::json!({
-            "timestamp": at, "type": "event_msg", "payload": {"type": "task_complete"},
-        })),
-        (SupervisorCli::Claude, serde_json::json!({
-            "timestamp": at, "type": "assistant",
-            "message": {"role": "assistant", "stop_reason": "end_turn"},
-        })),
-    ] {
-        std::fs::write(&path, format!("{event}\n")).unwrap();
-        let mut samples = std::collections::HashMap::new();
-        let cold = record_cpu_sample(&mut samples, 77, "build", 100);
-        let quiet = record_cpu_sample(&mut samples, 77, "build", 100);
-        let warm = record_cpu_sample(&mut samples, 77, "build", 130);
-        assert_eq!((cold, quiet, warm), (None, Some(false), Some(true)));
-        // The finished turn with a busy harness stays idle on cpu evidence
-        // alone; only the owned child's measured progress changes it.
-        let evidence = ProcessEvidence { alive: Some(true), cpu_busy: warm, detail: "fixed cpu sample".into() };
-        let finished = observe(cli, Some(&path), evidence, now(), 300);
-        assert_eq!(finished.state, Liveness::WaitingForInput, "{cli:?}: {}", finished.detail());
-        let within = Some(now() - chrono::Duration::seconds(20));
-        let expired = Some(now() - chrono::Duration::seconds(400));
-        for (progress, expected) in [
-            (None, Liveness::WaitingForInput),
-            (expired, Liveness::WaitingForInput),
-            (within, Liveness::Executing),
-        ] {
-            let got = finished_turn_with_owned_child_progress(
-                finished.clone(), owned_child_advancing(progress, now(), 300));
-            assert_eq!(got.state, expected, "{cli:?} finished turn, child progress {progress:?}: {}", got.detail());
-        }
-        // An executing or dead worker keeps its own reading.
-        for (state, expected) in [(Liveness::Dead, Liveness::Dead), (Liveness::Stalled, Liveness::Stalled)] {
-            let other = Observation { state, evidence: "fixture".into() };
-            assert_eq!(finished_turn_with_owned_child_progress(other, true).state, expected);
-        }
-    }
 }
 
 #[test]
@@ -854,6 +814,37 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     let rows = queue.peek_all(50).unwrap();
     assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 2);
     assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1);
+
+    // cas-0125: once the turn has finished, the worker reads waiting_for_input
+    // only while no child it owns is advancing; a background build or test it
+    // started keeps it executing. Same real tree and sampling boundary.
+    let finished_at = now + chrono::Duration::minutes(290);
+    let done = serde_json::json!({"timestamp":finished_at.to_rfc3339(),"type":"event_msg","payload":{"type":"task_complete"}});
+    std::fs::write(&rollout, format!("{meta}\n{start}\n{done}\n")).unwrap();
+    std::fs::File::open(&rollout).unwrap().set_modified(finished_at.into()).unwrap();
+    let after = now + chrono::Duration::minutes(300);
+    status(after); // Warm the cache past the last sweep; no work since then.
+    tree.work("write");
+    let advancing = status(after);
+    assert_eq!(advancing.state, Liveness::Executing, "{}", advancing.detail());
+    assert_eq!(status(after).state, Liveness::Executing);
+    // The advance ages out of the stall window and the idle worker reads idle again.
+    let quiet = status(after + chrono::Duration::minutes(10));
+    assert_eq!(quiet.state, Liveness::WaitingForInput, "{}", quiet.detail());
+    // CPU burned by the harness itself is not an owned child advancing.
+    tree.work("harness");
+    let harness_only = status(after + chrono::Duration::minutes(11));
+    assert_eq!(harness_only.state, Liveness::WaitingForInput, "{}", harness_only.detail());
+    // A foreign session or a reused root PID cannot borrow the owned child's advance.
+    tree.work("write");
+    let later = after + chrono::Duration::minutes(12);
+    let mut foreign = tree.agent.clone();
+    foreign.factory_session = Some("another-session".into());
+    assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, later, 300).state, Liveness::Executing);
+    foreign.factory_session = tree.agent.factory_session.clone();
+    foreign.pid_starttime = Some(0);
+    assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, later, 300).state, Liveness::Executing);
+    assert_eq!(status(later).state, Liveness::Executing);
 }
 
 // cas-8ea3: a Claude worker's row names the `cas serve --backend` grandchild as

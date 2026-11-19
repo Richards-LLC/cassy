@@ -3686,40 +3686,6 @@ async fn test_clear_context_unconfirmed_reset_names_action_without_claiming_succ
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
 
-/// GH #2185: a recycle keeps the worktree and branch, so a clean worker whose
-/// commits are only local is recycled, and its branch head is untouched.
-#[tokio::test]
-async fn test_recycle_worker_keeps_unpushed_commits_gh_2185() {
-    if run_authenticated_recycle_child("test_recycle_worker_keeps_unpushed_commits_gh_2185") { return; }
-    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
-    write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
-    let env = FactoryTestEnv::new();
-    let worker_path = init_pushed_worker_repo(&env, "ahead-worker");
-    std::fs::write(worker_path.join("local.txt"), "not pushed\n").expect("write");
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git").args(args).current_dir(&worker_path).output().expect("git");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
-    };
-    git(&["add", "local.txt"]);
-    git(&["commit", "-qm", "local only"]);
-    let head = git(&["rev-parse", "HEAD"]);
-    register_codex_worker_at(&env, "ahead-worker", "session-a622-unpushed", &worker_path);
-
-    let mut req = factory_req("recycle_worker");
-    req.target = Some("ahead-worker".to_string());
-    env.service
-        .factory_request(Parameters(req))
-        .await
-        .expect("a clean worker with only local commits is recycled");
-    let queued = env.spawn_queue().peek(10).expect("peek queue");
-    assert_eq!(
-        (queued.len(), queued[0].action, git(&["rev-parse", "HEAD"])),
-        (1, cas_store::SpawnAction::Recycle, head),
-        "(queued actions, action, branch head)"
-    );
-}
-
 #[tokio::test]
 async fn test_recycle_worker_refuses_dirty_worktree() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle-dirty")]);

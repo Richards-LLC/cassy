@@ -11335,7 +11335,6 @@ impl FactoryDaemon {
                             Ok(cas_mux::InjectStart::Started(ticket)) => {
                                 self.urgent_injects.owners.insert(ticket,
                                     super::inject_commands::UrgentInject::NormalRow {
-                                        inline_supervisor: inline_supervisor_body,
                                         delivery: Box::new(super::inject_commands::DirectDelivery {
                                             message_batch, message_senders: facts.message_senders.clone(),
                                             queued: queued.clone(), pane_target: pane_target.clone(),
@@ -23076,8 +23075,18 @@ mod stall_nudge_rework_tests {
     }
 
     pub(super) async fn make_worker_ready_for(daemon: &mut FactoryDaemon, harness: cas_mux::SupervisorCli) {
+        make_worker_ready_with(daemon, harness, vec!["-c".into(), "printf ready; sleep 30".into()]).await;
+    }
+
+    /// A ready Codex worker whose process keeps every byte typed into it at `input`.
+    async fn make_recording_worker_ready(daemon: &mut FactoryDaemon, input: &std::path::Path) {
+        let args = vec!["-c".into(), "stty raw -echo; printf ready; exec cat > \"$1\"".into(), "sh".into(), input.to_string_lossy().into_owned()];
+        make_worker_ready_with(daemon, cas_mux::SupervisorCli::Codex, args).await;
+    }
+
+    async fn make_worker_ready_with(daemon: &mut FactoryDaemon, harness: cas_mux::SupervisorCli, args: Vec<String>) {
         let pty = cas_mux::Pty::spawn("worker-a", cas_mux::PtyConfig {
-            command: "sh".into(), args: vec!["-c".into(), "printf ready; sleep 30".into()],
+            command: "sh".into(), args,
             cwd: Some(std::env::temp_dir()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
         let pane = cas_mux::Pane::with_pty("worker-a", cas_mux::PaneKind::Worker,
@@ -23094,9 +23103,10 @@ mod stall_nudge_rework_tests {
     /// server has not listed its tools; it goes out once the server reports it did.
     #[tokio::test]
     async fn a_codex_workers_first_wake_waits_for_its_cassy_tools_gh_2128() {
-        let (_root, cas_dir, _worker, _nudge) = fixture(false);
+        let (root, cas_dir, _worker, _nudge) = fixture(false);
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
-        make_worker_ready(&mut daemon).await;
+        let typed = root.path().join("worker-input");
+        make_recording_worker_ready(&mut daemon, &typed).await;
         crate::factory_tools_ready::await_listing(&cas_dir, &daemon.session_name, "worker-a");
         let queue = open_prompt_queue_store(&cas_dir).unwrap();
         let wake = queue.enqueue("supervisor", "worker-a", "your next instruction").unwrap();
@@ -23150,17 +23160,34 @@ mod stall_nudge_rework_tests {
         assert!(queue.queued_prompt(after_swap).unwrap().unwrap().processed_at.is_some(), "a backend swap does not hold the worker's wakes");
 
         // GH #2185: an upgraded daemon adopts an idle Codex worker whose server listed its
-        // tools before any record existed and never lists again. Its message is typed in.
+        // tools before any record existed and never lists again. Its message is typed in,
+        // and the worker's turn-start hook reads the turn that payload submitted.
         std::fs::remove_file(crate::factory_tools_ready::path_for_test(&cas_dir, &daemon.session_name, "worker-a")).unwrap();
-        let adopted = queue.enqueue("supervisor", "worker-a", "after the upgrade").unwrap();
-        for _ in 0..4 {
+        let body = "after the upgrade";
+        let adopted = queue.enqueue("supervisor", "worker-a", body).unwrap();
+        let mut turn = None;
+        for _ in 0..20 {
             daemon.process_prompt_queue().await.unwrap();
             super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+            turn = std::fs::read_to_string(&typed).unwrap().split('\r').find(|turn| turn.contains(body)).map(str::to_string);
+            if turn.is_some() { break; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let (transported, wake): (Option<String>, Option<String>) = conn.query_row(
-            "SELECT transport_delivered_at, wake_attempt FROM prompt_queue WHERE id = ?", [adopted], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
-        assert!(transported.is_some() && wake.is_some(), "an adopted worker's message reaches its pane: transported={transported:?} wake={wake:?}");
+        let turn = turn.expect("the adopted worker's message is typed into its pane and submitted");
+        let hook = cas_core::hooks::types::HookInput {
+            session_id: "adopted-codex-worker".into(),
+            cwd: root.path().to_string_lossy().into_owned(),
+            hook_event_name: "UserPromptSubmit".into(),
+            user_prompt: Some(turn.trim_start_matches("\x1b[200~").trim_end_matches("\x1b[201~").to_string()),
+            ..Default::default()
+        };
+        crate::hooks::handlers::handle_user_prompt_submit(&hook, Some(&cas_dir)).unwrap();
+        let report = queue.message_delivery_report(adopted).unwrap().unwrap();
+        assert_eq!(
+            (report.wake_attempt, report.wake, report.recipient_receipt),
+            (cas_store::WakeAttempt::Fired, cas_store::ObservationStatus::Observed, Some(cas_store::SurfacingSource::HookSurfaced)),
+            "(wake attempt, turn started with this message, message read)"
+        );
     }
 
     /// GH #2128: the other ways an actionable prompt reaches a Codex worker (its spawn

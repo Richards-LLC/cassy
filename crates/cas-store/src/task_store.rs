@@ -3,8 +3,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::StoreError;
@@ -195,7 +196,24 @@ CREATE TABLE IF NOT EXISTS task_proposal_request_keys (
 pub struct SqliteTaskStore {
     conn: Arc<Mutex<Connection>>,
     origin_project: Option<String>,
+    /// The task headers [`Self::list_heads_with_parent_deps_and_start_gates`]
+    /// read last, keyed by id with the mutation revision each was read at.
+    heads_cache: Mutex<HashMap<String, (i64, Task)>>,
+    /// Task rows the last heads read took from the `tasks` table.
+    heads_rows_read: AtomicUsize,
 }
+
+/// The header columns of a task, in `task_from_row` order, for the director's
+/// refresh read (see [`SqliteTaskStore::list_heads_with_parent_deps_and_start_gates`]).
+const TASK_HEADS_SELECT: &str = "SELECT id, title, '', '', '', '',
+     status, priority, task_type, assignee, labels, created_at, updated_at,
+     closed_at, NULL, external_ref, content_hash, branch, worktree_id,
+     pending_verification, pending_worktree_merge, epic_verification_owner, team_id,
+     CASE WHEN status IN ('closed', 'cancelled') AND task_type <> 'epic'
+          AND instr(deliverables, '\"evidence_only\"') = 0 AND instr(deliverables, '\"negative_result\"') = 0
+          THEN '{}' ELSE deliverables END,
+     '', execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door, review_dispatch_id
+     FROM tasks";
 
 impl SqliteTaskStore {
     /// A task store on an existing connection, e.g. a
@@ -205,6 +223,8 @@ impl SqliteTaskStore {
         Self {
             conn,
             origin_project: None,
+            heads_cache: Mutex::new(HashMap::new()),
+            heads_rows_read: AtomicUsize::new(0),
         }
     }
 
@@ -227,6 +247,8 @@ impl SqliteTaskStore {
         Ok(Self {
             conn,
             origin_project,
+            heads_cache: Mutex::new(HashMap::new()),
+            heads_rows_read: AtomicUsize::new(0),
         })
     }
 
@@ -1072,22 +1094,10 @@ impl SqliteTaskStore {
     ) -> Result<(Vec<Task>, Vec<Dependency>, HashSet<String>)> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
 
-        // Both queries run under the same mutex hold, guaranteeing a consistent snapshot
-        let tasks = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id, title, '', '', '', '',
-                 status, priority, task_type, assignee, labels, created_at, updated_at,
-                 closed_at, NULL, external_ref, content_hash, branch, worktree_id,
-                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id,
-                 CASE WHEN status IN ('closed', 'cancelled') AND task_type <> 'epic'
-                      AND instr(deliverables, '\"evidence_only\"') = 0 AND instr(deliverables, '\"negative_result\"') = 0
-                      THEN '{}' ELSE deliverables END,
-                 '', execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door, review_dispatch_id
-                 FROM tasks ORDER BY priority, created_at DESC",
-            )?;
-            stmt.query_map([], Self::task_from_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
+        // One read transaction: the task rows, their links and the start gates
+        // are one snapshot even while another process writes.
+        let tx = conn.unchecked_transaction()?;
+        let tasks = self.read_task_heads(&tx)?;
 
         let deps = {
             let dep_type_str = DependencyType::ParentChild.to_string();
@@ -1110,8 +1120,81 @@ impl SqliteTaskStore {
             stmt.query_map([], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<HashSet<_>, _>>()?
         };
+        tx.commit()?;
 
         Ok((tasks, deps, start_gated))
+    }
+
+    /// Every task header, ordered by priority then newest first. Only rows
+    /// whose mutation revision moved since the last read are taken from the
+    /// `tasks` table; a store whose revisions cannot be read reads them all.
+    fn read_task_heads(&self, conn: &Connection) -> Result<Vec<Task>> {
+        let current: Option<Vec<(String, Option<i64>)>> = conn
+            .prepare_cached(
+                "SELECT t.id, r.revision FROM tasks t
+                 LEFT JOIN task_mutation_revisions r ON r.entity_id = t.id",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .ok();
+        let mut cache = self.heads_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = current else {
+            cache.clear();
+            let mut stmt = conn.prepare_cached(&format!("{TASK_HEADS_SELECT} ORDER BY priority, created_at DESC"))?;
+            let tasks = stmt
+                .query_map([], Self::task_from_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            self.heads_rows_read.store(tasks.len(), Ordering::Relaxed);
+            return Ok(tasks);
+        };
+        let stale: Vec<&str> = current
+            .iter()
+            .filter(|(id, revision)| match (revision, cache.get(id)) {
+                (Some(revision), Some((cached, _))) => revision != cached,
+                _ => true,
+            })
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let mut fresh = HashMap::with_capacity(stale.len());
+        for chunk in stale.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare_cached(&format!("{TASK_HEADS_SELECT} WHERE id IN ({marks})"))?;
+            for task in stmt.query_map(rusqlite::params_from_iter(chunk.iter()), Self::task_from_row)? {
+                let task = task?;
+                fresh.insert(task.id.clone(), task);
+            }
+        }
+        self.heads_rows_read.store(fresh.len(), Ordering::Relaxed);
+        let mut kept = HashMap::with_capacity(current.len());
+        let mut tasks = Vec::with_capacity(current.len());
+        for (id, revision) in &current {
+            let entry = match (fresh.remove(id), cache.remove(id)) {
+                (Some(task), _) => Some((revision.unwrap_or(0), task)),
+                (None, cached) => cached,
+            };
+            let Some((cached_revision, task)) = entry else { continue };
+            tasks.push(task.clone());
+            // A row without a revision is never kept, so it is read again next time.
+            if revision.is_some() {
+                kept.insert(id.clone(), (cached_revision, task));
+            }
+        }
+        *cache = kept;
+        drop(cache);
+        tasks.sort_by(|a, b| {
+            a.priority.0
+                .cmp(&b.priority.0)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(tasks)
+    }
+
+    /// How many task rows the last heads read took from the `tasks` table.
+    pub fn last_heads_rows_read(&self) -> usize {
+        self.heads_rows_read.load(Ordering::Relaxed)
     }
 }
 

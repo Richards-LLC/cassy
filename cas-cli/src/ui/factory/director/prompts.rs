@@ -737,9 +737,16 @@ pub(crate) fn apply_idle_liveness(
     prompt: &mut Prompt,
     worker: &str,
     observation: &crate::mcp::tools::service::worker_liveness::Observation,
-    _named_task_in_progress: bool,
+    named_task_in_progress: bool,
 ) -> bool {
     use crate::mcp::tools::service::worker_liveness::Liveness;
+    // cas-97dc: a delivery relay names a task parked for merge. Live state
+    // that shows that task in progress again (reassigned or restarted after
+    // the idle basis) has no delivery to report, and the observation's idle
+    // basis belongs to an earlier task; claiming "pending delivery" is untrue.
+    if prompt.retract_task.is_some() && named_task_in_progress {
+        return false;
+    }
     // A pending merge remains actionable even if the harness starts another
     // turn. Report that state instead of dropping the delivery notification.
     if prompt.retract_task.is_none() && observation.state != Liveness::WaitingForInput {

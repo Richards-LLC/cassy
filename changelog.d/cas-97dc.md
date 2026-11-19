@@ -1,0 +1,3 @@
+### Fixed — Director idle relay
+
+- **A worker given a new task no longer gets a "pending delivery" relay for it** — Was: the director's idle relay took its liveness from the worker's previous task and, for a relay naming a task awaiting merge, rewrote it as "has a pending delivery while task ..." even when live state already showed that task in progress again, so a supervisor was told to message or reassign a worker that had just started. Now: when the named task is in progress in the live snapshot, the relay is dropped and never claims a delivery; a task actually awaiting merge still reports its pending delivery. Measured: the extended idle-relay test fails at the delivery base because the relay was still emitted, and passes with this change.

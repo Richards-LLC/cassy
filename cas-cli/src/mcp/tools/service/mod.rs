@@ -672,7 +672,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\"; decision=promote promotes an open epic first; the train supervisor's decision=lift with a reason is audited and sent to the operator; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\"; the train supervisor's decision=lift with a reason is audited and sent to the operator; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
     )]
     pub async fn factory(
         &self,

@@ -1,0 +1,3 @@
+### Fixed — Release
+
+- **The tool list is back under its byte budget** — Was: the factory tool's description and its `decision` parameter both explained `train_freeze decision=promote` (added by the promote-and-freeze delivery, a887c96531), pushing `tools/list` to 59037 bytes against the 59000 budget, so the train suite and merge queue failed. Now: the parameter keeps the one explanation and the description drops the duplicate; `tools/list` is under budget with the budget unchanged. Measured: the same test fails at the delivery base c2a1c18109 with "tools/list is 59037 bytes; budget 59000" and passes with this change.

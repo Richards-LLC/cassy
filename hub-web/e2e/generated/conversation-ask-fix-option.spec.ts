@@ -15,21 +15,29 @@ test.describe("Conversation question", () => {
     const question = "Gate run 33512 failed on that one warning.";
     await expect(waitingRegion).toBeVisible();
     await expect(waitingRegion).toContainText(question);
-    await expect(waitingRegion.getByRole("button", { name: "Fix in-train" })).toBeVisible();
-    await expect(waitingRegion.getByRole("button", { name: "Ship with allowlist" })).toBeVisible();
+    // The pinned bar only points at the question; its options live in the Question group in the log.
+    const questionInLog = thread.getByRole("log").getByRole("group", { name: "Question from patient-pelican-9" });
+    const options = questionInLog.getByRole("button");
+    await expect(options).toHaveCount(2);
+    await expect(options.nth(0)).toBeEnabled();
+    await expect(options.nth(1)).toBeEnabled();
     await expect(thread.getByRole("group", { name: "Blocker from patient-pelican-9" })).toBeVisible();
     await expect(thread.getByText("attention.rs:212 · needless_borrow")).toBeVisible();
 
-    // 2. Click Fix in-train once.
-    await waitingRegion.getByRole("button", { name: "Fix in-train" }).click();
+    // 2. Click the first option (Fix in-train) once.
+    const chosen = (await options.nth(0).textContent())!.trim();
+    const other = (await options.nth(1).textContent())!.trim();
+    await options.nth(0).click();
 
-    const questionInLog = thread.getByRole("group", { name: "Question from patient-pelican-9" });
-    await expect(questionInLog.locator('[aria-label="You replied: Fix in-train"]')).toBeVisible();
-    await expect(thread.getByRole("log").getByRole("paragraph").filter({ hasText: /^Fix in-train$/ })).toBeVisible();
+    await expect(questionInLog).toHaveAttribute("data-answered", "true");
+    await expect(options).toHaveCount(0);
+    await expect(questionInLog.locator(".chip.sent")).toHaveCount(1);
+    await expect(questionInLog.locator(".chip.sent")).toContainText(chosen);
+    await expect(questionInLog.locator(".chip.sent")).not.toContainText(other);
+    await expect(thread.getByRole("log").getByRole("paragraph").filter({ hasText: new RegExp(`^${chosen.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) })).toBeVisible();
     await expect(thread.getByRole("log").locator('.bub[data-state="sending"] .conversation-delivery')).toBeVisible();
     await expect(waitingRegion).toBeHidden();
     await expect(page.locator('[aria-label="Conversation context"] [data-section="waiting"]')).toBeHidden();
     await expect(page.locator('[aria-label="Conversation context"] .context-waiting li')).toHaveCount(0);
-    await expect(questionInLog.locator('[aria-label="You replied: Ship with allowlist"]')).toHaveCount(0);
   });
 });

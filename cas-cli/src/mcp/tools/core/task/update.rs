@@ -3146,6 +3146,9 @@ impl CasCore {
         if !warnings.is_empty() {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
         }
+        if changes.contains(&"acceptance_criteria") {
+            response.push_str(&crate::task_assignment::test_policy_note(&task.acceptance_criteria));
+        }
         if split_takeover.is_some() { response = crate::gates::override_tag("G-07", response); }
         if binding_override {response=crate::gates::override_tag("G-151",response);}
 

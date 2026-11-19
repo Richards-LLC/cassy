@@ -13974,11 +13974,12 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice}{sync} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice}{sync} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.{}\n\nDecision: {}",
             task.id,
             task.title,
             assignee,
             outcome.branch_handling,
+            crate::task_assignment::test_policy_note(&req.reason),
             req.reason.trim(),
         )))
     }

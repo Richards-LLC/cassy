@@ -1016,7 +1016,7 @@ pub struct FactoryRequest {
 ///   message_ack, message_status.
 /// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity,
 ///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
-///   remind, remind_list, remind_cancel, restart_spawn_queue, restart_supervisor, standby, claim, claim_status,
+///   remind, remind_list, remind_cancel, restart_spawn_queue, restart_supervisor, claim, claim_status,
 ///   release_claim, transfer_claim, accept_claim.
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
 ///   worktree_merge, worktree_status.

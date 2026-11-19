@@ -4416,10 +4416,14 @@
       "411ff0166301cc16503ef4143e5192ec0d40f9eb07901040f923b886c5fe3f90",
       "8a724c0d0861d8edc2c4d1f7f4838a291eb614ff53a313347e15522a98702124",
       "8b657e24dacabecb0290faf4adce413ee5edeb6e6e84924ee8a5f1983143a2f5",
-      "936848d122abae85a829cb65523314a8d4ef8d63fce3e93bbed8bd5c4fe44148"
+      "936848d122abae85a829cb65523314a8d4ef8d63fce3e93bbed8bd5c4fe44148",
+      "daa817bac472d799e591a6cfc48ff97842b8a97341aa2e384df617099f12104f"
     ],
     "skills/cas-writing-tests/agents/openai.yaml": [
       "8619a54e8c098122a7f3881394f84ca89b684366e848233a29ad18b6ec363935"
+    ],
+    "skills/cas-writing-tests/references/brief-test-phrases.txt": [
+      "b6051fb67e1e657577eeb2c6010dc5542db0c0e3c2a6a8efda8ad72f6265aebc"
     ],
     "skills/cas-writing-tests/references/mocking.md": [
       "331990b5092342d01352547ce761fc6162fdbbe578cb86f2d7f25d40980c0310",

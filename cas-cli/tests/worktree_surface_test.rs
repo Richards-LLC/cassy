@@ -5192,6 +5192,11 @@ async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed()
     let result = svc.factory(Parameters(req)).await;
 
     assert!(result.is_err(), "closed parent epic must reject the merge");
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("Closed") && message.contains("close receipt"),
+        "refusal must explain closed-epic integrity. Got: {message}"
+    );
     let epic_tree = Command::new("git")
         .args(["ls-tree", "-r", "--name-only", "epic/already-closed"])
         .current_dir(&repo.root)

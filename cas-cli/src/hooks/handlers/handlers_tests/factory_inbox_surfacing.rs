@@ -140,7 +140,9 @@ fn cas_0660_a_withdrawn_director_merge_alert_is_not_surfaced() {
     let mut env = TestEnvGuard::temp_home();
     supervisor_env(&mut env);
     for tool_boundary in [false, true] {
-        for withdrawn in [false, true] {
+        // A row without the daemon stamp is caller-settable text: even one
+        // dressed as an alert for a withdrawn task is mail and must surface.
+        for (withdrawn, stamped) in [(false, true), (true, true), (true, false)] {
             let temp = TempDir::new().unwrap();
             let store = store_at(&temp);
             let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
@@ -167,7 +169,7 @@ fn cas_0660_a_withdrawn_director_merge_alert_is_not_surfaced() {
             let id = store
                 .enqueue_urgent_with_outcome(
                     "director", "supervisor", &body, Some(SESSION), Some("Director prompt"),
-                    None, false, Some(&cas_store::QueueOrigin::Daemon),
+                    None, false, stamped.then_some(&cas_store::QueueOrigin::Daemon),
                 )
                 .unwrap()
                 .id();
@@ -183,8 +185,8 @@ fn cas_0660_a_withdrawn_director_merge_alert_is_not_surfaced() {
                 crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
             };
             let shown = surfaced.as_deref().is_some_and(|text| text.contains(token));
-            assert_eq!(shown, !withdrawn, "withdrawn={withdrawn} boundary={tool_boundary}: {surfaced:?}");
-            if withdrawn {
+            assert_eq!(shown, !(withdrawn && stamped), "withdrawn={withdrawn} stamped={stamped} boundary={tool_boundary}: {surfaced:?}");
+            if withdrawn && stamped {
                 // Receipted, so the next turn does not surface it again.
                 assert_eq!(store.count_unseen_for_recipient("supervisor", Some(SESSION)).unwrap(), 0, "row {id}");
             }

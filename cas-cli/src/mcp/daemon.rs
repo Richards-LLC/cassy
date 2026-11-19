@@ -470,8 +470,10 @@ fn register_session_start_identity(
     }
 
     if agent.role == AgentRole::Worker {
-        if let Some(host) = crate::factory_session_scope::WorkerHost::current(cas_root, agent.factory_session.as_deref())
+        let session = agent.factory_session.clone().or_else(|| caller_env.then(|| std::env::var("CAS_FACTORY_SESSION").ok()).flatten());
+        if let Some(host) = crate::factory_session_scope::WorkerHost::current(cas_root, session.as_deref())
             .map_err(cas_store::StoreError::Other)? {
+            agent.factory_session = Some(host.session);
             agent.parent_id = Some(host.owner.clone());
             agent.metadata.insert("train_owner".into(), host.owner);
             agent.metadata.insert("train_owner_generation".into(), host.generation);

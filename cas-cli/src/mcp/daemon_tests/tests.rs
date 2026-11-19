@@ -609,7 +609,7 @@ fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
 /// socket reports a different session id for the same Claude Code PID.
 #[test]
 fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
-    let _env = TestEnvGuard::temp_home();
+    let mut env = TestEnvGuard::temp_home();
     let temp = TempDir::new().expect("temp project");
     let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
     let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
@@ -674,6 +674,33 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
         .filter(|agent| agent.name == "strong-bear-44")
         .count();
     assert_eq!(same_worker_rows, 1, "worker identity must remain singular");
+
+    // First registration on a worker host has no prior local row or supervisor.
+    let project = TempDir::new().unwrap();
+    let root = init_cas_dir(project.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut epic = Task::new("cas-owner-train".into(), "train".into());
+    epic.task_type = cas_types::TaskType::Epic;
+    epic.epic_verification_owner = Some("remote-owner-id".into());
+    tasks.add(&epic).unwrap();
+    let host = crate::factory_session_scope::WorkerHost {
+        train: epic.id.clone(), owner: "remote-owner-id".into(),
+        generation: crate::factory_session_scope::train_owner_generation(&epic).unwrap(),
+        name: "remote-owner".into(), session: "remote-owner-session".into(), machine: "remote-machine".into(),
+    };
+    let mut metadata = crate::ui::factory::create_metadata(&host.session, 0, &host.name,
+        &["host-worker".into()], Some(&epic.id), project.path().to_str(), None);
+    metadata.worker_host = Some(host.clone());
+    crate::ui::factory::SessionManager::new().save_daemon_metadata(metadata, &root).unwrap();
+    env.set("CAS_FACTORY_SESSION", &host.session);
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let (worker, _) = register_session_start_agent(&root, agents.as_ref(), "host-native-session",
+        Some("host-worker"), Some("worker"), cc_pid, None).unwrap();
+    assert_eq!(worker.factory_session.as_deref(), Some(host.session.as_str()));
+    assert_eq!(worker.parent_id.as_deref(), Some("remote-owner-id"));
+    assert_eq!(worker.metadata.get("train_owner_generation"), Some(&host.generation));
+    assert!(agents.list(None).unwrap().iter().all(|agent| agent.role == AgentRole::Worker));
+
 }
 
 /// cas-24f3: one daemon owns `.cas/daemon.sock` and receives every agent's

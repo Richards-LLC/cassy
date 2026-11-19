@@ -143,7 +143,7 @@ pub(super) fn execute_daemon(
         crate::factory_session_scope::WorkerHost::resolve(&cas_root, train).map_err(anyhow::Error::msg)).transpose()?;
     if let Some(host) = &host {
         if host.session != session { bail!("Worker host must use the train owner's factory session"); }
-        let mut metadata = crate::ui::factory::session::create_metadata(session, 0, &host.name,
+        let mut metadata = crate::ui::factory::create_metadata(session, 0, &host.name,
             &worker_names, Some(&host.train), project_root.to_str(), None);
         metadata.worker_host = Some(host.clone());
         metadata.pinned_epic_id = Some(host.train.clone());

@@ -2051,7 +2051,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         let root = crate::store::find_cas_root_from(&project_root)?;
         // Workers need this route while registering. PID zero records a
         // pending launch, never a claim that a daemon is already running.
-        let mut metadata = crate::ui::factory::session::create_metadata(&session_name, 0,
+        let mut metadata = crate::ui::factory::create_metadata(&session_name, 0,
             &supervisor_name, &worker_names, Some(&host.train), project_root.to_str(), None);
         metadata.worker_host = Some(host.clone());
         metadata.pinned_epic_id = Some(host.train.clone());

@@ -54,6 +54,13 @@ pub fn agent_process_is_alive(agent: &Agent) -> bool {
 /// without a recorded PID retain status-based protection; a recorded process
 /// must still exist with its original fingerprint, independent of heartbeats.
 pub(crate) fn verifier_is_running(agent: &Agent) -> bool {
+    agent_registration_is_live(agent)
+}
+
+/// A registered row proves its agent alive only while its recorded process
+/// still exists: a dead session re-registered as `active` is not live (GH #2074).
+/// Rows without a recorded pid keep status-based protection.
+pub(crate) fn agent_registration_is_live(agent: &Agent) -> bool {
     agent.is_alive()
         && (agent.pid.is_none()
             || agent_process_is_alive_with(

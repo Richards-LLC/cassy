@@ -1156,6 +1156,38 @@ fn test_worker_can_takeover_supervisor_task() {
     assert_eq!(transfer.agent_id, "supervisor-1");
 }
 
+/// GH #2115: a recycled worker's new session reclaims the lease its retired
+/// same-name predecessor still holds, without a supervisor force-reset.
+#[test]
+fn test_recycled_worker_reclaims_dead_predecessor_lease() {
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
+
+    let old = Agent::new("old-session".to_string(), "swift-lark-1".to_string());
+    let new = Agent::new("new-session".to_string(), "swift-lark-1".to_string());
+    let other = Agent::new("other-session".to_string(), "other-worker".to_string());
+    for agent in [&old, &new, &other] {
+        store.register(agent).unwrap();
+    }
+    store.try_claim("task-1", "old-session", 1800, None).unwrap();
+
+    // The predecessor is still live, and another worker is never a successor.
+    for requester in ["new-session", "other-session"] {
+        let result = store.try_claim("task-1", requester, 600, None).unwrap();
+        assert!(matches!(result, ClaimResult::AlreadyClaimed { .. }));
+    }
+
+    // Recycle retires the predecessor's row without revoking its lease.
+    let mut retired = store.get("old-session").unwrap();
+    retired.status = AgentStatus::Shutdown;
+    store.update(&retired).unwrap();
+    let result = store.try_claim("task-1", "other-session", 600, None).unwrap();
+    assert!(matches!(result, ClaimResult::AlreadyClaimed { .. }));
+    let result = store.try_claim("task-1", "new-session", 600, None).unwrap();
+    assert!(matches!(result, ClaimResult::Success(_)));
+    assert_eq!(store.get_lease("task-1").unwrap().unwrap().agent_id, "new-session");
+}
+
 #[test]
 fn test_non_child_cannot_takeover_task() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();

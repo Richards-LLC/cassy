@@ -25,7 +25,6 @@ const NOTICE: &str = "train_main_sync";
 
 /// Merge the integration branch into each open train that lacks it; returns
 /// how many trains moved.
-// gate[W-54 watchdog]: Open release trains sync with main
 pub(crate) fn sync_open_trains(cas_dir: &Path) -> Result<usize> {
     let tasks = crate::store::open_task_store(cas_dir)?;
     let all = tasks.list(None)?;

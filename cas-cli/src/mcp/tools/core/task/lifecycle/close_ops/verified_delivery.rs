@@ -133,7 +133,11 @@ pub(super) fn current(
         return Ok(None);
     }
     let candidate = premerge_verification::candidate_for_dispatch(root, &dispatch)?;
-    Ok(dispatch.repository.map(|repository| ReviewedDelivery {
+    // A validated carry-over has its own synthetic merge parents. Close must
+    // consume that proof without rewriting the original dispatch or verdict.
+    let repository = candidate.as_ref().map(|candidate| candidate.proof.clone())
+        .or(dispatch.repository);
+    Ok(repository.map(|repository| ReviewedDelivery {
         dispatch: dispatch.id,
         repository,
         candidate,

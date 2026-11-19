@@ -248,6 +248,7 @@ struct Promotion {
 }
 
 mod peer;
+mod carryover;
 mod automatic;
 #[cfg(unix)]
 mod factory_launch;
@@ -596,7 +597,7 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub(crate) fn candidate_for_dispatch(
+fn original_candidate_for_dispatch(
     root: &Path,
     dispatch: &VerificationDispatch,
 ) -> Result<Option<Candidate>, String> {
@@ -632,6 +633,11 @@ pub(crate) fn candidate_for_dispatch(
         return Err("candidate does not match its immutable dispatch proof".into());
     }
     Ok(Some(candidate))
+}
+
+pub(crate) fn candidate_for_dispatch(root: &Path, dispatch: &VerificationDispatch) -> Result<Option<Candidate>, String> {
+    let Some(original) = original_candidate_for_dispatch(root, dispatch)? else { return Ok(None) };
+    Ok(carryover::mapped(root, dispatch, &original)?.or(Some(original)))
 }
 
 impl Candidate {
@@ -1289,6 +1295,9 @@ impl CasCore {
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
+        if let Some(approval) = carryover::reuse(self, task, repo, source, target, &digest, latest.as_ref())? {
+            return Ok(Some(approval));
+        }
         let mut inherited_supervisor_call = None;
         let mut drifted_dispatch = None;
         if let Some(dispatch) = latest.as_ref()
@@ -1947,67 +1956,158 @@ mod tests {
 
     #[test]
     fn cas_da35c_expired_supervisor_approval_reuses_only_unchanged_candidate() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path();
-        run(repo, &["init", "-q", "-b", "epic/train"]);
-        // Candidate commit-tree must use explicit fixture identity, never the
-        // host's platform-dependent author/email auto-detection.
-        run(repo, &["config", "user.useConfigOnly", "true"]);
-        run(repo, &["config", "user.name", "Fixture"]);
-        run(repo, &["config", "user.email", "fixture@example.invalid"]);
-        let root = crate::store::init_cas_dir(repo).unwrap();
-        env.set("CAS_ROOT", &root);
-        env.set("CAS_AGENT_ROLE", "supervisor");
-        std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
-        std::fs::write(root.join("config.toml"), "[qa]\nmode = 'batch'\n[verification]\nenabled = true\n").unwrap();
-        commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
-        run(repo, &["checkout", "-q", "-b", "factory/worker"]);
-        let source = commit_file(repo, "src/lib.rs", "delivery\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
-        run(repo, &["checkout", "-q", "epic/train"]);
-        let core = CasCore::with_daemon(root.clone(), None, None);
-        let owner = cas_types::Agent::new_with_role(
-            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
-        );
-        core.open_agent_store().unwrap().register(&owner).unwrap();
-        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
-        let mut task = Task::new("cas-da35c-reuse".into(), "Review approval reuse".into());
-        task.depth = cas_types::TaskDepth::Deep;
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.deliverables.factory_branch_anchor = Some(source);
-        core.open_task_store().unwrap().add(&task).unwrap();
-        let held = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap_err();
-        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
-            .unwrap_or_else(|| panic!("candidate never reached dispatch creation: {held:?}"));
-        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
-            "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
-            rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
-        ).unwrap();
-        let expired = cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now()).unwrap().unwrap();
-        assert_eq!(expired.state, cas_types::VerificationDispatchState::TimedOut);
-        let request = serde_json::from_value(serde_json::json!({
-            "task_id": task.id, "dispatch_id": dispatch.id, "status": "approved",
-            "summary": "Supervisor reviewed the expired exact candidate", "issues": "[]",
-        })).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let response = runtime.block_on(core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).unwrap();
-        assert_ne!(response.is_error, Some(true), "{response:?}");
-        let approval = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().unwrap();
-        assert_eq!(approval.dispatch_id, dispatch.id);
-        assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);
-        // A repeated park and accumulated notes change no delivered tree.
-        core.open_task_store().unwrap().append_note(&task.id, "Another park with the same evidence").unwrap();
-        let reparked = core.open_task_store().unwrap().get(&task.id).unwrap();
-        let reused = core.prepare_premerge_verification(&reparked, repo, "factory/worker", "epic/train").unwrap().unwrap();
-        assert_eq!(reused.dispatch_id, dispatch.id);
-        reused.validate_for_merge(&root, &reparked).unwrap();
-        // The real incident moved the target in reviewed code after approval.
-        // A clean merge with different reviewed context must request another review.
-        commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nchanged\nfifth\nlast\n", "target moved");
-        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
-        let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-        assert_ne!(replacement.id, dispatch.id);
-        assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state, cas_types::VerificationDispatchState::Invalidated);
+        // A terminal close consumes the delivery cycle. Keep source-change
+        // and final-close scenarios on independent real fixtures in this test.
+        for close_delivery in [false, true] {
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            run(repo, &["init", "-q", "-b", "epic/train"]);
+            // Candidate commit-tree must use explicit fixture identity, never the
+            // host's platform-dependent author/email auto-detection.
+            run(repo, &["config", "user.useConfigOnly", "true"]);
+            run(repo, &["config", "user.name", "Fixture"]);
+            run(repo, &["config", "user.email", "fixture@example.invalid"]);
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            env.set("CAS_ROOT", &root);
+            env.set("CAS_CLONE_PATH", repo);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='reuse-fixture'\n[qa]\nmode = 'batch'\n[verification]\nenabled = true\n").unwrap();
+            commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
+            run(repo, &["checkout", "-q", "-b", "factory/worker"]);
+            let source = commit_file(repo, "src/lib.rs", "delivery\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
+            run(repo, &["checkout", "-q", "epic/train"]);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let owner = cas_types::Agent::new_with_role(
+                "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            core.open_agent_store().unwrap().register(&owner).unwrap();
+            core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+            let mut task = Task::new("cas-da35c-reuse".into(), "Review approval reuse".into());
+            task.depth = cas_types::TaskDepth::Deep;
+            task.assignee = Some("worker".into());
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+            task.deliverables.parked_branch = Some("factory/worker".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:reuse-fixture".into(), target_branch: "epic/train".into(),
+            });
+            task.deliverables.factory_branch_anchor = Some(source);
+            core.open_task_store().unwrap().add(&task).unwrap();
+            let held = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap_err();
+            let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
+                .unwrap_or_else(|| panic!("candidate never reached dispatch creation: {held:?}"));
+            rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
+                rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
+            ).unwrap();
+            let expired = cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now()).unwrap().unwrap();
+            assert_eq!(expired.state, cas_types::VerificationDispatchState::TimedOut);
+            let request = serde_json::from_value(serde_json::json!({
+                "task_id": task.id, "dispatch_id": dispatch.id, "status": "approved",
+                "summary": "Supervisor reviewed the expired exact candidate", "issues": "[]",
+            })).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let response = runtime.block_on(core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).unwrap();
+            assert_ne!(response.is_error, Some(true), "{response:?}");
+            let approval = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().unwrap();
+            assert_eq!(approval.dispatch_id, dispatch.id);
+            assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);
+            // A repeated park and accumulated notes change no delivered tree.
+            core.open_task_store().unwrap().append_note(&task.id, "Another park with the same evidence").unwrap();
+            let reparked = core.open_task_store().unwrap().get(&task.id).unwrap();
+            let reused = core.prepare_premerge_verification(&reparked, repo, "factory/worker", "epic/train").unwrap().unwrap();
+            assert_eq!(reused.dispatch_id, dispatch.id);
+            reused.validate_for_merge(&root, &reparked).unwrap();
+            // GH #2170: the administrative target correction invalidates the
+            // old cycle, but merging only the new train changes no reviewed patch.
+            run(repo, &["checkout", "-q", "-b", "epic/next"]);
+            commit_file(repo, "src/sibling.rs", "sibling train work\n", "successor train");
+            let service = crate::mcp::CasService::new(core.clone(), None);
+            let correction = serde_json::from_value(serde_json::json!({
+                "action":"update", "id":task.id, "proof_scope_fix":true,
+                "target_branch":"epic/next", "reason":"carry approved delivery to successor train",
+            })).unwrap();
+            let corrected = runtime.block_on(service.task(rmcp::handler::server::wrapper::Parameters(correction))).unwrap();
+            assert_ne!(corrected.is_error, Some(true), "{corrected:?}");
+            run(repo, &["checkout", "-q", "factory/worker"]);
+            run(repo, &["merge", "-q", "--no-ff", "epic/next", "-m", "merge successor only"]);
+            let store = core.open_task_store().unwrap();
+            task = store.get(&task.id).unwrap();
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(run(repo, &["rev-parse", "HEAD"]));
+            store.update(&task).unwrap();
+            run(repo, &["checkout", "-q", "epic/next"]);
+            let dispatch_count = || rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                .query_row("SELECT COUNT(*) FROM verification_dispatches WHERE task_id=?1", [&task.id], |row| row.get::<_, i64>(0)).unwrap();
+            let before = dispatch_count();
+            let carried = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next");
+            assert_eq!(dispatch_count(), before);
+            let carried = carried.unwrap().unwrap();
+            assert_eq!(carried.dispatch_id, dispatch.id);
+            assert_eq!(carried.verdict_id, approval.verdict_id);
+            carried.validate_for_merge(&root, &task).unwrap();
+            let repeated = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next").unwrap().unwrap();
+            assert_eq!(repeated.verdict_id, approval.verdict_id);
+            assert_eq!(dispatch_count(), before);
+
+            // The carried identity must also authorize publication and close.
+            run(repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "publish carried delivery"]);
+            let landed = run(repo, &["rev-parse", "HEAD"]);
+            carried.promote(&landed).unwrap();
+            core.verify_premerge_promotion(&task, &dispatch, &approval.verdict_id).unwrap();
+            assert!(cycle::approved(&root, repo, &task, task.deliverables.factory_branch_anchor.as_deref().unwrap(), &landed).unwrap().is_some());
+            if close_delivery {
+                // Promotion alone missed the final close's ReviewedDelivery projection:
+                // it must consume the derived proof while retaining the original verdict.
+                let original_verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
+                let close = serde_json::from_value(serde_json::json!({
+                    "id":task.id, "commit_receipt":landed, "supervisor_override":true,
+                    "reason":"Reviewed carried merge; scoped proof deferred to fixture assembly",
+                })).unwrap();
+                let closed = runtime.block_on(core.cas_task_close(rmcp::handler::server::wrapper::Parameters(close)));
+                assert_eq!(store.get(&task.id).unwrap().status, cas_types::TaskStatus::Closed, "{closed:?}");
+                assert_eq!(dispatch_count(), before);
+                assert_eq!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap().id, approval.verdict_id);
+                assert_eq!(serde_json::to_value(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap()).unwrap(), serde_json::to_value(original_verdict).unwrap());
+                assert_eq!(serde_json::to_value(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().repository).unwrap(), serde_json::to_value(&dispatch.repository).unwrap());
+                continue;
+            }
+
+            // A new commit in reviewed code still needs a real new review.
+            run(repo, &["checkout", "-q", "factory/worker"]);
+            let changed = commit_file(repo, "src/lib.rs", "new delivery\nsecond\nthird\nfourth\nfifth\nlast\n", "change reviewed source");
+            task.deliverables.factory_branch_anchor = Some(changed);
+            store.update(&task).unwrap();
+            run(repo, &["checkout", "-q", "epic/next"]);
+            let changed_review = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next");
+            assert!(changed_review.is_err());
+            let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert_ne!(replacement.id, dispatch.id, "{changed_review:?}");
+            let approve_changed = serde_json::from_value(serde_json::json!({
+                "task_id":task.id, "dispatch_id":replacement.id, "status":"approved",
+                "summary":"Reviewed the changed source", "issues":"[]",
+            })).unwrap();
+            assert_ne!(runtime.block_on(core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(approve_changed))).unwrap().is_error, Some(true));
+            // The original guard also holds a target edit in a reviewed file.
+            // Resolving its actual merge conflict creates unreviewed content.
+            commit_file(repo, "src/lib.rs", "target edit\nsecond\nthird\nfourth\nfifth\nlast\n", "target moved");
+            run(repo, &["checkout", "-q", "factory/worker"]);
+            let conflict = Command::new("git").current_dir(repo)
+                .args(["merge", "--no-ff", "epic/next", "-m", "merge with resolution"]).output().unwrap();
+            assert_eq!(conflict.status.code(), Some(1));
+            std::fs::write(repo.join("src/lib.rs"), "resolved delivery\nsecond\nthird\nfourth\nfifth\nlast\n").unwrap();
+            run(repo, &["add", "src/lib.rs"]);
+            run(repo, &["commit", "-qm", "resolve reviewed content conflict"]);
+            task.deliverables.factory_branch_anchor = Some(run(repo, &["rev-parse", "HEAD"]));
+            store.update(&task).unwrap();
+            run(repo, &["checkout", "-q", "epic/next"]);
+            assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/next").is_err());
+            let resolved = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert_ne!(resolved.id, replacement.id);
+        }
     }
 
     #[test]

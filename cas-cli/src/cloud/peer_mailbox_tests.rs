@@ -1107,7 +1107,9 @@ async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_
         train:train.id.clone(), owner:"owner".into(), generation:generation.clone(), name:"owner".into(),
         session:"owner-session".into(), machine:"soundwave".into(),
     });
-    std::fs::write(crate::ui::factory::metadata_path("owner-session"), serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let metadata_file = crate::ui::factory::metadata_path("owner-session");
+    std::fs::create_dir_all(metadata_file.parent().unwrap()).unwrap();
+    std::fs::write(metadata_file, serde_json::to_vec(&metadata).unwrap()).unwrap();
     let registry = [serde_json::json!({"id":"owner", "name":"owner", "agent_type":"primary", "status":"active",
         "machine_id":"soundwave", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"account",
         "metadata":{"role":"supervisor", "factory_session":"owner-session", "canonical_id":REPO, "hostname":"soundwave"}}),

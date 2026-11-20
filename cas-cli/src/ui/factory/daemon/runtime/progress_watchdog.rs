@@ -479,7 +479,7 @@ mod tests {
             "INSERT INTO task_execution_states(task_id,state,updated_at) VALUES (?1,?2,?3)",
             rusqlite::params!["cas-unreadable", serde_json::json!({"close_refusal": {"invalid": true}}).to_string(), chrono::Utc::now().to_rfc3339()],
         ).unwrap();
-        let (_, waiting, _, _, _, _) = super::observe(&root, "refusal-isolation", chrono::Utc::now()).unwrap();
+        let waiting = super::observe(&root, "refusal-isolation", chrono::Utc::now()).unwrap().waiting;
         assert_eq!(waiting.len(), 1);
         assert!(waiting[0].contains("cas-actionable"));
     }

@@ -735,7 +735,6 @@ fn published_train_closes_members_independently_cas_734b() {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed);
     }
     assert!(matches!(result.members.get("cas-closed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
-    assert!(matches!(result.members.get("cas-closed-report"), Some(CassyMergeClose::AlreadyClosed)), "{:?}", result.members.get("cas-closed-report"));
     assert!(matches!(result.members.get("cas-unreviewed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
     for id in ["cas-unshipped", "cas-other-source"] {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
@@ -745,6 +744,19 @@ fn published_train_closes_members_independently_cas_734b() {
         let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
         assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
     }
+    // cas-f0e7a: v4.43.0's cut shape, three members already closed beside the
+    // closed no-code member with no inventory delivery, passes the cut gate.
+    let mut cut = scope.clone();
+    cut.included_task_ids = ["cas-approved", "cas-candidate", "cas-equal", "cas-closed-report"].map(str::to_string).to_vec();
+    cut.no_code_members.clear();
+    let cut_inventory = resolve_release_inventory(&root, &repo, &cut).unwrap();
+    assert!(!cut_inventory.deliveries.iter().any(|d| d.task_id == "cas-closed-report"));
+    let cut_preview = crate::cli::release_automation::ReleasePreview::from_members(cut.clone(),
+        crate::release_reconcile::preview_release(&root, &repo, &cut_inventory).unwrap());
+    let shown = serde_json::to_value(&cut_preview).unwrap();
+    assert_eq!(shown["would_close"], 0);
+    assert!(cut.included_task_ids.iter().all(|id| shown["members_by_id"][id] == "already_closed"), "{shown}");
+    cut_preview.allow_cut().unwrap();
     // A batch ledger cannot replace the missing code delivery approvals.
     let mut later = receipt;
     later.id = "qab-later".into();

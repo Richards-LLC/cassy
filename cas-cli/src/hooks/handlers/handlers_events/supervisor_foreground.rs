@@ -47,8 +47,7 @@ const SSH_VALUE_OPTIONS: &[&str] = &[
 ];
 
 pub(super) fn denial(input: &HookInput) -> Option<String> {
-    if true // red-run stub (cas-803f): H-49 disabled
-        || input.tool_name.as_deref() != Some("Bash")
+    if input.tool_name.as_deref() != Some("Bash")
         || !crate::harness_policy::is_supervisor(input)
         || input.agent_id.as_deref().is_some_and(|id| !id.is_empty())
         || input.workspace_root.is_some()

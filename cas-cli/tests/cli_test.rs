@@ -2977,7 +2977,13 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
         let status = std::process::Command::new("git").args(&args).current_dir(&worktree).status().unwrap();
         assert!(status.success(), "git {args:?}");
     }
-    let output = cas_cmd(temp.path())
+    // The fixture crate has none of this repository's nextest profiles: the outer
+    // runner's NEXTEST_* settings (CI exports NEXTEST_PROFILE=queue) must not reach it.
+    let mut worker_check = cas_cmd(temp.path());
+    for (key, _) in std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("NEXTEST_")) {
+        worker_check.env_remove(key);
+    }
+    let output = worker_check
         .current_dir(&worktree)
         .env("CAS_ROOT", &live_root)
         .args(["factory", "worker-check", "--cas-root"])

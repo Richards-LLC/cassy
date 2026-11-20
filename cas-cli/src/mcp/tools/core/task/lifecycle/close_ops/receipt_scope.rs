@@ -1467,6 +1467,111 @@ raise SystemExit(1 if failed else 0)
         assert!(failures.is_empty(), "{failures:?}");
     }
 
+    /// GH #2257: a source with no sibling spec must select its consumers,
+    /// never the whole backend, and earn proof the park reader accepts.
+    #[cfg(unix)]
+    #[test]
+    fn jest_source_related_tests_command_and_park_receipt_gh2257() {
+        use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("worktrees/worker");
+        let write = |path: &str, body: &str| {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        };
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&repo)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let source = "apps/backend/src/conversations/v2/make-it-mine-request.ts";
+        let consumer = "apps/backend/test/conversation.spec.ts";
+        write(".gitignore", "node_modules/\ntarget/\n");
+        write("apps/backend/package.json", r#"{"devDependencies":{"jest":"30"}}"#);
+        write("apps/backend/jest.config.js", "module.exports = {};\n");
+        write(source, "export const value = 1;\n");
+        // The consuming spec is elsewhere; a sibling-name heuristic cannot find it.
+        write(consumer, "import { value } from '../src/conversations/v2/make-it-mine-request';\nit('claims', () => {});\n");
+        write("apps/backend/test/unrelated.spec.ts", "it('unrelated', () => { throw 0; });\n");
+        // Framework boundary: implement the import-graph selection predicate,
+        // report unrelated failures and report an empty selection as empty.
+        write("apps/backend/node_modules/.bin/jest", r#"#!/usr/bin/env python3
+import json, pathlib, re, sys
+a = sys.argv[1:]
+specs = sorted(pathlib.Path.cwd().rglob('*.spec.ts'))
+if '--listTests' in a:
+    print(json.dumps([str(p) for p in specs]))
+    sys.exit(0)
+def depends(spec, target, seen=None):
+    seen = set() if seen is None else seen
+    if spec in seen: return False
+    seen.add(spec)
+    if spec == target: return True
+    for name in re.findall(r"from\s+['\"]([^'\"]+)", spec.read_text()):
+        dependency = (spec.parent / name).resolve().with_suffix('.ts')
+        if dependency.is_file() and depends(dependency, target, seen): return True
+    return False
+if '--findRelatedTests' in a:
+    target = pathlib.Path(a[a.index('--findRelatedTests') + 1]).resolve()
+    specs = [p for p in specs if depends(p, target)]
+elif '--runTestsByPath' in a:
+    target = pathlib.Path(a[a.index('--runTestsByPath') + 1]).resolve()
+    specs = [p for p in specs if p == target]
+results = [{'name': str(p), 'status': 'failed' if 'throw 0' in p.read_text() else 'passed',
+    'assertionResults': [{'fullName': 'claims', 'status': 'failed' if 'throw 0' in p.read_text() else 'passed'}]} for p in specs]
+ok = bool(results) and all(r['status'] == 'passed' for r in results)
+pathlib.Path(a[a.index('--outputFile') + 1]).write_text(json.dumps({'success': ok, 'testResults': results}))
+pathlib.Path('target').mkdir(exist_ok=True)
+with pathlib.Path('target/executed.jsonl').open('a') as out: out.write(json.dumps([str(p) for p in specs]) + '\n')
+sys.exit(0 if ok else 1)
+"#);
+        std::fs::set_permissions(repo.join("apps/backend/node_modules/.bin/jest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]); git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
+        write(source, "export const value = 2;\n");
+        git(&["commit", "-qam", "change source"]);
+        std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = vec![source.to_owned()];
+        let task = Task::new("cas-1587".into(), "related source proof".into());
+        let held = park_refusals(root.path(), &repo, &task, &paths, &head, "main", None);
+        assert!(held.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61")));
+        let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        let commands = widened::commands(root.path(), &repo, &paths, &scopes);
+        assert_eq!(commands.len(), 1);
+        // These bytes are the runnable command consumed by worker-check.
+        let (_, command) = commands[0].split_once(" -- ").unwrap();
+        let args = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "--findRelatedTests"), "{commands:?}");
+        javascript::execute(root.path(), &args, &repo, &[]).unwrap();
+        let runs = std::fs::read_to_string(repo.join("apps/backend/target/executed.jsonl")).unwrap();
+        let executed = runs.lines().map(|line| serde_json::from_str::<Vec<String>>(line).unwrap()).collect::<Vec<_>>();
+        assert_eq!(executed, [vec![repo.join(consumer).to_str().unwrap().to_owned()]]);
+        assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes).is_empty());
+        assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
+        // A receipt for this source cannot cover a second source in the package.
+        write("apps/backend/src/other.ts", "export const value = 3;\n");
+        let other = widened::scope(&repo, "apps/backend/src/other.ts");
+        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()]), [other]);
+        std::fs::remove_file(repo.join("apps/backend/src/other.ts")).unwrap();
+        // A failing related spec must withdraw the old proof at the new tip.
+        write(consumer, "import { value } from '../src/conversations/v2/make-it-mine-request';\nit('claims', () => { throw 0; });\n");
+        git(&["commit", "-qam", "related failure"]);
+        let failed = git(&["rev-parse", "HEAD"]);
+        assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());
+        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+        assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", None).is_empty());
+    }
+
     fn changelog_fixture() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {

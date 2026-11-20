@@ -11,6 +11,6 @@
   Was: every ended session kept its full hand-off record (a supervisor's can
   be several megabytes), and every message to the operator kept a delivery
   copy that also stopped the message itself from ever being cleaned up. Now:
-  the daily retention pass removes records older than the existing retention
+  the regular retention pass removes records older than the existing retention
   windows once nothing still needs them; pending hand-offs, live successors
   and undelivered messages are always kept.

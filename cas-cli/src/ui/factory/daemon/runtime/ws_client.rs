@@ -258,6 +258,22 @@ impl FactoryDaemon {
             }
         }
 
+        // cas-bcf50: sends that lost the store on an earlier pass go first,
+        // so a client's sends stay in order. A gone client's waiting sends go
+        // with it, like its other unanswered frames.
+        let clients = &self.ws_clients;
+        self.deferred_commander_sends.retain(|(client, _)| clients.contains_key(client));
+        if !self.deferred_commander_sends.is_empty() {
+            let _operator_command = cas_store::wait_budget::permit_store_access();
+            for (client_id, message) in self.retry_deferred_commander_sends().await {
+                if let Some(frame) = ws_encode(&message)
+                    && let Some(client) = self.ws_clients.get_mut(&client_id)
+                {
+                    let _ = client.sink.feed(frame).now_or_never();
+                }
+            }
+        }
+
         let had_activity = !messages.is_empty();
         for (client_id, msg) in messages {
             self.handle_ws_message(client_id, msg).await;
@@ -374,26 +390,11 @@ impl FactoryDaemon {
             .get(&client_id)
             .is_some_and(|client| client.relay_trusted);
         if let Some(control) = commander_control_from_ws_message(&msg, relay_trusted) {
-            let error_prefix = control.error_prefix();
-            let client_ref = control.client_ref().map(str::to_owned);
-            match self.dispatch_commander_control(control).await {
-                Ok(Some(message)) => {
-                    if let Some(frame) = ws_encode(&message)
-                        && let Some(client) = self.ws_clients.get_mut(&client_id)
-                    {
-                        let _ = client.sink.feed(frame).now_or_never();
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    if let Some(frame) = ws_encode(&DaemonMessage::Error {
-                        message: format!("{error_prefix}: {error}"),
-                        client_ref,
-                    }) && let Some(client) = self.ws_clients.get_mut(&client_id)
-                    {
-                        let _ = client.sink.feed(frame).now_or_never();
-                    }
-                }
+            if let Some(message) = self.commander_control_for_client(client_id, control).await
+                && let Some(frame) = ws_encode(&message)
+                && let Some(client) = self.ws_clients.get_mut(&client_id)
+            {
+                let _ = client.sink.feed(frame).now_or_never();
             }
             return;
         }

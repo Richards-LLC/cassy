@@ -1923,7 +1923,7 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
 /// Drive real admission, persistence and daemon retry with a Git/SQLite fixture.
 #[tokio::test]
 async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
-    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "green-after-gh-failure", "green-bad-neighbor", "missing-supervisor", "unknown", "unvalidated", "missing-commit"] {
+    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "green-after-cancelled-rerun", "green-after-gh-failure", "green-bad-neighbor", "missing-supervisor", "unknown", "unvalidated", "missing-commit"] {
         let home = TempDir::new().unwrap();
         let fake_bin = TempDir::new().unwrap();
         let gh = fake_bin.path().join("gh");
@@ -1932,6 +1932,7 @@ async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
         cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
 if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
 if [ "$1 $2" = 'api graphql' ]; then printf '%s\n' '{"data":{"repository":{"mergeQueue":null}}}'; exit 0; fi
+if [ "$3" = POST ]; then printf '%s\n' "$4" >> "$CAS_CI_RETRY_TEST_RESPONSE.reruns"; exit 0; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-failure ]; then exit 1; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-timeout ]; then exec sleep 5; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = missing-commit ]; then echo 'HTTP 422: no commit found' >&2; exit 1; fi
@@ -2002,8 +2003,23 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
                 "a gh lookup failure must not stop the retry or page the supervisor");
             std::fs::write(&response, green).unwrap();
         }
-        if outcome == "cancelled" {
-            std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"cancelled"}]}"#).unwrap();
+        if outcome.contains("cancelled") {
+            // cas-fef6: a lane job past its timeout reports cancelled and no
+            // replacement run starts. The armed retry re-runs it exactly once
+            // and keeps waiting while the original cancellation is still the
+            // latest result; only a cancelled rerun stops it.
+            let green = std::fs::read(&response).unwrap();
+            let cancelled = |check: u32| format!(r#"{{"id":{check},"name":"Fast Validation","status":"completed","conclusion":"cancelled","html_url":"https://github.com/org/repo/actions/runs/77/job/{check}"}}"#);
+            std::fs::write(&response, format!(r#"{{"check_runs":[{}]}}"#, cancelled(11))).unwrap();
+            for poll in ["rerun requested", "original cancellation still the latest"] {
+                cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+                assert!(request.exists(), "{poll}: the armed retry survives");
+            }
+            if outcome == "cancelled" {
+                std::fs::write(&response, format!(r#"{{"check_runs":[{},{}]}}"#, cancelled(12), cancelled(11))).unwrap();
+            } else {
+                std::fs::write(&response, green).unwrap();
+            }
         }
         if outcome == "expired" {
             std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
@@ -2018,6 +2034,10 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
         assert!(!request.exists(), "{outcome}: settled intent is consumed once");
+        if outcome.contains("cancelled") {
+            let reruns = std::fs::read_to_string(response.with_extension("json.reruns")).unwrap();
+            assert_eq!(reruns.lines().filter(|line| line.ends_with("/actions/runs/77/rerun")).count(), 1, "{outcome}: {reruns}");
+        }
         // pin: retry notices share the CI watcher's durable lifecycle wake namespace.
         let notices: Vec<_> = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap()
             .peek_all(100).unwrap().into_iter().filter(|p| p.source.starts_with("lifecycle-wake:ci-red-run:") || p.source.starts_with("lifecycle-wake:merge-ci-retry:")).collect();

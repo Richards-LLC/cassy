@@ -30,7 +30,15 @@ pub(crate) struct Retry {
     /// forever or acquire a new lease every time the daemon reads them.
     #[serde(default)]
     pub armed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// cas-fef6: the cancelled check runs this intent already re-ran, once.
+    /// Empty until a rerun was requested; those checks stay the latest result
+    /// until the rerun's own check runs appear.
+    #[serde(default)]
+    pub ci_rerun: Vec<u64>,
 }
+
+pub(crate) const CI_CANCELLED_STOP: &str =
+    "CI was cancelled and no replacement check is running; inspect CI and request the merge again";
 
 fn directory(root: &Path) -> PathBuf {
     root.join("merge-ci-retries")
@@ -69,6 +77,9 @@ pub(crate) enum CiStatus {
     Green,
     Red,
     Pending,
+    /// Cancelled with no replacement run: the cancelled workflow `runs` in
+    /// `repo`, and the ids of the cancelled `checks` they hold.
+    Cancelled { repo: String, runs: Vec<String>, checks: Vec<u64> },
     Stopped(String),
 }
 
@@ -260,6 +271,26 @@ pub async fn retry_pending(root: &Path, session: &str) -> Result<()> {
     Ok(())
 }
 
+/// Record the one rerun (and the checks it replaces) before requesting it, so a
+/// crash can never repeat it. False when a newer supervisor intent replaced this one.
+fn mark_rerun(root: &Path, request: &Retry, checks: &[u64]) -> Result<bool> {
+    let dir = directory(root);
+    let path = dir.join(format!("{}.json", request.task));
+    let current = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Retry>(&bytes).ok());
+    if current.as_ref() != Some(request) {
+        return Ok(false);
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(&dir)?;
+    let mut value = serde_json::to_value(request)?;
+    value["ci_rerun"] = serde_json::to_value(checks)?;
+    serde_json::to_writer(std::io::Write::by_ref(&mut temporary), &value)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|e| e.error)?;
+    Ok(true)
+}
+
 async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
     let agents = crate::store::open_agent_store(root)?;
     let supervisor = match agents.get(&request.supervisor) {
@@ -348,6 +379,26 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         &request.ci_sha,
     ) {
         CiStatus::Pending => return Ok(false),
+        // cas-fef6: a lane job that hits its timeout reports `cancelled`, and
+        // nothing replaces it. Re-run it once and keep waiting while the
+        // original cancelled checks are still the latest; stop only when a
+        // check the rerun created is cancelled too.
+        CiStatus::Cancelled { repo, runs, checks } => {
+            if request.ci_rerun.is_empty() {
+                if !mark_rerun(root, request, &checks)? {
+                    return Ok(false);
+                }
+                if runs.iter().all(|run| {
+                    crate::mcp::tools::core::workflow::rerun_workflow_run(&request.repo, &repo, run)
+                }) {
+                    return Ok(false);
+                }
+            } else if checks.iter().all(|check| request.ci_rerun.contains(check)) {
+                return Ok(false);
+            }
+            notice(root, request, CI_CANCELLED_STOP, false)?;
+            return Ok(true);
+        }
         CiStatus::Stopped(detail) => {
             notice(root, request, &detail, false)?;
             return Ok(true);
@@ -450,7 +501,7 @@ async fn reopened_merge_intent_retires_without_worker_blocker_cas_ae2c() {
     let request = Retry { task: task.id, worktree: "worker".into(), branch: "factory/worker".into(),
         sha: "a".repeat(40), ci_sha: "a".repeat(40), target: "epic/train".into(), repo: temp.path().into(),
         supervisor: supervisor.id, session: "ci-retry".into(), force: false, allow_trunk: false,
-        cleanup: None, armed_at: Some(chrono::Utc::now()) };
+        cleanup: None, armed_at: Some(chrono::Utc::now()), ci_rerun: Vec::new() };
     assert!(attempt(&root, &request).await.unwrap());
     assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
 }

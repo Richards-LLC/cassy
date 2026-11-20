@@ -1550,6 +1550,17 @@ function conversationConnection(machineId: string, session: string | undefined):
   return sessionConnection(machine, attachStates.get(key), sessionsEverLive.has(key), connections.get(machineId)?.hasLiveAttach(session));
 }
 
+/**
+ * cas-bcf50: the machine as rows and chips see it. Live when its event stream
+ * is, or when the footer's rule finds a conversation still answering while
+ * that stream retries; otherwise the machine's own state. The footer's
+ * session retries never lower it.
+ */
+function reachableMachineState(machineId: string): ConnectionState | undefined {
+  const footer = machineFooterConnection(machineId);
+  return footer?.phase === "live" ? footer : connectionStates.get(machineId);
+}
+
 function machineFooterConnection(machineId: string): ConnectionState | undefined {
   const prefix = `${machineId}:`;
   // The catalog removes ended peers; their cached retry lifecycle must not
@@ -3767,14 +3778,14 @@ function machineWillReconnect(machineId: string): boolean {
 }
 
 /**
- * Whether the thread's session is attached and its machine live right now. A
- * machine that holds messages (unsteady, or a doubted socket being probed) is
- * not: control is taken when it answers, as for any held send (cas-a6f0).
+ * Whether the thread's session is attached and a message can reach it now
+ * (cas-bcf50: the footer's rule, `canDeliver`). A machine that holds messages
+ * (unsteady, or a doubted socket being probed) is not: control is taken when
+ * it answers, as for any held send (cas-a6f0).
  */
 function sessionIsUp(machineId: string, session: string): boolean {
   if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return false;
-  const connection = connections.get(machineId);
-  return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connection?.snapshot().phase === "live" && !connection.holdsMessages();
+  return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connections.get(machineId)?.canDeliver(session) === true;
 }
 
 function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number, birth?: string): void {
@@ -5026,12 +5037,15 @@ function renderConversationList(): void {
     const summary = sessionSummaries.get(key);
     const needsYou = waiting > 0;
     // A kept catalog can still carry yesterday's positive online bit.
-    const machineState = connectionStates.get(machine.id);
+    // cas-bcf50: a row never reads "Last known" while its machine's
+    // conversations still answer (the footer's rule lifts it), and one
+    // session's own retry stays that row's, not a machine outage.
+    const machineState = reachableMachineState(machine.id);
     const machineOnline = machineState?.phase === "live" && session.machine_online !== false;
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), standby: session.standby === true, connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), standby: session.standby === true, connection: machineOutage ? "Last known" : pendingSessionLabel(session, machineState?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -5047,7 +5061,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { reload: row => { void reloadCassy(row); }, resume: row => { void resumeStandby(row); }, machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { reload: row => { void reloadCassy(row); }, resume: row => { void resumeStandby(row); }, machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: reachableMachineState(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   renderStoppedMessageNotices(container);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.

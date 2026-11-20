@@ -13327,6 +13327,11 @@ pub(super) fn ci_completed_candidates(
             let condition = super::ci_watch::parse_ci_completed(r.trigger_filter.as_ref()?).ok()?;
             Some((r, condition))
         })
+        // cas-be96: a selector this repository does not define never matches
+        // a run; probing it would poll GitHub every tick forever.
+        .filter(|(_, condition)| condition.workflow.as_deref().is_none_or(|workflow| {
+            super::ci_watch::local_workflow_defined(cas_dir.parent().unwrap_or(cas_dir), workflow)
+        }))
         .collect()
 }
 
@@ -15387,9 +15392,14 @@ mod tests {
     /// satisfied wake fires once with the run conclusions.
     #[test]
     fn ci_completed_reminder_fires_once_with_run_conclusions() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        // cas-be96: only a workflow the checkout defines is a watcher candidate.
+        std::fs::create_dir_all(project.path().join(".github/workflows")).unwrap();
+        std::fs::write(project.path().join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
+        let cas_dir = project.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
         let reminders: Arc<dyn cas_store::ReminderStore> =
-            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
+            Arc::new(cas_store::SqliteReminderStore::open(cas_dir.as_path()).unwrap());
         reminders.init().unwrap();
         let sha = "fba7a3365eb0cb6403be9d708e8f03151fc42054";
         let filter = serde_json::json!({"sha": sha, "workflow": "CI"});
@@ -15402,7 +15412,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut candidates = super::ci_completed_candidates(temp.path(), "factory-a");
+        let mut candidates = super::ci_completed_candidates(cas_dir.as_path(), "factory-a");
         assert_eq!(candidates.len(), 1);
         let (reminder, condition) = candidates.remove(0);
         let run = serde_json::from_value(serde_json::json!({"id": 1, "name": "CI",
@@ -15415,7 +15425,7 @@ mod tests {
         for _ in 0..2 {
             let (sup, wake_ref) = (&None, &wake.reminder);
             super::fire_reminder(wake_ref, &reminders, sup, &None, "factory-a", "supervisor",
-                &agents, Some(&context), temp.path());
+                &agents, Some(&context), cas_dir.as_path());
         }
 
         let fired = reminders.list_recently_fired(60).unwrap();
@@ -15425,7 +15435,7 @@ mod tests {
         assert_eq!(event["data"]["outcome"], "failure");
         let expected = "CI completed for fba7a3365eb0: CI failure https://github.test/runs/1";
         assert_eq!(event["description"], expected);
-        assert!(super::ci_completed_candidates(temp.path(), "factory-a").is_empty());
+        assert!(super::ci_completed_candidates(cas_dir.as_path(), "factory-a").is_empty());
     }
 
     /// cas-73b89: hold, the awaited event during the hold, release, and the

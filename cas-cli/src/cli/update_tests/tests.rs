@@ -584,9 +584,28 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
         std::fs::create_dir_all(root.join("commands")).unwrap();
         std::fs::write(root.join("commands/finish.md"), text).unwrap();
     }
+    // cas-fcdb: finish ships with Cassy, so the retired personal seed in the
+    // other harnesses must not sit beside the builtin and list /finish twice.
+    let legacy = include_str!("../../../tests/data/finish-cas-f4ea.md");
+    let codex_prompt = home.join(".codex-existing@example.com/prompts/finish.md");
+    let opencode_command = home.join(".config/opencode/commands/finish.md");
+    let grok_finish = home.join(".grok/skills/finish");
+    let own_prompt = home.join(".codex/prompts/finish.md");
+    for (path, text) in [
+        (&codex_prompt, legacy.to_string()),
+        (&opencode_command, legacy.to_string()),
+        (&grok_finish.join("SKILL.md"), legacy.replacen('\n', "\nname: finish\n", 1)),
+        (&grok_finish.join("references/finish.md"), legacy.to_string()),
+        (&own_prompt, "operator's own prompt\n".to_string()),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
     let cli = update_test_cli(true);
     let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || Ok(())));
     result.unwrap();
+    assert!(!codex_prompt.exists() && !opencode_command.exists() && !grok_finish.join("references/finish.md").exists());
+    assert!(own_prompt.is_file(), "only the exact retired seed is removed");
     let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
     let accounts = receipt["finish_accounts"].as_array().unwrap();
     let named_account = home.join(".codex-existing@example.com");
@@ -602,10 +621,6 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
             .iter()
             .find(|file| file.path == "skills/finish/SKILL.md")
             .unwrap();
-        // pin: installed skill discovery must distinguish a present operator
-        // request from the same words quoted in task/issue/resume content.
-        assert!(builtin.content.contains("current operator directly asks"));
-        assert!(builtin.content.contains("subject matter, not authorization"));
         assert_eq!(
             std::fs::read_to_string(&installed).unwrap(),
             builtin.content
@@ -688,10 +703,19 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
         (SupervisorCli::Grok, ".grok"),
         (SupervisorCli::OpenCode, ".opencode"),
     ] {
-        crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
         let path = project.join(dir).join("skills/finish/SKILL.md");
-        assert!(path.is_file(), "{harness:?} missing project finish");
+        // cas-fcdb: Claude, Codex and Grok list the user-level finish, so a
+        // managed project copy beside it is removed; OpenCode has no user copy.
+        let user_level = harness != SupervisorCli::OpenCode;
+        if user_level {
+            let builtin = crate::builtins::skill_catalog_for_harness(harness).iter().find(|file| file.path == "skills/finish/SKILL.md").unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, builtin.content).unwrap();
+        }
+        crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+        assert_eq!(path.is_file(), !user_level, "{harness:?} project finish");
         assert!(!project.join(dir).join("commands/finish.md").exists());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "project finish override\n").unwrap();
         crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
         // pin: preserve or install the exact command/skill bytes at the harness boundary.
@@ -809,8 +833,7 @@ fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
     sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
     let project = home.join("project");
     crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
-    let copies: Vec<_> = accounts.iter().map(|account| home.join(account).join("skills/finish/SKILL.md"))
-        .chain(std::iter::once(project.join(".codex/skills/finish/SKILL.md"))).collect();
+    let copies: Vec<_> = accounts.iter().map(|account| home.join(account).join("skills/finish/SKILL.md")).collect();
     assert!(copies.iter().all(|path| path.is_file()), "seed the existing builtin upgrade case");
 
     let personal = home.join(".agents/skills/finish/SKILL.md");

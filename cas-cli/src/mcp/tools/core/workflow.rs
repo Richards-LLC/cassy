@@ -8,7 +8,7 @@ pub(crate) mod release_auto_cut;
 mod protected_pr;
 pub(crate) mod premerge_verification;
 pub(crate) use worktree_ops::check_runs_still_running;
-pub(crate) use worktree_ops::retry_ci_status;
+pub(crate) use worktree_ops::{rerun_workflow_run, retry_ci_status};
 pub(crate) use worktree_ops::delivery_ci_pending;
 pub(crate) use worktree_ops::delivery_tip_ci_conclusion;
 pub(crate) use worktree_ops::epic_tip_ci_proof;

@@ -369,6 +369,10 @@ pub struct FactoryDaemon {
     /// cas-bea6: receipts for recent Commander sends by `client_ref`, so a
     /// resent message is answered with its first receipt and queued once.
     send_receipts: runtime::send_dedupe::SendReceipts,
+    /// cas-bcf50: Commander sends that lost the store to another thread, by
+    /// WebSocket client, in arrival order. Each is retried on a later pass
+    /// until it is enqueued; the sender is never told "Not sent" for it.
+    deferred_commander_sends: Vec<(usize, runtime::delivery::CommanderControl)>,
     supervisor_commands: runtime::supervisor_commands::CommandState,
     /// cas-6e76 (GH #224): normal PTY writes are transport receipts, not proof
     /// that an idle harness surfaced a turn.  Keep a bounded probe until pane

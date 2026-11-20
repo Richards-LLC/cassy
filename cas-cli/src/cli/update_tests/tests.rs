@@ -574,6 +574,8 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
     }
     let command_only = home.join(".claude-command@example.com");
     let seeded = home.join(".claude-seeded@example.com");
+    let restored = home.join(".claude-restored@example.com");
+    std::fs::create_dir_all(&restored).unwrap();
     for (root, text) in [
         (&command_only, "operator's command-only finish\n"),
         (
@@ -621,9 +623,17 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
     let command = home.join(".claude/commands/finish.md");
     std::fs::create_dir_all(command.parent().unwrap()).unwrap();
     std::fs::write(&command, "customized command after install\n").unwrap();
+    // cas-fcdb: the operator restores his own command over Cassy's skill.
+    let personal = include_str!("../../../tests/data/finish-cas-f4ea.md");
+    assert!(restored.join("skills/finish/SKILL.md").is_file());
+    std::fs::create_dir_all(restored.join("commands")).unwrap();
+    std::fs::write(restored.join("commands/finish.md"), personal).unwrap();
     sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
-    assert!(seeded.join("skills/finish/SKILL.md").is_file());
-    assert!(!seeded.join("commands/finish.md").exists());
+    // pin: the operator's exact command bytes survive every update (cas-fcdb).
+    for account in [&seeded, &restored] {
+        assert_eq!(std::fs::read_to_string(account.join("commands/finish.md")).unwrap(), personal);
+        assert!(!account.join("skills/finish").exists(), "{} skill shadows the command", account.display());
+    }
     assert!(!command_only.join("skills/finish/SKILL.md").exists());
     // pin: a custom legacy command remains the callable entrypoint, byte-for-byte.
     assert_eq!(
@@ -688,10 +698,20 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
         (SupervisorCli::Grok, ".grok"),
         (SupervisorCli::OpenCode, ".opencode"),
     ] {
-        crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
         let path = project.join(dir).join("skills/finish/SKILL.md");
-        assert!(path.is_file(), "{harness:?} missing project finish");
+        if harness == SupervisorCli::Claude {
+            // cas-fcdb: finish is user-level; a project copy listed /finish twice.
+            let builtin = crate::builtins::BUILTIN_SKILLS.iter().find(|file| file.path == "skills/finish/SKILL.md").unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, builtin.content).unwrap();
+            crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+            assert!(!path.exists(), "Claude project finish duplicates the user-level one");
+        } else {
+            crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+            assert!(path.is_file(), "{harness:?} missing project finish");
+        }
         assert!(!project.join(dir).join("commands/finish.md").exists());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "project finish override\n").unwrap();
         crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
         // pin: preserve or install the exact command/skill bytes at the harness boundary.

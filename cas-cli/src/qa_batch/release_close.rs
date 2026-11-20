@@ -721,7 +721,15 @@ pub(crate) fn reconcile_members(
                 .filter(|e| !already_closed || matches!(e.code, ReleaseInventoryCode::Reverted | ReleaseInventoryCode::UnprovenContent)) {
                 return Err(exception.code.close_gate());
             }
-            let delivery = inventory.deliveries.iter().find(|d| d.task_id == id).ok_or("RELEASE_MEMBERSHIP_MISSING")?;
+            let Some(delivery) = inventory.deliveries.iter().find(|d| d.task_id == id) else {
+                // cas-f0e7a: bind_reports binds no proof for a terminal no-code
+                // member, so the inventory holds no delivery for it. Its close
+                // already ran; it needs no new proof to count as closed.
+                if already_closed && (crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some()) {
+                    return Ok(CassyMergeClose::AlreadyClosed);
+                }
+                return Err("RELEASE_MEMBERSHIP_MISSING".into());
+            };
             if delivery_generation(&task) != delivery.generation { return Err("RELEASE_GENERATION_CHANGED".into()); }
             if review.ledger_reverts(&id, delivery.anchor.as_deref()) {
                 return Err(ReleaseInventoryCode::Reverted.close_gate());

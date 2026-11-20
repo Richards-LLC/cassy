@@ -4152,7 +4152,7 @@ fn sync_project_catalog(
     if finish_is_user_level(harness) {
         // The stale-dir prune trusts the managed marker; finish goes only by its bytes.
         keep.insert("finish".to_string());
-        if !excluded_path(&target_dir.join("skills/finish"), excluded) {
+        if !excluded_path(&target_dir.join("skills/finish/SKILL.md"), excluded) {
             result.pruned_files.extend(prune_project_finish(target_dir)?);
         }
     }

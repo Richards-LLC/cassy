@@ -1230,10 +1230,33 @@ pub fn clear_pending_verification_with_conn(conn: &Connection, task_id: &str) ->
     Ok(())
 }
 
+/// Test hook: how many times `init` ran its schema work per database file.
+#[cfg(test)]
+pub(crate) fn schema_init_runs(db_path: &Path) -> u32 {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    *schema_init_counts().lock().unwrap().get(&key).unwrap_or(&0)
+}
+
+#[cfg(test)]
+fn schema_init_counts() -> &'static Mutex<HashMap<std::path::PathBuf, u32>> {
+    static RUNS: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, u32>>> = std::sync::OnceLock::new();
+    RUNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn note_schema_init_run(conn: &Connection) {
+    if let Some(path) = conn.path().filter(|path| !path.is_empty()) {
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        *schema_init_counts().lock().unwrap().entry(key).or_default() += 1;
+    }
+}
+
 impl TaskStore for SqliteTaskStore {
     fn init(&self) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
+            #[cfg(test)]
+            note_schema_init_run(&conn);
             // cas-0e57: the DDL is read-only once every object exists; the
             // revision backfill is a write and takes the write lock even
             // when it inserts nothing. Run it only when a task lacks its row.

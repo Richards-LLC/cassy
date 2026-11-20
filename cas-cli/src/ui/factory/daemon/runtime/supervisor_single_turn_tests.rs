@@ -1652,7 +1652,30 @@ async fn cas_9594c_operator_message_reaches_idle_supervisor_when_claims_outlast_
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
+    daemon.teams = None;
     let cas = daemon.app.cas_dir().to_path_buf();
+    // An idle Claude supervisor, as in cas_3cd4: its last turn finished and
+    // its composer is empty.
+    let agents = crate::store::open_agent_store(&cas).unwrap();
+    let mut agent = agents.get("single-sup").unwrap();
+    agent.cc_session_id = Some("idle-9594c".into());
+    agent.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
+    agents.update(&agent).unwrap();
+    let now = chrono::Utc::now();
+    let mut epoch = crate::history::epochs::current_daemon_epoch(&now.to_rfc3339());
+    epoch.pid = Some(std::process::id().into());
+    use cas_store::HistoryStore;
+    cas_store::SqliteHistoryStore::open(&cas).unwrap().record_epoch(&epoch).unwrap();
+    let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::write(projects.join("idle-9594c.jsonl"), format!("{}\n{}\n",
+        serde_json::json!({"type":"user","version":"2.1.318","timestamp":now-chrono::Duration::seconds(2),"message":{"role":"user","content":"Prior turn"}}),
+        serde_json::json!({"type":"system","subtype":"turn_duration","timestamp":now-chrono::Duration::seconds(1)}),
+    )).unwrap();
+    let supervisor = daemon.app.supervisor_name().to_string();
+    daemon.app.mux.get_mut(&supervisor).unwrap()
+        .feed("\x1b[2J\x1b[19;1H────────────────────\r\n❯\r\n────────────────────".as_bytes()).unwrap();
     let writer = StalledClaimWriter::start();
     daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with(super::jobs::LaneWiring {
         reader: None,
@@ -1666,7 +1689,6 @@ async fn cas_9594c_operator_message_reaches_idle_supervisor_when_claims_outlast_
         verified: true,
     };
     let needle = "operator-9594c-ping";
-    let supervisor = daemon.app.supervisor_name().to_string();
     let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
     let id = queue
         .enqueue_operator_message("commander:Daniel@Chrome on Linux", &supervisor, needle,

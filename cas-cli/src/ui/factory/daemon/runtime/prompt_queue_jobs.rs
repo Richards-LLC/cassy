@@ -321,10 +321,6 @@ impl QueueStamp {
 /// inline write, which failed in the pass itself, and is accepted.
 pub(crate) const SETTLING_DEFERRED_HOLD: Duration = Duration::from_secs(30);
 
-/// A stamp lane with work outstanding but no progress for this long stops
-/// gating QueueSelect (review L3), so a wedged writer cannot stop delivery.
-pub(crate) const STAMP_STALL_LIMIT: Duration = Duration::from_secs(10);
-
 /// The finished store write for one stamp.
 #[derive(Debug)]
 pub(crate) struct StampDone {
@@ -416,8 +412,11 @@ pub(crate) struct ClaimDone {
 
 #[derive(Debug, Clone)]
 enum ClaimState {
-    /// A claim job of this generation is out.
-    Pending(Instant, u64),
+    /// A claim job of this generation is out. It is awaited until it reports:
+    /// every job posts a result, a panic or a refusal. A wall-clock expiry
+    /// here threw away claims that waited out a slow store writer, and the
+    /// re-claim queued behind the same writer (cas-9594c).
+    Pending(u64),
     Ready(ClaimOutcome, Instant),
 }
 
@@ -967,8 +966,6 @@ pub(crate) struct QueueJobs {
     /// Rows with a settling stamp not yet landed, by row: the count of such
     /// stamps outstanding, and a hold deadline once one was deferred.
     settling_rows: HashMap<i64, (usize, Option<Instant>)>,
-    /// When a stamp last landed or was deferred.
-    last_stamp_progress: Instant,
     /// When each row's latest stamp landed or was deferred, for skipping
     /// rows a selection may have read before their stamp.
     stamp_landed_at: HashMap<i64, Instant>,
@@ -1087,7 +1084,6 @@ impl QueueJobs {
             store: None,
             prunes_done: 0,
             settling_rows: HashMap::new(),
-            last_stamp_progress: Instant::now(),
             stamp_landed_at: HashMap::new(),
             claims: HashMap::new(),
             claim_retargeted: Vec::new(),
@@ -1145,21 +1141,11 @@ impl QueueJobs {
         if self.select_in_flight {
             return;
         }
-        // cas-4272 review L3: a stamp released behind its key goes to the back
-        // of the write lane, so a selection submitted now could read a row
-        // before that stamp lands. Select only once every stamp has.
+        // cas-9594c: selection never waits for outstanding stamps. It runs
+        // ahead of them on the writer, and delivery holds every row whose
+        // stamp has not landed (`row_settling`) or landed after this submit
+        // (`stamped_since`), so a slow writer cannot hold delivery.
         let now = Instant::now();
-        if self.stamps_pending(now) {
-            return;
-        }
-        if self.stamps_outstanding() {
-            tracing::warn!(
-                target: "cas::coordination",
-                stage = "stamp_gate_valve",
-                stalled_ms = now.saturating_duration_since(self.last_stamp_progress).as_millis() as u64,
-                "factory loop v2: stamps made no progress; selecting anyway, and rows whose stamps are still pending are held out of delivery"
-            );
-        }
         self.select_submitted_at = now;
         let generation = self.generation();
         let ready = Arc::clone(&self.ready);
@@ -1167,7 +1153,7 @@ impl QueueJobs {
             kind: "QueueSelect",
             key: QUEUE_SELECT_KEY.to_string(),
             lane: Lane::Write,
-            criticality: Criticality::Critical,
+            criticality: Criticality::Delivery,
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
@@ -1225,8 +1211,8 @@ impl QueueJobs {
             budget: QUEUE_JOB_BUDGET,
         };
         if stamp != QueueStamp::Settled {
-            // Review L3: the row is held until every queued stamp for it has
-            // landed, and no QueueSelect runs meanwhile.
+            // Review L3: the row is held out of delivery until every queued
+            // stamp for it has landed.
             self.settling_rows.entry(row).or_insert((0, None)).0 += 1;
         }
         let refused = (stamp != QueueStamp::Settled)
@@ -1651,7 +1637,7 @@ impl QueueJobs {
                     let key = (done.row, done.recipient);
                     let awaited = matches!(
                         self.claims.get(&key),
-                        Some(ClaimState::Pending(_, generation)) if *generation == done.generation
+                        Some(ClaimState::Pending(generation)) if *generation == done.generation
                     );
                     if awaited {
                         // A claim nobody takes is released by `expire_claims`.
@@ -2050,8 +2036,7 @@ impl QueueJobs {
         if done.stamp == "settled" {
             return;
         }
-        self.last_stamp_progress = Instant::now();
-        self.stamp_landed_at.insert(done.row, self.last_stamp_progress);
+        self.stamp_landed_at.insert(done.row, Instant::now());
         if done.error.is_some() {
             // Handed to the StoreWorker: hold the row while it lands.
             self.stamp_deferred(done.row);
@@ -2069,20 +2054,10 @@ impl QueueJobs {
     /// panicked or failed its retries) but was handed to the StoreWorker:
     /// count it as done and hold the row while the deferred write lands.
     fn stamp_deferred(&mut self, row: i64) {
-        self.last_stamp_progress = Instant::now();
-        self.stamp_landed_at.insert(row, self.last_stamp_progress);
+        self.stamp_landed_at.insert(row, Instant::now());
         let entry = self.settling_rows.entry(row).or_insert((0, None));
         entry.0 = entry.0.saturating_sub(1);
         entry.1 = Some(Instant::now() + SETTLING_DEFERRED_HOLD);
-    }
-
-    /// Whether a stamp submitted to the lane has not landed yet, so a new
-    /// QueueSelect could read a row before its stamp (review L3). A lane
-    /// that made no progress for [`STAMP_STALL_LIMIT`] stops gating, so a
-    /// wedged writer cannot stop delivery outright (the watchdog reports it).
-    pub(crate) fn stamps_pending(&self, now: Instant) -> bool {
-        self.settling_rows.values().any(|(count, _)| *count > 0)
-            && now.saturating_duration_since(self.last_stamp_progress) < STAMP_STALL_LIMIT
     }
 
     /// The finished selection, once.
@@ -2157,7 +2132,7 @@ impl QueueJobs {
             kind: "ClaimForInject",
             key: format!("ClaimForInject:{row}:{recipient}"),
             lane: Lane::Write,
-            criticality: Criticality::Critical,
+            criticality: Criticality::Delivery,
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
@@ -2170,7 +2145,7 @@ impl QueueJobs {
         // Pending first: inline, the job's result is applied after this.
         self.claims.insert(
             (row, recipient.to_string()),
-            ClaimState::Pending(Instant::now(), generation),
+            ClaimState::Pending(generation),
         );
         let submitted = self.submit_job(spec, false, move || {
             let done = run_claim_for_inject(
@@ -2211,14 +2186,11 @@ impl QueueJobs {
     }
 
     /// Release claims that came back but were not taken within
-    /// [`CLAIM_READY_TTL`], and forget claim jobs lost past the outcome
-    /// timeout.
+    /// [`CLAIM_READY_TTL`]. A claim job still out stays awaited.
     pub(crate) fn expire_claims(&mut self, cas_dir: &Path, now: Instant) {
         let mut released = Vec::new();
         self.claims.retain(|(row, recipient), state| match state {
-            ClaimState::Pending(since, _) => {
-                now.saturating_duration_since(*since) < INJECT_OUTCOME_TIMEOUT
-            }
+            ClaimState::Pending(_) => true,
             ClaimState::Ready(outcome, since) => {
                 if now.saturating_duration_since(*since) < CLAIM_READY_TTL {
                     return true;
@@ -2330,11 +2302,6 @@ impl QueueJobs {
             batch.rows.push(row);
         }
         Some(batch)
-    }
-
-    /// Whether any stamp has been submitted and not landed or deferred.
-    fn stamps_outstanding(&self) -> bool {
-        self.settling_rows.values().any(|(count, _)| *count > 0)
     }
 
     /// Whether a stamp for `row` landed after `since` (a selection's submit

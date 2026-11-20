@@ -8,6 +8,23 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+/// How long one request waits for the daemon's answer.
+const RESPONSE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The daemon did not answer within [`RESPONSE_DEADLINE`] (cas-7caf). A timed
+/// socket read reports this as EAGAIN ("os error 35" on macOS, 11 on Linux);
+/// it means a busy daemon, which may still finish the launch, not a host limit.
+#[derive(Debug)]
+struct ResponseDeadline;
+
+impl std::fmt::Display for ResponseDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "verifier daemon response deadline: no answer within {} s", RESPONSE_DEADLINE.as_secs())
+    }
+}
+
+impl std::error::Error for ResponseDeadline {}
+
 fn read_frame(stream: &mut UnixStream, deadline: Instant) -> anyhow::Result<DaemonMessage> {
     fn read(
         stream: &mut UnixStream,
@@ -18,12 +35,15 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> anyhow::Result<Daem
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .filter(|left| !left.is_zero())
-                .ok_or_else(|| anyhow::anyhow!("verifier daemon response deadline"))?;
+                .ok_or(ResponseDeadline)?;
             stream.set_read_timeout(Some(remaining))?;
             match stream.read(bytes) {
                 Ok(0) => anyhow::bail!("verifier daemon disconnected"),
                 Ok(n) => bytes = &mut bytes[n..],
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    return Err(ResponseDeadline.into());
+                }
                 Err(e) => return Err(e.into()),
             }
         }
@@ -69,7 +89,7 @@ impl std::error::Error for Unsupported {}
 
 pub(super) fn request(session: &str, dispatch: &str) -> Result<(), LaunchError> {
     let request = || -> anyhow::Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + RESPONSE_DEADLINE;
         let mut stream = UnixStream::connect(crate::ui::factory::gui_socket_path(session))?;
         match read_frame(&mut stream, deadline)? {
             DaemonMessage::Welcome {
@@ -104,6 +124,9 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), LaunchError> 
             retry_for_code(message)
         } else if error.is::<Unsupported>() {
             Retry::Never
+        } else if error.is::<ResponseDeadline>() {
+            // A busy daemon: wait behind it without spending an attempt.
+            Retry::Contended
         } else {
             Retry::Backoff
         };

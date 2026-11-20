@@ -22,7 +22,7 @@
 //! off-loop work should use that API; children C2 and C3 move callers onto it
 //! (cas-1240 adds the API only).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
@@ -62,9 +62,12 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 /// it, and the watchdog names only the waiter.
 const SLOW_JOB: Duration = Duration::from_secs(1);
 
-/// One ordered background thread for daemon store writes.
+/// One ordered background thread for daemon store writes. Jobs queued with
+/// [`StoreWorker::execute_first`] run before the rest, in their own order.
 pub(crate) struct StoreWorker {
-    sender: Option<Sender<(Option<&'static str>, &'static str, Job)>>,
+    /// `None` jobs only wake the thread to run `first`.
+    sender: Option<Sender<(Option<&'static str>, &'static str, Option<Job>)>>,
+    first: Arc<Mutex<VecDeque<(&'static str, Job)>>>,
     pending: Arc<AtomicUsize>,
     in_flight: Arc<Mutex<HashSet<&'static str>>>,
     handle: Option<JoinHandle<()>>,
@@ -72,9 +75,11 @@ pub(crate) struct StoreWorker {
 
 impl StoreWorker {
     pub(crate) fn start() -> Self {
-        let (sender, receiver) = channel::<(Option<&'static str>, &'static str, Job)>();
+        let (sender, receiver) = channel::<(Option<&'static str>, &'static str, Option<Job>)>();
+        let first = Arc::new(Mutex::new(VecDeque::<(&'static str, Job)>::new()));
         let pending = Arc::new(AtomicUsize::new(0));
         let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let thread_first = Arc::clone(&first);
         let thread_pending = Arc::clone(&pending);
         let thread_in_flight = Arc::clone(&in_flight);
         // Log to the starter's dispatcher, which is the global one in the daemon.
@@ -82,7 +87,7 @@ impl StoreWorker {
         let handle = std::thread::Builder::new()
             .name("factory-store-worker".into())
             .spawn(move || tracing::dispatcher::with_default(&dispatch, || {
-                for (key, label, job) in receiver {
+                let run = |key: Option<&'static str>, label: &'static str, job: Job| {
                     let started = Instant::now();
                     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
                     {
@@ -105,6 +110,18 @@ impl StoreWorker {
                             .remove(key);
                     }
                     thread_pending.fetch_sub(1, Ordering::AcqRel);
+                };
+                for (key, label, job) in receiver {
+                    loop {
+                        let next = thread_first
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .pop_front();
+                        let Some((label, next)) = next else { break };
+                        run(None, label, next);
+                    }
+                    let Some(job) = job else { continue };
+                    run(key, label, job);
                 }
             }));
         let (sender, handle) = match handle {
@@ -116,6 +133,7 @@ impl StoreWorker {
         };
         Self {
             sender,
+            first,
             pending,
             in_flight,
             handle,
@@ -126,6 +144,24 @@ impl StoreWorker {
     /// on the caller's thread.
     pub(crate) fn submit(&self, label: &'static str, job: impl FnOnce() + Send + 'static) -> bool {
         self.send(None, label, Box::new(job))
+    }
+
+    /// Queue `job` ahead of every job not queued this way (cas-9594c).
+    pub(crate) fn execute_first(&self, label: &'static str, job: Job) -> bool {
+        let Some(sender) = self.sender.as_ref() else {
+            tracing::warn!(label, "factory store worker unavailable; job dropped");
+            return false;
+        };
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        let mut first = self.first.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        first.push_back((label, job));
+        if sender.send((None, label, None)).is_err() {
+            first.pop_back();
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+            tracing::warn!(label, "factory store worker stopped; job dropped");
+            return false;
+        }
+        true
     }
 
     /// Queue `job` unless a job with the same key is queued or running, so a
@@ -159,7 +195,7 @@ impl StoreWorker {
             return false;
         };
         self.pending.fetch_add(1, Ordering::AcqRel);
-        if sender.send((key, label, job)).is_err() {
+        if sender.send((key, label, Some(job))).is_err() {
             self.pending.fetch_sub(1, Ordering::AcqRel);
             tracing::warn!(label, "factory store worker stopped; job dropped");
             return false;
@@ -208,6 +244,10 @@ impl StoreWorker {
 impl super::jobs::WriteExecutor for StoreWorker {
     fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
         self.submit(label, job)
+    }
+
+    fn execute_first(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+        StoreWorker::execute_first(self, label, job)
     }
 }
 

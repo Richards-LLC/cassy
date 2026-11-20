@@ -1,6 +1,7 @@
 //! Clear a supervisor at an idle boundary under live context pressure.
 //! GH #1665: cumulative cached re-reads are billing, not prompt occupancy.
-//! The latest call's input is compared with 80% of the reported model window,
+//! The latest call's input is compared with 80% of the reported model window
+//! (Codex rollouts; Claude's statusline input, see [`record_harness_window`]),
 //! capped by `factory.supervisor_wake_input_budget`. Without a reported window,
 //! only the configured per-call cap applies; zero disables automatic clearing.
 //!
@@ -128,6 +129,32 @@ fn save(root: &Path, state: &State) -> anyhow::Result<()> {
 
 fn clear_state(root: &Path, agent_id: &str) {
     let _ = std::fs::remove_file(state_path(root, agent_id));
+}
+
+/// cas-27e3: Claude transcripts carry no context window, so the per-call cap
+/// (default 1,000,000) stood in for a 1M window and Claude compacted at ~967k
+/// first. Claude's statusline input reports the window; it is kept per session.
+fn window_path(root: &Path, harness_session: &str) -> PathBuf {
+    let safe: String = harness_session
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    root.join(SOURCE).join("windows").join(safe)
+}
+
+/// Best effort: a read-only store only loses the window, not the statusline.
+pub(crate) fn record_harness_window(root: &Path, harness_session: &str, window: u64) {
+    if harness_window(root, harness_session) == Some(window) {
+        return;
+    }
+    let path = window_path(root, harness_session);
+    if let Some(dir) = path.parent() && std::fs::create_dir_all(dir).is_ok() {
+        let _ = std::fs::write(path, window.to_string());
+    }
+}
+
+fn harness_window(root: &Path, harness_session: &str) -> Option<u64> {
+    std::fs::read_to_string(window_path(root, harness_session)).ok()?.trim().parse().ok()
 }
 
 fn tokens(n: u64) -> String {
@@ -447,6 +474,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
                 turn.transcript, turn.cli,
             ) else { return Ok(Step::Nothing) };
             let budget = usage.model_context_window.filter(|window| *window > 0)
+                .or_else(|| harness_window(root, turn.harness_session))
                 .map(|window| (window.saturating_mul(80) / 100).min(cap)).unwrap_or(cap);
             let trigger_tokens = usage.input_tokens;
             if Utc::now() - turn.at > Duration::minutes(FRESH_MINUTES) {

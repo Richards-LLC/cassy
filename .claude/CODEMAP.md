@@ -137,7 +137,8 @@
 
 - **Tests:** inline Rust modules and `cas-cli/tests/`; process isolation uses `cas-cli/src/test_env_guard.rs`. Workers run capped named nextest filters; the merge queue runs the Rust suite.
 - **Browser proof:** Vitest under `hub-web/src/`, Playwright under `hub-web/e2e/`; affected selection in `scripts/journeys-for-diff.py`.
-- **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/release-notes/`, `docs/release-reports/`.
+- **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`.
+- **Release docs:** `docs/release-notes/`, `docs/release-reports/` — per-version Slack drafts (`<date>-vX.Y.Z-slack.md`, `RUBRIC.md`) and release reports (`vX.Y.Z.{md,html,pdf}`, brief, visual QA).
 - **Generated docs:** `docs/product-overview.d/`, `docs/qa/bug-families/`, `scripts/doc-fragments.py` — fragments, lane lint and release compilation.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py`, `scripts/check-changed-markdown.py`; `scripts/test-test-audit.py` with `scripts/fixtures/test-audit/` covers the audit detectors.

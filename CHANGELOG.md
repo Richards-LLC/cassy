@@ -7,6 +7,45 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.44.0] - 2026-11-20
+
+### Fixed — Factory supervisor
+
+- **Supervisor startup no longer waits minutes on parked deliveries** — Was: a
+  supervisor startup checked every parked delivery's merge and content gates,
+  2 to 21 seconds each, so a project with 202 parked deliveries held the
+  session for about 21 minutes. Now: the check stops listing after 10 seconds, startup never waits more than 12 (a timeout retries at the next startup), and it lists
+  the deliveries it did not check with their commit receipts, and a compacted
+  session does not repeat it.
+- **Claude supervisors clear at 80% of their real window** — Was: Claude
+  transcripts report no context window, so the clear waited for the
+  1,000,000-token cap and Claude compacted first (at about 967,000 on a 1M
+  window). Now: Claude's status line reports the window and the handoff and
+  clear start at 80% of it.
+
+### Fixed — Factory
+
+- **A busy factory no longer reports a verifier as failed to start** — Was: on a loaded Mac, the request to start a task's verifier gave up after four tries with "Resource temporarily unavailable (os error 35)", and the supervisor had to retry the close by hand, even though the verifier usually started a moment later. Now: a factory that does not answer within 5 seconds counts as busy, the request waits with growing pauses for up to 15 minutes, and a failure names the 5-second limit.
+
+<!-- Part 2 of GH2241 (recycle/clear_context store-wait budget) moved to cas-2e27. -->
+
+- **Commander messages reach an idle supervisor under store contention** — Was:
+  when the store writer was slow, each message's delivery claim waited past
+  the 10-second inject timeout, was thrown away when it finally landed, and
+  the message was re-queued behind the same backlog. Messages sat "Queued for
+  supervisor" for minutes until the operator typed in the pane. Now: a claim
+  is kept until it lands, prompt-queue selection and claims run ahead of other
+  queued store writes, and selection no longer waits for unrelated delivery
+  stamps.
+
+### Fixed — Release
+
+- **A closed no-code member no longer blocks the release cut** — Was: when a
+  release train listed a no-code task (notes or report) that had already
+  closed, the cut preview held it as missing release membership, so a train
+  whose members were all closed was refused as "zero would-close". Now: the
+  closed no-code member counts as already closed and the cut proceeds.
+
 ## [4.43.0] - 2026-11-20
 
 ### Fixed — Cloud sync

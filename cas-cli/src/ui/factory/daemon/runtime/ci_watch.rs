@@ -177,6 +177,30 @@ pub(crate) fn parse_ci_completed(filter: &serde_json::Value) -> Result<CiComplet
     })
 }
 
+/// cas-be96: whether the checkout defines the workflow a `ci_completed`
+/// selector names (display name, file path or file name), read from
+/// `.github/workflows` with no GitHub call. A numeric ID was bound against
+/// GitHub when the reminder was created, so it counts as defined.
+pub(crate) fn local_workflow_defined(project: &Path, selector: &str) -> bool {
+    if selector.parse::<u64>().is_ok() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(project.join(".github/workflows")) else { return false };
+    entries.flatten().any(|entry| {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !(file.ends_with(".yml") || file.ends_with(".yaml")) {
+            return false;
+        }
+        let path = format!(".github/workflows/{file}");
+        let name = std::fs::read_to_string(entry.path()).ok().and_then(|text| {
+            text.lines().find_map(|line| line.strip_prefix("name:"))
+                .map(|name| name.split(" #").next().unwrap_or_default().trim().trim_matches(['"', '\'']).to_string())
+        });
+        // GitHub names a workflow without `name:` after its file path.
+        selector == file || selector == path || name.as_deref().unwrap_or(&path) == selector
+    })
+}
+
 /// The commit's runs once every one has completed; `None` while any is still
 /// queued or running, or before the first run exists. Scheduled runs count
 /// only when their workflow is named: they run on the default-branch tip on a
@@ -1964,7 +1988,8 @@ mod tests {
         use super::super::queue_and_events::{self, ReminderTriggerContext};
         let env = crate::test_support::TestEnvGuard::temp_home();
         let project = env.home().join("project");
-        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(project.join(".github/workflows")).unwrap();
+        std::fs::write(project.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
         let root = crate::store::init_cas_dir(&project).unwrap();
         let mut owner = cas_types::Agent::new_with_role("rerun-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
         owner.factory_session = Some("rerun-session".into());
@@ -2029,6 +2054,57 @@ mod tests {
         assert_eq!(fired.len(), 3);
         assert_eq!(fired.iter().map(|row| row.fired_event.as_ref().unwrap()["data"]["runs"][0]["attempt"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3]);
         assert_eq!(prompts.peek_all(20).unwrap().len(), 3);
+    }
+
+    /// cas-be96: domdms has no workflow named CI and its parked deliveries
+    /// were already on staging; each armed a CI watch that polled GitHub every
+    /// 30 s forever, re-armed by the watchdog after a manual cancel.
+    #[test]
+    fn delivery_wake_arms_no_ci_watch_that_cannot_fire_cas_be96() {
+        use super::super::queue_and_events;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("downstream");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "staging"]);
+        git(&project, &["config", "user.email", "test@example.com"]);
+        git(&project, &["config", "user.name", "Test"]);
+        git(&project, &["commit", "--allow-empty", "-qm", "merged delivery"]);
+        let merged = git_output(&project, &["rev-parse", "HEAD"]);
+        git(&project, &["checkout", "-qb", "factory/worker"]);
+        git(&project, &["commit", "--allow-empty", "-qm", "parked delivery"]);
+        let parked = git_output(&project, &["rev-parse", "HEAD"]);
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let mut owner = cas_types::Agent::new_with_role("be96-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("be96".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let reminders = crate::store::open_reminder_store(&root).unwrap();
+        let arm = |id: &str, sha: &str| {
+            let mut task = cas_types::Task::new(id.into(), "Downstream delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some(owner.id.clone());
+            task.deliverables.factory_branch_anchor = Some(sha.into());
+            task.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "staging".into() });
+            if tasks.get(id).is_err() { tasks.add(&task).unwrap(); }
+            crate::factory_delivery_wake::arm_task(&root, &task, &owner.id).unwrap();
+            let rows = reminders.list_for_task(id).unwrap();
+            assert!(rows.iter().any(|row| row.trigger_event.as_deref() == Some("branch_contained_in")), "{id}");
+            rows.iter().filter(|row| row.trigger_event.as_deref() == Some("ci_completed")).count()
+        };
+        // No workflow named CI: the delivery keeps only its landing watch.
+        assert_eq!(arm("cas-be96-parked", &parked), 0);
+        std::fs::create_dir_all(project.join(".github/workflows")).unwrap();
+        std::fs::write(project.join(".github/workflows/pr.yml"), "name: Pull request CI\non: pull_request\n").unwrap();
+        assert_eq!(arm("cas-be96-parked", &parked), 0, "a name containing CI is not CI");
+        std::fs::write(project.join(".github/workflows/ci.yml"), "name: CI # lane\non: push\n").unwrap();
+        assert_eq!(arm("cas-be96-merged", &merged), 0, "already on the target");
+        assert_eq!(arm("cas-be96-parked", &parked), 1);
+        // A watch already armed for a workflow the repo lacks is never probed.
+        crate::factory_delivery_wake::arm_event(&root, &owner, "cas-be96-parked", "ci_completed",
+            &serde_json::json!({"sha": parked, "workflow": "main-build"}), false).unwrap();
+        let probed: Vec<_> = queue_and_events::ci_completed_candidates(&root, "be96").into_iter()
+            .map(|(_, condition)| condition.workflow).collect();
+        assert_eq!(probed, [Some("CI".to_string())]);
     }
 
     /// cas-e845 / cas-ae6a: `ci_completed` waits only while a check-run of the

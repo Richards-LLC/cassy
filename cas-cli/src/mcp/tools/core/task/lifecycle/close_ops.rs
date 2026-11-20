@@ -30543,7 +30543,8 @@ mod merge_state_gate_tests {
         for final_append in [false, true] {
             let dir = TempDir::new().unwrap();
             let repo = dir.path().join("project");
-            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+            std::fs::write(repo.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
             let root = repo.join(".cas");
             std::fs::create_dir_all(&root).unwrap();
             let (core, tasks, queue, mut task) = close_relay_fixture_cas_3a82(&root);

@@ -13327,6 +13327,11 @@ pub(super) fn ci_completed_candidates(
             let condition = super::ci_watch::parse_ci_completed(r.trigger_filter.as_ref()?).ok()?;
             Some((r, condition))
         })
+        // cas-be96: a selector this repository does not define never matches
+        // a run; probing it would poll GitHub every tick forever.
+        .filter(|(_, condition)| condition.workflow.as_deref().is_none_or(|workflow| {
+            super::ci_watch::local_workflow_defined(cas_dir.parent().unwrap_or(cas_dir), workflow)
+        }))
         .collect()
 }
 

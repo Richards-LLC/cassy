@@ -1,3 +1,0 @@
-title: Each harness lists one builtin finish entrypoint, and the retired personal finish seed is migrated away instead of listed beside it
-statement: Finish installs once at user level for Claude, Codex and Grok (OpenCode keeps its project copy). A managed project copy beside the user-level one is removed by byte proof, and the exact retired personal seed in Claude commands, Codex prompts, OpenCode commands and the Grok personal skill is removed so the builtin is the only finish entrypoint. Edited copies stay.
-tasks: [cas-fcdb]

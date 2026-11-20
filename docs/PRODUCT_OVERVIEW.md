@@ -663,6 +663,18 @@ A train's `epic_verification_owner` pins its decision maker across machines. A p
 
 Remote parks bind the project, owner generation, worker identity and lease epoch, task cycle, pushed branch and commit, target, and committed artifact manifest. The owner restores required artifacts and validates portable test, stability and widened-scope claims against immutable Git inputs before admitting its ordinary verification and merge path. These are worker claims; independent owner verification and CI remain authoritative. Missing evidence holds admission, and stale identities or delivery cycles cannot authorize publication. A dead owner process does not transfer ownership; an explicit transfer command remains separate work.
 
+- **One reachability rule in Commander** - A conversation is reachable while its machine's event stream is live, or while that stream reconnects and the conversation's own socket still answers. Rows, machine chips, the footer, the header and sends all use this rule, and a send that meets a busy machine database waits and is queued in order instead of being refused.
+
+- **Delivery CI watches stay within the GitHub budget.** A parked delivery gets
+  a CI-completion watch only when its project defines the workflow being
+  watched and the delivery is not already on its target branch. The landing
+  watch still reports when the delivery merges. Watches for a workflow the
+  project does not define are never polled.
+
+- **One `/finish` per harness** - Cassy ships finish as a builtin skill installed once at user level for Claude, Codex and Grok (OpenCode keeps its project copy), so each harness lists it once. `cas update` removes the old personal `/finish` seed from every harness by its exact bytes and prunes a managed project copy; edited copies stay.
+
+- **Cancelled lane CI re-runs once** - when a parked delivery's lane run is cancelled (a job past its 45-minute limit reports cancelled and nothing replaces it), the armed automatic merge re-runs that run once, keeps waiting while the original cancellation is still the latest result, and merges on green. It stops with the existing notice only when the re-run is cancelled too.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

@@ -1,3 +1,0 @@
-title: Commander rows, chips, footer, header and sends agree on whether a conversation is reachable, and a busy machine database never refuses a send
-statement: While a machine's event stream reconnects and a conversation's socket still answers, its row and machine chip read Live (not "Last known"), matching the footer and header, and a send goes out at once. A Commander send that cannot get the daemon's database within its grant waits and is queued in order on a later pass; it is never answered "Not sent" for that reason.
-tasks: [cas-bcf50]

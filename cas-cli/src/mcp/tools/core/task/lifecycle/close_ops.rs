@@ -9498,7 +9498,7 @@ impl CasCore {
             let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
             let measurement = match measure_no_delivery(
                 repo, no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch, delivery_receipt,
-                commit_receipt_window.as_ref(),
+                commit_receipt_window.as_ref(), actor.role == cas_types::AgentRole::Supervisor,
             ) {
                 Ok(measurement) => measurement,
                 Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", format!(
@@ -10917,10 +10917,11 @@ impl CasCore {
                                     // no lane start keeps the strict boundary.
                                     if epic_proof_ref.is_none()
                                         && (task.execution_note.as_deref() == Some("no-code")
+                                            || empty_delivery
                                             || (task.deliverables.factory_branch_start.is_some() && measure_no_delivery(
                                                 worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                                                 no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch,
-                                                delivery_receipt, commit_receipt_window.as_ref(),
+                                                delivery_receipt, commit_receipt_window.as_ref(), false,
                                             ).is_ok() && checkout_is_clean(&proof_worktree)))
                                     {
                                         crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
@@ -17521,6 +17522,25 @@ pub(crate) fn has_recorded_no_delivery_state(task: &Task, receipt: Option<&str>)
         || delivery.declined_factory_branch_anchors.as_ref().is_some_and(|anchors| !anchors.is_empty())
 }
 
+/// Refusals retain the measured commit identities and containing refs, including
+/// remote-only work. An unreachable recorded commit still refuses, explicitly.
+fn no_delivery_commit_refusal(
+    repo: &std::path::Path,
+    commits: &[String],
+    refs: &std::collections::HashMap<String, String>,
+) -> String {
+    let evidence = commits.iter().map(|commit| {
+        let mut branches: Vec<_> = refs.iter()
+            .filter(|(_, tip)| git_commit_is_ancestor(repo, commit, tip))
+            .map(|(reference, _)| reference.as_str()).collect();
+        branches.sort_unstable();
+        format!("{commit} [{}]", if branches.is_empty() {
+            "no reachable branch found".into()
+        } else { branches.join(", ") })
+    }).collect::<Vec<_>>().join("; ");
+    format!("task-attributed commits are recorded: {evidence}")
+}
+
 /// Prove absence for a fresh no_delivery declaration, rather than interpreting
 /// an empty diff (or a failed Git probe) as permission to bypass delivery gates.
 /// Inspect both local and origin refs: a merged local lane cannot hide a newer
@@ -17533,19 +17553,17 @@ fn measure_no_delivery(
     target: &str,
     receipt: Option<&str>,
     window: Option<&TaskCommitReceiptWindow>,
+    supervisor_source_recovery: bool,
 ) -> Result<String, String> {
     let delivery = &task.deliverables;
     if has_recorded_no_delivery_state(task, receipt) {
         return Err("recorded delivery, methodology or handoff evidence exists; use the ordinary close contract.".into());
     }
     let window = window.ok_or("task attribution is unavailable")?;
-    if !window.identity.known_commits.is_empty() {
-        return Err("task-attributed commits are recorded".into());
-    }
     // A successful inventory distinguishes truly absent refs from failed
     // existence probes. Every present relevant ref must also resolve/read.
     let output = std::process::Command::new("git")
-        .args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/remotes/origin/"])
+        .args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/remotes/"])
         .current_dir(repo).measurement_output()
         .map_err(|_| "Git ref inventory is unavailable")?;
     if !output.status.success() || !output.stderr.is_empty() {
@@ -17556,6 +17574,9 @@ fn measure_no_delivery(
     for line in inventory.lines() {
         let (name, sha) = line.split_once(' ').ok_or("Git ref inventory is malformed")?;
         refs.insert(name.to_string(), sha.to_string());
+    }
+    if !window.identity.known_commits.is_empty() {
+        return Err(no_delivery_commit_refusal(repo, &window.identity.known_commits, &refs));
     }
     let origin_target = format!("refs/remotes/origin/{target}");
     let target_ref = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
@@ -17568,10 +17589,10 @@ fn measure_no_delivery(
     let target_sha = resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}"))
         .ok_or("integration target is unavailable")?;
     let source = task.deliverables.factory_branch_start.as_ref();
-    if let Some(start) = source
-        && (task.assignee.as_deref() != Some(start.assignee.as_str())
-            || delivery.work_target.as_ref() != Some(&start.work_target))
-    {
+    let source_identity_mismatch = source.is_some_and(|start|
+        task.assignee.as_deref() != Some(start.assignee.as_str())
+            || delivery.work_target.as_ref() != Some(&start.work_target));
+    if source_identity_mismatch && !supervisor_source_recovery {
         return Err("recorded task source does not match its delivery identity".into());
     }
     let mut measured = Vec::new();
@@ -17593,8 +17614,43 @@ fn measure_no_delivery(
             }
         }
     }
-    if measured.is_empty() {
-        return Err("recorded task source is unavailable; missing delivery cannot be proven".into());
+    if source_identity_mismatch || measured.is_empty() {
+        // GH #2256: an explicit supervisor declaration can prove absence after
+        // peer ownership changes. Never rewrite the start or infer absence from
+        // approval/empty diffs. The original base must be integrated in this
+        // same repository, and every reachable branch must lack task claims.
+        let start = source.filter(|start| supervisor_source_recovery
+            && delivery.work_target.as_ref().is_some_and(|target|
+                target.repo_selector == start.work_target.repo_selector)
+            && crate::mcp::tools::core::task::repo_context::repo_answers_to(
+                repo, &start.work_target.repo_selector)
+            && is_safe_git_refname(&start.branch)
+            && matches!(start.base_sha.len(), 40 | 64)
+            && start.base_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && git_commit_is_ancestor(repo, &start.base_sha, &target_sha))
+            .ok_or("recorded task source is unavailable or mismatched; an integrated source base in the same repository is required")?;
+        let mut args = vec!["log", "--format=%H%x1f%B%x1e", "--regexp-ignore-case",
+            "--fixed-strings", "--grep", task.id.as_str()];
+        args.extend(refs.values().map(String::as_str));
+        args.push("--");
+        let history = crate::git_evidence::git_text(repo, &args)
+            .ok_or("reachable branch attribution is unavailable")?;
+        let mut commits = Vec::new();
+        for record in history.split('\u{1e}').map(str::trim).filter(|record| !record.is_empty()) {
+            let (sha, message) = record.split_once('\u{1f}')
+                .ok_or("reachable branch attribution is unreadable")?;
+            if message_references_task(message, &task.id)
+                && !task_attribution::commit_claims_another_task(repo, sha, &window.identity)
+            {
+                commits.push(sha.to_string());
+            }
+        }
+        if !commits.is_empty() {
+            return Err(no_delivery_commit_refusal(repo, &commits, &refs));
+        }
+        if measured.is_empty() {
+            measured.push((format!("recorded source base {}", start.branch), start.base_sha.clone()));
+        }
     }
     for (reference, sha) in &measured {
         if !matches!(known_unmerged_factory_commits(repo, sha, &target_sha), KnownUnmergedCount::KnownZero) {

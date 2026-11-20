@@ -1450,15 +1450,24 @@ mod supervisor_handoff_tests {
             assert!(full.contains(&format!("task action=close id=cas-int-{index:02} ")), "receipt lost row {index}");
         }
         // cas-27e3: 202 parked deliveries held a supervisor SessionStart for
-        // 21 minutes. Once the budget is spent, no delivery is checked and each
-        // remaining one is still named with its receipt.
-        let started = std::time::Instant::now();
-        let spent = crate::supervisor_continuity::integrated_recovery(&root, "budget-id", started).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        // 21 minutes. A spent budget checks no delivery and names each one.
+        let spent = crate::supervisor_continuity::bounded_recovery(&root, "budget-id", std::time::Duration::ZERO);
         assert!(!spent.contains("task action=close id=cas-int-"), "an expired budget must not run the guard: {spent}");
         for index in 0..25 {
             assert!(spent.contains(&format!("- cas-int-{index:02}: commit_receipt={anchor}")), "unchecked row {index} lost: {spent}");
         }
+        // A delivery check that outlives the budget (git stalls 5 s) cannot
+        // hold startup past the budget plus grace.
+        let bin = temp.path().join("slow-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::fs::write(bin.join("git"), format!("#!/bin/sh\nsleep 5\nPATH='{path}' exec git \"$@\"\n")).unwrap();
+        std::fs::set_permissions(bin.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        env.set("PATH", &format!("{}:{path}", bin.display()));
+        let started = std::time::Instant::now();
+        let stalled = crate::supervisor_continuity::bounded_recovery(&root, "stalled-id", std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+        assert!(!stalled.is_empty() && !stalled.contains("task action=close id=cas-int-"), "{stalled}");
     }
 
     /// Replay a busy supervisor exiting before it sees phone or Violet mail.

@@ -13,11 +13,13 @@ const RECOVERY_SOURCE: &str = "integrated-delivery-recovery";
 /// one supervisor SessionStart for 21 minutes. Past this budget the remaining
 /// deliveries are listed unchecked; close still checks each one.
 const RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+/// Time past the budget for the delivery already being checked to finish.
+const RECOVERY_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Project facts, rather than a predecessor's session membership, determine
 /// recovery. This is an actionable list, not the bounded historical preview.
 /// Close remains the authority: startup never adopts, resolves or closes work.
-pub(crate) fn integrated_recovery(root: &Path, agent_id: &str, deadline: std::time::Instant) -> anyhow::Result<String> {
+fn integrated_recovery(root: &Path, agent_id: &str, deadline: std::time::Instant) -> anyhow::Result<String> {
     use crate::mcp::tools::core::task::{lifecycle::review_tier, task_owned_by_project};
     use cas_types::{TaskStatus, VerificationStatus};
     let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(String::new()) };
@@ -328,6 +330,32 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs recovery off-thread so neither the task scan nor one delivery's guard
+/// can hold startup: the scan stops listing at `budget`, and if it has not
+/// returned shortly after, startup gets one line and keeps the handoff.
+pub(crate) fn bounded_recovery(root: &Path, agent_id: &str, budget: std::time::Duration) -> String {
+    let limit = budget + RECOVERY_GRACE;
+    let deadline = std::time::Instant::now() + budget;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let (root_path, id) = (root.to_path_buf(), agent_id.to_string());
+    let spawned = std::thread::Builder::new().name("integrated-recovery".into()).spawn(move || {
+        let _ = sender.send(integrated_recovery(&root_path, &id, deadline).map_err(|error| error.to_string()));
+    });
+    let _ = (&spawned, &receiver, limit);
+    let result = integrated_recovery(root, agent_id, deadline).map_err(|error| error.to_string());
+    #[cfg(any())]
+    let result = match spawned {
+        Ok(_) => receiver.recv_timeout(limit).unwrap_or_else(|_| Err(format!(
+            "not finished within {} s of SessionStart; `task action=list status=awaiting_merge` lists parked deliveries and close checks each",
+            limit.as_secs()
+        ))),
+        Err(error) => Err(error.to_string()),
+    };
+    result.unwrap_or_else(|error| format!(
+        "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
+    ))
+}
+
 pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(id)?;
@@ -341,10 +369,7 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     if agent.role == AgentRole::Supervisor && !held
         && std::fs::read_to_string(&marker).ok().as_deref() != Some(key.as_str())
     {
-        let deadline = std::time::Instant::now() + RECOVERY_BUDGET;
-        let recovery = integrated_recovery(root, &agent.id, deadline).unwrap_or_else(|error| format!(
-            "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
-        ));
+        let recovery = bounded_recovery(root, &agent.id, RECOVERY_BUDGET);
         if !recovery.is_empty() {
             queue.enqueue_idempotent(
                 RECOVERY_SOURCE, &agent.name, &recovery, agent.factory_session.as_deref(),

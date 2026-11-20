@@ -540,6 +540,14 @@ fn published_train_closes_members_independently_cas_734b() {
         tasks.add(&task).unwrap();
         tasks.add_dependency(&cas_types::Dependency::new(id.into(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
     }
+    // cas-f0e7a: a closed no-code member, unlinked from the train, binds no
+    // report proof (bind_reports skips terminal members), as cas-928bf in v4.43.0.
+    let mut closed_report = Task::new("cas-closed-report".into(), "Shipped notes".into());
+    closed_report.origin_project = Some("close-fixture".into());
+    closed_report.execution_note = Some("no-code".into());
+    closed_report.external_ref = Some("artifact:art-unbound".into());
+    closed_report.status = TaskStatus::Closed;
+    tasks.add(&closed_report).unwrap();
     let artifact = cas_store::PublishedArtifact {
         id: "art-report".into(), task_id: "cas-report".into(), name: "report.md".into(),
         mime: "text/markdown".into(), size_bytes: 10, sha256: "a".repeat(64),
@@ -642,7 +650,7 @@ fn published_train_closes_members_independently_cas_734b() {
     let scope = ReleaseScope { project_id: "close-fixture".into(), repository: "example/close-fixture".into(),
         release_id: tag.clone(), reviewed_sha: base, final_release_sha: published,
         promotion_pr: None, release_tag: Some(tag.clone()), constituent_epic_ids: vec![train.id.clone()],
-        included_task_ids: ["cas-approved", "cas-candidate", "cas-unshipped", "cas-other-source", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
+        included_task_ids: ["cas-approved", "cas-candidate", "cas-unshipped", "cas-other-source", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal", "cas-closed-report"].map(str::to_string).to_vec(),
         no_code_members: BTreeMap::from([("cas-report".into(), vec![proof])]), proof_refs: vec![], };
     // A preview must leave the store, artifact cache and operation directory
     // byte-for-byte unchanged. SQLite's transient reader locks live in -shm.
@@ -727,6 +735,7 @@ fn published_train_closes_members_independently_cas_734b() {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed);
     }
     assert!(matches!(result.members.get("cas-closed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
+    assert!(matches!(result.members.get("cas-closed-report"), Some(CassyMergeClose::AlreadyClosed)), "{:?}", result.members.get("cas-closed-report"));
     assert!(matches!(result.members.get("cas-unreviewed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
     for id in ["cas-unshipped", "cas-other-source"] {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));

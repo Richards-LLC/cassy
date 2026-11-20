@@ -351,7 +351,7 @@ pub(crate) fn bounded_recovery(root: &Path, agent_id: &str, budget: std::time::D
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let (root_path, id) = (root.to_path_buf(), agent_id.to_string());
     let spawned = std::thread::Builder::new().name("integrated-recovery".into()).spawn(move || {
-        let result = integrated_recovery(&root_path, &id, deadline);
+        let result = cas_store::shared_db::with_private_connections(|| integrated_recovery(&root_path, &id, deadline));
         let _ = sender.send(result.map_err(|error| error.to_string()));
     });
     let result = match spawned {

@@ -17,6 +17,7 @@ const LONG_COMMANDS: &[&[&str]] = &[
     &["release-portable.sh"],
     &["release-zig.sh"],
     &["test-release-gate.sh"],
+    &["journey-eval.sh"],
     &["npm", "test"],
     &["npm", "ci"],
     &["npm", "install"],

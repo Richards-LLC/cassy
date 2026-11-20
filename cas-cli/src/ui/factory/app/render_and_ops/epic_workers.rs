@@ -9128,6 +9128,9 @@ mod tests {
             "reason": "Approve the replacement after returning the parked mismatch",
         }))).await.unwrap();
         env.set("CAS_AGENT_ROLE", "worker");
+        worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "inbox_poll",
+        })).unwrap())).await.unwrap();
         worker.task(request(serde_json::json!({"action": "start", "id": task.id}))).await.unwrap();
         worker.task(request(serde_json::json!({
             "action": "close", "id": task.id, "reason": "Recovered parked mismatch validated",

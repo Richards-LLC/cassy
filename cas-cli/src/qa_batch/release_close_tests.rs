@@ -541,7 +541,7 @@ fn published_train_closes_members_independently_cas_734b() {
         tasks.add_dependency(&cas_types::Dependency::new(id.into(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
     }
     // cas-f0e7a: a closed no-code member, unlinked from the train, binds no
-    // report proof (bind_reports skips terminal members), as cas-928bf in v4.43.0.
+    // report proof (bind_reports skips terminal members), as cas-928bf on the frozen train.
     let mut closed_report = Task::new("cas-closed-report".into(), "Shipped notes".into());
     closed_report.origin_project = Some("close-fixture".into());
     closed_report.execution_note = Some("no-code".into());

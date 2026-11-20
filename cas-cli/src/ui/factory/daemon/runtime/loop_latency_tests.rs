@@ -763,6 +763,71 @@ async fn commander_send_queues_under_a_spent_pass_budget_and_brief_write_content
     assert!(row.is_some(), "the send wrote its prompt_queue row");
 }
 
+/// cas-bcf50: prowl, Nov 20 9:08 AM ET. Another daemon thread kept the shared
+/// connection past the send's 2 s grant, and the operator saw "Not sent". The
+/// send now waits, with the client's next send behind it, and both are queued
+/// in order on the first pass after the store frees up.
+#[tokio::test(flavor = "current_thread")]
+async fn commander_send_outlasting_its_store_grant_is_retried_not_refused_cas_bcf50() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    let send = |client_ref: &str| super::delivery::CommanderControl::SendMessage {
+        target: "supervisor".to_string(),
+        text: format!("update please ({client_ref})"),
+        summary: None,
+        urgent: false,
+        client_ref: Some(client_ref.to_string()),
+        in_reply_to: None,
+        attribution: crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("device-desktop".to_string()),
+            credential_id: Some("credential-desktop".to_string()),
+            device_label: Some("Chrome on Linux".to_string()),
+            operator_label: Some("Operator".to_string()),
+            controller_origin: None,
+            request_id: None,
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
+        },
+    };
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    let (held_tx, held_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _conn = shared.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(30));
+    });
+    held_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    let first = {
+        let _spent = wait_budget::bound_waits_until(Instant::now());
+        daemon.commander_control_for_client(7, send("first")).await
+    };
+    assert!(first.is_none(), "a send that lost the store must wait, not be refused: {first:?}");
+    let second = daemon.commander_control_for_client(7, send("second")).await;
+    assert!(second.is_none(), "a later send waits behind the first: {second:?}");
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let replies = {
+        let _spent = wait_budget::bound_waits_until(Instant::now());
+        daemon.retry_deferred_commander_sends().await
+    };
+    let queued: Vec<_> = replies
+        .iter()
+        .map(|(client, reply)| match reply {
+            crate::ui::factory::DaemonMessage::MessageQueued { client_ref, .. } => (*client, client_ref.clone()),
+            other => panic!("expected MessageQueued, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        queued,
+        vec![(7, Some("first".to_string())), (7, Some("second".to_string()))]
+    );
+    assert!(daemon.retry_deferred_commander_sends().await.is_empty());
+}
+
 /// cas-b235: three panes receive the same attach input while output is flowing.
 /// A one-shot sender can close between the input phase and the output flush;
 /// a failed output write must not discard that sender's unread input.

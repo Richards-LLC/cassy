@@ -510,16 +510,13 @@ async fn cas_e37f_progress_watchdog_reads_without_the_store_writer() {
         repo_selector: "project:relay".into(), target_branch: "main".into(),
     });
     crate::store::open_task_store(&cas_dir).unwrap().add(&held).unwrap();
-    // Record every git call, then run the real git.
-    let bin = tempfile::tempdir().unwrap();
-    let log = bin.path().join("git.log");
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let real = std::env::split_paths(&path).map(|dir| dir.join("git")).find(|git| git.is_file()).unwrap();
-    let fake = bin.path().join("git");
-    std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n", log.display(), real.display())).unwrap();
-    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // Git traces every command it runs in the project to this file.
+    assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(cas_dir.parent().unwrap())
+        .status().unwrap().success());
+    let trace = tempfile::tempdir().unwrap();
+    let log = trace.path().join("git.log");
     let mut env = crate::test_support::TestEnvGuard::new();
-    env.set("PATH", std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&path))).unwrap());
+    env.set("GIT_TRACE", &log);
     let mut daemon = daemon_on_lanes(&cas_dir);
     let (release, wait) = std::sync::mpsc::channel::<()>();
     assert!(daemon.relay_jobs.submit_write(&mut daemon.queue_jobs, "busy-writer", None, move || {
@@ -537,7 +534,7 @@ async fn cas_e37f_progress_watchdog_reads_without_the_store_writer() {
     }
     assert!(daemon.relay_jobs.writing("progress-watchdog"), "only its writes queue behind the writer");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(calls.lines().any(|call| call.starts_with(&format!("merge-base --is-ancestor {sha} "))),
+    assert!(calls.lines().any(|call| call.contains(&format!("merge-base --is-ancestor {sha} "))),
         "the held delivery's containment check ran before the writer was free: {calls:?}");
     release.send(()).unwrap();
     settle_relays(&mut daemon).await;

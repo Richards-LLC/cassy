@@ -2866,6 +2866,10 @@ Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
 When discovery cannot classify an input, the capped runner widens to the whole
 test file, or to the nearest JavaScript package/Rust crate for a source input.
+For a Jest source input, the suggested command is `jest --findRelatedTests
+<source file>`: the capped runner executes only that source's test dependents
+from its Jest config root and records proof for that source. It never drops the
+source selector to run the whole package; an empty related selection is not proof.
 That wider set runs once and records a separate widened receipt at the tested
 commit. Park consumes it without executing tests; identified changed tests still
 owe five consecutive passes. Caller Jest name filters cannot narrow this proof.

@@ -570,13 +570,15 @@ fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
     assert_eq!(conflicts[0].winner_side, "remote");
     assert_eq!(conflicts[0].strategy, "timestamp_lww");
     assert_eq!(queue.unreviewed_conflict_count().unwrap(), 1);
-    // Different revision and state remain distinct evidence.
+    // A different state is distinct evidence. cas-258e: the same discarded
+    // state under a newer revision pair is a re-echo, not new evidence; prowl
+    // journaled one identical 9 KB row per task every sync cycle (22 GB).
     for (payload, revision) in [(r#"{"state":"changed"}"#, None),
-        (r#"{"state":"changed"}"#, Some(7))] {
+        (r#"{"state":"changed"}"#, Some(7)), (r#"{"state":"changed"}"#, Some(8))] {
         queue.record_conflict("task", "cas-conflict", payload, "remote",
-            "timestamp_lww", revision, None).unwrap();
+            "timestamp_lww", revision, revision).unwrap();
     }
-    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 3);
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 2);
     // Concurrent replay across independent connections is still one snapshot.
     std::thread::scope(|scope| {
         for _ in 0..4 {
@@ -587,14 +589,14 @@ fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
             });
         }
     });
-    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 3);
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 2);
     for state in ["A", "A", "B", "A", "A"] {
         queue.record_conflict("task", "guarded", state, "local",
             "task_lifecycle_guard", None, None).unwrap();
     }
     assert_eq!(queue.latest_task_lifecycle_conflicts().unwrap(), [("guarded".into(), "A".into())]);
-    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 6);
-    assert_eq!(queue.prune_conflicts(0).unwrap(), 6);
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 5);
+    assert_eq!(queue.prune_conflicts(0).unwrap(), 5);
     assert!(queue.list_conflicts(10).unwrap().is_empty());
 }
 

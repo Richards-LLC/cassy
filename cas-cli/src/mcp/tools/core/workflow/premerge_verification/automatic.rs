@@ -1013,6 +1013,60 @@ mod tests {
         }
     }
 
+    /// cas-7caf (GH2241): on a loaded Mac the daemon took longer than the
+    /// request's response deadline, the timed-out socket read surfaced as
+    /// "Resource temporarily unavailable (os error 35)", and four attempts gave
+    /// up while the daemon went on to launch the verifier anyway. A busy daemon
+    /// is contention: the request waits and asks again, spending no attempt,
+    /// and the replay sees the launch the daemon finished meanwhile.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_daemon_slower_than_the_response_deadline_is_waited_for_cas_7caf() {
+        use crate::ui::factory::{
+            ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, PROTOCOL_VERSION, SessionState,
+            decode_length, encode_message, gui_socket_path, local_gui_capabilities,
+        };
+        use std::io::{Read, Write};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let session = "slow-daemon";
+        let socket = gui_socket_path(session);
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let daemon = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for answer in [false, true] {
+                let (mut client, _) = listener.accept().unwrap();
+                client.write_all(&encode_message(&DaemonMessage::Welcome {
+                    session_name: session.into(),
+                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                        epic_title: None, cols: 80, rows: 24 },
+                    scrollback: None, protocol_version: PROTOCOL_VERSION,
+                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+                }).unwrap()).unwrap();
+                let mut header = [0; FRAME_HEADER_SIZE];
+                client.read_exact(&mut header).unwrap();
+                let mut body = vec![0; decode_length(&header)];
+                client.read_exact(&mut body).unwrap();
+                let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                else { panic!("unexpected factory control") };
+                if answer {
+                    client.write_all(&encode_message(&DaemonMessage::VerifierLaunched { dispatch_id })
+                        .unwrap()).unwrap();
+                } else {
+                    held.push(client); // busy: no answer before the deadline
+                }
+            }
+        });
+        let connections = std::cell::Cell::new(0);
+        let result = request_with_retry(1, std::time::Duration::ZERO, std::time::Duration::from_secs(60), || {
+            connections.set(connections.get() + 1);
+            super::factory_launch::request(session, "vdispatch-test")
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(connections.get(), 2, "the deadline costs a wait, not the only attempt");
+        daemon.join().unwrap();
+    }
+
     #[test]
     fn daemon_bound_owner_is_a_live_supervisor_even_when_its_process_is_another_harness_cas_d824() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

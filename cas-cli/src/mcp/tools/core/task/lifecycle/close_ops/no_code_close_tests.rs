@@ -1940,6 +1940,86 @@ async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
     }
 }
 
+/// GH #2256: a peer review keeps its original empty source when a new
+/// supervisor owns the Open task. Approval never erases reachable delivery.
+#[tokio::test]
+async fn approved_peer_review_no_delivery_missing_supervisor_lane_cas_e0ee() {
+    let mut env = TestEnvGuard::temp_home();
+    for case in ["unchanged", "missing", "remote-own", "bound-own"] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let id = "cas-e0ee";
+        let source = "factory/peer-reviewer";
+        let side = "factory/earlier-review-work";
+        let base = git(repo, &["rev-parse", "main"]);
+        git(repo, &["branch", source, "main"]);
+        let own = if case.ends_with("own") {
+            let checkout = f.cas_dir().join("worktrees").join(WORKER);
+            git(&checkout, &["checkout", "-q", "-b", side, "main"]);
+            git(&checkout, &["commit", "-q", "--allow-empty", "-m", "fix(cas-e0ee): earlier delivery"]);
+            let own = git(&checkout, &["rev-parse", "HEAD"]);
+            git(&checkout, &["push", "-q", "origin", side]);
+            git(&checkout, &["checkout", "-q", LANE]);
+            git(repo, &["branch", "-D", side]);
+            Some(own)
+        } else { None };
+        if case == "missing" {
+            git(repo, &["branch", "-D", source]);
+        }
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        task.assignee = Some("nocode-supervisor-session".into());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: "peer-reviewer".into(), branch: source.into(), base_sha: base,
+        });
+        let original_start = task.deliverables.factory_branch_start.clone();
+        f.put(&task);
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        let boundary = if case == "bound-own" {
+            cas_types::VerificationProofBoundary::task_at(
+                super::super::repository_proof::capture_repository_proof_with_anchors(
+                    repo, repo, vec![own.clone().unwrap()],
+                ).unwrap(),
+            )
+        } else { cas_types::VerificationProofBoundary::task() };
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
+            &boundary, chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let mut verdict = cas_types::Verification::approved(
+            format!("ver-review-{case}"), id.into(), "Read-only review approved".into(),
+        );
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some("nocode-supervisor-session".into());
+        verdict.issuer_agent_id = verdict.agent_id.clone();
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        use cas_store::VerificationStore;
+        cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(
+            &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+        ).unwrap();
+        let response = call(&f.supervisor, serde_json::json!({
+            "action":"close", "id":id, "no_delivery":true,
+            "reason":"Peer review completed without code delivery",
+        })).await;
+        if let Some(own) = own {
+            assert_eq!(f.task(id).status, TaskStatus::Open, "{case}: {response}");
+            assert!(response.contains("G-47"), "{case}: {response}");
+            // SHA and ref are actionable delivery data, independent of prose.
+            assert!(response.contains(&own), "{case}: {response}");
+            assert!(response.contains(&format!("refs/remotes/origin/{side}")), "{case}: {response}");
+        } else {
+            assert_closed_without_lane(&f, id, &response);
+            assert_eq!(f.task(id).deliverables.factory_branch_start, original_start);
+            assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        }
+    }
+}
+
 /// A reset starts at the target tip, without inheriting target history as
 /// delivery evidence when the no-delivery verdict is consumed.
 #[tokio::test]

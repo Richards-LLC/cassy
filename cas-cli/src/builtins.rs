@@ -94,6 +94,84 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[BuiltinFile {
 /// This recognizes the retired seed without carrying a second runtime body.
 const LEGACY_FINISH_COMMAND_HASH: &str =
     "eeeede161e720bb59ad61f06cec534c57398744c322ffc70c1548a06957c410b";
+/// The same seed as the Grok personal skill: the command with `name: finish` added.
+const LEGACY_FINISH_GROK_SKILL_HASH: &str =
+    "16a97a76241de552016db71ffedfd0ab72dc32c88563caf8db317da7db33d7d6";
+
+/// Remove `path` only when it is a regular file holding exactly the retired
+/// seed `hash`; anything else is the operator's own and stays.
+fn remove_legacy_finish_seed(path: &Path, hash: &str) -> std::io::Result<bool> {
+    if path.is_symlink() {
+        return Ok(false);
+    }
+    match std::fs::read(path) {
+        Ok(bytes) if file_bytes_hash(&bytes) == hash => std::fs::remove_file(path).map(|()| true),
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Finish ships as one user-level skill per harness. A copy in the project
+/// beside it lists `/finish` twice (cas-fcdb); OpenCode has no user-level copy.
+fn finish_is_user_level(harness: SupervisorCli) -> bool {
+    harness != SupervisorCli::OpenCode
+}
+
+/// Drop the Grok personal seed (skill plus its reference copy) so the builtin
+/// installs in its place instead of being blocked by a customized skill.
+fn remove_legacy_grok_finish(grok_dir: &Path) -> std::io::Result<()> {
+    let skill = grok_dir.join("skills/finish");
+    if remove_legacy_finish_seed(&skill.join("SKILL.md"), LEGACY_FINISH_GROK_SKILL_HASH)? {
+        remove_legacy_finish_seed(&skill.join("references/finish.md"), LEGACY_FINISH_COMMAND_HASH)?;
+        let _ = std::fs::remove_dir(skill.join("references"));
+    }
+    Ok(())
+}
+
+/// OpenCode's user config holds the seed as a `/finish` command, beside the
+/// builtin skill. Update never otherwise touches that directory.
+pub(crate) fn remove_legacy_opencode_finish() -> std::io::Result<bool> {
+    let Some(config) = opencode_config_dir() else {
+        return Ok(false);
+    };
+    remove_legacy_finish_seed(&config.join("commands/finish.md"), LEGACY_FINISH_COMMAND_HASH)
+}
+
+fn opencode_config_dir() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))?;
+    Some(config.join("opencode"))
+}
+
+/// A managed project copy of finish, proven by its bytes, would list `/finish`
+/// beside the user-level one. A customized copy or symlink stays.
+fn prune_project_finish(target_dir: &Path) -> std::io::Result<Vec<String>> {
+    let relative = "skills/finish/SKILL.md";
+    let target = target_dir.join(relative);
+    if target.is_symlink() || target_dir.join("skills/finish").is_symlink() || target_dir.join("skills").is_symlink() {
+        return Ok(Vec::new());
+    }
+    let bytes = match std::fs::read(&target) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut state = BuiltinReferenceState::load(target_dir)?;
+    let hash = file_bytes_hash(&bytes);
+    let current = file_bytes_hash(include_str!("builtins/skills/finish/SKILL.md").as_bytes());
+    if hash != current && state.files.get(relative) != Some(&hash) && !is_shipped_builtin_reference_version(relative, &hash) {
+        return Ok(Vec::new());
+    }
+    std::fs::remove_file(&target)?;
+    let _ = std::fs::remove_dir(target_dir.join("skills/finish"));
+    state.files.remove(relative);
+    state.skipped_references.remove(relative);
+    state.replace_on_next_sync.remove(relative);
+    state.save(target_dir)?;
+    Ok(vec![relative.to_string()])
+}
 
 fn is_finish_entrypoint(builtin: &BuiltinFile) -> bool {
     builtin.path == "skills/finish/SKILL.md"
@@ -168,6 +246,11 @@ fn prepare_finish(harness: SupervisorCli, target_dir: &Path) -> std::io::Result<
             result.skipped_files.push("commands/finish.md".to_string());
         }
         return Ok((install, result));
+    }
+    if harness == SupervisorCli::Codex
+        && remove_legacy_finish_seed(&target_dir.join("prompts/finish.md"), LEGACY_FINISH_COMMAND_HASH)?
+    {
+        result.pruned_files.push("prompts/finish.md".to_string());
     }
     let Some(personal) = (harness == SupervisorCli::Codex).then(personal_codex_finish).flatten() else {
         return Ok((true, result));
@@ -3910,6 +3993,7 @@ pub fn sync_all_codex_builtins(codex_dir: &Path) -> std::io::Result<SyncResult> 
 
 /// Sync all built-in files to .grok/ directory (EPIC cas-8888, Phase 5).
 pub fn sync_all_grok_builtins(grok_dir: &Path) -> std::io::Result<SyncResult> {
+    remove_legacy_grok_finish(grok_dir)?;
     sync_all_builtins_inner(grok_dir, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS)
 }
 
@@ -3953,7 +4037,7 @@ pub(crate) fn sync_all_builtins_for_project_excluding(
 ) -> std::io::Result<SyncResult> {
     match harness {
         SupervisorCli::Claude => {
-            let skills = filtered_project_skills(BUILTIN_SKILLS, project_root);
+            let skills = filtered_project_skills(harness, BUILTIN_SKILLS, project_root);
             sync_project_catalog(
                 harness,
                 &project_root.join(".claude"),
@@ -3964,11 +4048,11 @@ pub(crate) fn sync_all_builtins_for_project_excluding(
             )
         }
         SupervisorCli::Codex => {
-            let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
+            let skills = filtered_project_skills(harness, CODEX_BUILTIN_SKILLS, project_root);
             sync_project_catalog(harness, &project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None, excluded)
         }
         SupervisorCli::Grok => {
-            let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
+            let skills = filtered_project_skills(harness, GROK_BUILTIN_SKILLS, project_root);
             sync_project_catalog(harness, &project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None, excluded)
         }
         // cas-6b97 (audit M40): OpenCode reads `.opencode/skills` ahead of
@@ -3976,7 +4060,7 @@ pub(crate) fn sync_all_builtins_for_project_excluding(
         // are not: OpenCode validates its own agent schema and the Claude
         // agent frontmatter does not fit it.
         SupervisorCli::OpenCode => {
-            let skills = filtered_project_skills(opencode_builtin_skills(), project_root);
+            let skills = filtered_project_skills(harness, opencode_builtin_skills(), project_root);
             sync_project_catalog(harness, &project_root.join(".opencode"), NO_AGENTS, &skills, None, excluded)
         }
     }
@@ -4065,6 +4149,13 @@ fn sync_project_catalog(
         }
     }
     let mut keep = builtin_skill_dir_names(skills);
+    if finish_is_user_level(harness) {
+        // The stale-dir prune trusts the managed marker; finish goes only by its bytes.
+        keep.insert("finish".to_string());
+        if !excluded_path(&target_dir.join("skills/finish"), excluded) {
+            result.pruned_files.extend(prune_project_finish(target_dir)?);
+        }
+    }
     retain_excluded_names(&target_dir.join("skills"), excluded, &mut keep);
     if !excluded_path(&target_dir.join("skills"), excluded) {
         prune_stale_cas_skill_dirs(&target_dir.join("skills"), &keep)?;
@@ -4073,6 +4164,7 @@ fn sync_project_catalog(
 }
 
 fn filtered_project_skills(
+    harness: SupervisorCli,
     skills: &[BuiltinFile],
     project_root: &Path,
 ) -> Vec<BuiltinFile> {
@@ -4081,6 +4173,9 @@ fn filtered_project_skills(
         .iter()
         .copied()
         .filter(|builtin| {
+            if finish_is_user_level(harness) && is_finish_entrypoint(builtin) {
+                return false;
+            }
             let Some(skill_id) = builtin_skill_id(builtin.path) else {
                 return true;
             };
@@ -4944,25 +5039,20 @@ pub fn preview_all_builtins_for_project(
     };
     let (agents, skills): (&[BuiltinFile], Vec<BuiltinFile>) = match harness {
         SupervisorCli::Claude => {
-            let custom_command = custom_finish_command(&target_dir)?;
-            let files = filtered_project_skills(BUILTIN_SKILLS, project_root)
-                .into_iter()
-                .filter(|file| !custom_command || !is_finish_entrypoint(file))
-                .collect();
+            let files = filtered_project_skills(harness, BUILTIN_SKILLS, project_root);
             (BUILTIN_AGENTS, files)
         }
         SupervisorCli::Codex => (
             CODEX_BUILTIN_AGENTS,
-            filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root).into_iter()
-                .filter(|file| personal_codex_finish().is_none() || !is_finish_entrypoint(file)).collect(),
+            filtered_project_skills(harness, CODEX_BUILTIN_SKILLS, project_root),
         ),
         SupervisorCli::Grok => (
             GROK_BUILTIN_AGENTS,
-            filtered_project_skills(GROK_BUILTIN_SKILLS, project_root),
+            filtered_project_skills(harness, GROK_BUILTIN_SKILLS, project_root),
         ),
         SupervisorCli::OpenCode => (
             NO_AGENTS,
-            filtered_project_skills(opencode_builtin_skills(), project_root),
+            filtered_project_skills(harness, opencode_builtin_skills(), project_root),
         ),
     };
     let mut changes = Vec::new();

@@ -9092,7 +9092,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             audit["previous_start"],
-            serde_json::to_value(task.deliverables.factory_branch_start).unwrap()
+            serde_json::to_value(&task.deliverables.factory_branch_start).unwrap()
         );
         assert_eq!(audit["previous_tip"], anchor);
         // The replacement can now continue, park and merge under its own name.

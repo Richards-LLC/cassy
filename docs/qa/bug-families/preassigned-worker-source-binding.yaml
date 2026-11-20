@@ -10,4 +10,4 @@ statement: >-
   source with request_changes followed by rebind_branch, inbox_poll, start and
   close. Missing or divergent previous source tips still need supervisor recovery.
   Regression: preassigned_worker_takeover_starts_parks_and_recovers_cas_ace6.
-fixed_by: cas-ace6
+fixed_by: [cas-ace6]

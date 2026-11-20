@@ -141,6 +141,15 @@ fn rate_limited(output: &Output) -> bool {
         .any(|phrase| text.contains(phrase))
 }
 
+/// A failure message that carries GitHub's rate-limit refusal or this
+/// machine's backoff refusal, as opposed to an auth or transport failure.
+pub(crate) fn names_rate_limit(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    ["github rate-limit backoff", "api rate limit exceeded", "api rate limit already exceeded", "secondary rate limit", "rate_limited"]
+        .iter()
+        .any(|phrase| text.contains(phrase))
+}
+
 /// cas-c24e: one answer per `key` per `ttl` for every Cassy process on this
 /// machine (the merge-queue listing). The first caller past the TTL fetches
 /// under a file lock; the others read its answer. Failures are not cached.

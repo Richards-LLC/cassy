@@ -1536,7 +1536,9 @@ sys.exit(0 if ok else 1)
         git(&["init", "-q", "-b", "main"]);
         git(&["add", "."]); git(&["commit", "-qm", "base"]);
         git(&["checkout", "-qb", "delivery"]);
-        write(source, "export const value = 2;\n");
+        // A valid production method named `it` collides with the static test
+        // API recognizer, reproducing the uncertain-source branch of G-61.
+        write(source, "export function value(it: { claim: () => number }) { return it.claim(); }\n");
         git(&["commit", "-qam", "change source"]);
         std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
         let head = git(&["rev-parse", "HEAD"]);

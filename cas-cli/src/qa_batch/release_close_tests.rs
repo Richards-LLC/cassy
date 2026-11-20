@@ -540,6 +540,14 @@ fn published_train_closes_members_independently_cas_734b() {
         tasks.add(&task).unwrap();
         tasks.add_dependency(&cas_types::Dependency::new(id.into(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
     }
+    // cas-f0e7a: a closed no-code member, unlinked from the train, binds no
+    // report proof (bind_reports skips terminal members), as cas-928bf on the frozen train.
+    let mut closed_report = Task::new("cas-closed-report".into(), "Shipped notes".into());
+    closed_report.origin_project = Some("close-fixture".into());
+    closed_report.execution_note = Some("no-code".into());
+    closed_report.external_ref = Some("artifact:art-unbound".into());
+    closed_report.status = TaskStatus::Closed;
+    tasks.add(&closed_report).unwrap();
     let artifact = cas_store::PublishedArtifact {
         id: "art-report".into(), task_id: "cas-report".into(), name: "report.md".into(),
         mime: "text/markdown".into(), size_bytes: 10, sha256: "a".repeat(64),
@@ -642,7 +650,7 @@ fn published_train_closes_members_independently_cas_734b() {
     let scope = ReleaseScope { project_id: "close-fixture".into(), repository: "example/close-fixture".into(),
         release_id: tag.clone(), reviewed_sha: base, final_release_sha: published,
         promotion_pr: None, release_tag: Some(tag.clone()), constituent_epic_ids: vec![train.id.clone()],
-        included_task_ids: ["cas-approved", "cas-candidate", "cas-unshipped", "cas-other-source", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
+        included_task_ids: ["cas-approved", "cas-candidate", "cas-unshipped", "cas-other-source", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal", "cas-closed-report"].map(str::to_string).to_vec(),
         no_code_members: BTreeMap::from([("cas-report".into(), vec![proof])]), proof_refs: vec![], };
     // A preview must leave the store, artifact cache and operation directory
     // byte-for-byte unchanged. SQLite's transient reader locks live in -shm.
@@ -736,6 +744,19 @@ fn published_train_closes_members_independently_cas_734b() {
         let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
         assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
     }
+    // cas-f0e7a: the frozen train's cut shape, three members already closed beside the
+    // closed no-code member with no inventory delivery, passes the cut gate.
+    let mut cut = scope.clone();
+    cut.included_task_ids = ["cas-approved", "cas-candidate", "cas-equal", "cas-closed-report"].map(str::to_string).to_vec();
+    cut.no_code_members.clear();
+    let cut_inventory = resolve_release_inventory(&root, &repo, &cut).unwrap();
+    assert!(!cut_inventory.deliveries.iter().any(|d| d.task_id == "cas-closed-report"));
+    let cut_preview = crate::cli::release_automation::ReleasePreview::from_members(cut.clone(),
+        crate::release_reconcile::preview_release(&root, &repo, &cut_inventory).unwrap());
+    let shown = serde_json::to_value(&cut_preview).unwrap();
+    assert_eq!(shown["would_close"], 0);
+    assert!(cut.included_task_ids.iter().all(|id| shown["members_by_id"][id] == "already_closed"), "{shown}");
+    cut_preview.allow_cut().unwrap();
     // A batch ledger cannot replace the missing code delivery approvals.
     let mut later = receipt;
     later.id = "qab-later".into();

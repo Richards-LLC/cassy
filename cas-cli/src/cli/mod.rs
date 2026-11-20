@@ -45,7 +45,7 @@ mod provider_default;
 pub(crate) mod release_report;
 mod release_precheck;
 pub(crate) mod release_adapters;
-mod release_automation;
+pub(crate) mod release_automation;
 mod release_notice_failure;
 pub mod deliverable;
 mod sweep;

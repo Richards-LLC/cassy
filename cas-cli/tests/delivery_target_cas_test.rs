@@ -2005,12 +2005,21 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         }
         if outcome.contains("cancelled") {
             // cas-fef6: a lane job past its timeout reports cancelled and no
-            // replacement run starts. The armed retry re-runs it exactly once.
+            // replacement run starts. The armed retry re-runs it exactly once
+            // and keeps waiting while the original cancellation is still the
+            // latest result; only a cancelled rerun stops it.
             let green = std::fs::read(&response).unwrap();
-            std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"cancelled","html_url":"https://github.com/org/repo/actions/runs/77/job/1"}]}"#).unwrap();
-            cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
-            assert!(request.exists(), "a cancelled run is re-run before the retry settles");
-            if outcome != "cancelled" { std::fs::write(&response, green).unwrap(); }
+            let cancelled = |check: u32| format!(r#"{{"id":{check},"name":"Fast Validation","status":"completed","conclusion":"cancelled","html_url":"https://github.com/org/repo/actions/runs/77/job/{check}"}}"#);
+            std::fs::write(&response, format!(r#"{{"check_runs":[{}]}}"#, cancelled(11))).unwrap();
+            for poll in ["rerun requested", "original cancellation still the latest"] {
+                cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+                assert!(request.exists(), "{poll}: the armed retry survives");
+            }
+            if outcome == "cancelled" {
+                std::fs::write(&response, format!(r#"{{"check_runs":[{},{}]}}"#, cancelled(12), cancelled(11))).unwrap();
+            } else {
+                std::fs::write(&response, green).unwrap();
+            }
         }
         if outcome == "expired" {
             std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();

@@ -10917,7 +10917,7 @@ impl CasCore {
                                     // no lane start keeps the strict boundary.
                                     if epic_proof_ref.is_none()
                                         && (task.execution_note.as_deref() == Some("no-code")
-                                            || empty_delivery
+                                            || (empty_delivery && checkout_is_clean(&proof_worktree))
                                             || (task.deliverables.factory_branch_start.is_some() && measure_no_delivery(
                                                 worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                                                 no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch,

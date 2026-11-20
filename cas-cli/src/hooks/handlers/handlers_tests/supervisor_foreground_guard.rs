@@ -22,7 +22,7 @@ fn refusal_codes(tool_input: serde_json::Value) -> Option<Vec<&'static str>> {
 }
 
 const LONG: &[&str] = &[
-    "scripts/release.sh 4.43.0",
+    "scripts/release.sh 9.99.0",
     "bash -lc 'scripts/release-gate.sh'",
     "cd cas-cli && timeout 300 cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'",
     "cargo build --release",

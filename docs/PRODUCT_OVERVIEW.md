@@ -677,6 +677,9 @@ Remote parks bind the project, owner generation, worker identity and lease epoch
 
 - **Team sync settles each queued row once** - A personal sync row in a team project is cleared by the first team write the cloud confirms, so it is not re-sent every cycle. The conflict journal keeps one row per discarded state; a repeat that differs only in its revision number is not recorded again.
 
+- **Bounded conflict journal** - The sync conflict journal keeps the ten newest discarded-row copies per entity, plus the newest copy of each strategy that lifecycle guards, `cas doctor` collision reports and memory folds read. Older copies are removed when a new conflict for that entity is recorded; `cas cloud conflicts --prune <days>` still removes copies by age.
+- **Bounded session ends and operator snapshots** - The canonical daemon's retention tick also removes session-end records older than `factory.supervisor_queue_retention_days`, except an unpublished supervisor handoff, one claimed by a live successor, one whose agent row still exists, the newest supervisor end on each machine and the newest end per role and name. It removes operator-turn snapshots older than `factory.prompt_retention_days` once unleased, with their prompt processed or gone and no cloud row still awaiting a receipt; the prompt-queue pass can then release those prompts. A window of 0 disables its sweep.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

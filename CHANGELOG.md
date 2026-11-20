@@ -7,6 +7,45 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.43.0] - 2026-11-20
+
+### Fixed — Cloud sync
+
+- **The conflict log stays small** — Was: every sync conflict saved another
+  full copy of the local row, forever, and one project database grew to
+  22 GB. Now: each task or memory keeps its ten most recent conflict copies,
+  plus the latest copy of each conflict kind that Cassy still reads.
+
+### Fixed — Factory
+
+- **Old session-end records and delivered operator messages are cleaned up** — Was:
+  every ended session kept its full hand-off record (a supervisor's can
+  be several megabytes), and every message to the operator kept a delivery
+  copy that also stopped the message itself from ever being cleaned up. Now:
+  the regular retention pass removes records older than the existing retention
+  windows once nothing still needs them; pending hand-offs, live successors
+  and undelivered messages are always kept.
+- **Opening the task store no longer reads every task** — Was: each time the
+  daemon opened the task store, a startup check read every task in full, up
+  to almost two seconds on a large project, while all other database work
+  waited. Now: the schema setup runs once, and the check finds open tasks
+  through an index in a few milliseconds.
+
+### Fixed — Verification
+
+- **Supervisor review binds the delivery, not the supervisor's checkout** — Was:
+  when a supervisor closed a task whose worker checkout was not on that machine,
+  the review bound the supervisor's own checkout HEAD, so every later close was
+  refused as "merge required". Now: the review binds the task's own delivery
+  already on the target, and the ordinary close succeeds.
+
+### Added — Factory
+
+- **Slow store work is named in the daemon trace** — Was: when a factory's
+  database writes waited minutes, the trace named only the job left waiting,
+  never the work holding the store writer. Now: any store job that holds the
+  writer for over a second is logged with its name and duration.
+
 ## [4.42.0] - 2026-11-20
 
 ### Fixed — Cloud sync

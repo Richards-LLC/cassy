@@ -438,6 +438,46 @@ impl SqliteAgentStore {
         )?)
     }
 
+    /// Delete up to `batch` aged session ends that nothing reads any more, in
+    /// one IMMEDIATE transaction (cas-3ade). Kept at any age: an unpublished
+    /// supervisor handoff, an end claimed by a live successor, an end whose
+    /// agent row still exists, the newest supervisor end on its machine (the
+    /// succession head) and the newest end per other role and name (the
+    /// retired-worker recovery check).
+    pub fn prune_superseded_session_ends_batch(
+        &self,
+        older_than_secs: i64,
+        batch: usize,
+    ) -> Result<usize> {
+        if older_than_secs <= 0 {
+            return Err(StoreError::Other(
+                "prune_superseded_session_ends_batch requires a positive window".into(),
+            ));
+        }
+        let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
+        let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            if !table_exists(tx, "agent_session_ends")? {
+                return Ok(0);
+            }
+            Ok(tx.execute(
+                "DELETE FROM agent_session_ends WHERE id IN (
+                   SELECT e.id FROM agent_session_ends e
+                   WHERE e.ended_at < ?1
+                     AND NOT (e.role = 'supervisor' AND e.queued_at IS NULL)
+                     AND NOT EXISTS (SELECT 1 FROM agents c WHERE c.id = e.claimed_by
+                         AND c.registered_at = e.claimed_epoch AND c.status IN ('active','idle'))
+                     AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = e.agent_id)
+                     AND EXISTS (SELECT 1 FROM agent_session_ends n
+                         WHERE n.role = e.role AND n.ended_at > e.ended_at
+                           AND CASE WHEN e.role = 'supervisor' THEN n.machine_id IS e.machine_id
+                               ELSE json_extract(n.payload, '$.name') IS json_extract(e.payload, '$.name') END)
+                   LIMIT ?2)",
+                params![cutoff, batch as i64],
+            )?)
+        })
+    }
+
     pub fn recent_session_ends(&self, machine: &str, limit: usize) -> Result<Vec<SessionEnd>> {
         let conn = self.lock_conn()?;
         if !table_exists(&conn, "agent_session_ends")? {

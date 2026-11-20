@@ -58,9 +58,16 @@ pub(crate) struct PromptTableRetentionReport {
     /// Finished `supervisor_queue` rows deleted
     /// (`factory.supervisor_queue_retention_days`).
     pub supervisor_queue: cas_store::retention::RetentionReport,
+    /// Settled `operator_delivery_outbox` snapshots deleted
+    /// (`factory.prompt_retention_days`, cas-3ade).
+    pub operator_turns: cas_store::retention::RetentionReport,
+    /// Superseded `agent_session_ends` rows deleted
+    /// (`factory.supervisor_queue_retention_days`, cas-3ade).
+    pub session_ends: cas_store::retention::RetentionReport,
 }
 
-/// Bound the prompt, prompt-queue and supervisor-queue tables (cas-f207) in
+/// Bound the prompt, prompt-queue and supervisor-queue tables (cas-f207), plus
+/// operator-turn snapshots and session ends (cas-3ade), in
 /// transactions of at most [`cas_store::retention::RETENTION_MAX_BATCH`] rows,
 /// with the lock released between batches. Shared by the canonical daemon's
 /// retention tick; each window is re-read from config and 0 disables it.
@@ -94,6 +101,13 @@ pub(crate) fn run_prompt_table_retention(
     if factory.prompt_retention_days > 0 {
         let queue =
             crate::store::open_prompt_queue_store(cas_root).map_err(|error| error.to_string())?;
+        // Settled operator snapshots first: each one otherwise pins its
+        // processed prompt against the prompt-queue pass below (cas-3ade).
+        let turns = cas_store::SqlitePromptQueueStore::open(cas_root)
+            .map_err(|error| error.to_string())?;
+        report.operator_turns = run(factory.prompt_retention_days, &|secs, batch| {
+            turns.prune_settled_operator_turns_batch(secs, batch)
+        })?;
         report.prompt_queue = run(factory.prompt_retention_days, &|secs, batch| {
             queue.prune_terminal_batch(secs, batch)
         })?;
@@ -103,6 +117,11 @@ pub(crate) fn run_prompt_table_retention(
             .map_err(|error| error.to_string())?;
         report.supervisor_queue = run(factory.supervisor_queue_retention_days, &|secs, batch| {
             supervisor.prune_finished_batch(secs, batch)
+        })?;
+        let agents =
+            cas_store::SqliteAgentStore::open(cas_root).map_err(|error| error.to_string())?;
+        report.session_ends = run(factory.supervisor_queue_retention_days, &|secs, batch| {
+            agents.prune_superseded_session_ends_batch(secs, batch)
         })?;
     }
     Ok(report)

@@ -300,6 +300,38 @@ impl SqlitePromptQueueStore {
         .map_err(Into::into)
     }
 
+    /// Delete up to `batch` aged operator-turn snapshots that no delivery still
+    /// needs, in one IMMEDIATE transaction (cas-3ade). The local lane has no
+    /// relay, so a snapshot is settled once it is unleased, its prompt is
+    /// processed or gone, and its cloud row (if any) holds a receipt. A turn
+    /// still unread, or parked or pending in the cloud lane, is kept.
+    pub fn prune_settled_operator_turns_batch(
+        &self,
+        older_than_secs: i64,
+        batch: usize,
+    ) -> Result<usize> {
+        if older_than_secs <= 0 {
+            return Err(StoreError::Other(
+                "prune_settled_operator_turns_batch requires a positive window".into(),
+            ));
+        }
+        let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
+        let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            Ok(tx.execute(
+                "DELETE FROM operator_delivery_outbox WHERE event_id IN (
+                   SELECT o.event_id FROM operator_delivery_outbox o
+                   WHERE o.created_at < ?1 AND o.lease_token IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM prompt_queue q
+                         WHERE q.id = o.prompt_id AND q.processed_at IS NULL)
+                     AND NOT EXISTS (SELECT 1 FROM operator_cloud_outbox c
+                         WHERE c.event_id = o.event_id AND c.receipt_kind IS NULL)
+                   ORDER BY o.created_at LIMIT ?2)",
+                params![cutoff, batch as i64],
+            )?)
+        })
+    }
+
     fn operator_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorDeliveryEvent> {
         Ok(OperatorDeliveryEvent {
             event_id: row.get(0)?,

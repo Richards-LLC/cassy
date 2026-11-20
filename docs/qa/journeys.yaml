@@ -2020,6 +2020,24 @@ bug_families:
     title: A worker with an advancing owned child is not reported as waiting for input
     tasks: [cas-0125]
     journeys: [FACTORY-SUPERVISE]
+  armed-merge-cancelled-ci-rerun:
+    title: An armed merge re-runs a cancelled lane run once and keeps waiting on the original cancellation until the re-run reports
+    tasks: [cas-fef6]
+    journeys: [FACTORY-MERGE]
+  commander-one-reachability-rule:
+    title: Commander rows, chips, footer, header and sends agree on whether a conversation is reachable, and a busy machine database never refuses a send
+    statement: While a machine's event stream reconnects and a conversation's socket still answers, its row and machine chip read Live (not "Last known"), matching the footer and header, and a send goes out at once. A Commander send that cannot get the daemon's database within its grant waits and is queued in order on a later pass; it is never answered "Not sent" for that reason.
+    tasks: [cas-bcf50]
+  delivery-wake-dead-ci-watch:
+    title: Parked deliveries armed CI-completion watches that could never fire and polled GitHub every 30 s
+    statement: A parked delivery arms a ci_completed watch only when its checkout defines the named workflow and its anchor is not already on the target; pending watches for a workflow the checkout lacks are never probed.
+    found: "2026-11-20"
+    tasks: [cas-be96]
+    journeys: [FACTORY-SUPERVISE]
+  finish-single-builtin-entrypoint:
+    title: Each harness lists one builtin finish entrypoint, and the retired personal finish seed is migrated away instead of listed beside it
+    statement: Finish installs once at user level for Claude, Codex and Grok (OpenCode keeps its project copy). A managed project copy beside the user-level one is removed by byte proof, and the exact retired personal seed in Claude commands, Codex prompts, OpenCode commands and the Grok personal skill is removed so the builtin is the only finish entrypoint. Edited copies stay.
+    tasks: [cas-fcdb]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

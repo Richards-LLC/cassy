@@ -3630,6 +3630,8 @@ fn sync_user_builtins_with_discovery(
     let claude_dir = home.join(".claude");
     let codex_dir = home.join(".codex");
     let grok_dir = home.join(".grok");
+    // cas-fcdb: the retired personal /finish command would list beside the builtin skill.
+    crate::builtins::remove_legacy_opencode_finish()?;
 
     let theme = ActiveTheme::default();
 

@@ -30448,6 +30448,8 @@ mod merge_state_gate_tests {
         env.set("CAS_FACTORY_SESSION", "relay-fixture-session");
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
+        std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+        std::fs::write(repo.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
         git(repo, &["init", "-q", "-b", "main"]);
         git(repo, &["commit", "--allow-empty", "-qm", "base"]);
         let root = repo.join(".cas");
@@ -30507,6 +30509,8 @@ mod merge_state_gate_tests {
         ] {
             let dir = TempDir::new().unwrap();
             let repo = dir.path();
+            std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+            std::fs::write(repo.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
             git(repo, &["init", "-q", "-b", "main"]);
             git(repo, &["commit", "--allow-empty", "-qm", "delivery"]);
             let tip = rev_parse_local(repo, "HEAD");
@@ -30543,7 +30547,8 @@ mod merge_state_gate_tests {
         for final_append in [false, true] {
             let dir = TempDir::new().unwrap();
             let repo = dir.path().join("project");
-            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+            std::fs::write(repo.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
             let root = repo.join(".cas");
             std::fs::create_dir_all(&root).unwrap();
             let (core, tasks, queue, mut task) = close_relay_fixture_cas_3a82(&root);

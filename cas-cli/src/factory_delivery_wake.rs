@@ -9,6 +9,7 @@ use fs2::FileExt;
 use serde_json::{Value, json};
 
 use crate::mcp::tools::core::task::lifecycle::{close_ops, supervisor_push};
+use crate::ui::factory::daemon::runtime::ci_watch;
 
 pub(crate) const MISSING_WAKE: &str = "DELIVERY_WAKE_MISSING";
 
@@ -75,11 +76,26 @@ pub(crate) fn arm_task(root: &Path, task: &Task, actor: &str) -> Result<()> {
             root.parent().unwrap_or(root),
         ).map_err(anyhow::Error::msg)?
     };
-    let target = crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch(&target);
+    let target = ci_watch::normalize_external_target_branch(&target);
     arm_event(root, &supervisor, &task.id, "branch_contained_in",
         &json!({"commit": sha, "target_branch": target}), false)?;
+    // cas-be96: a CI watch on a commit already in its target, or for a
+    // workflow the repository does not define, polls GitHub forever. The
+    // containment watch above still reports the landing.
+    let project = root.parent().unwrap_or(root);
+    if contained(project, sha, target) || !ci_watch::local_workflow_defined(project, "CI") {
+        return Ok(());
+    }
     arm_event(root, &supervisor, &task.id, "ci_completed",
         &json!({"sha": sha, "workflow": "CI"}), false)
+}
+
+/// The commit is already on the target, locally or on its fetched remote.
+fn contained(project: &Path, sha: &str, target: &str) -> bool {
+    [format!("refs/remotes/origin/{target}"), format!("refs/heads/{target}")].iter().any(|reference| {
+        let args = ["merge-base", "--is-ancestor", sha, reference.as_str()].map(String::from);
+        ci_watch::run_external_git_command(project, &args).is_ok_and(|output| output.success)
+    })
 }
 
 /// A retried close has committed a new delivery boundary. Establish its

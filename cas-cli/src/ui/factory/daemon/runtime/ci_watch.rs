@@ -2096,6 +2096,28 @@ mod tests {
         std::fs::create_dir_all(project.join(".github/workflows")).unwrap();
         std::fs::write(project.join(".github/workflows/pr.yml"), "name: Pull request CI\non: pull_request\n").unwrap();
         assert_eq!(arm("cas-be96-parked", &parked), 0, "a name containing CI is not CI");
+        // The incident's pre-existing watch, and two daemon ticks over it:
+        // GitHub sees no per-commit run read for either delivery.
+        crate::factory_delivery_wake::arm_event(&root, &owner, "cas-be96-legacy", "ci_completed",
+            &serde_json::json!({"sha": merged, "workflow": "CI"}), false).unwrap();
+        struct Counting(std::cell::Cell<u32>);
+        impl CiTransport for Counting {
+            fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> { Ok(Vec::new()) }
+            fn failing_job(&self, _: u64) -> Result<Option<String>, CiWatchError> { Ok(None) }
+            fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> { Ok(None) }
+            fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> { Ok(Vec::new()) }
+            fn delivery_pull_requests(&self, _: &str) -> Result<Vec<DeliveryPullRequest>, CiWatchError> { Ok(Vec::new()) }
+            fn runs_for_sha(&self, _: &str) -> Result<Vec<CiRun>, CiWatchError> {
+                self.0.set(self.0.get() + 1);
+                Ok(Vec::new())
+            }
+        }
+        let github = Counting(std::cell::Cell::new(0));
+        for _ in 0..2 {
+            delivery_ci_rearms(&root, "be96", &github).unwrap();
+            collect_ci_wakes(&github, &queue_and_events::ci_completed_candidates(&root, "be96"));
+        }
+        assert_eq!(github.0.get(), 0);
         std::fs::write(project.join(".github/workflows/ci.yml"), "name: CI # lane\non: push\n").unwrap();
         assert_eq!(arm("cas-be96-merged", &merged), 0, "already on the target");
         assert_eq!(arm("cas-be96-parked", &parked), 1);
@@ -2104,7 +2126,7 @@ mod tests {
             &serde_json::json!({"sha": parked, "workflow": "main-build"}), false).unwrap();
         let probed: Vec<_> = queue_and_events::ci_completed_candidates(&root, "be96").into_iter()
             .map(|(_, condition)| condition.workflow).collect();
-        assert_eq!(probed, [Some("CI".to_string())]);
+        assert_eq!(probed, [Some("CI".to_string()), Some("CI".to_string())], "main-build is never probed");
     }
 
     /// cas-e845 / cas-ae6a: `ci_completed` waits only while a check-run of the

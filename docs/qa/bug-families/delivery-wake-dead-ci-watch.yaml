@@ -1,0 +1,5 @@
+title: Parked deliveries armed CI-completion watches that could never fire and polled GitHub every 30 s
+statement: A parked delivery arms a ci_completed watch only when its checkout defines the named workflow and its anchor is not already on the target; pending watches for a workflow the checkout lacks are never probed.
+found: "2026-11-20"
+tasks: [cas-be96]
+journeys: [FACTORY-SUPERVISE]

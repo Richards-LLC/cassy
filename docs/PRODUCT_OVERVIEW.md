@@ -638,6 +638,31 @@ Worker recycling preserves assignments through the gap between releasing the old
 
 - **Repair class audit** - When a merge-queue ejection names failing tests, Cassy records them on the task. Sending that delivery back (`request_changes`) or spawning a repair worker for it then needs `class_audit`, a nextest filter for the whole test class that selects those tests. The class is stored on the task, and the worker's next park needs passing capped receipts at the tip that run every part of it. A task with no recorded failing tests is unaffected,.
 
+- **Worker liveness and owned children** - `worker_status` and the director classify a worker from its harness transcript and process evidence. A turn that has finished reads as waiting for input only while nothing the worker owns is advancing; a background build or test whose CPU or output advanced within the stall window keeps it executing and suppresses the idle relay. A worker with no advancing child and no activity still reads as waiting for input.
+
+### Commander standby controls
+
+Commands includes Standby with one confirmation. A parked supervisor's conversation shows Standby and a Resume action. Resume sends an operator message through the existing conversation path; the supervisor restores its workers and handoff. The session catalog reads the same standby marker as the daemon, so the badge clears after resume.
+
+- **Combined merge registry validation** — Before publishing a Cassy merge, including a retry onto a moved train tip, the engine runs the same gate-declaration validator as `build.rs` on the exact combined checkout without invoking Cargo. Duplicate IDs refuse with G-160 before the remote or local train ref advances.
+
+- **Codex worker readiness and wakes** - A Codex worker the daemon launches or recycles waits for its Cassy tools before its first message is typed in. A worker that was already running when the daemon upgraded in place is not held, so its queued and urgent messages are typed into its pane. A message typed into a Codex pane records a fired wake, and the worker's turn-start hook marks it read.
+- **Recycling with local commits** - `recycle_worker` and `clear_context` keep the worker's worktree, branch and task bindings. A clean worktree whose commits are only local is recycled, and the replacement starts on the same branch and HEAD. Uncommitted files still refuse the recycle.
+
+- **Train focus follows active work** — `worktree_merge`, `train_merge`, and proof-scope retargets recover an unset or retired session focus and report the epic they pin. Cut moves existing pins to the successor; an automatic context-clear handoff saves and restores its train ID, following successor links when needed. A local peer pin does not grant ownership of the train's Cloud claim.
+
+Worker recycling waits while a live detached build from the same worker registration and factory session holds its private target lease. The existing request resumes automatically after the lease releases, without a failure notice or manual retry. Ownership requires matching target provenance and producer process identity; unknown holders, completed producers and foreign-session runs retain visible lease refusals.
+
+- **Carry-over content proof** — A delivery merged into a fresh branch from a moved target is measured from its fork with that target before integration. The close gate excludes inherited target content from the delivery's obligations while continuing to refuse missing delivery changes.
+
+Widened web proof distinguishes inherited journey failures from delivery failures before a task parks. Previously, any failed journey blocked the proof, even when the untouched merge base failed identically. The worker now reuses lane CI's attribution engine to replay only failed Playwright identities at that immutable base. A matching project, path, title, failure status and error fingerprint records a release repair and permits the widened receipt. A base pass, a different failure, skipped or retried results, and incomplete attribution keep the delivery blocked. Evidence remains attached to the original failed report and the repair link; identified changed tests still owe their five passing runs.
+
+Factory repair spawns accept an optional structural `class_audit` nextest selector with `task_id` and `spawn_brief`. Cassy validates coverage of recorded failures and saves the effective selector before enqueueing; an omitted selector retains the task's recorded class. Park requires capped proof covering that class.
+
+A train's `epic_verification_owner` pins its decision maker across machines. A peer factory started with `--worker-host <train>` creates workers under that owner's session without launching a local supervisor. Status, blockers, parked work, corrections and final results use the durable mailbox directly between workers and their owner. A released worker claim does not remove the owner's result route.
+
+Remote parks bind the project, owner generation, worker identity and lease epoch, task cycle, pushed branch and commit, target, and committed artifact manifest. The owner restores required artifacts and validates portable test, stability and widened-scope claims against immutable Git inputs before admitting its ordinary verification and merge path. These are worker claims; independent owner verification and CI remain authoritative. Missing evidence holds admission, and stale identities or delivery cycles cannot authorize publication. A dead owner process does not transfer ownership; an explicit transfer command remains separate work.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

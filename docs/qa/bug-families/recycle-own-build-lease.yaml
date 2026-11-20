@@ -1,4 +1,0 @@
-title: Worker recycling waits for its own detached build lease and exposes unverified holders
-tasks: [cas-63ed]
-journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
-invariants: [FACTORY-WORKER-RESPAWN]

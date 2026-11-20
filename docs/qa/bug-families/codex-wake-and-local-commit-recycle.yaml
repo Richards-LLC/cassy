@@ -1,3 +1,0 @@
-title: An idle Codex worker the daemon kept across an in-place upgrade gets its messages, and a recycle keeps a clean worktree's local-only commits
-tasks: [cas-3568]
-journeys: [FACTORY-SUPERVISE]

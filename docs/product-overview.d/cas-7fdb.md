@@ -1,3 +1,0 @@
-## Core Concepts
-
-Widened web proof distinguishes inherited journey failures from delivery failures before a task parks. Previously, any failed journey blocked the proof, even when the untouched merge base failed identically. The worker now reuses lane CI's attribution engine to replay only failed Playwright identities at that immutable base. A matching project, path, title, failure status and error fingerprint records a release repair and permits the widened receipt. A base pass, a different failure, skipped or retried results, and incomplete attribution keep the delivery blocked. Evidence remains attached to the original failed report and the repair link; identified changed tests still owe their five passing runs.

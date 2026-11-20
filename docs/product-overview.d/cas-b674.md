@@ -1,5 +1,0 @@
-## Core Concepts
-
-A train's `epic_verification_owner` pins its decision maker across machines. A peer factory started with `--worker-host <train>` creates workers under that owner's session without launching a local supervisor. Status, blockers, parked work, corrections and final results use the durable mailbox directly between workers and their owner. A released worker claim does not remove the owner's result route.
-
-Remote parks bind the project, owner generation, worker identity and lease epoch, task cycle, pushed branch and commit, target, and committed artifact manifest. The owner restores required artifacts and validates portable test, stability and widened-scope claims against immutable Git inputs before admitting its ordinary verification and merge path. These are worker claims; independent owner verification and CI remain authoritative. Missing evidence holds admission, and stale identities or delivery cycles cannot authorize publication. A dead owner process does not transfer ownership; an explicit transfer command remains separate work.

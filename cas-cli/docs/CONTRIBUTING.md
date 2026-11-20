@@ -4324,7 +4324,15 @@ other harnesses receive the same `SKILL.md`. It needs no personal HOME seed.
 Update also refreshes finish in named Claude/Codex accounts. The shared bases
 (`~/.cas/claude-base`, `~/.cas/codex-base`), which every account's `skills`
 links to, receive the full builtin set. The exact old cas-f4ea command seed is
-removed in favor of the skill.
+removed in favor of the skill wherever it was installed: Claude
+`commands/finish.md`, Codex `prompts/finish.md`, OpenCode
+`~/.config/opencode/commands/finish.md` and the Grok personal skill
+(`SKILL.md` plus `references/finish.md`). Removal is by exact bytes, so an
+edited copy stays.
+Finish is installed once per harness, at user level, so its picker lists `/finish`
+once. Project sync for Claude, Codex and Grok installs no finish and removes an
+earlier managed project copy when its bytes prove it is Cassy's (cas-fcdb).
+OpenCode has no user-level skill tree, so its project copy stays.
 A customized Claude `commands/finish.md` blocks builtin installation: Cassy leaves both
 entrypoints untouched and skips installing its finish skill for that profile.
 An existing customized finish `SKILL.md` is preserved, even when it retains
@@ -4332,7 +4340,7 @@ An existing customized finish `SKILL.md` is preserved, even when it retains
 the builtin. Other builtin skills keep their existing ownership policy.
 
 For Codex, a personal `~/.agents/skills/finish/SKILL.md` takes precedence over
-Cassy's default, named-account, shared-base and project copies. Update skips
+Cassy's default, named-account and shared-base copies. Update skips
 installing another finish and removes an earlier Cassy copy only when its hash
 matches the recorded baseline or a shipped version. Customized copies and
 symlinks are preserved; if both entrypoints exist, update warns with both paths

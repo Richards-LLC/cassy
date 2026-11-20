@@ -174,6 +174,9 @@ pub struct SessionInfo {
     /// Session ID for agent lookup
     #[serde(skip)]
     pub session_id: Option<String>,
+    /// The harness's own context window; Claude transcripts never carry it.
+    #[serde(skip)]
+    pub context_window_size: Option<u64>,
 }
 
 /// Info about current agent's active task
@@ -211,6 +214,15 @@ pub fn execute(args: &StatusLineArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
     } else {
         None
     };
+
+    // cas-27e3: supervisor auto-clear needs the real window to clear at 80%,
+    // before Claude compacts; only this input reports it.
+    if std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("supervisor")
+        && let Some(info) = &session_info
+        && let (Some(session), Some(window)) = (&info.session_id, info.context_window_size)
+    {
+        crate::supervisor_auto_clear::record_harness_window(cas_root, session, window);
+    }
 
     // In factory mode, skip the statusline entirely - the TUI handles status display
     // Check env var directly since agent may not be registered yet (MCP registration
@@ -275,7 +287,7 @@ fn read_claude_code_input() -> Option<SessionInfo> {
     parse_claude_code_input(&input)
 }
 
-fn parse_claude_code_input(input: &str) -> Option<SessionInfo> {
+pub(crate) fn parse_claude_code_input(input: &str) -> Option<SessionInfo> {
     let claude_input = serde_json::from_str::<ClaudeCodeInput>(input).ok()?;
     if let Some(limits) = claude_input.rate_limits {
         if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -285,12 +297,14 @@ fn parse_claude_code_input(input: &str) -> Option<SessionInfo> {
         }
     }
     let model = claude_input.model.and_then(|m| m.display_name);
+    let context_window_size = claude_input.context_window.as_ref()
+        .and_then(|cw| cw.context_window_size).filter(|size| *size > 0);
     let context_pct = claude_input.context_window.and_then(|cw| {
         let size = cw.context_window_size?;
         let used = cw.total_input_tokens.unwrap_or(0) + cw.total_output_tokens.unwrap_or(0);
         (size > 0).then(|| ((used * 100) / size) as u8)
     });
-    Some(SessionInfo { model, context_pct, session_id: claude_input.session_id })
+    Some(SessionInfo { model, context_pct, session_id: claude_input.session_id, context_window_size })
 }
 
 #[cfg(test)]

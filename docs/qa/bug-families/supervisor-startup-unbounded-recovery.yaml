@@ -1,0 +1,4 @@
+title: Supervisor startup and context clear stay bounded on a large store
+statement: A supervisor SessionStart returns its context within the recovery budget however many parked deliveries the project holds; deliveries it did not check are named with their commit receipts and the supervisor handoff is kept. A Claude supervisor's automatic handoff and clear start at 80% of the context window Claude reports, before Claude compacts on its own.
+found: 2026-11-20
+tasks: [cas-27e3]

@@ -1945,14 +1945,24 @@ async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
 #[tokio::test]
 async fn approved_peer_review_no_delivery_missing_supervisor_lane_cas_e0ee() {
     let mut env = TestEnvGuard::temp_home();
-    for case in ["unchanged", "missing", "remote-own", "bound-own"] {
+    for case in ["unchanged", "missing", "foreign-tip", "remote-own", "bound-own"] {
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
         let id = "cas-e0ee";
-        let source = "factory/peer-reviewer";
+        let source = if case == "foreign-tip" {
+            "factory/nocode-worker-cas-e0ee"
+        } else { "factory/peer-reviewer" };
         let side = "factory/earlier-review-work";
         let base = git(repo, &["rev-parse", "main"]);
-        git(repo, &["branch", source, "main"]);
+        if case == "foreign-tip" {
+            // cas-f8f8: the per-task source is gone, while the reusable
+            // worker lane belongs to another task and must remain untouched.
+            assert!(git(repo, &["for-each-ref", "--format=%(refname)",
+                &format!("refs/heads/{source}"), &format!("refs/remotes/origin/{source}")]).is_empty());
+            assert_eq!(git(repo, &["log", "-1", "--format=%s", LANE]), OTHER);
+        } else {
+            git(repo, &["branch", source, "main"]);
+        }
         let own = if case.ends_with("own") {
             let checkout = f.cas_dir().join("worktrees").join(WORKER);
             git(&checkout, &["checkout", "-q", "-b", side, "main"]);
@@ -1968,10 +1978,11 @@ async fn approved_peer_review_no_delivery_missing_supervisor_lane_cas_e0ee() {
         }
         let mut task = assigned(id, TaskType::Task, "main");
         task.status = TaskStatus::Open;
-        task.assignee = Some("nocode-supervisor-session".into());
+        let source_assignee = if case == "foreign-tip" { WORKER } else { "peer-reviewer" };
+        task.assignee = Some(if case == "foreign-tip" { WORKER } else { "nocode-supervisor-session" }.into());
         task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
             work_target: task.deliverables.work_target.clone().unwrap(),
-            assignee: "peer-reviewer".into(), branch: source.into(), base_sha: base,
+            assignee: source_assignee.into(), branch: source.into(), base_sha: base,
         });
         let original_start = task.deliverables.factory_branch_start.clone();
         f.put(&task);
@@ -2016,6 +2027,10 @@ async fn approved_peer_review_no_delivery_missing_supervisor_lane_cas_e0ee() {
             assert_closed_without_lane(&f, id, &response);
             assert_eq!(f.task(id).deliverables.factory_branch_start, original_start);
             assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+            if case == "foreign-tip" {
+                assert_eq!(git(repo, &["rev-parse", LANE]), f.foreign_tip);
+                assert_eq!(git(repo, &["rev-parse", &format!("origin/{LANE}")]), f.foreign_tip);
+            }
         }
     }
 }

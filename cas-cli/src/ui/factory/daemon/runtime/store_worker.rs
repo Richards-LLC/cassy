@@ -57,9 +57,14 @@ pub(crate) const TASK_SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(30
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// A job that holds the store worker longer than this is logged with its
+/// label (cas-7678): every later job, write-lane jobs included, waits behind
+/// it, and the watchdog names only the waiter.
+const SLOW_JOB: Duration = Duration::from_secs(1);
+
 /// One ordered background thread for daemon store writes.
 pub(crate) struct StoreWorker {
-    sender: Option<Sender<(Option<&'static str>, Job)>>,
+    sender: Option<Sender<(Option<&'static str>, &'static str, Job)>>,
     pending: Arc<AtomicUsize>,
     in_flight: Arc<Mutex<HashSet<&'static str>>>,
     handle: Option<JoinHandle<()>>,
@@ -67,18 +72,31 @@ pub(crate) struct StoreWorker {
 
 impl StoreWorker {
     pub(crate) fn start() -> Self {
-        let (sender, receiver) = channel::<(Option<&'static str>, Job)>();
+        let (sender, receiver) = channel::<(Option<&'static str>, &'static str, Job)>();
         let pending = Arc::new(AtomicUsize::new(0));
         let in_flight = Arc::new(Mutex::new(HashSet::new()));
         let thread_pending = Arc::clone(&pending);
         let thread_in_flight = Arc::clone(&in_flight);
+        // Log to the starter's dispatcher, which is the global one in the daemon.
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         let handle = std::thread::Builder::new()
             .name("factory-store-worker".into())
-            .spawn(move || {
-                for (key, job) in receiver {
+            .spawn(move || tracing::dispatcher::with_default(&dispatch, || {
+                for (key, label, job) in receiver {
+                    let started = Instant::now();
                     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
                     {
                         tracing::error!(?key, ?panic, "factory store job panicked");
+                    }
+                    let elapsed = started.elapsed();
+                    if elapsed >= SLOW_JOB {
+                        tracing::warn!(
+                            target: "cas::loop_watchdog",
+                            label,
+                            elapsed_ms = elapsed.as_millis() as u64,
+                            queued = thread_pending.load(Ordering::Acquire).saturating_sub(1),
+                            "factory store job held the store writer"
+                        );
                     }
                     if let Some(key) = key {
                         thread_in_flight
@@ -88,7 +106,7 @@ impl StoreWorker {
                     }
                     thread_pending.fetch_sub(1, Ordering::AcqRel);
                 }
-            });
+            }));
         let (sender, handle) = match handle {
             Ok(handle) => (Some(sender), Some(handle)),
             Err(error) => {
@@ -141,7 +159,7 @@ impl StoreWorker {
             return false;
         };
         self.pending.fetch_add(1, Ordering::AcqRel);
-        if sender.send((key, job)).is_err() {
+        if sender.send((key, label, job)).is_err() {
             self.pending.fetch_sub(1, Ordering::AcqRel);
             tracing::warn!(label, "factory store worker stopped; job dropped");
             return false;
@@ -404,6 +422,36 @@ mod tests {
         );
         assert_eq!(events.list_recent(100).unwrap().len(), before_events + 1);
         worker.drain(Duration::from_secs(5));
+    }
+
+    /// cas-7678: gabber write jobs waited minutes for the store writer, and
+    /// the trace named only the waiter. A job that holds the writer past 1 s
+    /// is logged with its label; a quick one is not.
+    #[test]
+    fn a_job_that_holds_the_writer_past_a_second_logs_its_label() {
+        use std::io::{Read, Seek};
+        let mut log = tempfile::tempfile().unwrap();
+        let capture = log.try_clone().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || capture.try_clone().unwrap())
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let worker = StoreWorker::start();
+        drop(guard);
+        assert!(worker.submit("slow store job", || {
+            std::thread::sleep(Duration::from_millis(1100))
+        }));
+        assert!(worker.submit("quick store job", || {}));
+        worker.drain(Duration::from_secs(10));
+
+        let mut text = String::new();
+        log.rewind().unwrap();
+        log.read_to_string(&mut text).unwrap();
+        assert!(text.contains(r#"label="slow store job""#), "{text}");
+        assert!(text.contains("elapsed_ms="), "{text}");
+        assert!(!text.contains(r#"label="quick store job""#), "{text}");
     }
 
     #[test]

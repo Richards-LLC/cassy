@@ -68,6 +68,18 @@ pub(crate) struct NudgeReport {
 }
 
 impl NudgeReport {
+    /// A PTY-channel delivery: the typed payload is the wake, so a completed
+    /// write is a fired wake (GH #2185). Whether a turn started is still the
+    /// recipient's evidence (`MessageDeliveryReport::wake`), never this.
+    pub(crate) fn pty_delivered(outcome: InjectOutcome) -> Self {
+        Self {
+            outcome,
+            channel: DeliveryChannel::Pty,
+            wake: if outcome == InjectOutcome::Delivered { WakeAttempt::Fired } else { WakeAttempt::NotAttempted },
+            wake_detail: Some(PTY_DELIVERY_WAKE_DETAIL.to_string()),
+        }
+    }
+
     /// A delivery where no wake was attempted, with the reason stated.
     pub(crate) fn not_attempted(
         outcome: InjectOutcome,
@@ -1784,11 +1796,7 @@ impl FactoryDaemon {
             // asserted a turn nobody had observed; the delivery watchdog reads
             // the recipient's transcript and records a nudge or failure on
             // this row when no turn starts.
-            return Ok(NudgeReport::not_attempted(
-                primary_outcome,
-                channel,
-                PTY_DELIVERY_WAKE_DETAIL,
-            ));
+            return Ok(NudgeReport::pty_delivered(primary_outcome));
         }
         if !wake.allowed {
             return Ok(NudgeReport::not_attempted(

@@ -17,6 +17,48 @@ use crate::mcp::tools::service::imports::*;
 const LOCAL_TARGETS: &[&str] = &["operator", "supervisor", "all_workers", "director", "owner"];
 
 impl CasService {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::mcp::tools::service) async fn owned_message_send(
+        &self, sender: &cas_types::Agent, target: &str, summary: &str, message: &str,
+        reply: Option<i64>, urgent: bool, kind: Option<&str>, blocker: bool, attachment: Option<&str>,
+    ) -> Result<Option<CallToolResult>, McpError> {
+        if ["operator", "all_workers", "director", "owner"].iter().any(|reserved| target.eq_ignore_ascii_case(reserved))
+            || (sender.role != cas_types::AgentRole::Worker && target.eq_ignore_ascii_case("supervisor"))
+            || target.starts_with("commander:") || target.starts_with("inbox:")
+            || super::message::target_is_reserved_source(target) { return Ok(None); }
+        let (root, from, target) = (self.inner.cas_root.clone(), sender.clone(), target.to_string());
+        let route = tokio::task::spawn_blocking(move || peer_mailbox::owned_route(&root, &from, &target)).await
+            .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+            .map_err(|e| Self::error(ErrorCode::INVALID_REQUEST, e))?;
+        let Some((recipient, label)) = route else { return Ok(None) };
+        if urgent { return Err(Self::error(ErrorCode::INVALID_REQUEST, "Direct cross-machine train mail cannot interrupt a pane")); }
+        let body = self.peer_body(message, attachment).await?;
+        let body = peer_mailbox::attach_message_intent(&body, kind.or(reply.map(|_| "answer")), blocker)
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        let (root, from, summary) = (self.inner.cas_root.clone(), sender.clone(), summary.to_string());
+        let delivery_label = label.clone();
+        let sent = tokio::task::spawn_blocking(move || -> Result<peer_mailbox::SendReceipt,String> {
+            let queue = crate::store::open_prompt_queue_store(&root).map_err(|e| e.to_string())?;
+            let response = reply.map(|id| -> Result<String,String> {
+                let row = queue.queued_prompt(id).map_err(|e| e.to_string())?.ok_or("Reply message is absent")?;
+                let envelope = peer_mailbox::parse_envelope(&row.prompt).filter(|envelope|
+                    row.origin == Some(cas_store::QueueOrigin::Daemon) && row.target == from.name
+                    && row.factory_session == from.factory_session && envelope.scope == peer_mailbox::PeerScope::Project)
+                    .ok_or("Reply must name mail delivered to this caller")?;
+                if envelope.sender_agent_id != recipient && !(from.role == cas_types::AgentRole::Worker
+                    && peer_mailbox::WorkerDirectory::load(&root, &from.id)?.owner_of(&envelope.sender_agent_id, &from.id))
+                { return Err("Reply sender is not this train route's recipient".into()); }
+                Ok(envelope.id)
+            }).transpose()?;
+            let receipt = peer_mailbox::send_raw(&root, &from.id, &recipient, &body, Some(&summary), response.as_deref(), &delivery_label)
+                .map_err(|e| e.to_string())?;
+            if let Some(id) = reply { queue.ack(id).map_err(|e| e.to_string())?; }
+            Ok(receipt)
+        }).await.map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+            .map_err(|e| Self::error(ErrorCode::INVALID_REQUEST, e))?;
+        Ok(Some(Self::success(format!("Queued for {label} via Cassy Cloud (message {}, {}).", sent.id, sent.status))))
+    }
+
     /// Advisory contracts between live workers of one account/repo/epic.
     /// Never enters supervisor discovery, user scope, or escalation routing.
     #[allow(clippy::too_many_arguments)]
@@ -75,7 +117,7 @@ impl CasService {
         }).await.map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
             .map_err(|e| Self::error(ErrorCode::INVALID_REQUEST, e))?;
         Ok(sent.map(|(label, receipt)| Self::success(format!(
-            "Sent to peer worker {label} via Cassy Cloud (peer message {}, {}). Both supervisors receive quiet copies on delivery. Check delivery with coordination action=message_status id={}.",
+            "Sent to peer worker {label} via Cassy Cloud (peer message {}, {}). Check delivery with coordination action=message_status id={}.",
             receipt.id, receipt.status, receipt.id))))
     }
 
@@ -105,6 +147,8 @@ impl CasService {
         {
             return Ok(None);
         }
+        if let Some(sent) = self.owned_message_send(sender, target, summary, message, in_reply_to,
+            urgent, kind, blocker, attachment).await? { return Ok(Some(sent)); }
         let cas_root = self.inner.cas_root.clone();
         let explicit_account_peer = target
             .get(..11)
@@ -353,28 +397,13 @@ impl CasService {
             }
             None => (None, None),
         };
-        // cas-9f53: a live worker in a peer's session takes instructions only
-        // from its own supervisor. Name that supervisor instead of "no such
-        // worker", so a lane takeover has a channel.
         if peer.is_none()
             && let Some(worker) = workers.iter().find(|worker| worker.matches(&wanted))
         {
             let owner = &worker.supervisor;
-            return Err(Self::error(
-                ErrorCode::INVALID_REQUEST,
-                format!(
-                    "{}@{} is a worker in peer supervisor {}@{}'s factory session ({}); peer \
-                     workers take messages only from their own supervisor. Message target={}@{} \
-                     to relay it. Nothing was enqueued.",
-                    worker.name,
-                    worker.machine,
-                    owner.name,
-                    owner.machine,
-                    owner.session.as_deref().unwrap_or("unknown"),
-                    owner.name,
-                    owner.machine
-                ),
-            ));
+            return Err(Self::error(ErrorCode::INVALID_REQUEST,format!(
+                "{}@{} belongs to {}@{}; its owner must send directly to that worker. Nothing was enqueued.",
+                worker.name,worker.machine,owner.name,owner.machine)));
         }
         let Some(peer) = peer else {
             // cas-2a5a: not a supervisor of this repo; perhaps one of

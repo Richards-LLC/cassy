@@ -1110,6 +1110,7 @@ impl GitOperations {
 
     /// Publish a detached merge against the observed origin tip. Peer
     /// reconciliation stays detached too, and gets at most one retry.
+    // gate-audit[reconcile_peer]: selector Chooses a detached peer-reconciliation retry; both attempts run G-160 on the exact combined checkout before publication.
     pub(crate) fn publish_merge_candidate(
         &self,
         branch: &str,
@@ -1255,6 +1256,7 @@ impl GitOperations {
         self.publish_pinned_source_with_lease(branch, head, None, false, timeout)
     }
 
+    // gate-audit[proven_merge]: selector Internal publication provenance selects merge validation with G-160 versus ordinary source pre-push checks; no caller override is accepted.
     fn publish_pinned_source_with_lease(
         &self,
         branch: &str,
@@ -1284,6 +1286,19 @@ impl GitOperations {
                 };
             }
         };
+        // gate[G-160 merge-admission integrity]: Combined-tree gate registry validity before merge publication
+        // A moved target can add the same id in a different file without a
+        // Git conflict or a change to the delivery's approved patch. Check
+        // the exact combined tree, including any peer-publication retry,
+        // before granting the proven-merge pre-push exemption below.
+        if proven_merge && checkout.path().join("cas-cli/build.rs").is_file()
+            && let Err(error) = crate::gates::declarations::scan(checkout.path())
+        {
+            return TargetPushOutcome::NotPushed {
+                sha: Some(local_sha), remote_sha: self.resolve_commit(&remote_ref),
+                reason: crate::gates::tag("G-160", format!("Merge registry validation failed: {error}")),
+            };
+        }
         let mut cmd = Command::new("git");
         // A relative filesystem remote is relative to the receiver's
         // checkout. Preserve that destination when moving the hook's cwd,

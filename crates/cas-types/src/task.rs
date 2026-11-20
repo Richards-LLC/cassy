@@ -829,6 +829,12 @@ pub struct PortableTestReceipt {
     /// so the receiving machine can check the run passed this filter.
     #[serde(default)]
     pub passing_run: String,
+    /// Worker claims decoded and validated by the receiving capped-proof consumer.
+    /// Empty `package` denotes adapter-only evidence, never Rust crate coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widened: Option<serde_json::Value>,
 }
 
 /// A no-delivery or portable no-code close waiting on one exact verdict.
@@ -1419,6 +1425,7 @@ impl TaskDeliverables {
             && !self.merge_conflicted
             && self.green_merge_commit.is_none()
             && self.merge_ci_admission.is_none()
+            && self.test_receipts.is_empty()
     }
 }
 

@@ -1322,6 +1322,7 @@ pub struct FactoryApp {
     worker_names: Vec<String>,
     /// Supervisor name (for reference)
     supervisor_name: String,
+    worker_host: bool,
     /// Factory session name (for prompt queue isolation)
     factory_session: Option<String>,
     /// Factory session creation timestamp for elapsed-time display.
@@ -2072,6 +2073,7 @@ impl FactoryApp {
     }
 
     fn detect_supervisor_stall(&mut self) -> Option<DirectorEvent> {
+        if self.worker_host { return None; }
         use cas_store::ReminderStatus;
 
         let session = self.factory_session.as_deref()?;
@@ -2789,6 +2791,8 @@ impl FactoryApp {
     }
 
     /// Get supervisor name
+    pub(crate) fn is_worker_host(&self) -> bool { self.worker_host }
+
     pub fn supervisor_name(&self) -> &str {
         &self.supervisor_name
     }
@@ -2879,7 +2883,7 @@ impl FactoryApp {
                     "failed to open agent store for trusted supervisor identity"
                 ),
             }
-        } else {
+        } else if !self.worker_host {
             tracing::error!(
                 supervisor = %self.supervisor_name,
                 factory_session = %name,
@@ -5119,6 +5123,7 @@ mod tests {
 
         fn sample_metadata(name: &str, created_at: &str) -> SessionMetadata {
             SessionMetadata {
+                worker_host: None,
                 name: name.to_string(),
                 created_at: created_at.to_string(),
                 daemon_pid: 1,

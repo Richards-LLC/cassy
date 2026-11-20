@@ -35,6 +35,9 @@ pub enum FactoryError {
     #[error("Supervisor already spawned")]
     SupervisorExists,
 
+    #[error("Worker hosts cannot launch a supervisor")]
+    WorkerHost,
+
     /// Supervisor not spawned yet
     #[error("Supervisor not spawned")]
     NoSupervisor,
@@ -202,6 +205,7 @@ impl FactoryCore {
     /// # Returns
     /// The pane ID on success.
     pub fn spawn_supervisor(&mut self, name: Option<&str>) -> Result<PaneId> {
+        if self.config.worker_host.is_some() { return Err(FactoryError::WorkerHost); }
         if self.supervisor_name.is_some() {
             return Err(FactoryError::SupervisorExists);
         }
@@ -479,6 +483,7 @@ mod tests {
             workers: 0,
             worker_names: vec![],
             supervisor_name: Some("test-supervisor".to_string()),
+            worker_host: None,
             supervisor_cli: cas_mux::SupervisorCli::Claude,
             worker_cli: cas_mux::SupervisorCli::Claude,
             supervisor_model: None,
@@ -508,5 +513,7 @@ mod tests {
         let mut core = FactoryCore::new(test_config()).unwrap();
         core.supervisor_name = Some("existing-supervisor".into());
         assert!(matches!(core.spawn_supervisor(None), Err(FactoryError::SupervisorExists)));
+        core.config.worker_host = Some("cas-train".into());
+        assert!(matches!(core.spawn_supervisor(None), Err(FactoryError::WorkerHost)));
     }
 }

@@ -1134,20 +1134,20 @@ impl<'a> PassingTests<'a> {
     /// This machine's passing receipts at the head, for the task row.
     pub(crate) fn portable(&self) -> Vec<cas_types::PortableTestReceipt> {
         self.records().iter().filter_map(|(tested_head, package, test)| {
-            let log = std::fs::read_to_string(test.selected_log.as_ref()?).ok()?;
-            let passing_run = passing_run_lines(&log);
-            let package = package.clone()?;
-            passing_run_proves(&passing_run, &package, test.harness.as_deref(), &test.filter, test.count)
-                .then(|| cas_types::PortableTestReceipt {
-                    head: self.head.to_string(),
-                    tested_head: tested_head.clone(),
-                    package,
-                    harness: test.harness.clone(),
-                    filter: test.filter.clone(),
-                    count: test.count,
-                    log_sha256: passing_run_digest(&test.filter, &passing_run),
-                    passing_run,
-                })
+            let passing_run = test.selected_log.as_ref().and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|log| passing_run_lines(&log)).unwrap_or_default();
+            let valid = match package {
+                Some(package) => passing_run_proves(&passing_run, package, test.harness.as_deref(), &test.filter, test.count),
+                None => test.stability.as_ref().is_some_and(stability::valid) || test.widened.as_ref().is_some_and(widened::valid),
+            };
+            valid.then(|| cas_types::PortableTestReceipt {
+                head: self.head.to_string(), tested_head: tested_head.clone(),
+                package: package.clone().unwrap_or_default(), harness: test.harness.clone(),
+                filter: test.filter.clone(), count: test.count,
+                log_sha256: passing_run_digest(&test.filter, &passing_run), passing_run,
+                stability: test.stability.as_ref().and_then(|proof| serde_json::to_value(proof).ok()),
+                widened: test.widened.as_ref().and_then(|proof| serde_json::to_value(proof).ok()),
+            })
         }).collect()
     }
 
@@ -1162,30 +1162,36 @@ impl<'a> PassingTests<'a> {
         self.records.get_or_init(|| {
             let mut records = passing_test_records(self.cas_root, self.repo, self.head, self.target);
             for synced in self.synced {
+                let Ok(stability) = synced.stability.clone().map(serde_json::from_value::<stability::Proof>).transpose() else { continue };
+                let Ok(widened) = synced.widened.clone().map(serde_json::from_value::<widened::Proof>).transpose() else { continue };
+                let adapter = synced.package.is_empty();
                 let admissible = synced.head == self.head
                     && valid_git_oid(&synced.head)
                     && valid_git_oid(&synced.tested_head)
-                    && (synced.tested_head == synced.head
-                        || receipt_head_is_ancestor(self.repo, &synced.tested_head, &synced.head))
+                    && portable_inputs_unchanged(self.repo, &synced.tested_head, &synced.head, self.target)
                     && named_filter(&synced.filter)
                     && synced.count > 0
-                    && package_selector(&synced.package).is_some()
+                    && (adapter || package_selector(&synced.package).is_some())
+                    && stability.as_ref().is_none_or(stability::valid)
+                    && widened.as_ref().is_none_or(widened::valid)
                     && synced.harness.as_deref().is_none_or(valid_package)
                     && passing_run_digest(&synced.filter, &synced.passing_run) == synced.log_sha256
-                    && passing_run_proves(&synced.passing_run, &synced.package,
-                        synced.harness.as_deref(), &synced.filter, synced.count);
+                    && if adapter { stability.is_some() || widened.is_some() } else {
+                        passing_run_proves(&synced.passing_run, &synced.package,
+                            synced.harness.as_deref(), &synced.filter, synced.count)
+                    };
                 let local = records.iter().any(|(_, package, test)| {
-                    package.as_deref() == Some(synced.package.as_str())
+                    package.as_deref() == (!adapter).then_some(synced.package.as_str())
                         && test.harness == synced.harness
                         && test.filter == synced.filter
                 });
                 if admissible && !local {
-                    records.push((synced.tested_head.clone(), Some(synced.package.clone()), TestReceipt {
+                    records.push((synced.tested_head.clone(), (!adapter).then(|| synced.package.clone()), TestReceipt {
                         filter: synced.filter.clone(),
                         harness: synced.harness.clone(),
                         count: synced.count,
-                        stability: None,
-                        widened: None,
+                        stability,
+                        widened,
                         selected_log: None,
                         host_path_opt_out: None,
                         supervisor_recorded: None,
@@ -1389,6 +1395,20 @@ fn read_passing_test_record(
     };
     (entry.path() == test_receipt_path(cas_root, repo, &record.head, &targeted_test))
         .then_some((record.head, package, test))
+}
+
+/// Recheck worker claims against this clone's immutable Git inputs, rather
+/// than trusting ancestry alone or the producer's absolute checkout path.
+fn portable_inputs_unchanged(repo: &Path, tested: &str, head: &str, target: Option<&str>) -> bool {
+    if tested == head { return true; }
+    let Some(changes) = receipt_range_changed_paths(repo, tested, head, target) else { return false };
+    let changes = changes.into_iter().collect::<BTreeSet<_>>();
+    let inputs = delivered_tree_proof_inputs(repo, head, &changes).unwrap_or_else(|| changes.clone());
+    changes.iter().all(|path| {
+        let builtin_doc = path.starts_with("cas-cli/src/builtins/")
+            && (path.ends_with(".md") || path == "cas-cli/src/builtins/reference-history.json");
+        builtin_doc || !inputs.contains(path)
+    })
 }
 
 fn receipt_range_changed_paths(
@@ -4938,6 +4958,64 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             "fixture HEAD must be a full commit id: {head}"
         );
         head
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_receipts_preserve_relative_stability_and_widened_claims_cas_b674() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let producer = dir.path().join("producer");
+        let producer_root = dir.path().join("producer-store");
+        fixture_commit(&producer);
+        std::fs::create_dir(producer.join("src")).unwrap();
+        std::fs::write(producer.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+        std::fs::write(producer.join("src/lib.rs"), "#[test] fn owned() {}\n").unwrap();
+        fixture_commit_as(&producer, "proof inputs");
+        let head = fixture_head(&producer);
+        let identity = stability::Identity::exact("src/lib.rs", "owned");
+        let scope = widened::Scope::Crate("fixture".into());
+        stability::record(&producer_root, &producer, &head, stability::Proof {
+            runner:"nextest".into(), tests:vec![identity.clone()], consecutive_passes:5, elapsed_ms:42,
+        }).unwrap();
+        widened::record(&producer_root, &producer, &head, widened::Proof {
+            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(),
+        }, 1).unwrap();
+        record_passing_test_with_log_for_tests(&producer_root, &producer, &head, "fixture", "test(owned)");
+        let mut task = cas_types::Task::new("cas-portable".into(), "Portable proof".into());
+        task.deliverables.test_receipts = PassingTests::new(&producer_root, &producer, &head).portable();
+        assert_eq!(task.deliverables.test_receipts.len(), 3);
+        let wire = serde_json::to_vec(&task).unwrap();
+        let task: cas_types::Task = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(task.deliverables.test_receipts.len(), 3);
+        let owner = dir.path().join("owner");
+        git(dir.path(), &["clone", "-q", producer.to_str().unwrap(), owner.to_str().unwrap()]).unwrap();
+        let owner_root = dir.path().join("owner-store");
+        let passing = PassingTests::new(&owner_root, &owner, &head).with_synced(&task.deliverables.test_receipts);
+        assert!(stability::missing(&passing, &[identity.clone()]).is_empty());
+        assert!(widened::missing(&passing, &[scope.clone()]).is_empty());
+        assert_eq!(passing.packages(), ["fixture"]);
+        // Worker-authored proof is scoped to the immutable Git inputs, and
+        // neither relative traversal nor fewer than five passes grants credit.
+        let mut changed = serde_json::to_value(&task).unwrap();
+        for receipt in changed["deliverables"]["test_receipts"].as_array_mut().unwrap() {
+            if receipt.get("stability").is_some() {
+                receipt["stability"]["tests"][0]["path"] = "../outside.rs".into();
+                receipt["stability"]["consecutive_passes"] = 4.into();
+            }
+        }
+        let changed: cas_types::Task = serde_json::from_value(changed).unwrap();
+        let refused = PassingTests::new(&owner_root, &owner, &head).with_synced(&changed.deliverables.test_receipts);
+        assert_eq!(stability::missing(&refused, &[identity.clone()]), [identity.clone()]);
+        std::fs::write(owner.join("src/lib.rs"), "#[test] fn owned() { assert!(false); }\n").unwrap();
+        fixture_commit_as(&owner, "changed input");
+        let new_head = fixture_head(&owner);
+        let mut rebound = task.deliverables.test_receipts;
+        for receipt in &mut rebound { receipt.head = new_head.clone(); }
+        let refused = PassingTests::new(&owner_root, &owner, &new_head).with_synced(&rebound);
+        assert!(refused.packages().is_empty());
+        assert_eq!(stability::missing(&refused, &[identity.clone()]), [identity]);
+        assert_eq!(widened::missing(&refused, &[scope.clone()]), [scope]);
     }
 
     fn passing_test_identities(

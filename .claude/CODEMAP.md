@@ -75,11 +75,11 @@
 - `cas-cli/src/coordination.rs`, `cas-cli/src/coordination/`, `cas-cli/src/orchestration/` — external-thread authority, binding repair and agent names.
 - `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_review_scratch.rs` — authentication, candidate and review checkout ownership.
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_worker_runs.rs` — capped proof commands, selected-test captures, detached jobs and completion records.
-- `cas-cli/src/factory_worker_check/` — JavaScript discovery, Rust/JavaScript stability identities and widened proof receipts.
+- `cas-cli/src/factory_worker_check/` — JavaScript discovery, Rust/JavaScript stability identities and widened proof receipts; `javascript/web_attribution.rs` replays widened Playwright failures at the merge base through lane CI's attribution engine.
 - `cas-cli/src/factory_build_routing.rs` — machine-wide worker counts and build placement.
 - `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_target_cache/` — build admission, capacity and target ownership.
 - `cas-cli/src/supervisor_auto_clear.rs`, `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_message_wakes.rs` — continuity and typed wakes.
-- `cas-cli/src/supervisor_notices.rs`, `cas-cli/src/peer_ask_gate.rs`, `cas-cli/src/cloud/peer_mailbox/` — durable notices and explicitly scoped peer merge holds.
+- `cas-cli/src/supervisor_notices.rs`, `cas-cli/src/peer_ask_gate.rs`, `cas-cli/src/cloud/peer_mailbox/` — durable notices and explicitly scoped peer merge holds; `peer_mailbox/train_parks.rs` holds immutable worker park claims admitted by the sole train owner.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` — train guards, proof and retries.
 - `cas-cli/src/worktree/git/`, `cas-cli/src/worktree/retained.rs`, `scripts/cas-merge-drivers.py` — Git operations, rescue refs and shared merge drivers.
 - `cas-cli/src/git_evidence/` — shared bounded ref, ancestry, tree and delivery measurement probes.
@@ -88,7 +88,7 @@
 
 ## MCP, storage and delivery gates
 
-- `cas-cli/src/gates/`, `cas-cli/build.rs` — generated stable gate codes, classifications and registry stamps.
+- `cas-cli/src/gates/`, `cas-cli/build.rs` — generated stable gate codes, classifications and registry stamps; `gates/declarations.rs` is the registry validation shared by the build script and merge publication.
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` — stdio transport, independent sync scheduling, caller identity and backend replacement.
 - `cas-cli/src/cloud/`, `cas-cli/src/cloud/sync_lease.rs` — Cloud clients, entity/knowledge/quality sync and cursor leases.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` — operations, registrations and bounded tool futures.

@@ -842,6 +842,10 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub spawn_brief: Option<String>,
 
+    // spawn_workers with task_id: nextest filter for the repair's whole test class.
+    #[serde(default)]
+    pub class_audit: Option<String>,
+
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
     #[serde(default)]
@@ -1457,6 +1461,10 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub spawn_brief: Option<String>,
 
+    // spawn_workers with task_id: nextest filter for the repair's whole test class.
+    #[serde(default)]
+    pub class_audit: Option<String>,
+
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
     #[serde(default)]
@@ -1715,6 +1723,7 @@ impl CoordinationRequest {
             older_than_secs: self.older_than_secs,
             isolate: self.isolate,
             spawn_brief: self.spawn_brief.clone(),
+            class_audit: self.class_audit.clone(),
             remind_message: self.remind_message.clone(),
             remind_delay_secs: self.remind_delay_secs,
             remind_event: self.remind_event.clone(),

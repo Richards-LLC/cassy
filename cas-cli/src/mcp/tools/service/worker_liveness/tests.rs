@@ -637,10 +637,31 @@ for line in sys.stdin:
     elif command == 'write' and child is None:
         with open(sys.argv[3], 'a') as log:
             log.write('passing test\n')
+    elif command == 'burn':
+        # Forwarded without an ack: the leaf waits, then burns CPU and writes
+        # nothing, so only its CPU can show progress.
+        if child:
+            child.stdin.write('burn\n')
+            child.stdin.flush()
+        else:
+            time.sleep(1.0)
+            end = time.process_time() + 0.3
+            while time.process_time() < end:
+                pass
+        continue
+    elif command == 'exit_leaf' and child is None:
+        print('done', flush=True)
+        break
     elif child:
         child.stdin.write(command + '\n')
         child.stdin.flush()
         assert child.stdout.readline().strip() == 'done'
+        if command == 'exit_leaf':
+            try:
+                child.wait(timeout=1)
+                child = None
+            except subprocess.TimeoutExpired:
+                pass
     print('done', flush=True)
 if child:
     child.stdin.close()
@@ -681,6 +702,11 @@ if child:
         use std::io::Write;
         writeln!(self.harness.stdin.as_mut().unwrap(), "{command}").unwrap();
         self.read_ack("done");
+    }
+
+    fn send(&mut self, command: &str) {
+        use std::io::Write;
+        writeln!(self.harness.stdin.as_mut().unwrap(), "{command}").unwrap();
     }
 
     fn observe(&self) -> Observation {
@@ -814,6 +840,58 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     let rows = queue.peek_all(50).unwrap();
     assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 2);
     assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1);
+
+    // cas-0125: once the turn has finished, the worker reads waiting_for_input
+    // only while no child it owns is advancing; a background build or test it
+    // started keeps it executing. Same real tree and sampling boundary.
+    let finished_at = now + chrono::Duration::minutes(290);
+    let done = serde_json::json!({"timestamp":finished_at.to_rfc3339(),"type":"event_msg","payload":{"type":"task_complete"}});
+    std::fs::write(&rollout, format!("{meta}\n{start}\n{done}\n")).unwrap();
+    std::fs::File::open(&rollout).unwrap().set_modified(finished_at.into()).unwrap();
+    let after = now + chrono::Duration::minutes(300);
+    status(after); // Warm the cache past the last sweep; no work since then.
+    tree.work("write");
+    let advancing = status(after);
+    assert_eq!(advancing.state, Liveness::Executing, "{}", advancing.detail());
+    assert_eq!(status(after).state, Liveness::Executing);
+    // The advance ages out of the stall window and the idle worker reads idle again.
+    let quiet = status(after + chrono::Duration::minutes(10));
+    assert_eq!(quiet.state, Liveness::WaitingForInput, "{}", quiet.detail());
+    // CPU burned by the harness itself is not an owned child advancing.
+    tree.work("harness");
+    let harness_only = status(after + chrono::Duration::minutes(11));
+    assert_eq!(harness_only.state, Liveness::WaitingForInput, "{}", harness_only.detail());
+    // A new session or a reused root PID gets a cold sample, so it cannot borrow the owned child's advance.
+    tree.work("write");
+    let later = after + chrono::Duration::minutes(12);
+    let mut foreign = tree.agent.clone();
+    foreign.factory_session = Some("finished-turn-session".into());
+    assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, later, 300).state, Liveness::Executing);
+    foreign.factory_session = tree.agent.factory_session.clone();
+    foreign.pid_starttime = Some(0);
+    assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, later, 300).state, Liveness::Executing);
+    assert_eq!(status(later).state, Liveness::Executing);
+    // A child that only burns CPU, writing nothing, is advancing too. Forwarding
+    // the command wrote to the pipes, so read that sample first; the last
+    // advance is then older than the stall window and only the CPU can say so.
+    tree.send("burn");
+    status(after + chrono::Duration::minutes(13));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let busy = loop {
+        let got = status(after + chrono::Duration::minutes(20));
+        if got.state == Liveness::Executing || std::time::Instant::now() > deadline { break got; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(busy.state, Liveness::Executing, "{}", busy.detail());
+    // The child exits while the worker stays alive and inactive: once the
+    // window passes with nothing advancing, it reads idle again.
+    tree.work("exit_leaf");
+    // The exit's own teardown CPU lands in the first sample after it; read that
+    // sample, then let the window pass with nothing running.
+    status(after + chrono::Duration::minutes(21));
+    let gone = status(after + chrono::Duration::minutes(30));
+    assert_eq!(gone.state, Liveness::WaitingForInput, "{}", gone.detail());
+    assert_eq!(status(after + chrono::Duration::minutes(31)).state, Liveness::WaitingForInput);
 }
 
 // cas-8ea3: a Claude worker's row names the `cas serve --backend` grandchild as

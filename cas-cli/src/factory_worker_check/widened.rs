@@ -16,6 +16,17 @@ pub(crate) struct Proof {
     pub reason: String,
 }
 
+pub(super) fn valid(proof: &Proof) -> bool {
+    let relative = |path: &str| !Path::new(path).is_absolute()
+        && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)));
+    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
+        && match &proof.scope {
+            Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
+            Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
+            Scope::Package(path) => proof.runner != "nextest" && relative(path),
+        }
+}
+
 pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) && javascript::test_match(path) { return Scope::File(path.into()); }
     let rust = path.ends_with(".rs");

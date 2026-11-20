@@ -221,6 +221,35 @@ pub(crate) fn for_retirement(cas_root: &Path, worktree: &Path) -> io::Result<Opt
     open(cas_root, worktree, false)
 }
 
+/// Identify a held lease's original live builder without adopting or changing
+/// its provenance. Inherited survivors alone cannot qualify for a recycle wait.
+pub(crate) fn builder_identity(cas_root: &Path, worktree: &Path) -> io::Result<Option<(u32, u64)>> {
+    let worktree = worktree.canonicalize()?;
+    let (record_path, lock_path) = paths(cas_root, &worktree)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&lock_path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(error) => return Err(error),
+    }
+    private_metadata(&record_path)?;
+    let record = serde_json::from_slice(&fs::read(&record_path)?).map_err(io::Error::other)?;
+    let lease = Lease {
+        file, record_path, lock_path, record, builder: false, removed_worktree: false,
+    };
+    if lease.record.worktree == worktree
+        && lease.revalidate(&crate::factory_scratch::worker_target_dir(&worktree))?
+        && owner_live(&lease.record)?
+    {
+        Ok(Some((lease.record.pid, lease.record.start)))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Caller has already validated the exact managed target/quarantine layout.
 /// The durable inode/generation record still has to match this actual target.
 pub(super) fn for_gc(cas_root: &Path, worktree: &Path, target: &Path) -> io::Result<Option<Lease>> {

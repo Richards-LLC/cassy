@@ -2920,9 +2920,17 @@ impl CasService {
                 )
             })?;
             // cas-bc25: a repair for recorded failing tests needs its class audit.
-            crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), task_id, None)
-                .map(drop)
-                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            if let Some(class) = crate::mcp::tools::core::task::repair_class::require_class(
+                task_store.as_ref(),
+                task_id,
+                req.class_audit.as_deref(),
+            )
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?
+            {
+                task_store
+                    .patch_execution_state(task_id, &serde_json::json!({"class_audit": class}))
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            }
             preassigned_task = Some(task.clone());
             if task.is_terminal() {
                 return Err(Self::error(
@@ -4429,7 +4437,13 @@ impl CasService {
         // process liveness still protects a running harness's unsaved work.
         let recovering_dead_worker = factory_session.is_some()
             && !super::agent_liveness::evaluate_supervision_liveness(&worker).is_live();
-        if snapshot.unsafe_worktree && !recovering_dead_worker {
+        // GH #2185: commits that are only local survive a recycle in the kept
+        // worktree and branch; only uncommitted files need the worker's checkpoint.
+        let only_commits_unpushed = snapshot
+            .clone_path
+            .as_deref()
+            .is_some_and(|path| dirty_file_count(path) == Ok(0));
+        if snapshot.unsafe_worktree && !only_commits_unpushed && !recovering_dead_worker {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
@@ -12629,9 +12643,9 @@ pub(crate) fn worker_liveness_for_agent(
         cli,
     );
     let mut process = super::worker_liveness::process_evidence(agent);
-    if super::worker_liveness::child_progress(agent, now)
-        .is_some_and(|at| (now - at).num_seconds() < stall_secs.max(0))
-    {
+    let owned_child_advanced = super::worker_liveness::child_progress(agent, now)
+        .is_some_and(|at| (now - at).num_seconds() < stall_secs.max(0));
+    if owned_child_advanced {
         process.cpu_busy = Some(true);
         process.detail.push_str("; owned child CPU/output advanced within the stall window");
     }
@@ -12662,6 +12676,9 @@ pub(crate) fn worker_liveness_for_agent(
         }
     }
     let mut observation = super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs);
+    if owned_child_advanced && observation.state == super::worker_liveness::Liveness::WaitingForInput {
+        observation.state = super::worker_liveness::Liveness::Executing;
+    }
     // A recycled harness can perform authenticated work before its new
     // transcript resolves or the first CPU delta is available. Use its own
     // local activity, never heartbeat or another worker's progress, in that

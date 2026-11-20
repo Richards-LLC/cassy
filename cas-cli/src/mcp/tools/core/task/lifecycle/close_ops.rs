@@ -6532,6 +6532,14 @@ impl CasCore {
             ),
             data: None,
         })?;
+        if requester.role == cas_types::AgentRole::Worker
+            && (requester.metadata.contains_key("train_owner")
+                || crate::factory_session_scope::WorkerHost::current(&self.cas_root, requester.factory_session.as_deref())
+                    .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?.is_some())
+        {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST,
+                "Worker hosts cannot issue verification; park the delivery for its train owner."));
+        }
         if requester.role != cas_types::AgentRole::Worker || requester.factory_session.is_none() {
             return Ok(requester.id);
         }
@@ -8072,6 +8080,11 @@ impl CasCore {
             }
         }
 
+        if let Ok(id) = self.get_registered_agent_id_read_only()
+            && let Ok(actor) = self.open_agent_store()?.get(&id) && actor.role != cas_types::AgentRole::Worker {
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
+                .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
+        }
         if let Err(message) = crate::qa_batch::release_close::validate_task(&self.cas_root, &task) {
             return Ok(Self::tool_error(message));
         }
@@ -9679,7 +9692,7 @@ impl CasCore {
             && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
-            match run_factory_branch_merge_gate_for_delivery(
+            let mut merge_outcome = run_factory_branch_merge_gate_for_delivery(
                 &task,
                 &req,
                 &resolved_parent_branch,
@@ -9689,7 +9702,14 @@ impl CasCore {
                     window: commit_receipt_window.as_ref(),
                 },
                 recovery_branch.as_deref(),
-            ) {
+            );
+            if crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task).is_some()
+                && matches!(merge_outcome, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_))
+            {
+                if let MergeStateGateOutcome::ProceedWithNote(note) = &merge_outcome { close_notes.record(&mut task,note); }
+                merge_outcome = MergeStateGateOutcome::Reject("MERGE REQUIRED\n\nWorker-host delivery requires its train owner's verification and close, including work already integrated into the target.".into());
+            }
+            match merge_outcome {
                 MergeStateGateOutcome::Proceed => {}
                 // cas-e74c: the delivery is proven integrated (or nothing on
                 // the lane belongs to this task) — record the residue note
@@ -9962,6 +9982,7 @@ impl CasCore {
                         ) {
                             if crate::factory_build_routing::routed_from(&task)
                                 .is_some_and(|source| source != cas_types::Agent::get_or_generate_machine_id())
+                                || crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task).is_some()
                             { gate_refusals.push(warning); }
                             else {
                                 publication_warning = format!("\nWARNING (non-blocking): {warning}");
@@ -10031,6 +10052,12 @@ impl CasCore {
                         keep_fresh_test_receipts(task_store.as_ref(), &task.id, portable);
                     }
 
+                    if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {
+                        if self.get_agent_id()? != worker.id { return Err(Self::error(ErrorCode::INVALID_REQUEST,crate::gates::tag("G-113","Only the registered host worker may publish its park"))); }
+                        if let Err(error) = crate::cloud::peer_mailbox::train_parks::publish_ready(&self.cas_root,&task,&worker) {
+                            return Ok(Self::tool_error(format!("Delivery is parked, but its owner notification is not durable: {error}. Retry close for {}.",task.id)));
+                        }
+                    }
                     // cas-619f: a user-facing delivery needs an independent
                     // QA pass before it may merge. Open (or re-find) the
                     // round for this exact tip and tell the worker where it
@@ -12255,6 +12282,12 @@ impl CasCore {
             ));
         }
 
+        if crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root,&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some()
+            || crate::cloud::peer_mailbox::train_parks::parked(&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some() {
+            let actor = self.open_agent_store()?.get(&self.get_agent_id()?).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e.to_string()))?;
+            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?;
+            crate::cloud::peer_mailbox::train_parks::require_admitted(&self.cas_root,&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?;
+        }
         // Proceed with close
         let now = chrono::Utc::now();
         // cas-062d: capture pre-close status for durable lifecycle push identity.
@@ -13917,6 +13950,10 @@ impl CasCore {
                     format!("merge_source requires a live registered supervisor: {error:?}"))
             })?.id
         };
+        let actor = self.open_agent_store()?.get(&supervisor_id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,error.to_string()))?;
+        crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
         // First-park integration cannot decline a park that has not happened.
         // Apply only the typed grant, preserving the current task revision's status.
         if grant_only {
@@ -16519,7 +16556,12 @@ fn anchored_delivery_content_gate_unbounded(
     // task-attributed content remains Unknown and therefore fail-closed.
     // cas-01dc: an ordinary empty checkpoint also carries its preceding
     // task delivery. Prove that attributed range, never emptiness itself.
-    let presence = if let Some(base) = crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch) {
+    let presence = if let Some((base, target)) = task_attribution::rebound_delivery_base(repo_path, parent_branch, anchor) {
+        // GH #2168: the fresh lane's first parent is already target content,
+        // not this task's delivery. A retained old start/receipt must not
+        // charge that imported history to the rebound delivery.
+        delivery_content_presence_on_target_for_paths(repo_path, anchor, &target, None, false, &[task_id], Some(&base))
+    } else if let Some(base) = crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch) {
         delivery_content_presence_from_base_on_target_for_task(repo_path, &base, anchor, anchor, parent_branch, task_id)
     } else if git_commit_parent_count(repo_path, anchor) >= 2
         || task_attribution::has_first_parent_tree_effect(repo_path, anchor) == Some(false)
@@ -29186,6 +29228,10 @@ pub fn retry() {}
             "supervisor-a-id",
             "the dispatch belongs to the worker's live supervisor, not the worker"
         );
+        worker.metadata.insert("train_owner".into(), "remote-owner-id".into());
+        agents.update(&worker).unwrap();
+        assert!(core.verification_dispatch_owner("worker-id").is_err());
+
     }
 
     /// GH #1171: a task whose parent epic branch was deleted (merged and

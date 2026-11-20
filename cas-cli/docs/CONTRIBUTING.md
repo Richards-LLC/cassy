@@ -1806,6 +1806,14 @@ external status executable through `CAS_TEST_CLAUDE_BIN` in test builds.
 
 ### Factory worker account selection
 
+For a repair with recorded failing tests, `factory action=spawn_workers`
+accepts `class_audit` alongside `task_id` and `spawn_brief`. Supply a structural
+nextest selector such as `test(ui::list::) | test(ui::grid::)` covering the
+recorded failures. Cassy validates and stores the effective selector before
+enqueueing the worker; omitting it retains a previously recorded selector.
+A repair without either selector is refused, and park requires passing capped
+receipts covering the stored class.
+
 `factory action=spawn_workers` accepts an optional `config_dir` for all
 workers in the request. Claude workers use the tilde-expanded directory as
 `CLAUDE_CONFIG_DIR`; an explicit parameter wins over the requesting
@@ -2869,6 +2877,13 @@ Stability uses the same receipt carry-forward as crate proof: documentation or
 changelog commits preserve it when no test/build inputs change. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
 even when its name is unchanged or its product change is already on the target.
+For widened Playwright proof, a failing journey is replayed at the merge base
+through the same `scripts/ci-test-impact.py::lane_attribute` engine as lane CI.
+Only matching runtime identities and normalized failure fingerprints count as
+inherited. Their evidence and a deterministic `release-repair` task link are
+recorded with the proof. A base pass, different failure or incomplete replay
+still refuses G-61; identified changed tests retain five-pass stability.
+
 
 Detached capped runs register their worker/task, output log and PID incarnation
 before returning. Their existing worker-check command inherits a hidden
@@ -2887,7 +2902,14 @@ TERM, INT or HUP sent to the printed detached PID forwards to its capped
 producer. The wrapper waits for the producer to drain its owned Cargo groups,
 release its leases and record completion before writing the exit trailer.
 
-Before recycling a worker, Cassy sends TERM to each of its registered,
+The recycle queue waits while a worker's own live detached producer holds its
+private target lease. Target provenance, producer PID incarnation, worker
+registration and factory session must match. The same request stays pending
+and resumes on a later daemon pass after release, without a failure notice.
+Unknown holders, completed producers and foreign-session runs retain a visible
+lease refusal before worker teardown.
+
+Before stopping a worker for recycle, Cassy sends TERM to each of its registered,
 fingerprinted detached producers and lets the capped runner drain its guard
 and Cargo descendants. It checks the inherited target lease before retiring
 the worker or killing its cgroup. A producer that cannot settle within eight

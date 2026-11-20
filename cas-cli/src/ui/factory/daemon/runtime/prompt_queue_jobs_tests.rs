@@ -1256,29 +1256,33 @@ fn cas_062b_a_turn_parked_behind_the_pane_draft_publishes_its_hold() {
     assert_eq!((delivered[0].state.as_str(), delivered[0].pane_hold.as_deref()), ("delivered", None));
 }
 
-/// GH #2227: a stamp the store writer has not reached at the flush deadline
-/// refuses reexec, and the refusal names it and the stamp queued behind it.
-/// Once the writer drains, the same runtime flushes.
+/// GH #2227: stamps the store writer has not reached at the flush deadline
+/// refuse reexec, and the refusal names every one of them, past any short
+/// list. Once the writer drains, the same runtime flushes.
 #[tokio::test(flavor = "current_thread")]
 async fn reexec_flush_refusal_names_writes_stuck_behind_the_store_writer_gh2227() {
     let (_root, cas_dir) = project();
-    let first = enqueue(&cas_dir, "kind-spider-76", "first");
-    let second = enqueue(&cas_dir, "kind-spider-76", "second");
+    let rows: Vec<i64> = (0..10).map(|n| enqueue(&cas_dir, "kind-spider-76", &format!("row {n}"))).collect();
     let writer = TestWriter::start(true);
     let mut jobs = jobs_on(&writer);
-    for row in [first, second] {
-        jobs.stamp(&cas_dir, row, "kind-spider-76", QueueStamp::Dropped { detail: None });
+    for row in &rows {
+        jobs.stamp(&cas_dir, *row, "kind-spider-76", QueueStamp::Dropped { detail: None });
     }
 
     let error = jobs.flush_for_reexec(&cas_dir, Duration::from_millis(200)).await.unwrap_err();
     let unflushed = error.downcast_ref::<UnflushedJobs>().expect("a typed flush refusal");
-    let stuck = format!("QueueStamp:{first}:kind-spider-76");
-    let queued = format!("QueueStamp:{second}:kind-spider-76");
+    let key = |row: &i64| format!("QueueStamp:{row}:kind-spider-76");
     assert!(unflushed.running.iter().any(|job| job.lane == Lane::Write
-        && job.kind == "QueueStamp" && job.key == stuck && job.waiting_for_writer), "{error}");
-    assert!(unflushed.waiting.iter().any(|job| job.kind == "QueueStamp" && job.key == queued), "{error}");
+        && job.kind == "QueueStamp" && job.key == key(&rows[0]) && job.waiting_for_writer), "{error}");
+    let mut waiting: Vec<&str> = unflushed.waiting.iter().map(|job| job.key.as_str()).collect();
+    waiting.sort_unstable();
+    let mut expected: Vec<String> = rows[1..].iter().map(key).collect();
+    expected.sort_unstable();
+    assert_eq!(waiting, expected, "{error}");
     let text = error.to_string();
-    assert!(text.contains(&stuck) && text.contains(&queued), "{text}");
+    for row in &rows {
+        assert!(text.contains(&key(row)), "{text}");
+    }
 
     writer.open();
     jobs.flush_for_reexec(&cas_dir, Duration::from_secs(5)).await.unwrap();

@@ -1000,9 +1000,6 @@ pub(crate) struct UnflushedJobs {
     pub(crate) waiting: Vec<WaitingJob>,
 }
 
-/// Waiting jobs a refusal names before it only counts the rest.
-const UNFLUSHED_NAMED_WAITING: usize = 8;
-
 impl std::fmt::Display for UnflushedJobs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Durable daemon jobs did not flush before reexec (waited {:.1}s):", self.waited.as_secs_f64())?;
@@ -1013,11 +1010,8 @@ impl std::fmt::Display for UnflushedJobs {
                 write!(f, " {:?} {} {} running {:.1}s;", job.lane, job.kind, job.key, job.age.as_secs_f64())?;
             }
         }
-        for job in self.waiting.iter().take(UNFLUSHED_NAMED_WAITING) {
+        for job in &self.waiting {
             write!(f, " {:?} {} {} queued {:.1}s;", job.lane, job.kind, job.key, job.age.as_secs_f64())?;
-        }
-        if let Some(more) = self.waiting.len().checked_sub(UNFLUSHED_NAMED_WAITING).filter(|n| *n > 0) {
-            write!(f, " {more} more queued;")?;
         }
         write!(f, " the session keeps running unchanged; retry reexec once these jobs finish")
     }
@@ -1939,16 +1933,25 @@ impl QueueJobs {
     pub(crate) async fn flush_for_reexec(&mut self, cas_dir: &Path, timeout: Duration) -> anyhow::Result<()> {
         self.settle_injects(cas_dir);
         let started = Instant::now();
+        let lanes = [Lane::Read, Lane::Write, Lane::Blocking, Lane::External];
         loop {
             self.apply_completions();
-            let Exec::Lanes(runtime) = &self.exec else { return Ok(()) };
-            let lanes = [Lane::Read, Lane::Write, Lane::Blocking, Lane::External];
-            let running: Vec<RunningJob> =
-                lanes.iter().filter_map(|lane| runtime.lane_stats(*lane).running).collect();
-            let waiting: Vec<WaitingJob> =
-                lanes.iter().flat_map(|lane| runtime.waiting_jobs(*lane)).collect();
-            if running.is_empty() && waiting.is_empty() { return Ok(()); }
+            // Idle is decided per lane from one snapshot of its running job
+            // and its queue, so a job moving between them is never missed.
+            let idle = match &self.exec {
+                Exec::Inline(done) => done.is_empty(),
+                Exec::Lanes(runtime) => lanes.iter().all(|lane| {
+                    let stats = runtime.lane_stats(*lane);
+                    stats.running.is_none() && stats.queued == 0
+                }),
+            };
+            if idle { return Ok(()); }
             if started.elapsed() >= timeout {
+                let Exec::Lanes(runtime) = &self.exec else {
+                    anyhow::bail!("Durable daemon jobs did not flush before reexec");
+                };
+                let running = lanes.iter().filter_map(|lane| runtime.lane_stats(*lane).running).collect();
+                let waiting = lanes.iter().flat_map(|lane| runtime.waiting_jobs(*lane)).collect();
                 return Err(UnflushedJobs { waited: started.elapsed(), running, waiting }.into());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

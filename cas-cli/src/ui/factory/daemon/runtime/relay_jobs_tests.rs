@@ -494,6 +494,32 @@ async fn c4491f_relay_write_is_never_given_up() {
 async fn cas_e37f_progress_watchdog_reads_without_the_store_writer() {
     use super::relay_jobs::{Relay, RelayOutput};
     let (_dir, cas_dir) = project_with_worker();
+    // A parked delivery held for a later train: its completion edges need a
+    // git containment check, which must also run before the writer.
+    let mut supervisor = cas_types::Agent::new("s-1".into(), "relay-supervisor".into());
+    supervisor.role = cas_types::AgentRole::Supervisor;
+    supervisor.factory_session = Some("provision-test".into());
+    crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+    let sha = "a".repeat(40);
+    let mut held = cas_types::Task::new("cas-held".into(), "Held delivery".into());
+    held.status = cas_types::TaskStatus::AwaitingMerge;
+    held.assignee = Some("w-1".into());
+    held.notes = "[2026-11-20 10:00] DECISION HOLD: ships on the next train".into();
+    held.deliverables.factory_branch_anchor = Some(sha.clone());
+    held.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector: "project:relay".into(), target_branch: "main".into(),
+    });
+    crate::store::open_task_store(&cas_dir).unwrap().add(&held).unwrap();
+    // Record every git call, then run the real git.
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("git.log");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let real = std::env::split_paths(&path).map(|dir| dir.join("git")).find(|git| git.is_file()).unwrap();
+    let fake = bin.path().join("git");
+    std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n", log.display(), real.display())).unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("PATH", std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&path))).unwrap());
     let mut daemon = daemon_on_lanes(&cas_dir);
     let (release, wait) = std::sync::mpsc::channel::<()>();
     assert!(daemon.relay_jobs.submit_write(&mut daemon.queue_jobs, "busy-writer", None, move || {
@@ -510,8 +536,13 @@ async fn cas_e37f_progress_watchdog_reads_without_the_store_writer() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(daemon.relay_jobs.writing("progress-watchdog"), "only its writes queue behind the writer");
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(calls.lines().any(|call| call.starts_with(&format!("merge-base --is-ancestor {sha} "))),
+        "the held delivery's containment check ran before the writer was free: {calls:?}");
     release.send(()).unwrap();
     settle_relays(&mut daemon).await;
+    let armed = crate::store::open_reminder_store(&cas_dir).unwrap().list_for_task("cas-held").unwrap();
+    assert!(armed.iter().any(|row| row.trigger_event.as_deref() == Some("branch_contained_in")), "{armed:?}");
 }
 
 /// cas-4491f review M3: a batch's writes are applied before its reads, and a

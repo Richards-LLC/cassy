@@ -2,10 +2,12 @@ title: Replacement spawns preserve inherited work and bind their own source befo
 tasks: [cas-ace6]
 journeys: [FACTORY-SPAWN, FACTORY-CLOSE, FACTORY-MERGE]
 invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY]
-reproduction:
-  - Leave a recorded task source and delivery anchor owned by a departed worker.
-  - Preassign a replacement with spawn_workers task_id and resume the inherited delivery on its owned lane.
-  - Start and close through MCP without manual branch approval; the recorded and parked branches must name the replacement lane.
-  - Return an already parked mismatched source with request_changes, approve rebind_branch, then start and park again.
-regression: ui::factory::app::render_and_ops::epic_workers::tests::preassigned_worker_takeover_starts_parks_and_recovers_cas_ace6
-safety: Missing or divergent previous source tips must still require supervisor recovery; old refs and anchors remain evidence.
+statement: >-
+  Preassign a task with a departed assignee and recorded delivery to a replacement
+  worker, resume the inherited delivery, then start and close without manual
+  branch approval. The recorded source and parked branch must name the replacement
+  lane, retaining previous refs and anchors. Recover an already parked mismatched
+  source with request_changes followed by rebind_branch, inbox_poll, start and
+  close. Missing or divergent previous source tips still need supervisor recovery.
+  Regression: preassigned_worker_takeover_starts_parks_and_recovers_cas_ace6.
+fixed_by: cas-ace6

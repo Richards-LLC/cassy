@@ -2967,9 +2967,24 @@ impl CasCore {
                         .unwrap_or_else(|| {
                             crate::factory_isolation::expected_worker_branch(&worker.name)
                         });
+                    // A preassigned replacement can already carry the retired
+                    // worker's delivery. Keep that owned lane only when the
+                    // same ancestry proof used at persistence permits succession;
+                    // a fresh queued successor still gets its own target lane.
+                    let inherited_reassignment = queued_start
+                        && task.status == TaskStatus::Open
+                        && task.assignee.as_deref() == Some(worker.name.as_str())
+                        && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+                            start.assignee != worker.name && start.branch != worker_branch
+                                && Some(&start.work_target) == task.deliverables.work_target.as_ref()
+                        })
+                        && super::rebind::reassigned_branch_start(
+                            &self.cas_root, worker_checkout, &task, &worker, &worker_branch, queued_start,
+                        ).is_some();
                     // GH #1353: both the reusable and per-task parked refs
                     // must remain stable while the next task starts.
-                    let parked_branch_note = if (queued_start || detached_checkout) && task.status == TaskStatus::Open {
+                    let parked_branch_note = if (queued_start || detached_checkout)
+                        && task.status == TaskStatus::Open && !inherited_reassignment {
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
                             worker_checkout, &worker.name, &task.id, target_branch,

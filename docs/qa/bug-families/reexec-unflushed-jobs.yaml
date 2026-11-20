@@ -1,0 +1,3 @@
+title: A refused factory reexec names every unfinished daemon job and gives the next action
+statement: When `cas factory reexec` is refused because daemon jobs did not flush, the refusal names every running and waiting job by lane, kind, key and age, says when a write is still waiting for the store writer, and says the session keeps running unchanged until a retry. When store writes are still queued, it gives their count. A reexec never proceeds while any job is unfinished.
+tasks: [cas-9ad3]

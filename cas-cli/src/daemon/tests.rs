@@ -689,7 +689,7 @@ fn retention_prunes_superseded_session_ends_and_keeps_live_succession_cas_3ade()
     db.execute(
         "INSERT INTO agent_session_ends
            (id, agent_id, registered_at, machine_id, role, reason, payload, ended_at)
-         VALUES ('newest-standard', 'x2', ?1, 'm', 'standard', 'exit', '{"name":"x"}', ?2)",
+         VALUES ('newest-standard', 'x2', ?1, 'm', 'standard', 'exit', json_object('name', 'x'), ?2)",
         rusqlite::params![live_epoch, days_ago(20)],
     )
     .unwrap();

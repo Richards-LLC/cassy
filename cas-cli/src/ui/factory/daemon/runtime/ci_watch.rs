@@ -2009,7 +2009,7 @@ mod tests {
                     task: task.id.clone(), worktree: "worker".into(), branch: "factory/worker".into(),
                     sha: FIXTURE_SHA.into(), ci_sha: FIXTURE_SHA.into(), target: "main".into(),
                     repo: project.clone(), supervisor: owner.id.clone(), session: "rerun-session".into(),
-                    force: false, allow_trunk: false, cleanup: None, armed_at: Some(chrono::Utc::now()), ci_rerun: false,
+                    force: false, allow_trunk: false, cleanup: None, armed_at: Some(chrono::Utc::now()), ci_rerun: Vec::new(),
                 }).unwrap();
             }
             for _ in 0..2 {

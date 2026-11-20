@@ -1,0 +1,3 @@
+title: An armed merge re-runs a cancelled lane run once and keeps waiting on the original cancellation until the re-run reports
+tasks: [cas-fef6]
+journeys: [FACTORY-MERGE]

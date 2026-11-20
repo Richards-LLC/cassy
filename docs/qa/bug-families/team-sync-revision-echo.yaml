@@ -1,0 +1,3 @@
+title: A confirmed team write retires the queued personal copy, and a pull that changes only the revision records no new conflict
+statement: When a project syncs as a team, the first team write the cloud confirms clears the matching personal row from the sync queue, even though the push carried the row's base revision; that row is not sent again on later cycles. A pull that replaces a local row with the same content under a newer revision adds no second row to the conflict journal.
+tasks: [cas-258e]

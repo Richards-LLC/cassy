@@ -1582,6 +1582,30 @@ fn combine_presence(proofs: Vec<DeliveryContentPresence>) -> DeliveryContentPres
     }
 }
 
+/// A rebound lane starts on the target and merges the old delivery as its
+/// second parent. Find its fork with the target *before* integration: after
+/// landing, merge-base(tip, target) is the tip itself. Only a target-first
+/// merge qualifies; worker-first target-sync merges keep historical proof.
+/// Returns the base and the immutable target used to establish it.
+pub(super) fn rebound_delivery_base(repo: &Path, target: &str, tip: &str) -> Option<(String, String)> {
+    let tip = resolve_branch_sha(repo, &format!("{tip}^{{commit}}"))?;
+    let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", &tip])?;
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let [_, first, _] = parents.as_slice() else { return None };
+    let origin = format!("origin/{target}");
+    let target = if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, &tip, &origin) {
+        origin
+    } else { target.to_string() };
+    let target = resolve_branch_sha(repo, &format!("{target}^{{commit}}"))?;
+    let landings = git_text(repo, &[
+        "rev-list", "--first-parent", "--ancestry-path", "--reverse", "--parents",
+        &format!("{tip}..{target}"),
+    ])?;
+    let before = landings.lines().next()?.split_whitespace().nth(1)?;
+    let base = git_text(repo, &["merge-base", &tip, before])?;
+    (base == *first).then_some((base, target))
+}
+
 /// Prove a merge or empty checkpoint delivery from the task's attributed
 /// content commits rather than from the tip itself.
 ///

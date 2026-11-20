@@ -583,6 +583,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         older_than_secs: None,
         isolate: None,
         spawn_brief: None,
+        class_audit: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,
@@ -675,6 +676,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         config_dir: None,
         workers: None,
         spawn_brief: None,
+        class_audit: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,
@@ -3682,45 +3684,6 @@ async fn test_clear_context_unconfirmed_reset_names_action_without_claiming_succ
 
     assert_eq!(env.prompt_queue().peek_all(10).unwrap().len(), 1);
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
-}
-
-/// cas-a622: unsaved work still refuses a recycle, and the refusal names what
-/// to do instead of suggesting a `force=true` that recycling never honours.
-#[tokio::test]
-async fn test_recycle_worker_refuses_unpushed_commits_without_suggesting_force_cas_a622() {
-    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622-unpushed")]);
-    let env = FactoryTestEnv::new();
-    let worker_path = init_pushed_worker_repo(&env, "ahead-worker");
-    std::fs::write(worker_path.join("local.txt"), "not pushed\n").expect("write");
-    for args in [&["add", "local.txt"][..], &["commit", "-qm", "local only"][..]] {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&worker_path)
-            .status()
-            .expect("git");
-        assert!(status.success());
-    }
-    register_codex_worker_at(&env, "ahead-worker", "session-a622-unpushed", &worker_path);
-
-    for force in [None, Some(true)] {
-        let mut req = factory_req("recycle_worker");
-        req.target = Some("ahead-worker".to_string());
-        req.force = force;
-        let error = env
-            .service
-            .factory_request(Parameters(req))
-            .await
-            .expect_err("an unpushed worker must not be recycled");
-        assert!(error.message.contains("unpushed_commits=1"), "{error:?}");
-        assert!(
-            !error.message.contains("force=true"),
-            "the refusal must not suggest a flag that cannot work: {error:?}"
-        );
-    }
-    assert!(
-        env.spawn_queue().peek(10).expect("peek queue").is_empty(),
-        "refusal must not queue a lifecycle action"
-    );
 }
 
 #[tokio::test]
@@ -8974,6 +8937,7 @@ fn coord_msg(
         config_dir: None,
         workers: None,
         spawn_brief: None,
+        class_audit: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,

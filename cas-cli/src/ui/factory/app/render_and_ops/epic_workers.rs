@@ -4198,7 +4198,7 @@ impl FactoryApp {
     /// old server may still be alive) must not release its first wake (GH #2128).
     fn forget_tools_listed(&self, worker: &str) {
         if let Some(session) = self.factory_session() {
-            crate::factory_tools_ready::clear(self.cas_dir(), session, worker);
+            crate::factory_tools_ready::await_listing(self.cas_dir(), session, worker);
         }
     }
 
@@ -7987,7 +7987,7 @@ mod tests {
         let mut app = FactoryApp::for_test_at(cas_dir.clone());
         app.set_factory_session("handoff".into());
         let name = "codex-worker";
-        // A predecessor's readiness record is cleared when the name launches again.
+        // A predecessor's readiness record is replaced by an awaiting one when the name launches again.
         let stale = cas_dir.join("factory-tools-ready").join("handoff").join(name);
         std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
         std::fs::write(&stale, std::process::id().to_string()).unwrap();
@@ -8006,9 +8006,9 @@ mod tests {
             .prepare("SELECT transport_delivered_at FROM prompt_queue WHERE target = ?").unwrap()
             .query_map([name], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(
-            (argv.contains(cas_pty::WORKER_STARTUP_BRIEF_PREFIX.trim()), delivered.len(), delivered.iter().any(Option::is_some), stale.exists()),
+            (argv.contains(cas_pty::WORKER_STARTUP_BRIEF_PREFIX.trim()), delivered.len(), delivered.iter().any(Option::is_some), crate::factory_tools_ready::tools_listed(&cas_dir, "handoff", name, |_| true)),
             (false, 1, false, false),
-            "(launched with a startup brief argument, spawn rows, row marked delivered, stale readiness record kept); argv: {argv}"
+            "(launched with a startup brief argument, spawn rows, row marked delivered, tools listed before the launch lists them); argv: {argv}"
         );
         // The readiness record is written by the MCP child from these, so they must reach it.
         for entry in [format!("mcp_servers.cs.env.CAS_AGENT_NAME=\"{name}\""), "mcp_servers.cs.env.CAS_AGENT_ROLE=\"worker\"".to_string()] {

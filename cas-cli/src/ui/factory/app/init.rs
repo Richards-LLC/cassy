@@ -209,8 +209,9 @@ impl FactoryApp {
             .ok()
             .map(|stores| stores.with_project_id(crate::cloud::resolve_canonical_id(&cas_dir)));
 
-        let mut mux = Mux::factory(mux_config)?;
-        mux.focus(&supervisor_name);
+        let worker_host = config.worker_host.is_some();
+        let mut mux = if worker_host { Mux::worker_host(mux_config)? } else { Mux::factory(mux_config)? };
+        if !worker_host { mux.focus(&supervisor_name); }
 
         let mut event_detector =
             DirectorEventDetector::new(worker_names.clone(), supervisor_name.clone());
@@ -275,6 +276,7 @@ impl FactoryApp {
             theme,
             worker_names,
             supervisor_name,
+            worker_host,
             factory_session: None,
             session_created_at: None,
             supervisor_stall_after_secs: config.stall_after_secs,
@@ -359,14 +361,14 @@ impl FactoryApp {
             operator_draft_hold: false,
         };
 
-        queue_supervisor_intro_prompt(
+        if !worker_host { queue_supervisor_intro_prompt(
             app.cas_dir(),
             &supervisor_name_for_prompt,
             config.supervisor_cli,
             &app.worker_names,
             app.lead_session_id(),
             None,
-        );
+        ); }
         for worker in &app.worker_names {
             queue_codex_worker_intro_prompt(app.cas_dir(), worker, config.worker_cli);
         }
@@ -394,6 +396,7 @@ impl FactoryApp {
         recording_session_id: Option<String>,
         lead_session_id: Option<String>,
         project_dir: PathBuf,
+        worker_host: bool,
     ) -> anyhow::Result<Self> {
         let mut event_detector =
             DirectorEventDetector::new(worker_names.clone(), supervisor_name.clone());
@@ -471,6 +474,7 @@ impl FactoryApp {
             theme,
             worker_names: worker_names.clone(),
             supervisor_name: supervisor_name.clone(),
+            worker_host,
             factory_session: None,
             session_created_at: None,
             supervisor_stall_after_secs: cas_config.factory().stall_after_secs,
@@ -555,14 +559,14 @@ impl FactoryApp {
             operator_draft_hold: false,
         };
 
-        queue_supervisor_intro_prompt(
+        if !worker_host { queue_supervisor_intro_prompt(
             app.cas_dir(),
             &supervisor_name,
             supervisor_cli,
             &worker_names,
             app.lead_session_id(),
             None,
-        );
+        ); }
         for worker in &worker_names {
             queue_codex_worker_intro_prompt(app.cas_dir(), worker, worker_cli);
         }
@@ -738,6 +742,7 @@ impl FactoryApp {
             theme: ActiveTheme::default(),
             worker_names,
             supervisor_name: supervisor,
+            worker_host: false,
             factory_session: None,
             session_created_at: None,
             supervisor_stall_after_secs: 600,

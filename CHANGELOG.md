@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.40.0] - 2026-11-20
+
+### Fixed — Factory
+
+- **A worker running its own build or test no longer reads as idle** — Was: `worker_status` and the director read a worker whose turn had finished as waiting for input even while its own background build or test was burning CPU, so a supervisor interrupted three busy workers for nothing. Now: a finished turn whose owned child process is advancing reads as executing, with no idle relay; a worker with nothing advancing still reads as waiting for input.
+- **Idle Codex workers get their messages after a Cassy upgrade** — Was: after the factory daemon upgraded in place, every running Codex worker's messages, urgent ones included, stayed held as "Cassy tools not listed yet" until the worker was recycled or someone typed in its pane. Now: only a worker the daemon has just launched waits for its tools; a worker that was already running gets its messages.
+- **recycle_worker no longer refuses a clean worker with local-only commits** — Was: `recycle_worker` and `clear_context` refused a worker whose worktree was clean but had unpushed commits, and the supervisor could neither push them nor recover the worker without a forced shutdown. Now: the recycle goes ahead, and the worktree, the branch and its commits are kept. Uncommitted files still refuse.
+- **A message typed into a Codex worker's pane records a fired wake** — Was: a message typed straight into a Codex worker's pane was recorded as `nudge_not_attempted`, so `message_status` could not tell a delivered message from one Cassy never tried to deliver. Now: a completed pane write records `nudge_fired`, and the worker's turn-start hook still records whether the message was read.
+- **Recycle waits for its own build** — Worker recycling stays queued while that worker's verified detached build holds its target lease, then continues automatically when it releases. Unknown, completed and foreign-session holders still report a failure.
+- **Carried deliveries retain the correct content baseline** — Was: closing a delivery rebound onto a newer train could report an inherited, unchanged file as dropped after the target advanced. Now: target-first carry-over merges prove their own changes from the fork with the target before integration. Missing delivery content still refuses close with G-56.
+- **Attribute inherited web failures before park** — A widened Playwright proof now replays failing journeys at the merge base using lane CI's attribution engine. An identical failure records its evidence and a release repair instead of blocking the delivery. Failures that pass at base, differ there, or cannot be attributed still block under G-61.
+- **Repair spawn class selector** — Supervisors can pass `class_audit` with a repair worker's `task_id` and `spawn_brief`. The effective selector is validated and saved before the worker is queued, so its park proof covers the recorded failure class.
+
+### Added — Commander
+
+- **Standby and Resume** — Put a supervisor on standby from Commands with one confirmation. Its conversation shows Standby while the session is parked; Resume sends an operator message to restore its workers and handoff. The badge follows the session's actual standby marker.
+
+### Fixed — Release trains
+
+- **Reject colliding gate IDs before merge publication** — Manual merges and automatic CI retries validate the combined Cassy gate registry with the build script's shared checker before pushing. A duplicate ID refuses with G-160 and leaves the train at its prior tip.
+
+### Fixed — Factory focus
+
+- **Keep supervisor focus on the active train** — Merges and proof-scope retargets restore an unset or retired epic pin; a release cut moves focused sessions to its successor, and automatic handoff restore re-pins its saved train. A peer's release-train focus stays local and cannot create or renew the train owner's Cloud claim.
+
+### Added — Factory
+
+- **One train owner across machines** — Start a peer factory with `--worker-host <train>` to run workers under the train owner's session without a local supervisor. Workers send status, blockers and parked deliveries directly to that owner; the owner alone verifies, merges, returns work, waives QA and closes deliveries. Portable artifact and test-receipt claims are checked before remote admission, and obsolete peer-supervisor approval and merge-intent relays no longer grant authority.
+
+### Fixed — CLI
+
+- **`cas factory worker-check --cas-root` no longer claims CAS_ROOT wins** — Was: with CAS_ROOT naming another store, the capped runner printed the "CAS_ROOT supplies the default store" notice although it locks and writes its receipts in the store named by `--cas-root`. Now: the runner names its store explicitly, so the notice stays silent for it; other commands without a store choice still print it.
+
 ## [4.39.0] - 2026-11-19
 
 ### Fixed — CLI

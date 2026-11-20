@@ -1991,6 +1991,35 @@ bug_families:
     tasks: [cas-4fd6]
     journeys: [FACTORY-MERGE, FACTORY-CLOSE]
     invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+  codex-wake-and-local-commit-recycle:
+    title: An idle Codex worker the daemon kept across an in-place upgrade gets its messages, and a recycle keeps a clean worktree's local-only commits
+    tasks: [cas-3568]
+    journeys: [FACTORY-SUPERVISE]
+  merge-combined-gate-registry:
+    title: Disjoint deliveries with duplicate gate IDs must not publish onto a moved train
+    tasks: [cas-1273]
+    journeys: [FACTORY-SUPERVISE]
+  rebound-delivery-content-baseline:
+    title: Rebound carry-overs exclude unchanged target content from G-56 while genuine delivery loss still refuses close
+    tasks: [cas-7721]
+    journeys: [FACTORY-SUPERVISE]
+  recycle-own-build-lease:
+    title: Worker recycling waits for its own detached build lease and exposes unverified holders
+    tasks: [cas-63ed]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+    invariants: [FACTORY-WORKER-RESPAWN]
+  train-focus-continuity:
+    title: Train focus survives merge, cut and handoff without transferring a peer's Cloud claim
+    tasks: [cas-4680]
+    journeys: [FACTORY-SUPERVISE]
+  train-owner-worker-host-delivery:
+    title: One train owner admits remote worker deliveries and returns durable results
+    tasks: [cas-b674]
+    journeys: [FACTORY-SUPERVISE]
+  worker-liveness-owned-child-advancing:
+    title: A worker with an advancing owned child is not reported as waiting for input
+    tasks: [cas-0125]
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

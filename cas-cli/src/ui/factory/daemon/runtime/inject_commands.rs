@@ -74,7 +74,6 @@ pub(crate) enum UrgentInject {
     /// Normal body-bearing PTY row awaiting payload AND submit receipts.
     NormalRow {
         delivery: Box<DirectDelivery>,
-        inline_supervisor: bool,
     },
     /// A direct urgent queue row; its wake probe opens once it is typed.
     Row {
@@ -235,21 +234,8 @@ impl FactoryDaemon {
             let result: anyhow::Result<cas_mux::InjectOutcome> =
                 completion.result.map_err(Into::into);
             match owner {
-                UrgentInject::NormalRow {
-                    delivery,
-                    inline_supervisor,
-                } => {
-                    let report = result.map(|outcome| {
-                        let mut report = NudgeReport::not_attempted(
-                            outcome,
-                            super::delivery::DeliveryChannel::Pty,
-                            super::delivery::PTY_DELIVERY_WAKE_DETAIL,
-                        );
-                        if inline_supervisor && outcome == cas_mux::InjectOutcome::Delivered {
-                            report.wake = cas_store::WakeAttempt::Fired;
-                        }
-                        report
-                    });
+                UrgentInject::NormalRow { delivery } => {
+                    let report = result.map(NudgeReport::pty_delivered);
                     self.finish_direct_delivery(*delivery, report);
                 }
                 UrgentInject::Row {

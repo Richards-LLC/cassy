@@ -7,6 +7,8 @@ pub(crate) struct AppHandoff {
     pub(crate) cas_dir: PathBuf,
     project_dir: PathBuf,
     pub(crate) session: String,
+    #[serde(default)]
+    pub(crate) worker_host: bool,
     pub(crate) mux: cas_mux::MuxHandoff,
     supervisor_name: String,
     worker_names: Vec<String>,
@@ -95,6 +97,7 @@ impl FactoryApp {
         Ok(AppHandoff {
             cas_dir: self.cas_dir.clone(),
             project_dir: self.project_dir.clone(),
+            worker_host: self.worker_host,
             session: self
                 .factory_session
                 .clone()
@@ -165,6 +168,7 @@ impl FactoryApp {
             state.recording_session_id.clone(),
             state.lead_session_id.clone(),
             state.project_dir.clone(),
+            state.worker_host,
         )?;
         app.set_factory_session(state.session.clone());
         app.session_to_pane = state.session_to_pane.clone();

@@ -106,23 +106,25 @@ pub(super) fn enqueue_and_send(
     message: PeerSend,
     recipient: &str,
 ) -> Result<SendReceipt, PeerSendError> {
-    enqueue_with_recovery(root, message, recipient, false, false)
+    enqueue(root, message, recipient, false)
 }
 
 /// Scheduler feedback uses the existing retry duty without network I/O on the
 /// queue-selection lane. Persist even if credentials need to recover first.
 pub(crate) fn enqueue_feedback(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
-    enqueue_with_recovery(root, message, recipient, false, true)
+    enqueue(root, message, recipient, true)
 }
 
-/// Publication may re-attempt an abandoned receipt after the peer recovers.
-/// Keep the original logical send key; ordinary messages retain their policy.
-pub(super) fn enqueue_premerge_receipt(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
-    enqueue_with_recovery(root, message, recipient, true, false)
+pub(crate) fn enqueue_notice(root: &Path, message: PeerSend, recipient: &str) -> Result<i64, String> {
+    let (sender, key) = (message.sender_agent_id.clone(), message.dedupe_key.clone());
+    enqueue_feedback(root, message, recipient).map_err(|error| error.to_string())?;
+    let conn = connection(root).map_err(|error| error.to_string())?;
+    conn.query_row("SELECT id FROM peer_message_outbox WHERE sender_agent_id=?1 AND json_extract(payload,'$.dedupe_key')=?2",
+        params![sender, key], |row| row.get(0)).map_err(|error| error.to_string())
 }
 
-fn enqueue_with_recovery(
-    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool, defer_send: bool,
+fn enqueue(
+    root: &Path, mut message: PeerSend, recipient: &str, defer_send: bool,
 ) -> Result<SendReceipt, PeerSendError> {
     // Refuse before persisting: no login means no retry promise.
     if !defer_send {
@@ -148,20 +150,15 @@ fn enqueue_with_recovery(
         let mut conn = connection(root)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !message.dedupe_key.is_empty() {
-            let existing: Option<(i64, Option<String>, String)> = tx.query_row(
-                "SELECT id,cloud_id,state FROM peer_message_outbox
+            let existing: Option<(i64, Option<String>)> = tx.query_row(
+                "SELECT id,cloud_id FROM peer_message_outbox
                  WHERE (sender_agent_id=?1 OR ?4)
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?2
                  AND (json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 OR ?4) LIMIT 1",
                 params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id, message.dedupe_key.starts_with("build-route:")],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
-            if let Some((id, cloud_id, state)) = existing {
-                if recover_abandoned && state == "abandoned" && cloud_id.is_none() {
-                    let now = chrono::Utc::now().timestamp();
-                    tx.execute("UPDATE peer_message_outbox SET state='pending',created_at=?2,next_attempt_at=?2,last_error=NULL WHERE id=?1 AND state='abandoned'", params![id,now])?;
-                    tx.commit()?;
-                }
+            if let Some((id, cloud_id)) = existing {
                 return Ok((id, cloud_id));
             }
         }

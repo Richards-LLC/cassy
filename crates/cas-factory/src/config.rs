@@ -232,6 +232,8 @@ pub struct FactoryConfig {
     pub worker_names: Vec<String>,
     /// Custom supervisor name (optional)
     pub supervisor_name: Option<String>,
+    /// Train whose remote owner directs this worker-only host.
+    pub worker_host: Option<String>,
     /// Supervisor CLI (codex, claude, or pi)
     pub supervisor_cli: cas_mux::SupervisorCli,
     /// Worker CLI (codex, claude, or pi)
@@ -294,6 +296,7 @@ impl Default for FactoryConfig {
             workers: 0, // Supervisor-only by default for EPIC planning
             worker_names: vec![],
             supervisor_name: None,
+            worker_host: None,
             supervisor_cli: cas_mux::SupervisorCli::Claude,
             worker_cli: cas_mux::SupervisorCli::Claude,
             supervisor_model: None,

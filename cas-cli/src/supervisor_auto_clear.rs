@@ -64,6 +64,8 @@ enum Phase {
 struct State {
     agent_id: String,
     harness_session: String,
+    #[serde(default)]
+    focus_epic_id: Option<String>,
     trigger_tokens: u64,
     /// Old cumulative-budget state must not cause a clear after upgrading.
     #[serde(default)]
@@ -472,6 +474,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
             State {
                 agent_id: turn.agent.id.clone(),
                 harness_session: turn.harness_session.to_string(),
+                focus_epic_id: None,
                 trigger_tokens,
                 latest_call: true,
                 budget,
@@ -510,6 +513,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
     state.blockers.clear();
     match state.phase.clone() {
         Phase::Deferred => {
+            state.focus_epic_id = crate::ops::fleet::pinned_epic(turn.factory_session);
             let handoff_id = save_handoff(root, turn.agent, &state)?;
             let notice = format!(
                 "Context budget: your latest call at {} used {} input tokens; the context threshold is {}. Cassy saved your handoff as {handoff_id} \
@@ -575,12 +579,15 @@ pub(crate) fn poll(root: &Path, queue: &dyn PromptQueueStore, agent: &Agent, fac
         return Ok(Step::Nothing);
     };
     let body = crate::store::open_store(root)?.get(handoff_id).map(|e| e.content).unwrap_or_default();
+    let focus_note = state.focus_epic_id.as_deref().map(|epic|
+        crate::ops::fleet::restore_epic_focus(root, factory_session, epic)
+    ).unwrap_or_default();
     let brief = format!(
         "Cassy cleared your context at an idle boundary: the latest call used {} input tokens (context threshold {}). Workers kept running. \
          Your handoff is memory {handoff_id}; it is below and was injected at session start.\n\n{}",
         tokens(state.trigger_tokens),
         tokens(state.budget),
-        clip_block(&body, 8_000),
+        format!("{}{focus_note}", clip_block(&body, 8_000)),
     );
     queue.enqueue_idempotent(
         SOURCE, &agent.name, &brief, Some(factory_session), Some("Context cleared: resume from your handoff"),

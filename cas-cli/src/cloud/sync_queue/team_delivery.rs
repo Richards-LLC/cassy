@@ -41,10 +41,18 @@ pub struct TeamOwnedCleanupRow {
 }
 
 fn payload_digest(payload: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    Some(hex::encode(Sha256::digest(
-        serde_json::to_vec(&value).ok()?,
-    )))
+    delivery_digest(&serde_json::from_str(payload).ok()?)
+}
+
+/// Digest of a row's content. The top-level `revision` is the push's base
+/// revision, declared from the ledger at send time (`with_base_revision`),
+/// not row content: a body sent with it is the queued snapshot (cas-258e).
+fn delivery_digest(value: &serde_json::Value) -> Option<String> {
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("revision");
+    }
+    Some(hex::encode(Sha256::digest(serde_json::to_vec(&value).ok()?)))
 }
 
 fn personal_rows(conn: &Connection) -> Result<Vec<QueuedSync>, CasError> {
@@ -128,9 +136,8 @@ impl SyncQueue {
     ) -> Result<(), CasError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let transmitted_digest = hex::encode(Sha256::digest(
-            serde_json::to_vec(transmitted).map_err(|e| CasError::Other(e.to_string()))?,
-        ));
+        let transmitted_digest = delivery_digest(transmitted)
+            .ok_or_else(|| CasError::Other("could not digest the transmitted row".into()))?;
         let equivalent = item.operation == SyncOperation::Upsert
             && item.team_id.as_deref() == Some(team_id)
             && !team_id.is_empty()

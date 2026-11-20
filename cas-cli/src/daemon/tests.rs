@@ -742,6 +742,8 @@ fn retention_prunes_settled_operator_turns_and_keeps_pending_ones_cas_3ade() {
     let unread = record("unread");
     let recent = record("recent");
     let cloud_pending = record("cloud pending");
+    // Snapshots are immutable; age them with the guard lifted, then restore it.
+    db.execute_batch("DROP TRIGGER operator_delivery_immutable").unwrap();
     for (id, days, processed) in
         [(settled, 30, true), (unread, 30, false), (recent, 1, true), (cloud_pending, 30, true)]
     {
@@ -755,6 +757,9 @@ fn retention_prunes_settled_operator_turns_and_keeps_pending_ones_cas_3ade() {
             rusqlite::params![days_ago(days), processed.then(|| days_ago(days)), id],
         )
         .unwrap();
+    }
+    for statement in cas_store::OPERATOR_DELIVERY_SCHEMA_STATEMENTS {
+        db.execute_batch(statement).unwrap();
     }
     db.execute(
         "INSERT INTO operator_cloud_outbox

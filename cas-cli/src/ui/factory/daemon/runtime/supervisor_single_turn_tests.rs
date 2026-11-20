@@ -1667,18 +1667,22 @@ async fn cas_9594c_operator_message_reaches_idle_supervisor_when_claims_outlast_
     };
     let needle = "operator-9594c-ping";
     let supervisor = daemon.app.supervisor_name().to_string();
-    crate::store::open_prompt_queue_store(&cas).unwrap()
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    let id = queue
         .enqueue_operator_message("commander:Daniel@Chrome on Linux", &supervisor, needle,
             Some(&daemon.session_name), Some("Cassy Cloud message"), None, false, None, &stamp)
-        .unwrap();
+        .unwrap()
+        .id();
     let typed = || std::fs::read_to_string(root.path().join("input")).unwrap().contains(needle);
-    for _ in 0..3 {
-        tokio::time::timeout(Duration::from_secs(5), async {
+    for cycle in 0..3 {
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
             while !typed() && writer.held() == 0 {
                 daemon.process_prompt_queue().await.unwrap();
                 tokio::task::yield_now().await;
             }
-        }).await.expect("the row is typed or its claim reaches the writer");
+        }).await;
+        assert!(reached.is_ok(), "cycle {cycle}: neither typed nor claimed: {:?}",
+            queue.message_delivery_report(id).unwrap());
         if typed() {
             break;
         }
@@ -1693,5 +1697,6 @@ async fn cas_9594c_operator_message_reaches_idle_supervisor_when_claims_outlast_
             }
         }).await;
     }
-    assert!(typed(), "the operator message never reached the idle supervisor");
+    assert!(typed(), "the operator message never reached the idle supervisor: {:?}",
+        queue.message_delivery_report(id).unwrap());
 }

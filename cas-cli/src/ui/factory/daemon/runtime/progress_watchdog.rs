@@ -39,8 +39,9 @@ pub(crate) struct Observation {
     freeze_held: FreezeHeld,
     close_held: CloseHeld,
     train_ready: bool,
-    /// Parked deliveries a recorded hold explains; their completion edges are armed.
-    held: Vec<cas_types::Task>,
+    /// Completion edges for parked deliveries a recorded hold explains,
+    /// decided here (store reads and git) and persisted by `apply`.
+    held: Vec<crate::factory_delivery_wake::ArmPlan>,
     /// Open deliveries with no completion wake: `(task, anchor, supervisor)`.
     unwatched: Vec<(String, String, cas_types::Agent)>,
 }
@@ -169,8 +170,13 @@ pub(crate) fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Opti
             .2.push(task.id.clone());
         false
     });
-    // Recorded holds already explain these deliveries; `apply` arms them.
-    let held: Vec<_> = parked.into_iter().filter(|parked| !tasks.iter().any(|task| task.id == parked.id)).collect();
+    // Recorded holds already explain these deliveries. Decide their
+    // completion edges here, git included; `apply` only persists them.
+    let held: Vec<_> = parked.into_iter().filter(|parked| !tasks.iter().any(|task| task.id == parked.id))
+        .filter_map(|held| crate::factory_delivery_wake::plan_task(cas_dir, &held, "")
+            .inspect_err(|error| tracing::warn!(task_id=%held.id, %error, "held delivery completion wake unavailable"))
+            .ok().flatten())
+        .collect();
     // A train belongs to its verification owner, even when no task assignee
     // remains after its last child merges. Older explicitly owned trains have
     // only the release-train branch, without the newer label.
@@ -321,9 +327,9 @@ pub(crate) fn apply(cas_dir: &Path, session: &str, now: DateTime<Utc>, observati
     let Observation { fingerprint, waiting, supervisor, freeze_held, close_held, train_ready, held, unwatched } = observation;
     // Preserve held deliveries' own notices, and leave durable completion
     // edges ready for the hold's lift.
-    for held in &held {
-        if let Err(error) = crate::factory_delivery_wake::arm_task(cas_dir, held, "") {
-            tracing::warn!(task_id=%held.id, %error, "held delivery completion wake unavailable");
+    for plan in &held {
+        if let Err(error) = crate::factory_delivery_wake::arm_plan(cas_dir, plan) {
+            tracing::warn!(task_id=%plan.task, %error, "held delivery completion wake unavailable");
         }
     }
     if let Err(error) = report_unwatched(cas_dir, &unwatched) {

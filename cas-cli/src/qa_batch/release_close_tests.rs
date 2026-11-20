@@ -744,7 +744,7 @@ fn published_train_closes_members_independently_cas_734b() {
         let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
         assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
     }
-    // cas-f0e7a: v4.43.0's cut shape, three members already closed beside the
+    // cas-f0e7a: the frozen train's cut shape, three members already closed beside the
     // closed no-code member with no inventory delivery, passes the cut gate.
     let mut cut = scope.clone();
     cut.included_task_ids = ["cas-approved", "cas-candidate", "cas-equal", "cas-closed-report"].map(str::to_string).to_vec();

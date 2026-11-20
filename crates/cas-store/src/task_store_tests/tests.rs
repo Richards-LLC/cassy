@@ -12,6 +12,33 @@ fn create_test_store() -> (TempDir, SqliteTaskStore) {
     (temp, store)
 }
 
+/// cas-7678: the factory daemon opens the task store uncached many times a
+/// second, and each open ran the whole schema init (DDL plus two full task
+/// scans) under the shared connection; contention errors named it in 41 of
+/// 49 cases on gabber. Init runs once per database schema state; a schema
+/// change makes the next open run it again.
+#[test]
+fn reopening_an_initialized_store_skips_its_schema_work_cas_7678() {
+    let (temp, _store) = create_test_store();
+    let db = temp.path().join("cas.db");
+    assert_eq!(schema_init_runs(&db), 1);
+    for n in 0..3 {
+        let reopened = SqliteTaskStore::open(temp.path()).unwrap();
+        reopened.init().unwrap();
+        reopened.add(&Task::new(format!("cas-7678-{n}"), "still works".into())).unwrap();
+    }
+    assert_eq!(schema_init_runs(&db), 1, "an unchanged schema is not re-initialized");
+
+    rusqlite::Connection::open(&db).unwrap().execute_batch("DROP INDEX idx_tasks_status").unwrap();
+    let reopened = SqliteTaskStore::open(temp.path()).unwrap();
+    reopened.init().unwrap();
+    assert_eq!(schema_init_runs(&db), 2, "a changed schema is initialized again");
+    let restored: bool = rusqlite::Connection::open(&db).unwrap().query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'idx_tasks_status')", [], |row| row.get(0),
+    ).unwrap();
+    assert!(restored, "the re-run recreates what was dropped");
+}
+
 #[test]
 fn direct_write_receipt_binds_current_revision_cas_a836() {
     let (temp, store) = create_test_store();

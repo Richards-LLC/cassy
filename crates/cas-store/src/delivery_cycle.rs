@@ -229,7 +229,15 @@ pub fn backfill_delivery_cycles(root: &std::path::Path, project: &str) -> Result
 }
 
 fn backfill_selected_with_conn(conn: &Connection, default_project: Option<&str>, terminal: bool) -> Result<()> {
-    let status = if terminal { "1" } else { "t.status NOT IN ('closed', 'cancelled')" };
+    // cas-7678: `status` sits after the long text columns, so filtering on
+    // it row by row walked every task's overflow pages (0.1-1.8 s on a
+    // 6,800-task store, on each open). The covering status index finds the
+    // open rows without reading them.
+    let status = if terminal {
+        "1"
+    } else {
+        "t.rowid IN (SELECT rowid FROM tasks WHERE status NOT IN ('closed', 'cancelled'))"
+    };
     let candidates = format!("FROM tasks t
          WHERE {status}
            AND NOT EXISTS (SELECT 1 FROM delivery_cycles c WHERE c.task_id = t.id)

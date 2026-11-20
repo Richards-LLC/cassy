@@ -341,9 +341,6 @@ pub(crate) fn bounded_recovery(root: &Path, agent_id: &str, budget: std::time::D
     let spawned = std::thread::Builder::new().name("integrated-recovery".into()).spawn(move || {
         let _ = sender.send(integrated_recovery(&root_path, &id, deadline).map_err(|error| error.to_string()));
     });
-    let _ = (&spawned, &receiver, limit);
-    let result = integrated_recovery(root, agent_id, deadline).map_err(|error| error.to_string());
-    #[cfg(any())]
     let result = match spawned {
         Ok(_) => receiver.recv_timeout(limit).unwrap_or_else(|_| Err(format!(
             "not finished within {} s of SessionStart; `task action=list status=awaiting_merge` lists parked deliveries and close checks each",

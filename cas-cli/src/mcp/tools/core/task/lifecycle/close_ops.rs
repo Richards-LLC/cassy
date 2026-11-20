@@ -30448,6 +30448,8 @@ mod merge_state_gate_tests {
         env.set("CAS_FACTORY_SESSION", "relay-fixture-session");
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
+        std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+        std::fs::write(repo.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
         git(repo, &["init", "-q", "-b", "main"]);
         git(repo, &["commit", "--allow-empty", "-qm", "base"]);
         let root = repo.join(".cas");
@@ -30507,6 +30509,8 @@ mod merge_state_gate_tests {
         ] {
             let dir = TempDir::new().unwrap();
             let repo = dir.path();
+            std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+            std::fs::write(repo.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
             git(repo, &["init", "-q", "-b", "main"]);
             git(repo, &["commit", "--allow-empty", "-qm", "delivery"]);
             let tip = rev_parse_local(repo, "HEAD");

@@ -179,6 +179,16 @@ impl RunningJob {
     }
 }
 
+/// A job waiting to run, on its lane queue or behind its busy key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WaitingJob {
+    pub(crate) lane: Lane,
+    pub(crate) kind: &'static str,
+    pub(crate) key: String,
+    /// How long since it was queued.
+    pub(crate) age: Duration,
+}
+
 /// Lane occupancy, for the watchdog and `loop.json`. `running` makes a job
 /// that is wedged mid-run visible (review round 1, item 6). Work waiting
 /// behind a busy key counts as queued (review round 2, M2).
@@ -426,6 +436,19 @@ impl<T> Shared<T> {
     }
 }
 
+/// The jobs waiting on `lane`: its queue, then work behind its busy keys.
+fn waiting_on<'a, T>(
+    lane: Lane,
+    state: &'a LaneState<T>,
+    in_flight: &'a HashMap<String, KeyFollowUps<T>>,
+) -> impl Iterator<Item = &'a Queued<T>> {
+    let behind_keys = in_flight
+        .values()
+        .filter(move |followups| followups.lane == lane)
+        .flat_map(|followups| followups.critical.iter().chain(followups.rerun.iter()));
+    state.queue.iter().chain(behind_keys)
+}
+
 fn lock<M>(mutex: &Mutex<M>) -> std::sync::MutexGuard<'_, M> {
     mutex
         .lock()
@@ -640,11 +663,7 @@ impl<T: Send + 'static> JobRuntime<T> {
             dropped_refresh: state.dropped_refresh,
             ..LaneStats::default()
         };
-        let behind_keys = in_flight
-            .values()
-            .filter(|followups| followups.lane == lane)
-            .flat_map(|followups| followups.critical.iter().chain(followups.rerun.iter()));
-        for waiting in state.queue.iter().chain(behind_keys) {
+        for waiting in waiting_on(lane, &state, &in_flight) {
             let age = now.saturating_duration_since(waiting.enqueued_at);
             stats.queued += 1;
             stats.oldest_queued_age = stats.oldest_queued_age.max(Some(age));
@@ -668,6 +687,28 @@ impl<T: Send + 'static> JobRuntime<T> {
             }
         });
         stats
+    }
+
+    /// Every job waiting on `lane`, on its queue or behind a busy key, oldest
+    /// first; a refused reexec names them (GH #2227).
+    pub(crate) fn waiting_jobs(&self, lane: Lane) -> Vec<WaitingJob> {
+        let Some(slot) = self.shared.lanes.get(&lane) else {
+            return Vec::new();
+        };
+        // Lock order: lane state, then in_flight.
+        let state = lock(&slot.state);
+        let in_flight = lock(&self.shared.in_flight);
+        let now = Instant::now();
+        let mut jobs: Vec<WaitingJob> = waiting_on(lane, &state, &in_flight)
+            .map(|waiting| WaitingJob {
+                lane,
+                kind: waiting.spec.kind,
+                key: waiting.spec.key.clone(),
+                age: now.saturating_duration_since(waiting.enqueued_at),
+            })
+            .collect();
+        jobs.sort_by(|a, b| b.age.cmp(&a.age));
+        jobs
     }
 
     /// Jobs still running past their budget, and write jobs still waiting

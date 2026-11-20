@@ -2038,6 +2038,14 @@ bug_families:
     title: Each harness lists one builtin finish entrypoint, and the retired personal finish seed is migrated away instead of listed beside it
     statement: Finish installs once at user level for Claude, Codex and Grok (OpenCode keeps its project copy). A managed project copy beside the user-level one is removed by byte proof, and the exact retired personal seed in Claude commands, Codex prompts, OpenCode commands and the Grok personal skill is removed so the builtin is the only finish entrypoint. Edited copies stay.
     tasks: [cas-fcdb]
+  reexec-unflushed-jobs:
+    title: A refused factory reexec names every unfinished daemon job and gives the next action
+    statement: When `cas factory reexec` is refused because daemon jobs did not flush, the refusal names every running and waiting job by lane, kind, key and age, says when a write is still waiting for the store writer, and says the session keeps running unchanged until a retry. When store writes are still queued, it gives their count. A reexec never proceeds while any job is unfinished.
+    tasks: [cas-9ad3]
+  team-sync-revision-echo:
+    title: A confirmed team write retires the queued personal copy, and a pull that changes only the revision records no new conflict
+    statement: When a project syncs as a team, the first team write the cloud confirms clears the matching personal row from the sync queue, even though the push carried the row's base revision; that row is not sent again on later cycles. A pull that replaces a local row with the same content under a newer revision adds no second row to the conflict journal.
+    tasks: [cas-258e]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

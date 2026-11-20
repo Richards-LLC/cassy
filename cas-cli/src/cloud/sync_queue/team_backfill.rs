@@ -406,10 +406,18 @@ mod tests {
         for id in ["owned", "routed"] {
             let sent = team.iter().find(|r| r.entity_id == id).unwrap();
             let personal = queue.personal_delivery_snapshots().unwrap();
+            // cas-258e: the team push adds the ledger's base revision to the
+            // body it sends (with_base_revision). That transport key is not
+            // row content; a receipt must still retire the personal copy.
+            let mut transmitted: serde_json::Value =
+                serde_json::from_str(sent.payload.as_deref().unwrap()).unwrap();
+            if id == "owned" {
+                transmitted["revision"] = serde_json::json!("2577");
+            }
             queue
                 .acknowledge_team_write(
                     sent,
-                    &serde_json::from_str(sent.payload.as_deref().unwrap()).unwrap(),
+                    &transmitted,
                     "t",
                     "p",
                     &personal,

@@ -487,6 +487,33 @@ async fn c4491f_relay_write_is_never_given_up() {
     assert_eq!(reported, 1);
 }
 
+/// cas-e37f: soundwave gabber's writer waits came from the progress-watchdog
+/// sweep holding the store writer up to 8 s with task scans and git. Its reads
+/// now finish while the writer is busy; only its writes queue behind it.
+#[tokio::test]
+async fn cas_e37f_progress_watchdog_reads_without_the_store_writer() {
+    use super::relay_jobs::{Relay, RelayOutput};
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    assert!(daemon.relay_jobs.submit_write(&mut daemon.queue_jobs, "busy-writer", None, move || {
+        let _ = wait.recv();
+        RelayOutput::Written
+    }));
+    daemon.submit_progress_watchdog();
+    assert!(daemon.relay_jobs.reading(Relay::ProgressWatchdog), "the scan is a read");
+    assert!(!daemon.relay_jobs.writing("progress-watchdog"), "nothing waits on the writer yet");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon.relay_jobs.reading(Relay::ProgressWatchdog) {
+        daemon.drain_relay_jobs();
+        assert!(Instant::now() < deadline, "the scan waited on the busy writer");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(daemon.relay_jobs.writing("progress-watchdog"), "only its writes queue behind the writer");
+    release.send(()).unwrap();
+    settle_relays(&mut daemon).await;
+}
+
 /// cas-4491f review M3: a batch's writes are applied before its reads, and a
 /// read submitted before a write of the same key landed cannot ask for that
 /// write again (no duplicate notice, no second permission answer).

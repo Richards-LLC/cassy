@@ -1451,26 +1451,24 @@ mod supervisor_handoff_tests {
         }
         // cas-27e3: 202 parked deliveries held a supervisor SessionStart for
         // 21 minutes. A spent budget checks no delivery and names each one.
-        let spent = crate::supervisor_continuity::bounded_recovery(&root, "budget-id", std::time::Duration::ZERO);
+        let spent = crate::supervisor_continuity::bounded_recovery(&root, "budget-id", std::time::Duration::ZERO).unwrap();
         assert!(!spent.contains("task action=close id=cas-int-"), "an expired budget must not run the guard: {spent}");
         for index in 0..25 {
             assert!(spent.contains(&format!("- cas-int-{index:02}: commit_receipt={anchor}")), "unchecked row {index} lost: {spent}");
         }
-        // A store read that outlives the budget (the shared connection is
-        // held) cannot hold startup past the budget plus grace.
-        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
-        let (locked, is_locked) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _held = shared.lock().unwrap();
-            locked.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_secs(6));
-        });
-        is_locked.recv().unwrap();
+        // The incident shape: recovery itself stalls 6 s in a subprocess while
+        // holding its store access. Startup returns within budget + grace, shows the timeout
+        // inline and leaves no marker, so the next startup retries.
+        let mut stalled = Agent::new("stalled-id".into(), "stalled".into());
+        stalled.role = AgentRole::Supervisor;
+        agents.register(&stalled).unwrap();
+        *crate::supervisor_continuity::STALL_HOLDING_STORE.lock().unwrap() = Some((root.clone(), std::time::Duration::from_secs(6)));
         let started = std::time::Instant::now();
-        let stalled = crate::supervisor_continuity::bounded_recovery(&root, "stalled-id", std::time::Duration::from_secs(1));
+        let context = crate::supervisor_continuity::startup_context_within(&root, "stalled-id", std::time::Duration::from_secs(1)).unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
-        assert!(!stalled.is_empty() && !stalled.contains("task action=close id=cas-int-"), "{stalled}");
-        holder.join().unwrap();
+        *crate::supervisor_continuity::STALL_HOLDING_STORE.lock().unwrap() = None;
+        assert!(!context.is_empty() && !context.contains("task action=close id=cas-int-"), "{context}");
+        assert!(!root.join("supervisor-recovery").join("stalled-id.queued").exists(), "a timed-out recovery must retry next startup");
     }
 
     /// Replay a busy supervisor exiting before it sees phone or Violet mail.

@@ -24,6 +24,16 @@ fn integrated_recovery(root: &Path, agent_id: &str, deadline: std::time::Instant
     use cas_types::{TaskStatus, VerificationStatus};
     let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(String::new()) };
     let tasks = crate::store::open_task_store(root)?;
+    // Replays the incidents: recovery stalled in a subprocess (git) while it
+    // holds its store access.
+    #[cfg(test)]
+    let stall = STALL_HOLDING_STORE.lock().unwrap().clone();
+    #[cfg(test)]
+    if let Some((stalled, wait)) = stall.filter(|(path, _)| path.as_path() == root) {
+        let conn = cas_store::shared_db::shared_connection(&stalled.join("cas.db"))?;
+        let _held = conn.lock().unwrap();
+        std::process::Command::new("sleep").arg(wait.as_secs().to_string()).status()?;
+    }
     let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
     let verifications = crate::store::open_verification_store(root)?;
     let mut parked = tasks.list(Some(TaskStatus::AwaitingMerge))?;
@@ -330,30 +340,45 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Runs recovery off-thread so neither the task scan nor one delivery's guard
-/// can hold startup: the scan stops listing at `budget`, and if it has not
-/// returned shortly after, startup gets one line and keeps the handoff.
-pub(crate) fn bounded_recovery(root: &Path, agent_id: &str, budget: std::time::Duration) -> String {
+/// Runs recovery off-thread on its own store connections, so neither the task
+/// scan nor one delivery's guard can hold startup: the scan stops listing at
+/// `budget`, and past `budget` plus grace startup goes on without it. `Err` is
+/// that timeout's one line, shown inline and not queued, so the next startup
+/// for this registration retries.
+pub(crate) fn bounded_recovery(root: &Path, agent_id: &str, budget: std::time::Duration) -> Result<String, String> {
     let limit = budget + RECOVERY_GRACE;
     let deadline = std::time::Instant::now() + budget;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let (root_path, id) = (root.to_path_buf(), agent_id.to_string());
     let spawned = std::thread::Builder::new().name("integrated-recovery".into()).spawn(move || {
-        let _ = sender.send(integrated_recovery(&root_path, &id, deadline).map_err(|error| error.to_string()));
+        let result = integrated_recovery(&root_path, &id, deadline);
+        let _ = sender.send(result.map_err(|error| error.to_string()));
     });
     let result = match spawned {
-        Ok(_) => receiver.recv_timeout(limit).unwrap_or_else(|_| Err(format!(
-            "not finished within {} s of SessionStart; `task action=list status=awaiting_merge` lists parked deliveries and close checks each",
-            limit.as_secs()
-        ))),
+        Ok(_) => match receiver.recv_timeout(limit) {
+            Ok(result) => result,
+            Err(_) => return Err(format!(
+                "Integrated delivery recovery did not finish within {} s of SessionStart; the next startup retries. \
+                 `task action=list status=awaiting_merge` lists parked deliveries and close checks each.\n",
+                limit.as_secs()
+            )),
+        },
         Err(error) => Err(error.to_string()),
     };
-    result.unwrap_or_else(|error| format!(
+    Ok(result.unwrap_or_else(|error| format!(
         "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
-    ))
+    )))
 }
 
+#[cfg(test)]
+pub(crate) static STALL_HOLDING_STORE: std::sync::Mutex<Option<(std::path::PathBuf, std::time::Duration)>> =
+    std::sync::Mutex::new(None);
+
 pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
+    startup_context_within(root, id, RECOVERY_BUDGET)
+}
+
+pub(crate) fn startup_context_within(root: &Path, id: &str, budget: std::time::Duration) -> anyhow::Result<String> {
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(id)?;
     resume(root, &agent)?;
@@ -363,17 +388,21 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     // already queued; the marker skips recomputing what the dedupe key drops.
     let key = format!("{RECOVERY_SOURCE}:{}:{}", agent.id, agent.registered_at.to_rfc3339());
     let marker = root.join("supervisor-recovery").join(format!("{}.queued", agent.id));
+    let mut inline = None;
     if agent.role == AgentRole::Supervisor && !held
         && std::fs::read_to_string(&marker).ok().as_deref() != Some(key.as_str())
     {
-        let recovery = bounded_recovery(root, &agent.id, RECOVERY_BUDGET);
-        if !recovery.is_empty() {
-            queue.enqueue_idempotent(
-                RECOVERY_SOURCE, &agent.name, &recovery, agent.factory_session.as_deref(),
-                Some(RECOVERY_SOURCE), Some(NotificationPriority::High), &key,
-                Some(&QueueOrigin::Daemon),
-            )?;
-            let _ = std::fs::write(&marker, &key);
+        match bounded_recovery(root, &agent.id, budget) {
+            Ok(recovery) if !recovery.is_empty() => {
+                queue.enqueue_idempotent(
+                    RECOVERY_SOURCE, &agent.name, &recovery, agent.factory_session.as_deref(),
+                    Some(RECOVERY_SOURCE), Some(NotificationPriority::High), &key,
+                    Some(&QueueOrigin::Daemon),
+                )?;
+                let _ = std::fs::write(&marker, &key);
+            }
+            Ok(_) => {}
+            Err(timed_out) => inline = Some(timed_out),
         }
     }
     let mut messages = queue
@@ -391,6 +420,7 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     Ok(messages
         .into_iter()
         .map(|row| row.prompt)
+        .chain(inline)
         .collect::<Vec<_>>()
         .join("\n"))
 }

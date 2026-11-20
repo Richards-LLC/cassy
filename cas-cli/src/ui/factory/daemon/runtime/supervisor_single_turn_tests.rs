@@ -1589,3 +1589,136 @@ async fn cas_062b_commander_send_waits_only_for_a_live_pane_draft() {
     typed_once(&root, &mut daemon, body).await;
     assert!(!daemon.app.operator_draft_hold, "the notice ends with the draft");
 }
+
+/// A store writer that holds every `ClaimForInject` job until the test grants
+/// it, as the contended StoreWorker did on Nov 20: every other write behind
+/// the held claim waits too.
+struct StalledClaimWriter {
+    sender: std::sync::Mutex<std::sync::mpsc::Sender<(&'static str, Box<dyn FnOnce() + Send>)>>,
+    claims: std::sync::Arc<(std::sync::Mutex<(usize, usize)>, std::sync::Condvar)>,
+}
+
+impl StalledClaimWriter {
+    fn start() -> std::sync::Arc<Self> {
+        let (sender, receiver) = std::sync::mpsc::channel::<(&'static str, Box<dyn FnOnce() + Send>)>();
+        let claims = std::sync::Arc::new((std::sync::Mutex::new((0, 0)), std::sync::Condvar::new()));
+        let gate = std::sync::Arc::clone(&claims);
+        std::thread::spawn(move || {
+            for (label, job) in receiver {
+                if label == "ClaimForInject" {
+                    let (counts, granted) = &*gate;
+                    let mut counts = counts.lock().unwrap();
+                    counts.0 += 1;
+                    while counts.1 < counts.0 {
+                        counts = granted.wait(counts).unwrap();
+                    }
+                }
+                job();
+            }
+        });
+        std::sync::Arc::new(Self { sender: std::sync::Mutex::new(sender), claims })
+    }
+
+    /// Claim jobs that reached the writer and wait for a grant.
+    fn held(&self) -> usize {
+        let counts = self.claims.0.lock().unwrap();
+        counts.0 - counts.1
+    }
+
+    fn grant_one(&self) {
+        self.claims.0.lock().unwrap().1 += 1;
+        self.claims.1.notify_all();
+    }
+}
+
+struct StalledWriter(std::sync::Arc<StalledClaimWriter>);
+
+impl super::jobs::WriteExecutor for StalledWriter {
+    fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+        self.0.sender.lock().unwrap().send((label, job)).is_ok()
+    }
+}
+
+/// cas-9594c: keen-viper-14, Nov 20 20:06-20:14Z. The supervisor sat idle
+/// while four Commander messages stayed queued: each transport claim waited
+/// on the contended store writer for longer than the 10 s inject timeout, was
+/// dropped as nobody's, then re-selected and re-claimed behind the same
+/// writer. Replay that: every claim is held past the timeout. The operator's
+/// message must be typed into the idle pane once its claim lands.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_9594c_operator_message_reaches_idle_supervisor_when_claims_outlast_the_inject_timeout() {
+    if !fixture_child("cas_9594c_operator_message_reaches_idle_supervisor_when_claims_outlast_the_inject_timeout") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    daemon.teams = None;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    // An idle Claude supervisor, as in cas_3cd4: its last turn finished and
+    // its composer is empty.
+    let agents = crate::store::open_agent_store(&cas).unwrap();
+    let mut agent = agents.get("single-sup").unwrap();
+    agent.cc_session_id = Some("idle-9594c".into());
+    agent.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
+    agents.update(&agent).unwrap();
+    let now = chrono::Utc::now();
+    let mut epoch = crate::history::epochs::current_daemon_epoch(&now.to_rfc3339());
+    epoch.pid = Some(std::process::id().into());
+    use cas_store::HistoryStore;
+    cas_store::SqliteHistoryStore::open(&cas).unwrap().record_epoch(&epoch).unwrap();
+    let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::write(projects.join("idle-9594c.jsonl"), format!("{}\n{}\n",
+        serde_json::json!({"type":"user","version":"2.1.318","timestamp":now-chrono::Duration::seconds(2),"message":{"role":"user","content":"Prior turn"}}),
+        serde_json::json!({"type":"system","subtype":"turn_duration","timestamp":now-chrono::Duration::seconds(1)}),
+    )).unwrap();
+    let supervisor = daemon.app.supervisor_name().to_string();
+    daemon.app.mux.get_mut(&supervisor).unwrap()
+        .feed("\x1b[2J\x1b[19;1H────────────────────\r\n❯\r\n────────────────────".as_bytes()).unwrap();
+    let writer = StalledClaimWriter::start();
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with(super::jobs::LaneWiring {
+        reader: None,
+        writer: std::sync::Arc::new(StalledWriter(std::sync::Arc::clone(&writer))),
+    });
+    let stamp = cas_store::OperatorStamp {
+        operator: "Daniel".into(),
+        device_id: "chrome".into(),
+        device_label: "Chrome on Linux".into(),
+        scopes: vec!["message:send".into()],
+        verified: true,
+    };
+    let needle = "operator-9594c-ping";
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    let id = queue
+        .enqueue_operator_message("commander:Daniel@Chrome on Linux", &supervisor, needle,
+            Some(&daemon.session_name), Some("Cassy Cloud message"), None, false, None, &stamp)
+        .unwrap()
+        .id();
+    let typed = || std::fs::read_to_string(root.path().join("input")).unwrap().contains(needle);
+    for cycle in 0..3 {
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
+            while !typed() && writer.held() == 0 {
+                daemon.process_prompt_queue().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        }).await;
+        assert!(reached.is_ok(), "cycle {cycle}: neither typed nor claimed: {:?}",
+            queue.message_delivery_report(id).unwrap());
+        if typed() {
+            break;
+        }
+        // The claim waited on the writer past the inject timeout, then landed.
+        daemon.queue_jobs.expire_claims(&cas, Instant::now()
+            + super::prompt_queue_jobs::INJECT_OUTCOME_TIMEOUT + Duration::from_secs(1));
+        writer.grant_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while !typed() && writer.held() == 0 {
+                daemon.process_prompt_queue().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        }).await;
+    }
+    assert!(typed(), "the operator message never reached the idle supervisor: {:?}",
+        queue.message_delivery_report(id).unwrap());
+}

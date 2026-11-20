@@ -34,7 +34,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::jobs::{
-    Criticality, JobPanicked, JobResult, JobRuntime, JobSpec, Lane, LaneWiring, Submitted,
+    Criticality, JobPanicked, JobResult, JobRuntime, JobSpec, Lane, LaneWiring, RunningJob,
+    Submitted, WaitingJob,
 };
 use super::teams::{AlertIdentity, InboxPruner};
 use crate::ui::factory::director::{DirectorData, DirectorStores};
@@ -989,6 +990,35 @@ pub(crate) struct QueueJobs {
     pub(crate) prunes_done: u64,
 }
 
+/// A reexec refused because daemon jobs were still unfinished at the flush
+/// deadline (GH #2227). The session keeps running unchanged.
+#[derive(Debug)]
+pub(crate) struct UnflushedJobs {
+    pub(crate) waited: Duration,
+    pub(crate) running: Vec<RunningJob>,
+    /// Oldest first per lane.
+    pub(crate) waiting: Vec<WaitingJob>,
+}
+
+impl std::fmt::Display for UnflushedJobs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Durable daemon jobs did not flush before reexec (waited {:.1}s):", self.waited.as_secs_f64())?;
+        for job in &self.running {
+            if job.waiting_for_writer {
+                write!(f, " {:?} {} {} waiting {:.1}s for the store writer;", job.lane, job.kind, job.key, job.writer_wait.as_secs_f64())?;
+            } else {
+                write!(f, " {:?} {} {} running {:.1}s;", job.lane, job.kind, job.key, job.age.as_secs_f64())?;
+            }
+        }
+        for job in &self.waiting {
+            write!(f, " {:?} {} {} queued {:.1}s;", job.lane, job.kind, job.key, job.age.as_secs_f64())?;
+        }
+        write!(f, " the session keeps running unchanged; retry reexec once these jobs finish")
+    }
+}
+
+impl std::error::Error for UnflushedJobs {}
+
 impl QueueJobs {
     /// The daemon's queue jobs: lanes of their own, writes on the StoreWorker
     /// and reads on a dedicated connection.
@@ -1898,21 +1928,32 @@ impl QueueJobs {
 
     /// Stop submitting from control, finish every already queued write, and
     /// retain the original runtime so a refused exec can resume it unchanged.
+    /// The control loop is parked here, so nothing new is admitted. A refusal
+    /// is an [`UnflushedJobs`] naming every job still unfinished (GH #2227).
     pub(crate) async fn flush_for_reexec(&mut self, cas_dir: &Path, timeout: Duration) -> anyhow::Result<()> {
         self.settle_injects(cas_dir);
-        let deadline = Instant::now() + timeout;
+        let started = Instant::now();
+        let lanes = [Lane::Read, Lane::Write, Lane::Blocking, Lane::External];
         loop {
             self.apply_completions();
+            // Idle is decided per lane from one snapshot of its running job
+            // and its queue, so a job moving between them is never missed.
             let idle = match &self.exec {
                 Exec::Inline(done) => done.is_empty(),
-                Exec::Lanes(runtime) => [Lane::Read, Lane::Write, Lane::Blocking, Lane::External]
-                    .into_iter().all(|lane| {
-                        let stats = runtime.lane_stats(lane);
-                        stats.running.is_none() && stats.queued == 0
-                    }),
+                Exec::Lanes(runtime) => lanes.iter().all(|lane| {
+                    let stats = runtime.lane_stats(*lane);
+                    stats.running.is_none() && stats.queued == 0
+                }),
             };
             if idle { return Ok(()); }
-            anyhow::ensure!(Instant::now() < deadline, "Durable daemon jobs did not flush before reexec");
+            if started.elapsed() >= timeout {
+                let Exec::Lanes(runtime) = &self.exec else {
+                    anyhow::bail!("Durable daemon jobs did not flush before reexec");
+                };
+                let running = lanes.iter().filter_map(|lane| runtime.lane_stats(*lane).running).collect();
+                let waiting = lanes.iter().flat_map(|lane| runtime.waiting_jobs(*lane)).collect();
+                return Err(UnflushedJobs { waited: started.elapsed(), running, waiting }.into());
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }

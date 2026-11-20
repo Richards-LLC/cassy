@@ -167,9 +167,11 @@ impl FactoryDaemon {
         self.queue_jobs
             .flush_for_reexec(self.app.cas_dir(), Duration::from_secs(5))
             .await?;
+        let store_worker = runtime::store_worker::global();
         ensure!(
-            runtime::store_worker::global().wait_idle(Duration::from_secs(5)),
-            "Durable stores did not flush before reexec"
+            store_worker.wait_idle(Duration::from_secs(5)),
+            "Durable stores did not flush before reexec: {} store writes still queued or running after 5s; the session keeps running unchanged; retry reexec once the store writer drains",
+            store_worker.pending()
         );
         let rollback = pin_rollback(&self.session_name)?;
         let prepared = self.app.prepare_handoff().await;

@@ -3803,8 +3803,10 @@ fn sync_user_builtins_with_discovery(
             .filter(|path| *path != default_dir)
             .collect();
         let base = provider.base_dir(&home);
+        // The base goes first: accounts link `skills` to it, so its finish
+        // prune decides what each account's own finish check then sees.
         if base.is_dir() {
-            accounts.push(base.clone());
+            accounts.insert(0, base.clone());
         }
         for account in accounts {
             let shared_base = account == base;

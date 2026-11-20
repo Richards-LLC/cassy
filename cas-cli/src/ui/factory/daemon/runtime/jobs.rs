@@ -74,6 +74,11 @@ pub(crate) enum Criticality {
     Critical,
     /// Replaceable by a later run: snapshots, probes, polls.
     Refresh,
+    /// Critical, and runs ahead of other queued work on its lane and on the
+    /// store writer: prompt-queue selection and transport claims, so a
+    /// message to an idle pane never queues behind a write backlog
+    /// (cas-9594c).
+    Delivery,
 }
 
 /// What to run and how it may be coalesced or dropped.
@@ -299,6 +304,12 @@ impl Backoff {
 pub(crate) trait WriteExecutor: Send + Sync + 'static {
     /// Run `job` on the writer thread; false when the writer is gone.
     fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool;
+
+    /// [`Self::execute`], ahead of the writer's other queued jobs
+    /// ([`Criticality::Delivery`]).
+    fn execute_first(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+        self.execute(label, job)
+    }
 }
 
 /// Opens the read lane's dedicated context (in the daemon, its own SQLite
@@ -350,6 +361,10 @@ struct GlobalStoreWorker;
 impl WriteExecutor for GlobalStoreWorker {
     fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
         super::store_worker::global().execute(label, job)
+    }
+
+    fn execute_first(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+        super::store_worker::global().execute_first(label, job)
     }
 }
 
@@ -589,7 +604,7 @@ impl<T: Send + 'static> JobRuntime<T> {
                     };
                 }
                 return match queued.spec.criticality {
-                    Criticality::Critical => {
+                    Criticality::Critical | Criticality::Delivery => {
                         followups.critical.push_back(queued);
                         Submitted::QueuedBehindKey
                     }
@@ -636,7 +651,17 @@ impl<T: Send + 'static> JobRuntime<T> {
                 }
             }
         }
-        state.queue.push_back(queued);
+        if queued.spec.criticality == Criticality::Delivery {
+            // Behind earlier delivery work, ahead of everything else.
+            let at = state
+                .queue
+                .iter()
+                .position(|q| q.spec.criticality != Criticality::Delivery)
+                .unwrap_or(state.queue.len());
+            state.queue.insert(at, queued);
+        } else {
+            state.queue.push_back(queued);
+        }
         drop(state);
         slot.ready.notify_one();
         outcome
@@ -667,7 +692,7 @@ impl<T: Send + 'static> JobRuntime<T> {
             let age = now.saturating_duration_since(waiting.enqueued_at);
             stats.queued += 1;
             stats.oldest_queued_age = stats.oldest_queued_age.max(Some(age));
-            if waiting.spec.criticality == Criticality::Critical {
+            if waiting.spec.criticality != Criticality::Refresh {
                 stats.critical_backlog += 1;
                 stats.oldest_critical_age = stats.oldest_critical_age.max(Some(age));
             }
@@ -816,6 +841,7 @@ fn run_work<T: Send + 'static>(
     reader: &mut Option<ReadContextFactory>,
     context: &mut Option<Box<dyn std::any::Any>>,
     writer: Option<&Arc<dyn WriteExecutor>>,
+    first: bool,
     started: &Arc<OnceLock<Instant>>,
 ) -> Result<T, JobPanicked> {
     let _operation = cas_store::shared_db::connection_operation(label);
@@ -858,7 +884,12 @@ fn run_work<T: Send + 'static>(
                         });
                     let _ = sender.send(outcome);
                 });
-                if writer.execute(label, job) {
+                let queued = if first {
+                    writer.execute_first(label, job)
+                } else {
+                    writer.execute(label, job)
+                };
+                if queued {
                     receiver.recv().unwrap_or_else(|_| {
                         Err(JobPanicked {
                             message: "the store writer dropped the job".to_string(),
@@ -929,6 +960,7 @@ fn run_lane<T: Send + 'static>(
             &mut reader,
             &mut context,
             writer.as_ref(),
+            spec.criticality == Criticality::Delivery,
             &started,
         );
         let finished = Instant::now();
@@ -1594,6 +1626,42 @@ mod tests {
             "the writer's backlog is not the job's: {result:?}"
         );
         assert!(result.elapsed < result.writer_wait, "{result:?}");
+    }
+
+    /// cas-9594c: delivery jobs (selection, transport claims) run ahead of
+    /// queued work on the write lane and on the StoreWorker itself, so a
+    /// write backlog cannot hold a message to an idle pane.
+    #[test]
+    fn delivery_jobs_run_ahead_of_queued_writes() {
+        let worker = Arc::new(super::super::store_worker::StoreWorker::start());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let record = |name: &'static str| {
+            let order = Arc::clone(&order);
+            move || order.lock().unwrap().push(name)
+        };
+        let (release, backlog) = mpsc::channel::<()>();
+        assert!(worker.submit("backlog", move || {
+            let _ = backlog.recv_timeout(Duration::from_secs(5));
+        }));
+        assert!(worker.submit("queued write", record("queued write")));
+        let runtime: JobRuntime<()> = JobRuntime::start_with(
+            4,
+            LaneWiring { reader: None, writer: Arc::clone(&worker) as Arc<dyn WriteExecutor> },
+        );
+        runtime.submit(spec("select", Lane::Write, Criticality::Delivery, 1), record("select"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runtime.lane_stats(Lane::Write).running.is_some_and(|job| job.waiting_for_writer) {
+            assert!(Instant::now() < deadline, "the select never reached the writer");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        runtime.submit(spec("stamp", Lane::Write, Criticality::Critical, 2), record("stamp"));
+        runtime.submit(spec("claim", Lane::Write, Criticality::Delivery, 3), record("claim"));
+        release.send(()).unwrap();
+        assert_eq!(wait_for(&runtime, 3).len(), 3);
+        let order = order.lock().unwrap().clone();
+        let at = |name| order.iter().position(|seen| *seen == name).unwrap();
+        assert!(at("select") < at("queued write"), "StoreWorker: {order:?}");
+        assert!(at("claim") < at("stamp"), "write lane: {order:?}");
     }
 
     /// Review round 2, L2: a key busy on one lane refuses a submit on another

@@ -253,6 +253,29 @@ fn cached_wake_replay_uses_latest_call_and_reported_window() {
 
 }
 
+/// cas-27e3: Claude compacted a 1M-window supervisor at ~967k while Cassy
+/// waited for its 1,000,000 cap; Claude transcripts carry no window. With the
+/// window from Claude's statusline input, the handoff starts at 80%, below
+/// Claude's own compaction point (about the window less 33k) at either size.
+#[test]
+fn claude_statusline_window_starts_handoff_at_80_percent_before_compaction() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for (window, below, above) in [(200_000, 159_000, 161_000), (1_000_000, 799_000, 801_000)] {
+        let mut lane = Lane::new();
+        let input = json!({"session_id":"native-5f67","context_window":{"context_window_size":window}});
+        let info = crate::cli::statusline::parse_claude_code_input(&input.to_string()).unwrap();
+        crate::supervisor_auto_clear::record_harness_window(
+            &lane.root, info.session_id.as_deref().unwrap(), info.context_window_size.unwrap(),
+        );
+        lane.turn(below, true);
+        lane.scan();
+        assert!(lane.handoffs().is_empty(), "{window}: {below} is under 80%");
+        lane.turn(above, true);
+        lane.scan();
+        assert_eq!(lane.handoffs().len(), 1, "{window}: {above} is over 80%");
+    }
+}
+
 #[test]
 fn handoff_receipt_and_injection_keep_only_live_work_and_readable_pending_rows() {
     use cas_store::{SqliteSupervisorQueueStore, SupervisorQueueStore};

@@ -210,14 +210,28 @@ pub(crate) fn enqueue_commander_message_with_client_ref(
         &operator,
     )?;
     if let Some(notification_id) = in_reply_to {
-        queue.ack(notification_id).with_context(|| {
-            format!(
-                "Commander reply {} queued but ask {notification_id} could not be confirmed",
-                outcome.id()
-            )
-        })?;
+        queue
+            .ack(notification_id)
+            .context(ReplyQueuedAskUnconfirmed)
+            .with_context(|| {
+                format!(
+                    "Commander reply {} queued but ask {notification_id} could not be confirmed",
+                    outcome.id()
+                )
+            })?;
     }
     Ok(outcome)
+}
+
+/// The reply row is already queued; only confirming its ask failed, so sending
+/// it again would queue it twice (cas-bcf50).
+#[derive(Debug)]
+pub(crate) struct ReplyQueuedAskUnconfirmed;
+
+impl std::fmt::Display for ReplyQueuedAskUnconfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("reply queued; its ask is unconfirmed")
+    }
 }
 
 /// Recipient name of supervisor→operator Commander turns (`message.rs`).

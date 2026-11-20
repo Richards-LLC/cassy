@@ -284,6 +284,20 @@ fn current_factory_task_id(core: &crate::mcp::server::CasCore) -> Result<String,
 
 fn filing_failure_reason(error: &str, task_identity_warning: Option<&str>) -> String {
     let safe_error = redact_known_credentials(error);
+    // cas-be96: a rate-limit refusal or backoff is not a credential failure.
+    if crate::gh_budget::names_rate_limit(&safe_error) {
+        let mut reason = format!(
+            "GitHub filing failed: {safe_error}\nGitHub rate limit: the request was held by the \
+             rate-limit backoff or refused by GitHub's rate limit; retry after the backoff."
+        );
+        if let Some(warning) = task_identity_warning {
+            reason.push_str(&format!(
+                "\nTask identity warning: {}. The report was placed under `unassigned`.",
+                redact_known_credentials(warning)
+            ));
+        }
+        return reason;
+    }
     if safe_error.starts_with("Invalid issue target: ") {
         let mut reason = format!("GitHub filing failed: {safe_error}");
         if let Some(warning) = task_identity_warning {
@@ -1540,6 +1554,12 @@ mod tests {
         assert!(report.contains("GH_TOKEN") && report.contains("GITHUB_TOKEN"));
         assert!(!report.contains("ghp_private-token-value"));
         assert!(!report.contains("private-token-value"));
+        // cas-be96: the backoff refusal is not blamed on the credential.
+        let held = filing_failure_reason(
+            "GitHub rate-limit backoff: not sent; Cassy retries GitHub in 109s (after a rate-limit response on this machine)",
+            None,
+        );
+        assert!(!held.contains("GH_TOKEN") && !held.contains("GITHUB_TOKEN"), "{held}");
     }
 
     #[cfg(feature = "mcp-proxy")]

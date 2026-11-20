@@ -175,9 +175,20 @@ pub(crate) fn retry_ci_status(root: Option<&Path>, sha: &str, target: &str, cwd:
     match state {
         BranchCiState::Green { .. } => CiStatus::Green,
         BranchCiState::Red { .. } => CiStatus::Red,
-        BranchCiState::Pending { waiting_for_rerun: true, .. }
-        | BranchCiState::CodePending { waiting_for_rerun: true, .. } =>
-            CiStatus::Stopped("CI was cancelled and no replacement check is running; inspect CI and request the merge again".into()),
+        BranchCiState::Pending { waiting_for_rerun: true, ref sha, .. }
+        | BranchCiState::CodePending { waiting_for_rerun: true, ref sha, .. } => {
+            let binary = crate::github_repo::gh_binary();
+            let Some(repo) = lookup.repo else {
+                return CiStatus::Stopped(crate::factory_ci_retry::CI_CANCELLED_STOP.into());
+            };
+            let output = fetch_branch_ci(sha, cwd, &repo, &binary);
+            let (runs, checks) = cancelled_workflow_runs(&output);
+            if runs.is_empty() {
+                CiStatus::Stopped(crate::factory_ci_retry::CI_CANCELLED_STOP.into())
+            } else {
+                CiStatus::Cancelled { repo, runs, checks }
+            }
+        }
         BranchCiState::Pending { .. } | BranchCiState::CodePending { .. } => CiStatus::Pending,
         BranchCiState::NoChecks { reason, .. }
         | BranchCiState::Unknown { reason, .. }
@@ -700,6 +711,47 @@ fn check_run_workflow_id(run: &serde_json::Value) -> Option<&str> {
         .1;
     let id = tail.split('/').next()?;
     (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then_some(id)
+}
+
+/// Workflow runs, and the ids of their cancelled check runs, for the checks
+/// whose every run at this commit was cancelled.
+fn cancelled_workflow_runs(output: &GhApiOutput) -> (Vec<String>, Vec<u64>) {
+    let parsed: Option<serde_json::Value> =
+        output.success.then(|| serde_json::from_slice(&output.stdout).ok()).flatten();
+    let Some(runs) = parsed.as_ref().and_then(|value| value.get("check_runs")).and_then(serde_json::Value::as_array) else {
+        return Default::default();
+    };
+    let (latest, _) = select_latest_check_runs(runs);
+    let (mut ids, mut checks): (Vec<String>, Vec<u64>) = Default::default();
+    for run in runs {
+        let replaced = latest.iter().any(|kept| kept.get("name") == run.get("name") && run.get("name").is_some());
+        if !replaced
+            && run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled")
+            && let Some(id) = check_run_workflow_id(run)
+            && let Some(check) = run.get("id").and_then(serde_json::Value::as_u64)
+        {
+            if !ids.iter().any(|known| known == id) {
+                ids.push(id.to_string());
+            }
+            checks.push(check);
+        }
+    }
+    (ids, checks)
+}
+
+/// cas-fef6: re-run a whole cancelled workflow run, as `gh run rerun <id>` does.
+pub(crate) fn rerun_workflow_run(cwd: &Path, repo: &str, run_id: &str) -> bool {
+    let mut command = Command::new(crate::github_repo::gh_binary());
+    command
+        .current_dir(cwd)
+        .env("GH_HOST", "github.com")
+        .args(["api", "--method", "POST", &format!("repos/{repo}/actions/runs/{run_id}/rerun")]);
+    crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),
+        BRANCH_CI_LOOKUP_TIMEOUT,
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 fn workflow_run_cancelled(run_id: &str, cwd: &Path, repo: &str, binary: &Path) -> bool {
@@ -5533,6 +5585,7 @@ impl CasCore {
                         // A Green → Pending race must not renew the wait's age.
                         armed_at: Some(expected_delivery.and_then(|retry| retry.armed_at)
                             .unwrap_or_else(chrono::Utc::now)),
+                        ci_rerun: expected_delivery.map(|retry| retry.ci_rerun.clone()).unwrap_or_default(),
                     };
                     match crate::factory_ci_retry::arm(&cas_root, &request) {
                         Ok(()) => retry_notice = format!("\nAutomatic retry armed for {source_sha}; green CI retries this merge, red CI or a moved lane sends one notice."),
@@ -7111,15 +7164,15 @@ mod tests {
         use crate::factory_ci_retry::CiStatus;
         let mut env = crate::test_support::TestEnvGuard::new();
         let cancelled = serde_json::json!({"check_runs": [{
-            "name": "Scoped Validation (factory/PR)", "status": "completed", "conclusion": "cancelled",
+            "id": 501, "name": "Scoped Validation (factory/PR)", "status": "completed", "conclusion": "cancelled",
             "html_url": "https://github.com/acme/cas/actions/runs/41910660428/job/1",
         }]}).to_string();
         let (repo, code_sha, tip) = delivery_ci_fixture_with(true, &cancelled, "");
         let fake_gh = repo.path().join("gh-fixture");
         for (tip_response, expected) in [
             (r#"{"check_runs":[{"name":"Classify CI diff","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/cas/actions/runs/41910920188/job/2"}]}"#, CiStatus::Pending),
-            (r#"{"check_runs":[]}"#, CiStatus::Stopped(
-                "CI was cancelled and no replacement check is running; inspect CI and request the merge again".into())),
+            // cas-fef6: no newer run; the armed retry gets the run to re-run.
+            (r#"{"check_runs":[]}"#, CiStatus::Cancelled { repo: "acme/cas".into(), runs: vec!["41910660428".into()], checks: vec![501] }),
         ] {
             crate::test_paths::warm_stub(&fake_gh, &format!(
                 "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{code_sha}/check-runs) printf '%s\\n' '{cancelled}' ;;\n*/{tip}/check-runs) printf '%s\\n' '{tip_response}' ;;\n*) exit 97 ;;\nesac\n"

@@ -1923,6 +1923,18 @@ export class HubConnectionSupervisor {
     return this.probePingId !== undefined || this.unsteady();
   }
 
+  /**
+   * cas-bcf50: one reachability rule for a supervisor message, the one the
+   * footer and header use (session-connection.ts): the machine is live, or
+   * its event stream is retrying while this session's socket still answers.
+   * A socket that answered inside the liveness window is not one recovery
+   * replaces (reattachDesired keeps it), so a send written now is not lost.
+   */
+  canDeliver(session: string): boolean {
+    if (this.holdsMessages()) return false;
+    return this.lifecycle.phase === "live" || (this.hasLiveAttach(session) && !this.lifecycle.degraded);
+  }
+
   /** Re-announce every live attach, so the page sends what it held (cas-0978, cas-a6f0). */
   private releaseHeldMessages(): void {
     for (const [session, snapshot] of this.attachLifecycles) {
@@ -1940,7 +1952,7 @@ export class HubConnectionSupervisor {
     // The journal's claim and credential reads are asynchronous. Recovery can
     // begin after the caller checked live, while its old socket is still OPEN.
     // Never write that pending send onto a socket recovery is about to replace.
-    if (isSupervisorMessage(message) && (this.lifecycle.phase !== "live" || this.holdsMessages())) return false;
+    if (isSupervisorMessage(message) && !this.canDeliver(session)) return false;
     const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
       const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;

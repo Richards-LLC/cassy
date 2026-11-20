@@ -1165,7 +1165,7 @@ describe("Commander live connection lifecycle", () => {
     await waitFor(() => expect(onMachineInfo.mock.calls.at(-1)?.[0]?.version).toBe("4.0.2"));
   });
 
-  it.each([false, true])("measures current ready transport reads without relaxing the send fence (multiplex=%s, cas-49cc)", async (multiplex) => {
+  it.each([false, true])("fences sends during event recovery by current ready transport reads (multiplex=%s, cas-49cc, cas-bcf50)", async (multiplex) => {
     const hub = transport(multiplex);
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
@@ -1187,10 +1187,13 @@ describe("Commander live connection lifecycle", () => {
     hub.endEvents();
     await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     expect(connection.hasLiveAttach("healthy")).toBe(true);
-    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Still fenced during event recovery" } })).toBe(false);
+    // cas-bcf50: a socket that answered inside the liveness window takes a
+    // send during event recovery; one that went quiet is fenced.
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Answering during event recovery" } })).toBe(true);
     // Move the read clock without running retry timers or heartbeat signing.
     vi.setSystemTime(Date.now() + 20_000);
     expect(connection.hasLiveAttach("healthy")).toBe(false);
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Quiet during event recovery" } })).toBe(false);
     receive({ StateUpdate: { state: { panes: [] } } });
     expect(connection.hasLiveAttach("healthy")).toBe(true);
     socket.close(1000);
@@ -1314,7 +1317,7 @@ describe("Commander live connection lifecycle", () => {
     await waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
   });
 
-  it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
+  it("sends once on a speaking attach while the event stream reconnects (cas-9dc6, cas-bcf50)", async () => {
     const hub = transport();
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
@@ -1328,21 +1331,14 @@ describe("Commander live connection lifecycle", () => {
     await waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
     hub.event({ kind: "viewer_lagged" });
     await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
-    // A dispatch's IndexedDB/credential await can finish after this transition.
-    // Event recovery still fences sends, while recent daemon frames keep
-    // the healthy terminal available for its in-flight receipts (cas-49cc).
-    expect(socket.readyState).toBe(TransportSocket.OPEN);
-    const before = socket.sent.length;
-    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
-    expect(socket.sent).toHaveLength(before);
+    // cas-bcf50 (Nov 20): the footer and header call this conversation Live
+    // while the event stream retries; a send goes now, on the socket that
+    // still answers, and recovery keeps that socket (cas-49cc).
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "update please", client_ref: "during-recovery" } })).toBe(true);
     connection.retry();
     await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(TransportSocket.instances).toHaveLength(1);
-    const recovered = socket;
-    await waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
-    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(true);
-    expect(socket.sent).toHaveLength(before + 1);
-    expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
+    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "during-recovery")).toHaveLength(1);
   });
 
   it("pauses session attaches while the machine is down and resumes at two ticket requests per second", async () => {

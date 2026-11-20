@@ -7,6 +7,54 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.41.0] - 2026-11-20
+
+### Fixed — Commander
+
+- **Conversations stay Live while they answer** — Was: when a machine's event
+  stream reconnected, every conversation row turned gray "Last known" beside a
+  footer saying Connected and a header saying Live, and sends waited up to two
+  minutes before failing. Now: rows, machine chips and sends use the footer's
+  rule, so a conversation whose session still answers reads Live and a send
+  goes out at once.
+- **Busy machines no longer refuse sends** — Was: when another task on the
+  supervisor's machine held its database past two seconds, the send failed
+  with "The supervisor's machine couldn't take the message". Now: the send
+  waits and is queued, in order, as soon as the database frees up.
+
+### Fixed — Factory
+
+- **Delivery CI watches no longer poll GitHub forever** — Was: every parked
+  delivery armed a CI-completion watch for a workflow named "CI", even in
+  projects without one or for commits already on their target, so each watch
+  polled GitHub every 30 seconds and drained the shared API budget. Now: the
+  watch is armed only when the project defines that workflow and the commit is
+  not yet on its target, and existing watches for a workflow the project lacks
+  are not probed.
+- **Bug filing under rate limit names the backoff** — Was: a filing held by
+  the GitHub rate-limit backoff was reported as a missing or rejected
+  credential. Now: it says the rate limit held the request.
+- **Armed merges re-run a cancelled lane run once** — Was: a lane job that
+  hit its time limit reported cancelled, nothing replaced it, and the armed
+  automatic merge stopped until someone re-ran CI and asked again. Now: the
+  armed retry re-runs that workflow run once, keeps waiting while the original
+  cancellation is still the latest result, and merges when the re-run turns
+  green; it stops with one notice only when the re-run is cancelled too.
+
+### Fixed — Builtin skills
+
+- **One `/finish` in each harness picker** — Was: Claude, Codex and Grok listed
+  `/finish` twice, once from the user-level install and once from the project's
+  copy, and the old personal seed (Claude `commands/finish.md`, Codex
+  `prompts/finish.md`, OpenCode `commands/finish.md`, the Grok personal skill)
+  sat beside the builtin. Now: finish installs once at user level, project sync
+  removes its earlier managed copy, and `cas update` removes the exact old seed
+  from every harness. Edited copies are left alone.
+- **Shorter `/finish`** — Was: a long checklist that repeated steps Cassy already
+  enforces (the exit check, handoff supersede, gc report) and polled worker
+  status by hand. Now: a short list of the steps that need you, with worker
+  shutdown relying on Cassy's own refusal and remedy.
+
 ## [4.40.0] - 2026-11-20
 
 ### Fixed — Factory

@@ -490,6 +490,7 @@ pub(super) fn from_app_after_fork(
         urgent_injects: Default::default(),
         operator_refresh_requested: false,
         send_receipts: super::runtime::send_dedupe::SendReceipts::default(),
+        deferred_commander_sends: Vec::new(),
         supervisor_commands: Default::default(),
         normal_delivery_probes: HashMap::new(),
         last_pane_output_bytes: HashMap::new(),

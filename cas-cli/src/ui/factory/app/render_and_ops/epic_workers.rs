@@ -9061,6 +9061,7 @@ mod tests {
             queues.save("takeover-session", "replacement-worker", &mut queue).unwrap();
         }
         env.set_current_dir(&checkout);
+        env.set("CAS_AGENT_ROLE", "worker");
         worker
             .task(request(
                 serde_json::json!({"action": "start", "id": task.id}),
@@ -9116,6 +9117,7 @@ mod tests {
         let mut mismatched = tasks.get(&task.id).unwrap();
         mismatched.deliverables.factory_branch_start = task.deliverables.factory_branch_start.clone();
         tasks.update(&mismatched).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
         supervisor.task(request(serde_json::json!({
             "action": "request_changes", "id": task.id,
             "reason": "Recover the parked delivery's stale source binding",
@@ -9125,12 +9127,14 @@ mod tests {
             "action": "rebind_branch", "id": task.id, "branch": branch,
             "reason": "Approve the replacement after returning the parked mismatch",
         }))).await.unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
         worker.task(request(serde_json::json!({"action": "start", "id": task.id}))).await.unwrap();
         worker.task(request(serde_json::json!({
             "action": "close", "id": task.id, "reason": "Recovered parked mismatch validated",
         }))).await.unwrap();
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
         env.set_current_dir(&project);
+        env.set("CAS_AGENT_ROLE", "supervisor");
         let merged = supervisor
             .factory(Parameters(
                 serde_json::from_value(serde_json::json!({

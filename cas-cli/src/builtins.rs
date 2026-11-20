@@ -90,16 +90,41 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[BuiltinFile {
     content: include_str!("builtins/codex/agents/task-verifier.toml"),
 }];
 
+/// Hash of the unmodified cas-f4ea personal seed (fixture: finish-cas-f4ea.md).
+/// This recognizes the retired seed without carrying a second runtime body.
+const LEGACY_FINISH_COMMAND_HASH: &str =
+    "eeeede161e720bb59ad61f06cec534c57398744c322ffc70c1548a06957c410b";
+
 fn is_finish_entrypoint(builtin: &BuiltinFile) -> bool {
     builtin.path == "skills/finish/SKILL.md"
 }
 
-/// Any Claude `commands/finish.md` is the operator's own entrypoint, whatever
-/// its bytes: Cassy never removes it (cas-fcdb). Claude skills shadow
-/// same-name commands, so its presence suppresses the builtin skill.
-fn personal_finish_command(target_dir: &Path) -> bool {
+/// A customized Claude command must keep its name: Claude skills otherwise
+/// shadow same-name commands. Inspection is read-only for preview/parity.
+fn custom_finish_command(target_dir: &Path) -> std::io::Result<bool> {
     let command = target_dir.join("commands/finish.md");
-    command.exists() || command.is_symlink()
+    if command.is_symlink() {
+        return Ok(true);
+    }
+    match std::fs::read(command) {
+        Ok(bytes) => Ok(file_bytes_hash(&bytes) != LEGACY_FINISH_COMMAND_HASH),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove only the exact retired personal seed. A custom command suppresses
+/// installation for this Claude profile, without changing either entrypoint.
+fn prepare_claude_finish(target_dir: &Path) -> std::io::Result<bool> {
+    if custom_finish_command(target_dir)? {
+        return Ok(false);
+    }
+    match std::fs::remove_file(target_dir.join("commands/finish.md")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(true)
 }
 
 /// Equip a new or existing account without refreshing unrelated configuration.
@@ -133,22 +158,20 @@ fn personal_codex_finish() -> Option<std::path::PathBuf> {
     (path.exists() || path.is_symlink()).then_some(path)
 }
 
-/// Personal finish entrypoints win: a Claude `commands/finish.md` or the
-/// Codex HOME skill. Only a content hash, never a managed marker or
+/// Personal Codex skills win. Only a content hash, never a managed marker or
 /// replacement request, authorizes removal of an earlier Cassy installation.
 fn prepare_finish(harness: SupervisorCli, target_dir: &Path) -> std::io::Result<(bool, SyncResult)> {
     let mut result = SyncResult::default();
-    let personal = match harness {
-        SupervisorCli::Claude => personal_finish_command(target_dir).then(|| target_dir.join("commands/finish.md")),
-        SupervisorCli::Codex => personal_codex_finish(),
-        _ => None,
-    };
-    let Some(personal) = personal else {
+    if harness == SupervisorCli::Claude {
+        let install = prepare_claude_finish(target_dir)?;
+        if !install {
+            result.skipped_files.push("commands/finish.md".to_string());
+        }
+        return Ok((install, result));
+    }
+    let Some(personal) = (harness == SupervisorCli::Codex).then(personal_codex_finish).flatten() else {
         return Ok((true, result));
     };
-    if harness == SupervisorCli::Claude {
-        result.skipped_files.push("commands/finish.md".to_string());
-    }
     let relative = "skills/finish/SKILL.md";
     let target = target_dir.join(relative);
     match std::fs::read(&target) {
@@ -3862,7 +3885,7 @@ fn sync_workflows(
 
 /// Sync all built-in files to .claude/ directory
 pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
-    let (install_finish, policy) = prepare_finish(SupervisorCli::Claude, claude_dir)?;
+    let install_finish = prepare_claude_finish(claude_dir)?;
     let mut result = sync_all_builtins_with_finish_policy(
         claude_dir,
         BUILTIN_AGENTS,
@@ -3870,9 +3893,6 @@ pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
         install_finish,
         &[],
     )?;
-    result.skipped_files.extend(policy.skipped_files);
-    result.pruned_files.extend(policy.pruned_files);
-    result.warnings.extend(policy.warnings);
     sync_workflows(claude_dir, BUILTIN_WORKFLOWS, &mut result, &[])?;
     let keep = builtin_workflow_names(BUILTIN_WORKFLOWS);
     prune_stale_cas_workflow_files(&claude_dir.join("workflows"), &keep)?;
@@ -3933,12 +3953,7 @@ pub(crate) fn sync_all_builtins_for_project_excluding(
 ) -> std::io::Result<SyncResult> {
     match harness {
         SupervisorCli::Claude => {
-            // finish is user-level only: a project copy listed /finish twice
-            // and shadowed the operator's own command (cas-fcdb).
-            let skills: Vec<_> = filtered_project_skills(BUILTIN_SKILLS, project_root)
-                .into_iter()
-                .filter(|file| !is_finish_entrypoint(file))
-                .collect();
+            let skills = filtered_project_skills(BUILTIN_SKILLS, project_root);
             sync_project_catalog(
                 harness,
                 &project_root.join(".claude"),
@@ -4714,7 +4729,7 @@ impl InstallParity {
 pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> InstallParity {
     match harness {
         SupervisorCli::Claude => {
-            let custom_command = personal_finish_command(target_dir);
+            let custom_command = custom_finish_command(target_dir).unwrap_or(true);
             let skills: Vec<_> = BUILTIN_SKILLS
                 .iter()
                 .copied()
@@ -4837,7 +4852,7 @@ pub struct BuiltinChange {
 pub fn preview_all_builtins(claude_dir: &Path) -> std::io::Result<Vec<BuiltinChange>> {
     let mut changes = Vec::new();
 
-    let custom_command = personal_finish_command(claude_dir);
+    let custom_command = custom_finish_command(claude_dir)?;
     let all_builtins = BUILTIN_AGENTS
         .iter()
         .chain(BUILTIN_SKILLS.iter())
@@ -4929,9 +4944,10 @@ pub fn preview_all_builtins_for_project(
     };
     let (agents, skills): (&[BuiltinFile], Vec<BuiltinFile>) = match harness {
         SupervisorCli::Claude => {
+            let custom_command = custom_finish_command(&target_dir)?;
             let files = filtered_project_skills(BUILTIN_SKILLS, project_root)
                 .into_iter()
-                .filter(|file| !is_finish_entrypoint(file))
+                .filter(|file| !custom_command || !is_finish_entrypoint(file))
                 .collect();
             (BUILTIN_AGENTS, files)
         }

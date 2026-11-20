@@ -4323,13 +4323,10 @@ command away.
 other harnesses receive the same `SKILL.md`. It needs no personal HOME seed.
 Update also refreshes finish in named Claude/Codex accounts. The shared bases
 (`~/.cas/claude-base`, `~/.cas/codex-base`), which every account's `skills`
-links to, receive the full builtin set. Claude projects do not get a finish
-copy: finish is user-level, and a project copy listed `/finish` twice and
-shadowed the operator's own command (cas-fcdb).
-Any Claude `commands/finish.md` is the operator's own entrypoint, whatever its
-bytes, and Cassy never removes it. It blocks builtin installation for that
-profile, and update removes an installed finish skill there only when its
-content proves it is Cassy's; a customized skill is kept with a warning.
+links to, receive the full builtin set. The exact old cas-f4ea command seed is
+removed in favor of the skill.
+A customized Claude `commands/finish.md` blocks builtin installation: Cassy leaves both
+entrypoints untouched and skips installing its finish skill for that profile.
 An existing customized finish `SKILL.md` is preserved, even when it retains
 `managed_by: cas`. Delete the custom entrypoint and rerun `cas update` to accept
 the builtin. Other builtin skills keep their existing ownership policy.

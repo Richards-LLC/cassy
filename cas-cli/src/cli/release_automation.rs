@@ -136,7 +136,7 @@ fn relocate_candidates(from: &Path, to: &Path, live: &Path, snapshot: &Path) -> 
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct ReleasePreview {
+pub(crate) struct ReleasePreview {
     scope: ReleaseScope,
     members: usize,
     would_close: usize,
@@ -153,7 +153,7 @@ pub(super) struct ReleasePreview {
 }
 
 impl ReleasePreview {
-    fn from_members(scope: ReleaseScope, members_by_id: BTreeMap<String,
+    pub(crate) fn from_members(scope: ReleaseScope, members_by_id: BTreeMap<String,
         crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>) -> Self {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut value = Self { scope, members: members_by_id.len(), would_close: 0,
@@ -177,7 +177,7 @@ impl ReleasePreview {
         value
     }
 
-    fn allow_cut(&self) -> Result<()> {
+    pub(crate) fn allow_cut(&self) -> Result<()> {
         let missing: Vec<_> = self.review_missing.iter().filter(|id|
             self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).collect();
         ensure!(missing.is_empty(), "REVIEW_MISSING: {}", missing.into_iter().cloned().collect::<Vec<_>>().join(", "));

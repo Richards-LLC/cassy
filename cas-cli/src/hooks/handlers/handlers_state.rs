@@ -1449,6 +1449,16 @@ mod supervisor_handoff_tests {
         for index in 0..25 {
             assert!(full.contains(&format!("task action=close id=cas-int-{index:02} ")), "receipt lost row {index}");
         }
+        // cas-27e3: 202 parked deliveries held a supervisor SessionStart for
+        // 21 minutes. Once the budget is spent, no delivery is checked and each
+        // remaining one is still named with its receipt.
+        let started = std::time::Instant::now();
+        let spent = crate::supervisor_continuity::integrated_recovery(&root, "budget-id", started).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(!spent.contains("task action=close id=cas-int-"), "an expired budget must not run the guard: {spent}");
+        for index in 0..25 {
+            assert!(spent.contains(&format!("- cas-int-{index:02}: commit_receipt={anchor}")), "unchecked row {index} lost: {spent}");
+        }
     }
 
     /// Replay a busy supervisor exiting before it sees phone or Violet mail.

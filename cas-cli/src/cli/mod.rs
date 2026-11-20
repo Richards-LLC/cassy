@@ -86,7 +86,7 @@ mod rules;
 pub mod retrieval_parity;
 mod setup;
 mod status;
-mod statusline;
+pub(crate) mod statusline;
 pub mod store_choice;
 mod sync;
 mod update;

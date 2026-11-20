@@ -2573,3 +2573,50 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     let closed = text(supervisor.cas_task_close(request()).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
 }
+
+/// GH2240: a peer fast-forwarded a never-parked delivery into the target and
+/// the worker's checkout is not on this machine. The supervisor's close and
+/// its direct verdict must bind that delivery, never the supervisor's own
+/// unrelated checkout HEAD, so the ordinary close retry succeeds.
+#[tokio::test]
+async fn supervisor_direct_verdict_binds_delivery_not_checkout_head_gh2240() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let base = git(repo, &["rev-parse", "main"]);
+    let mut task = start_on_lane(tasks.as_ref(), &base);
+    task.notes = "no changelog: disposable fixture".into();
+    tasks.update(&task).unwrap();
+    git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
+    git(repo, &["merge", "-q", "--ff-only", &f.final_tip]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &f.final_tip]);
+    git(repo, &["checkout", "-q", "-b", "supervisor/startup"]);
+    let checkout_head = commit_file(repo, "managed.txt", "chore: sync managed files");
+    let config = root.join("config.toml");
+    std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+        .replace("enabled=false", "enabled=true")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(root.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let close = || Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Landed by fast-forward; reviewed".into()),
+        commit_receipt: None, supervisor_override: None,
+        no_delivery: None, stranded_branch_override: None, search_manifest: None,
+    });
+    let pending = text(supervisor.cas_task_close(close()).await.unwrap());
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
+        .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
+    let proof = dispatch.repository.as_ref().unwrap();
+    assert_ne!(proof.head_commit, checkout_head, "{proof:?}");
+    assert_eq!(proof.anchor_commits, vec![f.final_tip.clone()]);
+    let review = Parameters(serde_json::from_value(serde_json::json!({
+        "task_id": TASK, "dispatch_id": dispatch.id, "status": "approved", "summary": "Reviewed the landed delivery"
+    })).unwrap());
+    let recorded = supervisor.cas_verification_add(review).await.unwrap();
+    assert_ne!(recorded.is_error, Some(true), "{recorded:?}");
+    let closed = text(supervisor.cas_task_close(close()).await.unwrap());
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
+}

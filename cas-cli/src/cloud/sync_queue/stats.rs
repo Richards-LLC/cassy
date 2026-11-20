@@ -202,6 +202,9 @@ impl SyncQueue {
                        WHERE entity_type=?1 AND entity_id=?2 AND strategy=?5)))",
             rusqlite::params![entity_type, entity_id, discarded_row_json, winner_side, strategy, Utc::now().to_rfc3339(), local_revision, remote_revision],
         )?;
+        if conn.changes() > 0 {
+            trim_entity_conflicts(&conn, entity_type, entity_id)?;
+        }
         Ok(())
     }
 
@@ -331,4 +334,26 @@ impl SyncQueue {
         }
         grouped
     }
+}
+
+/// Bound one entity's journal after a new row (cas-3ade): keep its newest
+/// [`super::SYNC_CONFLICTS_KEPT_PER_ENTITY`] rows and the newest row of each strategy,
+/// which the lifecycle guard, collision and fold readers consume.
+fn trim_entity_conflicts(
+    conn: &rusqlite::Connection,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<usize, CasError> {
+    Ok(conn.execute(
+        "DELETE FROM sync_conflicts WHERE entity_type = ?1 AND entity_id = ?2
+           AND id NOT IN (SELECT id FROM sync_conflicts
+               WHERE entity_type = ?1 AND entity_id = ?2 ORDER BY id DESC LIMIT ?3)
+           AND id NOT IN (SELECT MAX(id) FROM sync_conflicts
+               WHERE entity_type = ?1 AND entity_id = ?2 GROUP BY strategy)",
+        params![
+            entity_type,
+            entity_id,
+            crate::cloud::sync_queue::SYNC_CONFLICTS_KEPT_PER_ENTITY as i64
+        ],
+    )?)
 }

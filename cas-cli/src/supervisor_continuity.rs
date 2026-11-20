@@ -36,7 +36,7 @@ pub(crate) fn integrated_recovery(root: &Path, agent_id: &str, deadline: std::ti
             continue;
         }
         let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else { continue };
-        if std::time::Instant::now() >= deadline && false {
+        if std::time::Instant::now() >= deadline {
             unchecked.push(format!("- {}: commit_receipt={anchor}\n", task.id));
             continue;
         }

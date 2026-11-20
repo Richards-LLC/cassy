@@ -474,6 +474,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
                 turn.transcript, turn.cli,
             ) else { return Ok(Step::Nothing) };
             let budget = usage.model_context_window.filter(|window| *window > 0)
+                .or_else(|| harness_window(root, turn.harness_session))
                 .map(|window| (window.saturating_mul(80) / 100).min(cap)).unwrap_or(cap);
             let trigger_tokens = usage.input_tokens;
             if Utc::now() - turn.at > Duration::minutes(FRESH_MINUTES) {

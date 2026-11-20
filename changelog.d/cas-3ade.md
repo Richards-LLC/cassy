@@ -7,8 +7,8 @@
 
 ### Fixed — Factory
 
-- **Old session-end records and delivered operator messages are cleaned up** —
-  Was: every ended session kept its full hand-off record (a supervisor's can
+- **Old session-end records and delivered operator messages are cleaned up** — Was:
+  every ended session kept its full hand-off record (a supervisor's can
   be several megabytes), and every message to the operator kept a delivery
   copy that also stopped the message itself from ever being cleaned up. Now:
   the regular retention pass removes records older than the existing retention

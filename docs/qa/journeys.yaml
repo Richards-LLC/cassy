@@ -2046,6 +2046,11 @@ bug_families:
     title: A confirmed team write retires the queued personal copy, and a pull that changes only the revision records no new conflict
     statement: When a project syncs as a team, the first team write the cloud confirms clears the matching personal row from the sync queue, even though the push carried the row's base revision; that row is not sent again on later cycles. A pull that replaces a local row with the same content under a newer revision adds no second row to the conflict journal.
     tasks: [cas-258e]
+  supervisor-startup-unbounded-recovery:
+    title: Supervisor startup and context clear stay bounded on a large store
+    statement: A supervisor SessionStart returns its context within the recovery budget however many parked deliveries the project holds; deliveries it did not check are named with their commit receipts and the supervisor handoff is kept. A Claude supervisor's automatic handoff and clear start at 80% of the context window Claude reports, before Claude compacts on its own.
+    found: 2026-11-20
+    tasks: [cas-27e3]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

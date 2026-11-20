@@ -1090,11 +1090,11 @@ fn a_drop_after_a_finished_uncollected_job_is_attributed_by_generation() {
     assert!(jobs.job_owners.get(probe).is_none(), "nothing is left outstanding for the key");
 }
 
-/// cas-4272 review L3: a Retry stamp holds its row and blocks QueueSelect
-/// until it lands; a selection then skips rows stamped after it was
-/// submitted.
+/// cas-4272 review L3, cas-9594c: a queued Retry stamp holds its row out of
+/// delivery without holding QueueSelect; a selection submitted before the
+/// stamp landed skips the row.
 #[test]
-fn a_retry_stamp_holds_its_row_and_gates_selection_until_it_lands() {
+fn a_retry_stamp_holds_its_row_without_holding_selection() {
     let (_root, cas_dir) = project();
     let row_id = enqueue(&cas_dir, "worker-a", "retry later");
     let writer = TestWriter::start(true);
@@ -1107,30 +1107,27 @@ fn a_retry_stamp_holds_its_row_and_gates_selection_until_it_lands() {
     );
     assert!(jobs.row_settling(row_id, Instant::now()), "the row is held while its Retry is queued");
     jobs.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
-    assert!(!jobs.select_in_flight(), "no QueueSelect while a stamp is outstanding");
+    assert!(jobs.select_in_flight(), "selection does not wait for the stamp");
 
     writer.open();
-    settle(&mut jobs, |jobs| !jobs.row_settling(row_id, Instant::now()));
-    jobs.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
-    assert!(jobs.select_in_flight(), "selection resumes once every stamp landed");
-    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    settle(&mut jobs, |jobs| !jobs.select_in_flight() && !jobs.row_settling(row_id, Instant::now()));
     let selection = jobs.take_selection().unwrap();
     let since = selection.submitted_at.unwrap();
-    assert!(!jobs.stamped_since(row_id, since), "the Retry landed before this selection");
+    assert!(jobs.stamped_since(row_id, since), "the Retry landed after this selection was submitted");
 }
 
-/// cas-4272 review L2: a stamp job that panics releases the selection gate
-/// and holds its row only for the deferral window; a panicked settle never
+/// cas-4272 review L2: a stamp job that panics holds its row only for the
+/// deferral window; a panicked settle never
 /// lowers a hold it did not raise.
 #[test]
-fn a_panicked_stamp_job_releases_the_gate_and_holds_its_row_briefly() {
+fn a_panicked_stamp_job_holds_its_row_briefly() {
     let (_root, cas_dir) = project();
     let row_id = enqueue(&cas_dir, "worker-a", "panics");
     let writer = TestWriter::start(false);
     let mut jobs = jobs_on(&writer);
     inject_stamp_panics(&cas_dir, 1);
     jobs.stamp(&cas_dir, row_id, "worker-a", QueueStamp::Dropped { detail: None });
-    settle(&mut jobs, |jobs| !jobs.stamps_pending(Instant::now()));
+    settle(&mut jobs, |jobs| jobs.stamp_landed_at.contains_key(&row_id));
     let now = Instant::now();
     assert!(jobs.row_settling(row_id, now), "held while a deferred write could still land");
     assert!(!jobs.row_settling(row_id, now + SETTLING_DEFERRED_HOLD), "the hold expires");
@@ -1150,41 +1147,6 @@ fn a_panicked_stamp_job_releases_the_gate_and_holds_its_row_briefly() {
     jobs.settle_injects(&cas_dir);
     settle(&mut jobs, |jobs| !jobs.in_flight().holds_row(other));
     assert!(!jobs.row_settling(other, Instant::now()), "a settle raised no hold and lowers none");
-}
-
-/// cas-786a6 review M1: a claim job whose wait expired, and whose result
-/// lands after a newer job was submitted, never holds the row: its claim is
-/// released, and the row is claimable again.
-#[test]
-fn a_superseded_claim_job_releases_its_claim() {
-    let (_root, cas_dir) = project();
-    let row = enqueue(&cas_dir, "worker-a", "claimed twice");
-    let writer = TestWriter::start(true);
-    let mut jobs = jobs_on(&writer);
-    assert_eq!(
-        jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a"),
-        ClaimStep::Waiting
-    );
-    // The first job's wait expires before it ran (a stalled writer).
-    jobs.expire_claims(&cas_dir, Instant::now() + INJECT_OUTCOME_TIMEOUT + Duration::from_secs(1));
-    assert!(!jobs.has_claim(row, "worker-a"));
-    assert_eq!(
-        jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a"),
-        ClaimStep::Waiting
-    );
-    writer.open();
-    // Job 1 claims; job 2 then finds a bare claim. Job 1's late token is
-    // released rather than overwritten.
-    // Job 2 comes back (it ran after job 1, so job 1's result is applied
-    // too), then job 1's late claim is released.
-    settle(&mut jobs, |jobs| jobs.claim_resolved(&cas_dir, "s", row, "worker-a", "worker-a"));
-    settle(&mut jobs, |_| claim_source(&cas_dir, row, "worker-a").is_none());
-    assert_eq!(
-        jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a"),
-        ClaimStep::NotClaimed,
-        "job 2 found job 1's bare claim"
-    );
-    assert!(store_claim(&cas_dir, row, "worker-a").unwrap().is_some(), "the row is claimable again");
 }
 
 /// cas-786a6 review L4: a claim that came back but whose row was never

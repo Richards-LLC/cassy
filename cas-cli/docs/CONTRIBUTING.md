@@ -449,9 +449,11 @@ that a model started or consumed tokens.
 At each newly recorded supervisor turn, `supervisor_auto_clear` reads the
 latest call's input occupancy, including cache reads/writes once. Its threshold
 is 80% of the harness-reported `model_context_window`, capped by
-`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Without
-a reported window, only that configured per-call cap applies; capacity is never
-inferred from a model name. Cumulative wake billing cannot trigger a clear.
+`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Claude
+transcripts omit the window, so `cas statusline --with-session` records
+`context_window.context_window_size` per supervisor session under
+`supervisor-auto-clear/windows/`. Without a reported window, only that
+configured per-call cap applies; capacity is never inferred from a model name. Cumulative wake billing cannot trigger a clear.
 If the wake ledger exceeds the cap while the latest call is below the context
 threshold, the supervisor inbox gets one quiet line with both measurements.
 It acts only at an idle

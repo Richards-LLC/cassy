@@ -2601,12 +2601,12 @@ async fn supervisor_direct_verdict_binds_delivery_not_checkout_head_gh2240() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let supervisor = CasCore::with_daemon(root.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
-    let close = || Parameters(TaskCloseRequest {
+    let close = |receipt: Option<String>| Parameters(TaskCloseRequest {
         id: TASK.into(), reason: Some("Landed by fast-forward; reviewed".into()),
-        commit_receipt: None, supervisor_override: None,
+        commit_receipt: receipt, supervisor_override: None,
         no_delivery: None, stranded_branch_override: None, search_manifest: None,
     });
-    let pending = text(supervisor.cas_task_close(close()).await.unwrap());
+    let pending = text(supervisor.cas_task_close(close(None)).await.unwrap());
     let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
         .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
     let proof = dispatch.repository.as_ref().unwrap();
@@ -2617,6 +2617,7 @@ async fn supervisor_direct_verdict_binds_delivery_not_checkout_head_gh2240() {
     })).unwrap());
     let recorded = supervisor.cas_verification_add(review).await.unwrap();
     assert_ne!(recorded.is_error, Some(true), "{recorded:?}");
-    let closed = text(supervisor.cas_task_close(close()).await.unwrap());
+    // The pre-close hook names the delivered commit, as GH2240's retry did.
+    let closed = text(supervisor.cas_task_close(close(Some(f.final_tip.clone()))).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
 }

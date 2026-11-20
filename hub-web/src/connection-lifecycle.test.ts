@@ -1165,7 +1165,7 @@ describe("Commander live connection lifecycle", () => {
     await waitFor(() => expect(onMachineInfo.mock.calls.at(-1)?.[0]?.version).toBe("4.0.2"));
   });
 
-  it.each([false, true])("measures current ready transport reads without relaxing the send fence (multiplex=%s, cas-49cc)", async (multiplex) => {
+  it.each([false, true])("fences sends during event recovery by current ready transport reads (multiplex=%s, cas-49cc, cas-bcf50)", async (multiplex) => {
     const hub = transport(multiplex);
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
@@ -1187,10 +1187,13 @@ describe("Commander live connection lifecycle", () => {
     hub.endEvents();
     await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     expect(connection.hasLiveAttach("healthy")).toBe(true);
-    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Still fenced during event recovery" } })).toBe(false);
+    // cas-bcf50: a socket that answered inside the liveness window takes a
+    // send during event recovery; one that went quiet is fenced.
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Answering during event recovery" } })).toBe(true);
     // Move the read clock without running retry timers or heartbeat signing.
     vi.setSystemTime(Date.now() + 20_000);
     expect(connection.hasLiveAttach("healthy")).toBe(false);
+    expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Quiet during event recovery" } })).toBe(false);
     receive({ StateUpdate: { state: { panes: [] } } });
     expect(connection.hasLiveAttach("healthy")).toBe(true);
     socket.close(1000);

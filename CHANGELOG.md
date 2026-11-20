@@ -7,6 +7,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.42.0] - 2026-11-20
+
+### Fixed — Cloud sync
+
+- **Team sync stops re-sending the same tasks every cycle** — Was: since
+  v4.33.0, a project that had moved to team sync re-sent every task still
+  queued from its personal days on each sync cycle, and each pull saved
+  another full copy of the task to the conflict log, which grew one project
+  database to 22 GB. Now: the first confirmed team write clears the queued
+  copy, and a pull that changes nothing but the revision number records no
+  new conflict.
+
+### Fixed — Factory
+
+- **A refused reexec names what it is waiting for** — Was: on a busy session
+  `cas factory reexec` refused with "Durable daemon jobs did not flush before
+  reexec" and named no job, so a retry minutes later was a guess. Now: the
+  refusal lists each unfinished daemon job by lane, kind, key and age, says
+  when a write is still waiting for the store writer, counts any store writes
+  still queued, and says the session keeps running unchanged until a retry.
+
 ## [4.41.0] - 2026-11-20
 
 ### Fixed — Commander

@@ -1456,18 +1456,21 @@ mod supervisor_handoff_tests {
         for index in 0..25 {
             assert!(spent.contains(&format!("- cas-int-{index:02}: commit_receipt={anchor}")), "unchecked row {index} lost: {spent}");
         }
-        // A delivery check that outlives the budget (git stalls 5 s) cannot
-        // hold startup past the budget plus grace.
-        let bin = temp.path().join("slow-bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::fs::write(bin.join("git"), format!("#!/bin/sh\nsleep 5\nPATH='{path}' exec git \"$@\"\n")).unwrap();
-        std::fs::set_permissions(bin.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        env.set("PATH", &format!("{}:{path}", bin.display()));
+        // A store read that outlives the budget (the shared connection is
+        // held) cannot hold startup past the budget plus grace.
+        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _held = shared.lock().unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(6));
+        });
+        is_locked.recv().unwrap();
         let started = std::time::Instant::now();
         let stalled = crate::supervisor_continuity::bounded_recovery(&root, "stalled-id", std::time::Duration::from_secs(1));
         assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
         assert!(!stalled.is_empty() && !stalled.contains("task action=close id=cas-int-"), "{stalled}");
+        holder.join().unwrap();
     }
 
     /// Replay a busy supervisor exiting before it sees phone or Violet mail.

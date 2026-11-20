@@ -474,6 +474,17 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
     crate::wait_budget::note_store_access("shared_connection");
 
     let canonical = canonical_db_path(db_path);
+    if let Some(private) = PRIVATE_CONNECTIONS.with_borrow_mut(|private| {
+        let map = private.as_mut()?;
+        Some(match map.get(&canonical) {
+            Some(conn) => Ok(Arc::clone(conn)),
+            None => open_configured(db_path).map(|conn| {
+                Arc::clone(map.entry(canonical.clone()).or_insert_with(|| Arc::new(Mutex::new(conn))))
+            }),
+        })
+    }) {
+        return private;
+    }
 
     let (slot, sweep_due) = {
         let mut guard = lock_pool();
@@ -529,6 +540,26 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
         );
     }
     Ok(shared)
+}
+
+thread_local! {
+    static PRIVATE_CONNECTIONS: std::cell::RefCell<Option<HashMap<PathBuf, Arc<Mutex<Connection>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `body` with this thread's [`shared_connection`] calls served by
+/// connections private to the thread (cas-27e3). Detached work that may stall
+/// inside SQLite then holds no mutex the rest of the process waits on; as a
+/// WAL reader it blocks neither other readers nor the writer.
+pub fn with_private_connections<T>(body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<HashMap<PathBuf, Arc<Mutex<Connection>>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PRIVATE_CONNECTIONS.set(self.0.take());
+        }
+    }
+    let _restore = Restore(PRIVATE_CONNECTIONS.replace(Some(HashMap::new())));
+    body()
 }
 
 /// A private connection to `db_path`, configured like the pooled one but

@@ -680,6 +680,9 @@ Remote parks bind the project, owner generation, worker identity and lease epoch
 - **Bounded conflict journal** - The sync conflict journal keeps the ten newest discarded-row copies per entity, plus the newest copy of each strategy that lifecycle guards, `cas doctor` collision reports and memory folds read. Older copies are removed when a new conflict for that entity is recorded; `cas cloud conflicts --prune <days>` still removes copies by age.
 - **Bounded session ends and operator snapshots** - The canonical daemon's retention tick also removes session-end records older than `factory.supervisor_queue_retention_days`, except an unpublished supervisor handoff, one claimed by a live successor, one whose agent row still exists, the newest supervisor end on each machine and the newest end per role and name. It removes operator-turn snapshots older than `factory.prompt_retention_days` once unleased, with their prompt processed or gone and no cloud row still awaiting a receipt; the prompt-queue pass can then release those prompts. A window of 0 disables its sweep.
 
+- **Bounded supervisor startup** - Supervisor startup checks parked integrated deliveries for 10 seconds and never waits more than 12; deliveries it did not reach are listed with their commit receipts, and close still checks each one. A compacted session keeps its registration and does not repeat the check.
+- **Claude supervisor context window** - Claude's status line input reports the session's context window, which Claude transcripts omit. Cassy records it for supervisor sessions, so the automatic handoff and clear start at 80% of that window, below Claude's own compaction point.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

@@ -618,6 +618,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 allow_trunk: false,
                 cleanup: Some(false),
                 armed_at: None,
+                ci_rerun: Vec::new(),
             };
             let result = core.worktree_merge_queued(&expected, &queue.id).await;
             let current = tasks.get(&entry.task)?;

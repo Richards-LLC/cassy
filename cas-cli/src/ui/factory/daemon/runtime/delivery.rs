@@ -890,7 +890,7 @@ fn provenance_writer() -> &'static ProvenanceWriter {
 /// dispatchers thin adapters: neither transport can grow a second interrupt or
 /// semantic-message implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum CommanderControl {
+pub(crate) enum CommanderControl {
     SupervisorCommand {
         request: crate::ui::factory::supervisor_commands::SupervisorCommandRequest,
         client_ref: String,
@@ -1030,7 +1030,94 @@ pub(crate) fn recipient_config_dir(spec: &cas_mux::WorkerSpec) -> Option<String>
     Some(trimmed.to_string())
 }
 
+/// A send refused only because another thread held the store (cas-bcf50).
+/// Retrying it cannot queue it twice: nothing was written. A reply whose row
+/// is queued but whose ask is unconfirmed is not one.
+fn lost_store_to_contention(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::ops::fleet::ReplyQueuedAskUnconfirmed>()
+        .is_none()
+        && error.chain().any(|cause| {
+            let sqlite = match cause.downcast_ref::<cas_store::StoreError>() {
+                Some(cas_store::StoreError::Database(sqlite)) => Some(sqlite),
+                _ => cause.downcast_ref::<rusqlite::Error>(),
+            };
+            sqlite.is_some_and(cas_store::shared_db::is_busy_error)
+        })
+}
+
+/// The frame a Commander control's result sends back to its client.
+fn commander_reply_frame(
+    error_prefix: &str,
+    client_ref: Option<String>,
+    result: anyhow::Result<Option<crate::ui::factory::DaemonMessage>>,
+) -> Option<crate::ui::factory::DaemonMessage> {
+    match result {
+        Ok(reply) => reply,
+        Err(error) => Some(crate::ui::factory::DaemonMessage::Error {
+            message: format!("{error_prefix}: {error}"),
+            client_ref,
+        }),
+    }
+}
+
 impl FactoryDaemon {
+    /// cas-bcf50: run a Commander control for `client`, answering with the
+    /// frame to send back. A send that lost the store to another thread
+    /// (the daemon's 2 s grant starved by other holders) waits, with the
+    /// client's later sends behind it, and is retried on later passes by
+    /// [`Self::retry_deferred_commander_sends`] until it is enqueued.
+    pub(super) async fn commander_control_for_client(
+        &mut self,
+        client: usize,
+        control: CommanderControl,
+    ) -> Option<crate::ui::factory::DaemonMessage> {
+        let is_send = matches!(control, CommanderControl::SendMessage { .. });
+        if is_send && self.deferred_commander_sends.iter().any(|(id, _)| *id == client) {
+            self.deferred_commander_sends.push((client, control));
+            return None;
+        }
+        let error_prefix = control.error_prefix();
+        let client_ref = control.client_ref().map(str::to_owned);
+        let retry = is_send.then(|| control.clone());
+        match self.dispatch_commander_control(control).await {
+            Err(error) if retry.is_some() && lost_store_to_contention(&error) => {
+                tracing::warn!(target: "cas::commander", client_ref = client_ref.as_deref().unwrap_or_default(),
+                    error = %format!("{error:#}"), "Commander send waits for the store; retrying on the next pass");
+                self.deferred_commander_sends.extend(retry.map(|send| (client, send)));
+                None
+            }
+            result => commander_reply_frame(error_prefix, client_ref, result),
+        }
+    }
+
+    /// Retry each waiting client's oldest send once, in order. Returns the
+    /// frames to send back; a send that loses the store again keeps waiting.
+    pub(super) async fn retry_deferred_commander_sends(
+        &mut self,
+    ) -> Vec<(usize, crate::ui::factory::DaemonMessage)> {
+        let mut replies = Vec::new();
+        let mut waiting = std::collections::HashSet::new();
+        for (client, control) in std::mem::take(&mut self.deferred_commander_sends) {
+            if waiting.contains(&client) {
+                self.deferred_commander_sends.push((client, control));
+                continue;
+            }
+            let error_prefix = control.error_prefix();
+            let client_ref = control.client_ref().map(str::to_owned);
+            match self.dispatch_commander_control(control.clone()).await {
+                Err(error) if lost_store_to_contention(&error) => {
+                    waiting.insert(client);
+                    self.deferred_commander_sends.push((client, control));
+                }
+                result => replies.extend(
+                    commander_reply_frame(error_prefix, client_ref, result).map(|frame| (client, frame)),
+                ),
+            }
+        }
+        replies
+    }
+
     /// Execute a Commander control after either client transport recognizes it.
     /// Targeted interrupt reaches the same `Mux::break_turn` primitive used by
     /// urgent coordination delivery, and semantic messages reach the same

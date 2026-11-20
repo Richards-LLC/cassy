@@ -4791,13 +4791,10 @@ impl FactoryDaemon {
     /// run on the External lane; only `apply`'s writes take the store writer.
     pub(super) fn submit_progress_watchdog(&mut self) {
         let (watchdog_dir, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
-        // RED-STEP (cas-e37f): the pre-fix lane, whole sweep on the writer.
-        self.relay_jobs.submit_write(&mut self.queue_jobs, "progress-watchdog", None, move || {
+        self.relay_jobs.submit_progress_watchdog_read(&mut self.queue_jobs, move || {
             let at = chrono::Utc::now();
-            if let Some(observation) = super::progress_watchdog::observe(&watchdog_dir, &session, at) {
-                super::progress_watchdog::apply(&watchdog_dir, &session, at, observation);
-            }
-            super::relay_jobs::RelayOutput::ProbeWritten
+            let observation = super::progress_watchdog::observe(&watchdog_dir, &session, at).map(Box::new);
+            super::relay_jobs::RelayOutput::ProgressObserved { at, observation }
         });
     }
 

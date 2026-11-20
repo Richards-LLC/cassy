@@ -1550,6 +1550,17 @@ function conversationConnection(machineId: string, session: string | undefined):
   return sessionConnection(machine, attachStates.get(key), sessionsEverLive.has(key), connections.get(machineId)?.hasLiveAttach(session));
 }
 
+/**
+ * cas-bcf50: the machine as rows and chips see it. Live when its event stream
+ * is, or when the footer's rule finds a conversation still answering while
+ * that stream retries; otherwise the machine's own state. The footer's
+ * session retries never lower it.
+ */
+function reachableMachineState(machineId: string): ConnectionState | undefined {
+  const footer = machineFooterConnection(machineId);
+  return footer?.phase === "live" ? footer : connectionStates.get(machineId);
+}
+
 function machineFooterConnection(machineId: string): ConnectionState | undefined {
   const prefix = `${machineId}:`;
   // The catalog removes ended peers; their cached retry lifecycle must not
@@ -5026,9 +5037,10 @@ function renderConversationList(): void {
     const summary = sessionSummaries.get(key);
     const needsYou = waiting > 0;
     // A kept catalog can still carry yesterday's positive online bit.
-    // cas-bcf50: the footer's and header's state, so a row never reads "Last
-    // known" while its machine's conversations still answer.
-    const machineState = machineFooterConnection(machine.id);
+    // cas-bcf50: a row never reads "Last known" while its machine's
+    // conversations still answer (the footer's rule lifts it), and one
+    // session's own retry stays that row's, not a machine outage.
+    const machineState = reachableMachineState(machine.id);
     const machineOnline = machineState?.phase === "live" && session.machine_online !== false;
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
@@ -5049,7 +5061,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { reload: row => { void reloadCassy(row); }, resume: row => { void resumeStandby(row); }, machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: machineFooterConnection(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { reload: row => { void reloadCassy(row); }, resume: row => { void resumeStandby(row); }, machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: reachableMachineState(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   renderStoppedMessageNotices(container);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.

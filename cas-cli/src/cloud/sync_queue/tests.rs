@@ -2051,3 +2051,31 @@ fn cas_abad_pull_echo_cleanup_previews_then_removes_only_cloud_identical_rows() 
     kept.sort();
     assert_eq!(kept, ["cas-echo:cas-local:blocks", "cas-edited"], "a local edit and a local-only edge remain");
 }
+
+/// cas-3ade: prowl gabber journaled 2.28M discarded task rows (22 GB). The
+/// journal keeps a bounded recent history per entity, and still keeps the
+/// newest row of every strategy that a latest-state consumer reads.
+#[test]
+fn conflict_journal_keeps_a_bounded_history_per_entity() {
+    use crate::cloud::sync_queue::SYNC_CONFLICTS_KEPT_PER_ENTITY as KEPT;
+    let (_temp, queue) = create_test_queue();
+    queue.record_conflict("task", "cas-echo", "guard", "local",
+        "task_lifecycle_guard", None, None).unwrap();
+    queue.record_conflict("task", "cas-other", "other", "remote",
+        "remote_wins", Some(1), Some(2)).unwrap();
+    let echoes = 3 * KEPT;
+    for n in 0..echoes {
+        let state = format!(r#"{{"id":"cas-echo","notes":"edit {n}"}}"#);
+        queue.record_conflict("task", "cas-echo", &state, "remote",
+            "remote_wins", Some(n as i64), Some(n as i64 + 1)).unwrap();
+    }
+
+    let echo: Vec<_> = queue.list_conflicts(usize::MAX >> 1).unwrap()
+        .into_iter().filter(|row| row.entity_id == "cas-echo").collect();
+    assert_eq!(echo.len(), KEPT + 1, "newest {KEPT} plus the lifecycle guard");
+    assert!(echo[0].discarded_row_json.contains(&format!("edit {}", echoes - 1)));
+    assert_eq!(queue.latest_task_lifecycle_conflicts().unwrap(),
+        [("cas-echo".into(), "guard".into())]);
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), KEPT + 2,
+        "another entity's history is untouched");
+}

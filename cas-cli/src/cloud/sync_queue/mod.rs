@@ -31,6 +31,9 @@ mod unauthored;
 
 /// A consumed memory pull preserved in the conflict journal, not a pull error.
 pub(crate) const MEMORY_FOLD_CONFLICT: &str = "fold_conflict";
+/// Discarded-row copies the conflict journal keeps per entity (cas-3ade). The
+/// newest row of each strategy is kept as well, for latest-state consumers.
+pub const SYNC_CONFLICTS_KEPT_PER_ENTITY: usize = 10;
 
 pub(crate) use dependency_repair::{DependencyEndpointState, dependency_repair_reason};
 pub(crate) use task_intents::{

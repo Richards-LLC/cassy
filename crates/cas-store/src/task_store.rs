@@ -1230,27 +1230,92 @@ pub fn clear_pending_verification_with_conn(conn: &Connection, task_id: &str) ->
     Ok(())
 }
 
+/// A database file (device, inode) at one `PRAGMA schema_version`. Init has
+/// nothing left to do for a state it already finished in this process: any
+/// DDL, from this process or another, bumps the version, and a replaced file
+/// has a new inode (cas-7678).
+type SchemaState = (u64, u64, i64);
+
+fn initialized_schemas() -> &'static Mutex<HashSet<SchemaState>> {
+    static DONE: std::sync::OnceLock<Mutex<HashSet<SchemaState>>> = std::sync::OnceLock::new();
+    DONE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(unix)]
+fn schema_state(conn: &Connection) -> Option<SchemaState> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(conn.path().filter(|path| !path.is_empty())?).ok()?;
+    let version = conn.query_row("PRAGMA schema_version", [], |row| row.get(0)).ok()?;
+    Some((metadata.dev(), metadata.ino(), version))
+}
+
+#[cfg(not(unix))]
+fn schema_state(_conn: &Connection) -> Option<SchemaState> {
+    None
+}
+
+/// Test hook: how many times `init` ran its schema DDL per database file.
+#[cfg(test)]
+pub(crate) fn schema_init_runs(db_path: &Path) -> u32 {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    *schema_init_counts().lock().unwrap().get(&key).unwrap_or(&0)
+}
+
+#[cfg(test)]
+fn schema_init_counts() -> &'static Mutex<HashMap<std::path::PathBuf, u32>> {
+    static RUNS: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, u32>>> = std::sync::OnceLock::new();
+    RUNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn note_schema_init_run(conn: &Connection) {
+    if let Some(path) = conn.path().filter(|path| !path.is_empty()) {
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        *schema_init_counts().lock().unwrap().entry(key).or_default() += 1;
+    }
+}
+
 impl TaskStore for SqliteTaskStore {
     fn init(&self) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            // cas-0e57: the DDL is read-only once every object exists; the
-            // revision backfill is a write and takes the write lock even
-            // when it inserts nothing. Run it only when a task lacks its row.
-            conn.execute_batch(&TASK_SCHEMA_DDL)?;
-            // `task_leases` is owned by the agent lifecycle (`AGENT_SCHEMA`), but
-            // `SqliteTaskStore::delete` issues `DELETE FROM task_leases WHERE
-            // task_id = ?` for cleanup. To keep the task store usable without
-            // requiring callers to also have constructed `SqliteAgentStore`,
-            // we run the agent schema here too. The full AGENT_SCHEMA is the
-            // single source of truth — running it from both store inits is
-            // idempotent (`CREATE TABLE IF NOT EXISTS`). See cas-bdb9
-            // fix-round-1 P1 for why a duplicated slim definition is dangerous.
-            conn.execute_batch(crate::AGENT_SCHEMA)?;
+            // cas-7678: uncached opens run this many times a second under the
+            // shared connection. The DDL runs once per schema state; the two
+            // legacy-row checks below stay on every open and use indexes.
+            let ready = schema_state(&conn).is_some_and(|state| {
+                initialized_schemas()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(&state)
+            });
+            if !ready {
+                #[cfg(test)]
+                note_schema_init_run(&conn);
+                // cas-0e57: the DDL is read-only once every object exists.
+                conn.execute_batch(&TASK_SCHEMA_DDL)?;
+                // `task_leases` is owned by the agent lifecycle (`AGENT_SCHEMA`), but
+                // `SqliteTaskStore::delete` issues `DELETE FROM task_leases WHERE
+                // task_id = ?` for cleanup. To keep the task store usable without
+                // requiring callers to also have constructed `SqliteAgentStore`,
+                // we run the agent schema here too. The full AGENT_SCHEMA is the
+                // single source of truth — running it from both store inits is
+                // idempotent (`CREATE TABLE IF NOT EXISTS`). See cas-bdb9
+                // fix-round-1 P1 for why a duplicated slim definition is dangerous.
+                conn.execute_batch(crate::AGENT_SCHEMA)?;
+                conn.execute_batch(crate::DELIVERY_CYCLE_SCHEMA)?;
+                if let Some(state) = schema_state(&conn) {
+                    initialized_schemas()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(state);
+                }
+            }
             // cas-50b2: anchor writes mint cycles inside task transactions;
             // the backfill is read-only once every open anchored task has one.
-            conn.execute_batch(crate::DELIVERY_CYCLE_SCHEMA)?;
             crate::delivery_cycle::backfill_with_conn(&conn, self.origin_project.as_deref())?;
+            // cas-0e57: the revision backfill is a write and takes the write
+            // lock even when it inserts nothing. Run it only when a task lacks
+            // its row.
             let missing_revision: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM tasks t WHERE NOT EXISTS (
                      SELECT 1 FROM task_mutation_revisions r WHERE r.entity_id = t.id))",

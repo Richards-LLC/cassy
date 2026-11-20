@@ -1837,6 +1837,8 @@ impl EmbeddedDaemon {
                     ("prompts.messages_json", report.transcripts),
                     ("prompt_queue", report.prompt_queue),
                     ("supervisor_queue", report.supervisor_queue),
+                    ("operator_delivery_outbox", report.operator_turns),
+                    ("agent_session_ends", report.session_ends),
                 ];
                 for (table, pass) in tables {
                     if pass.affected > 0 {

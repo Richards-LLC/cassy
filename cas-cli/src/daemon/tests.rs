@@ -639,6 +639,153 @@ fn prompt_table_retention_trims_and_prunes_in_bounded_batches_cas_f207() {
     assert_eq!(prompts.get("aged").unwrap().unwrap().messages.len(), 1);
 }
 
+/// cas-3ade: session ends grew without bound (prowl gabber 41 MB, a supervisor
+/// end is up to 4.5 MB). Retention removes superseded aged ends and keeps every
+/// end a successor, a live claimer or a recovery check still reads.
+#[test]
+fn retention_prunes_superseded_session_ends_and_keeps_live_succession_cas_3ade() {
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let cas_root = temp.path().to_path_buf();
+    let _store = crate::store::open_store(&cas_root).unwrap();
+    let _agents = crate::store::open_agent_store(&cas_root).unwrap();
+    let db = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+    let days_ago = |days: i64| (Utc::now() - Duration::days(days)).to_rfc3339();
+    let live_epoch = days_ago(40);
+    for (id, epoch) in [("live-successor", &live_epoch), ("still-registered", &live_epoch)] {
+        db.execute(
+            "INSERT INTO agents (id, name, role, status, registered_at, last_heartbeat)
+             VALUES (?1, ?1, 'supervisor', 'active', ?2, ?2)",
+            rusqlite::params![id, epoch],
+        )
+        .unwrap();
+    }
+    // (id, agent, role, machine, name, ended days ago, queued, claimed_by)
+    let ends: [(&str, &str, &str, &str, &str, i64, bool, Option<&str>); 9] = [
+        ("superseded", "s1", "supervisor", "m", "sup", 30, true, Some("gone")),
+        ("chain-head", "s2", "supervisor", "m", "sup", 20, true, Some("gone")),
+        ("unpublished", "s3", "supervisor", "m", "sup", 25, false, None),
+        ("live-claim", "s4", "supervisor", "m", "sup", 28, true, Some("live-successor")),
+        ("old-worker", "w1", "worker", "m", "swift-fox-1", 30, true, None),
+        ("newest-worker", "w2", "worker", "m", "swift-fox-1", 20, true, None),
+        ("registered", "still-registered", "worker", "m", "kind-owl-2", 30, true, None),
+        ("fresh", "w3", "worker", "m", "kind-owl-3", 1, true, None),
+        ("superseded-standard", "x1", "standard", "m", "x", 30, true, None),
+    ];
+    for (id, agent, role, machine, name, days, queued, claimed_by) in ends {
+        db.execute(
+            "INSERT INTO agent_session_ends
+               (id, agent_id, registered_at, machine_id, role, reason, payload, ended_at,
+                claimed_by, claimed_epoch, queued_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'exit', json_object('name', ?6), ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                id, agent, live_epoch, machine, role, name, days_ago(days), claimed_by,
+                claimed_by.map(|_| live_epoch.clone()), queued.then(|| days_ago(days)),
+            ],
+        )
+        .unwrap();
+    }
+    db.execute(
+        "INSERT INTO agent_session_ends
+           (id, agent_id, registered_at, machine_id, role, reason, payload, ended_at)
+         VALUES ('newest-standard', 'x2', ?1, 'm', 'standard', 'exit', json_object('name', 'x'), ?2)",
+        rusqlite::params![live_epoch, days_ago(20)],
+    )
+    .unwrap();
+
+    crate::daemon::run_prompt_table_retention(&cas_root).expect("retention run");
+
+    let mut kept: Vec<String> = db
+        .prepare("SELECT id FROM agent_session_ends ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    kept.sort();
+    assert_eq!(
+        kept,
+        ["chain-head", "fresh", "live-claim", "newest-standard", "newest-worker", "registered", "unpublished"]
+    );
+}
+
+/// cas-3ade: the local operator-turn outbox has no production relay, so every
+/// row stayed pending and kept its prompt from retention (soundwave cassy
+/// 14,102 rows, none retained). Retention removes aged turns whose prompt was
+/// processed and whose cloud lane is settled; pending ones stay.
+#[test]
+fn retention_prunes_settled_operator_turns_and_keeps_pending_ones_cas_3ade() {
+    use cas_store::{OperatorTurn, OperatorTurnMetadata, QueueOrigin};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let cas_root = temp.path().to_path_buf();
+    let _store = crate::store::open_store(&cas_root).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+    let db = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+    let days_ago = |days: i64| (Utc::now() - Duration::days(days)).to_rfc3339();
+    static DAEMON: QueueOrigin = QueueOrigin::Daemon;
+    let record = |prompt: &str| {
+        queue
+            .record_operator_turn(&OperatorTurn {
+                source: "supervisor",
+                target: "operator",
+                prompt,
+                factory_session: Some("session"),
+                metadata: OperatorTurnMetadata { origin: Some(&DAEMON), ..Default::default() },
+            })
+            .unwrap()
+            .id()
+    };
+    let settled = record("settled");
+    let unread = record("unread");
+    let recent = record("recent");
+    let cloud_pending = record("cloud pending");
+    // Snapshots are immutable; age them with the guard lifted, then restore it.
+    db.execute_batch("DROP TRIGGER operator_delivery_immutable").unwrap();
+    for (id, days, processed) in
+        [(settled, 30, true), (unread, 30, false), (recent, 1, true), (cloud_pending, 30, true)]
+    {
+        db.execute(
+            "UPDATE operator_delivery_outbox SET created_at = ?1 WHERE prompt_id = ?2",
+            rusqlite::params![days_ago(days), id],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE prompt_queue SET created_at = ?1, processed_at = ?2 WHERE id = ?3",
+            rusqlite::params![days_ago(days), processed.then(|| days_ago(days)), id],
+        )
+        .unwrap();
+    }
+    for statement in cas_store::OPERATOR_DELIVERY_SCHEMA_STATEMENTS {
+        db.execute_batch(statement).unwrap();
+    }
+    db.execute(
+        "INSERT INTO operator_cloud_outbox
+           (event_id, account_id, machine_id, hub_id, project_id, session_id, created_at)
+         SELECT event_id, 'a', 'm', 'h', 'p', 's', created_at
+         FROM operator_delivery_outbox WHERE prompt_id = ?1",
+        [cloud_pending],
+    )
+    .unwrap();
+
+    crate::daemon::run_prompt_table_retention(&cas_root).expect("retention run");
+
+    let kept: Vec<i64> = db
+        .prepare("SELECT prompt_id FROM operator_delivery_outbox ORDER BY prompt_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(kept, [unread, recent, cloud_pending]);
+    assert!(
+        queue.message_delivery_report(settled).unwrap().is_none(),
+        "the settled turn's prompt is released to prompt retention in the same run"
+    );
+}
+
 #[test]
 fn daemon_index_cycle_repairs_the_legacy_tantivy_root_before_draining_pending_entries() {
     use crate::daemon::indexing::run_indexing_cycle;

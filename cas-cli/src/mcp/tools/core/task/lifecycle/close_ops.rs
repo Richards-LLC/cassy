@@ -10749,7 +10749,7 @@ impl CasCore {
                         let recovery_anchor = verification_tier.as_ref()
                             .filter(|_| supervisor_tier_two_recovery)
                             .map(|decision| decision.tip.as_str());
-                        let merged_receipt = if post_merge_target.is_none() || supervisor_tier_two_recovery {
+                        let mut merged_receipt = if post_merge_target.is_none() || supervisor_tier_two_recovery {
                             req.commit_receipt.as_deref().or(recovery_anchor).and_then(|receipt| {
                                 let resolved =
                                     resolve_task_commit_receipt_sha(&close_project_root, receipt)
@@ -10764,17 +10764,8 @@ impl CasCore {
                         } else {
                             None
                         };
-                        let post_merge_target = post_merge_target.or_else(|| {
-                            merged_receipt.as_ref().map(|_| close_project_root.clone())
-                        });
-                        let use_target_branch_proof = post_merge_target.is_some();
-                        let proof_worktree = match post_merge_target {
-                            Some(target) => target,
-                            None => self
-                                .resolve_worker_worktree_path(
-                                    &task,
-                                    declared_repo_context.as_ref(),
-                                )
+                        let worker_proof_worktree = if post_merge_target.is_none() && merged_receipt.is_none() {
+                            self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref())
                                 .map_err(|error| McpError {
                                     code: ErrorCode::INVALID_PARAMS,
                                     message: Cow::from(format!(
@@ -10782,8 +10773,31 @@ impl CasCore {
                                     )),
                                     data: None,
                                 })?
-                                .unwrap_or_else(|| close_project_root.clone()),
+                        } else {
+                            None
                         };
+                        // GH2240: with no worker checkout here, the closer's
+                        // own checkout HEAD is not this delivery. A recorded
+                        // lane whose tip is already on the target binds as a
+                        // post-merge delivery instead.
+                        if worker_proof_worktree.is_none() && post_merge_target.is_none()
+                            && merged_receipt.is_none() && !is_epic
+                            && task.deliverables.factory_branch_start.is_some()
+                        {
+                            merged_receipt = task.assignee.as_deref()
+                                .map(|assignee| close_measured_factory_branch(&close_project_root, &task, assignee))
+                                .or_else(|| task_delivery_branch(&close_project_root, &task))
+                                .and_then(|branch| resolve_branch_sha(&close_project_root, &branch)
+                                    .or_else(|| resolve_branch_sha(&close_project_root, &format!("origin/{branch}"))))
+                                .filter(|tip| commit_is_merged_into_parent(&close_project_root, tip, &resolved_parent_branch));
+                        }
+                        let post_merge_target = post_merge_target.or_else(|| {
+                            merged_receipt.as_ref().map(|_| close_project_root.clone())
+                        });
+                        let use_target_branch_proof = post_merge_target.is_some();
+                        let proof_worktree = post_merge_target
+                            .or(worker_proof_worktree)
+                            .unwrap_or_else(|| close_project_root.clone());
                         // Epics have no worker delivery transaction. Their declared
                         // target (or legacy epic branch) is the verification tree,
                         // even while the supervisor checkout carries unrelated work.
@@ -10878,9 +10892,10 @@ impl CasCore {
                                             anchor_commits,
                                         )
                                     } else {
-                                        crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
+                                        // GH2240: never the closer's incidental HEAD.
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
                                             &close_project_root,
-                                            &proof_worktree,
+                                            &resolved_parent_branch,
                                             anchor_commits,
                                         )
                                     }

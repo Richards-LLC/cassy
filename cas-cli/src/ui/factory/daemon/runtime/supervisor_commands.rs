@@ -688,6 +688,70 @@ mod tests {
         daemon.pane_silent_since.insert(name.into(), Instant::now() - quiet);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn queued_command_survives_daemon_restart_and_is_typed_once_cas_7d2d() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::queued_command_survives_daemon_restart_and_is_typed_once_cas_7d2d") { return; }
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        fn restart(mut daemon: FactoryDaemon) -> FactoryDaemon {
+            let root = daemon.app.cas_dir().to_path_buf();
+            let name = daemon.app.supervisor_name().to_owned();
+            let pane = daemon.app.mux.remove_pane(&name);
+            drop(daemon);
+            for socket in ["test.sock", "gui.sock"] { std::fs::remove_file(root.join(socket)).unwrap(); }
+            let mut daemon = super::super::provisioning_tests::daemon(&root);
+            if let Some(pane) = pane { daemon.app.mux.add_pane(pane); }
+            daemon
+        }
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        agent.cc_session_id = Some("command-restart".into()); store.update(&agent).unwrap();
+        let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+        std::fs::create_dir_all(&projects).unwrap();
+        let transcript = projects.join("command-restart.jsonl");
+        let open = serde_json::json!({"type":"user","timestamp":Utc::now(),"message":{"role":"user","content":"work"}});
+        std::fs::write(&transcript, format!("{open}\n")).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        let run = Request::Run { command: Command::Compact, confirmed: false };
+        let queued = daemon.dispatch_supervisor_command(run.clone(), "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(matches!(queued, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        daemon = restart(daemon);
+        let restored = daemon.dispatch_supervisor_command(Request::Status, "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(matches!(restored, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+        assert!(daemon.dispatch_supervisor_command(Request::Status, "restart-queue".into(), foreign).await.is_err());
+        daemon.dispatch_supervisor_command(run.clone(), "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        let end = serde_json::json!({"type":"assistant","timestamp":Utc::now(),"message":{"stop_reason":"end_turn"}});
+        std::fs::write(&transcript, format!("{open}\n{end}\n")).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                // Recovery and delivery must work without browser polling.
+                daemon.advance_queued_command();
+                if std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&input).matches("/compact").count(), 1);
+        daemon = restart(daemon);
+        let replay = daemon.dispatch_supervisor_command(run, "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(matches!(replay, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Unconfirmed));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯ draft".as_bytes()).unwrap();
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "never-sent".into(), owner.clone()).await.unwrap();
+        let pane = daemon.app.mux.remove_pane(&name).unwrap();
+        let abandoned = daemon.dispatch_supervisor_command(Request::Status, "never-sent".into(), owner.clone()).await.unwrap();
+        assert!(matches!(abandoned, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
+        drop(pane);
+        daemon = restart(daemon);
+        let abandoned = daemon.dispatch_supervisor_command(Request::Status, "never-sent".into(), owner).await.unwrap();
+        assert!(matches!(abandoned, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn reload_cassy_requires_a_replacement_live_registry_pid_and_version() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture_for};
         use cas_store::HistoryStore;

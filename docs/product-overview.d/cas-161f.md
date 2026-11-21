@@ -1,3 +1,0 @@
-## Core Concepts
-
-Delivery integrity follows an epic into staging and main once both its recorded tip and delivery anchor are integrated. Content and reviewed supersession use that later history without changing the task's recorded work target. Arbitrary branches and immutable review snapshots cannot supply newer proof.

@@ -1,3 +1,0 @@
-## Primary Journeys
-
-Train owners can answer a peer-machine verifier's `supervisor_call` without moving train ownership. Read the public question in task notes, then use `verification action=add` with its task, dispatch, `status=supervisor_call` and answer in `summary`. Cassy queues an authenticated authorization to the dispatch's builder supervisor; that supervisor records the identical payload and the independent verifier continues. The authorization does not grant a final verdict, merge or close permission. Changed questions, deliveries, responders and train owners require fresh authorization.

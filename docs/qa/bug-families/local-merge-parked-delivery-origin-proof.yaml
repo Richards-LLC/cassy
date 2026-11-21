@@ -1,4 +1,0 @@
-title: Local-merge parked deliveries merge without origin proof
-statement: An approved local_merge parked delivery merges its exact local commit through worktree_merge, including from a retained or reused worker checkout with uncommitted work, and does not fetch or require an origin source ref. A push_branch delivery still requires a freshly fetched origin ref that matches its anchor. Both modes require the local branch at the exact anchor and leave the worker checkout untouched.
-found: 2026-11-21
-tasks: [cas-978ed]

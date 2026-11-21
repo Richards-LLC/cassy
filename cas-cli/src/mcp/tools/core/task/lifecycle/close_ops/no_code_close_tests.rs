@@ -459,7 +459,7 @@ async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
         let task = f.task(id);
         if state == "published" {
             assert_eq!(task.status, TaskStatus::AwaitingMerge, "{reply}");
-            let records = crate::artifacts::store::SqliteArtifactStore::open(&f.cas_dir())
+            let records = cas_store::SqliteArtifactStore::open(&f.cas_dir())
                 .unwrap().list_for_task(id).unwrap();
             assert_eq!(records.len(), 2);
             assert!(records.iter().all(|artifact| artifact.status == "committed"));

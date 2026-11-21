@@ -1,16 +1,22 @@
-//! GH #2146: a Playwright helper holds no tests; the specs importing it do.
+//! GH #2146, #2200: a helper holds no tests; the tests importing it do.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 const EXTENSIONS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
-/// The repository-relative Playwright specs that import `path`, directly or
-/// through other modules of its package. Empty when no spec imports it or when
-/// any importing spec is not a Playwright spec: that helper keeps its other
-/// proof. Only relative specifiers resolve, so an alias-only import finds no
-/// importer and the helper keeps its package proof.
+/// The repository-relative Playwright specs that import `path` (GH #2146).
 pub(crate) fn playwright_importers(repo: &Path, path: &str) -> Vec<String> {
+    related_tests(repo, path).filter(|(runner, _)| *runner == "playwright").map(|(_, tests)| tests).unwrap_or_default()
+}
+
+/// The runner and repository-relative test files that import `path`, directly
+/// or through other modules of its package, when every one is a Playwright
+/// spec or a `node:test` file of one runner (a CI guard, GH #2200). None when
+/// no test imports it or another runner's test does: that helper keeps its
+/// other proof. Only relative specifiers resolve, so an alias-only import
+/// finds no importer and the helper keeps its package proof.
+pub(crate) fn related_tests(repo: &Path, path: &str) -> Option<(&'static str, Vec<String>)> {
     static SPECIFIER: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r#"(?:\bfrom|\bimport|\brequire\s*\()\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).unwrap()
     });
@@ -19,7 +25,7 @@ pub(crate) fn playwright_importers(repo: &Path, path: &str) -> Vec<String> {
     while package.pop() && package.starts_with(repo) && !package.join("package.json").is_file() {}
     if !package.starts_with(repo) { package = repo.to_path_buf(); }
     let mut importers: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
-    let mut playwright = Vec::new();
+    let (mut playwright, mut node) = (Vec::new(), BTreeSet::new());
     for entry in ignore::WalkBuilder::new(&package).build().flatten() {
         let file = entry.path();
         if !entry.file_type().is_some_and(|kind| kind.is_file())
@@ -29,6 +35,7 @@ pub(crate) fn playwright_importers(repo: &Path, path: &str) -> Vec<String> {
         let Ok(source) = std::fs::read_to_string(file) else { continue };
         let file = normalize(file);
         if source.contains("@playwright/test") { playwright.push(file.clone()); }
+        if source.contains("'node:test'") || source.contains("\"node:test\"") { node.insert(file.clone()); }
         for capture in SPECIFIER.captures_iter(&source) {
             if let Some(imported) = resolve(file.parent().unwrap_or(repo), &capture[1]) {
                 importers.entry(imported).or_default().insert(file.clone());
@@ -46,12 +53,15 @@ pub(crate) fn playwright_importers(repo: &Path, path: &str) -> Vec<String> {
         seen
     };
     let runs_playwright = reached(playwright.clone()).into_iter().chain(playwright).collect::<BTreeSet<_>>();
-    let specs: Vec<_> = reached(vec![target]).into_iter().filter_map(|file| {
+    let tests: Vec<_> = reached(vec![target]).into_iter().filter_map(|file| {
         let relative = file.strip_prefix(repo).ok()?.to_str()?.to_owned();
-        super::test_match(&relative, Some("playwright")).then_some((file, relative))
+        super::test_match(&relative, None).then_some((file, relative))
     }).collect();
-    if specs.iter().any(|(file, _)| !runs_playwright.contains(file)) { return Vec::new(); }
-    specs.into_iter().map(|(_, relative)| relative).collect()
+    let runner = |file: &PathBuf| if runs_playwright.contains(file) { Some("playwright") }
+        else if node.contains(file) { Some("node") } else { None };
+    let first = runner(&tests.first()?.0)?;
+    tests.iter().all(|(file, _)| runner(file) == Some(first))
+        .then(|| (first, tests.into_iter().map(|(_, relative)| relative).collect()))
 }
 
 fn resolve(directory: &Path, specifier: &str) -> Option<PathBuf> {

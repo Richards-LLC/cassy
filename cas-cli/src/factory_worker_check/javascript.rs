@@ -13,7 +13,7 @@ use super::stability::{Identity, Proof};
 mod importers;
 mod web_attribution;
 
-pub(crate) use importers::playwright_importers;
+pub(crate) use importers::{playwright_importers, related_tests};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
@@ -1524,12 +1524,13 @@ fn execute_tests(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        // GH #2146: a helper runs through the specs importing it.
+        // GH #2146, #2200: a helper runs through the tests importing it.
         let importers = match widened {
-            Some((super::widened::Scope::Related(helper), _, _)) if runner == "playwright" => {
-                let specs = playwright_importers(repo, helper);
-                if specs.is_empty() { bail!(crate::gates::tag("G-61", format!("no Playwright spec imports {helper}"))); }
-                eprintln!("Running {helper} through its importing specs: {}", specs.join(" "));
+            Some((super::widened::Scope::Related(helper), _, _)) if matches!(runner, "playwright" | "node") => {
+                let Some((_, specs)) = related_tests(repo, helper).filter(|(owner, _)| *owner == runner) else {
+                    bail!(crate::gates::tag("G-61", format!("no {runner} test imports {helper}")));
+                };
+                eprintln!("Running {helper} through its importing tests: {}", specs.join(" "));
                 specs
             }
             _ => Vec::new(),
@@ -1619,6 +1620,7 @@ fn execute_tests(
                 if runner == "playwright" && !importers.is_empty() {
                     command.args(importers.iter().map(|spec| regex::escape(&repo.join(spec).to_string_lossy())));
                 } else if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
+                else if !importers.is_empty() { command.args(importers.iter().map(|test| repo.join(test))); }
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));

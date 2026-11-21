@@ -15,6 +15,10 @@ struct Journal {
     session: Option<String>,
     note: Option<String>,
     failed: bool,
+    #[serde(default)]
+    retry_peer_park: bool,
+    #[serde(default)]
+    peer_park_delivery: Option<(u32, Option<String>, Option<String>)>,
 }
 
 struct Pending {
@@ -102,6 +106,26 @@ impl Pending {
             .map_err(|e| e.to_string())?;
         }
         noted?;
+        if self.journal.retry_peer_park {
+            let current_delivery = (task.deliverables.delivery_cycle,
+                task.deliverables.parked_branch.clone(), task.deliverables.factory_branch_anchor.clone());
+            let current = task.status == cas_types::TaskStatus::AwaitingMerge
+                && self.journal.peer_park_delivery.as_ref() == Some(&current_delivery);
+            // This journal now owns publication, not a second close. The
+            // publisher's immutable outbox key makes crash replay idempotent.
+            if current {
+                let worker = crate::cloud::peer_mailbox::train_parks::host_worker(&self.root, &task)
+                    .ok_or("Park publication still needs its registered host worker")?;
+                crate::cloud::peer_mailbox::train_parks::publish_ready(&self.root, &task, &worker)?
+                    .ok_or("Park publication has no owner notification")?;
+            }
+            let recovered = format!("CLOSE_RECOVERY_OUTCOME: continuation={}", self.journal.id);
+            if !task.notes.contains(&recovered) {
+                store.append_note(&task.id, &format!("{recovered}; code={}",
+                    if current { "park_publication_recovered" } else { "park_publication_superseded" }))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         std::fs::remove_file(&self.path).map_err(|e| e.to_string())?;
         // The lock file may remain if the process exits here; only JSON entries
         // are scanned, so it cannot resurrect a completed continuation.
@@ -113,10 +137,12 @@ impl Pending {
 pub(super) struct LateClose {
     pending: Option<Pending>,
     work: Option<ToolWorkPermit>,
+    _worker_guard: Option<std::sync::Arc<File>>,
 }
 
 impl LateClose {
     pub(super) fn begin(service: &CasService, task_id: &str) -> Result<Self, String> {
+        let worker_guard = worker_close_guard(service)?;
         let directory = service.inner.cas_root.join("close-continuations");
         std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
         let id = uuid::Uuid::new_v4().to_string();
@@ -144,19 +170,29 @@ impl LateClose {
                 session: agent.and_then(|a| a.factory_session),
                 note: None,
                 failed: false,
+                retry_peer_park: false,
+                peer_park_delivery: None,
             },
         };
         pending.save()?;
         Ok(Self {
             pending: Some(pending),
             work: Some(service.tool_work.permit()),
+            _worker_guard: worker_guard,
         })
     }
 
-    pub(super) fn finish(mut self, note: String, failed: bool) -> Result<(), String> {
+    pub(super) fn finish(mut self, note: String, failed: bool, retry_peer_park: bool) -> Result<(), String> {
         let mut pending = self.pending.take().unwrap();
         pending.journal.note = Some(note);
         pending.journal.failed = failed;
+        pending.journal.retry_peer_park = retry_peer_park;
+        if retry_peer_park {
+            let task = crate::store::open_task_store_cached(&pending.root).map_err(|e| e.to_string())?
+                .get(&pending.journal.task_id).map_err(|e| e.to_string())?;
+            pending.journal.peer_park_delivery = Some((task.deliverables.delivery_cycle,
+                task.deliverables.parked_branch, task.deliverables.factory_branch_anchor));
+        }
         pending.save()?;
         pending.publish()
     }
@@ -168,12 +204,14 @@ impl Drop for LateClose {
             return;
         };
         let work = self.work.take();
+        let worker_guard = self._worker_guard.take();
         // Even cancellation before the watcher's first poll has an owner. If
         // runtime shutdown cancels this writer too, its unlocked journal is
         // recovered by a surviving or replacement daemon.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn_blocking(move || {
                 let _work = work;
+                let _worker_guard = worker_guard;
                 if let Err(error) = pending.publish() {
                     tracing::warn!(%error, "Lost close continuation retained for recovery");
                 }
@@ -224,4 +262,42 @@ pub(crate) fn recover(root: &Path) {
             tracing::warn!(path = %path.display(), %error, "Close continuation recovery will retry");
         }
     }
+}
+
+/// These lock files are never unlinked: replacing an inode could admit a close
+/// concurrently with teardown. File locks end with their owning process.
+fn worker_lock(root: &Path, id: &str) -> Result<File, String> {
+    use sha2::{Digest, Sha256};
+    let directory = root.join("worker-close-locks");
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(directory.join(format!("{}.lock", hex::encode(Sha256::digest(id.as_bytes())))))
+        .map_err(|e| e.to_string())
+}
+
+/// Acquire before the handler starts, including the interval before its late
+/// journal exists. Cloned ownership bridges the early response to its writer.
+pub(super) fn worker_close_guard(service: &CasService) -> Result<Option<std::sync::Arc<File>>, String> {
+    let Ok(id) = service.inner.get_registered_agent_id_read_only() else { return Ok(None) };
+    let agents = service.inner.open_agent_store().map_err(|e| e.to_string())?;
+    let agent = agents.get(&id).map_err(|e| e.to_string())?;
+    if agent.role != cas_types::AgentRole::Worker { return Ok(None); }
+    let lock = worker_lock(&service.inner.cas_root, &id)?;
+    fs2::FileExt::try_lock_shared(&lock).map_err(|e| format!(
+        "Worker shutdown owns this process; no close started. code=worker_shutdown_pending: {e}"))?;
+    if agents.get(&id).map_err(|e| e.to_string())?.status == cas_types::AgentStatus::Shutdown {
+        return Err("Worker is shut down; no close started. code=worker_shutdown_pending".into());
+    }
+    Ok(Some(std::sync::Arc::new(lock)))
+}
+
+/// Hold through signalling/retirement, not just admission. Force and recycle
+/// cannot discard publication that has not reached its durable outcome yet.
+pub(crate) fn shutdown_guards<'a>(root: &Path, workers: impl IntoIterator<Item = &'a str>) -> Result<Vec<File>, String> {
+    workers.into_iter().map(|id| {
+        let lock = worker_lock(root, id)?;
+        fs2::FileExt::try_lock_exclusive(&lock).map_err(|e| format!(
+            "Worker {id} still owns a close or its outcome writer. Wait for CLOSE_OUTCOME, then retry shutdown. code=worker_close_pending: {e}"))?;
+        Ok(lock)
+    }).collect()
 }

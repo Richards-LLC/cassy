@@ -46,6 +46,7 @@ fn required_checks(output: GhApiOutput) -> Result<Vec<RequiredCheck>, String> {
     Ok(checks)
 }
 
+// gate-audit[allow_skipped]: selector Parses target receipts for the exact-tree proof; skipped jobs still require matching successful source checks before G-71 accepts.
 fn completed_checks(
     output: GhApiOutput,
     sha: &str,

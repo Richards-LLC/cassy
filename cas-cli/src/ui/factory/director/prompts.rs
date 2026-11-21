@@ -1538,8 +1538,8 @@ fn merge_required_idle_prompt_text(
              Next action:\n\
              1. Confirm: {epic_status} and/or {list_awaiting}, and that {factory_branch} is on origin\n\
              2. Generate the body: `cas worktree pr-body --task {} --base origin/{target} --head {factory_branch} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
-             Open a pull request: `gh pr create --draft --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`, \
-             then mark it ready with `gh pr ready <number>` to run the PR checks. Do not merge into or push {target} locally.\n\
+             Open a pull request: `gh pr create --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`. \
+             Do not merge into or push {target} locally.\n\
              3. Read `gh pr view <number> --json headRefOid,statusCheckRollup`. Wait for the repository's configured PR gates on that exact head to succeed. Use its gate-backed queue or automerge label when configured; establish that policy from repository evidence. `--auto` alone does not guarantee CI will finish before publication.\n\
              4. Once eligible, merge with `gh pr merge <number> --merge --match-head-commit <approved-head>`, or use the configured gate-backed queue/label. The merge verdict closes or reopens the task; wait for its result.\n\
              5. Then clear context / hand the worker their next task if more work is ready\n\

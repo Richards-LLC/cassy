@@ -81,7 +81,7 @@ async fn peer_receipted_close_reaches_dependency_gate_cas_223c() {
                 team_conflict_resolution: if case == "local-wins" { ConflictResolution::LocalWins } else { ConflictResolution::RemoteWins },
                 ..Default::default()
             }, project.into(), &root);
-            for _ in 0..2 {
+            for pull in 0..2 {
                 let entries = crate::store::open_store_local(&root).unwrap();
                 let rules = crate::store::open_rule_store_local(&root).unwrap();
                 let skills = crate::store::open_skill_store_local(&root).unwrap();
@@ -98,7 +98,11 @@ async fn peer_receipted_close_reaches_dependency_gate_cas_223c() {
                 let resolves = case == "merged" || (case == "local-wins" && !team);
                 assert_eq!(blockers.is_empty(), resolves, "team={team} {case}: {blockers:?}");
                 let received = tasks.get(&local.id).unwrap();
-                assert_eq!(received.title, local.title);
+                // Completion projection preserves the newer body. A later
+                // same-lifecycle refresh still honors team RemoteWins, as the
+                // existing lifecycle/body strategy regression requires.
+                let title = if team && resolves && pull == 1 { &remote.title } else { &local.title };
+                assert_eq!(&received.title, title, "team={team} {case} pull={pull}");
                 assert!(received.notes.contains(&local.notes));
                 assert_eq!(received.status == TaskStatus::Closed, resolves);
                 assert_eq!(tasks.get_dependencies(&dependent.id).unwrap().len(), 1);

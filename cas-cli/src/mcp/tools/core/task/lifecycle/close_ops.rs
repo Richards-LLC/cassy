@@ -16954,13 +16954,22 @@ fn anchored_delivery_content_gate_unbounded(
                  Restore the missing delivery content on the assigned factory branch, \
                  commit it, and retry close. If the content was intentionally superseded, \
                  a live registered supervisor may close with supervisor_override=true \
-                 reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\". \
+                 (or operator_decision=<id> under an operator recovery decision) and \
+                 reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\"{}. \
                  Each named commit must differ from the anchor, be reachable on the \
                  target, and change dropped paths to their final target state. The \
                  commit may predate the anchor. The resolved commits, paths, and \
                  review are recorded.",
                 paths.join(", "),
                 dropped_line_samples(repo_path, anchor, parent_branch, &paths),
+                // A concrete candidate: the latest target commit that changed
+                // the dropped paths. The supervisor still reviews it.
+                git_stdout_lines(repo_path, &[&["log", "-1", "--format=%H", parent_branch, "--"][..],
+                    &paths.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
+                    .ok().and_then(|lines| lines.into_iter().next())
+                    .filter(|sha| !sha.is_empty() && sha.as_str() != anchor)
+                    .map(|sha| format!(", for example reason=\"reviewed-drop: {sha} -- <why>\""))
+                    .unwrap_or_default(),
             ))))
         }
         DeliveryContentPresence::Unknown { reason } => {

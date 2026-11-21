@@ -2393,6 +2393,8 @@ async fn operator_decision_recovers_contained_delivery_with_reviewed_drop_gh2270
     }
     let unreviewed = decision_close(&supervisor, &decision.id, &f.final_tip, "Reviewed the integrated historical delivery".into(), false).await;
     assert!(crate::gates::codes_in(&unreviewed).contains(&"G-56"), "{unreviewed}");
+    // The refusal carries a copyable reason naming the superseding commit.
+    assert!(unreviewed.contains(&format!("reviewed-drop: {replacement} --")), "{unreviewed}");
     assert!(!closed_now());
     let closed = decision_close(&supervisor, &decision.id, &f.final_tip, drop, false).await;
     let task = tasks.get(TASK).unwrap();

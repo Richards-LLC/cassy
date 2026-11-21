@@ -5936,9 +5936,17 @@ impl CasCore {
                 .or(dirty_pushed_anchor);
             // GH #2151: a local_merge delivery integrates its exact local
             // anchor; only a pushed delivery owes origin source-ref proof.
-            let pushed_proof = !scoped_task.as_deref()
-                .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
-            let source_label = if pushed_proof { "pushed ref origin/" } else { "local ref " };
+            let source_proof = if scoped_task.as_deref()
+                .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge)
+            {
+                crate::worktree::SourceProof::LocalAnchor
+            } else {
+                crate::worktree::SourceProof::PushedRef
+            };
+            let source_label = match source_proof {
+                crate::worktree::SourceProof::PushedRef => "pushed ref origin/",
+                crate::worktree::SourceProof::LocalAnchor => "local ref ",
+            };
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
             unpublished_merge_base = attempted_target_tip.clone();
             let merge_result = if publish_before_ref {
@@ -5982,7 +5990,7 @@ impl CasCore {
                     }
                 };
                 if let Some(anchor) = pushed_anchor {
-                    let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, pushed_proof, Some(&mut publish));
+                    let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, source_proof, Some(&mut publish));
                     if result.is_ok() {
                         pushed_source_note = format!(
                             "\nSource: {source_label}{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
@@ -5997,7 +6005,7 @@ impl CasCore {
                     )
                 }
             } else if let Some(anchor) = pushed_anchor {
-                let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, pushed_proof, None);
+                let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, source_proof, None);
                 if result.is_ok() {
                     pushed_source_note = format!(
                         "\nSource: {source_label}{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",

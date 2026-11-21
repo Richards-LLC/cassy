@@ -649,9 +649,9 @@ fn parked_local_delivery_merges_without_origin_proof_gh2151() {
     std::fs::write(path.join("delivered.txt"), "next task in progress").unwrap();
     worktree.parent_branch = epic_branch.clone();
 
-    let pushed = manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, true, None);
+    let pushed = manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, SourceProof::PushedRef, None);
     assert!(matches!(pushed, Err(WorktreeError::UncommittedChanges(_))), "{pushed:?}");
-    manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, false, None)
+    manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, SourceProof::LocalAnchor, None)
         .expect("a local_merge delivery needs no origin source ref");
     let contained = Command::new("git").args(["merge-base", "--is-ancestor", &anchor, &epic_branch])
         .current_dir(&repo_path).status().unwrap();

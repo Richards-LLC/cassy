@@ -41,6 +41,7 @@ pub use external_symlinks::{
 };
 pub use git::{GitError, GitOperations, RescuedWork};
 pub(crate) use manager::WorktreeError;
+pub(crate) use manager::SourceProof;
 pub use manager::{
     CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorkerRemovalPlan,
     WorktreeConfig, WorktreeManager, WorktreeResult, node_modules_setup_instruction,

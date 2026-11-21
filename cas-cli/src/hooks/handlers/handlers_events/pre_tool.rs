@@ -12574,9 +12574,10 @@ mod worker_commit_guard_tests {
         };
         git(&["switch", "-C", "factory/worker", "main"]);
         git(&["switch", "-c", "factory/sibling"]);
-        std::fs::write(repo.path().join("staged.txt"), "staged edit").unwrap();
+        let (staged, unstaged) = (b"cas-ea31-staged".as_slice(), b"cas-ea31-unstaged".as_slice());
+        std::fs::write(repo.path().join("staged.txt"), staged).unwrap();
         git(&["add", "staged.txt"]);
-        std::fs::write(repo.path().join("f.txt"), "unstaged edit").unwrap();
+        std::fs::write(repo.path().join("f.txt"), unstaged).unwrap();
         let refused = check_worker_git_commit_scope_for_command(cwd, "git commit -m wip")
             .expect("a registered sibling's branch is not committable");
         assert!(refused.contains("WORKER ISOLATION MISBINDING") && refused.contains("'sibling'"), "{refused}");
@@ -12589,8 +12590,8 @@ mod worker_commit_guard_tests {
             assert!(output.status.success(), "{step}: {output:?}");
         }
         assert_eq!(git(&["branch", "--show-current"]), "factory/worker");
-        assert_eq!(std::fs::read_to_string(repo.path().join("staged.txt")).unwrap(), "staged edit");
-        assert_eq!(std::fs::read_to_string(repo.path().join("f.txt")).unwrap(), "unstaged edit");
+        assert_eq!(std::fs::read(repo.path().join("staged.txt")).unwrap(), staged);
+        assert_eq!(std::fs::read(repo.path().join("f.txt")).unwrap(), unstaged);
         let redirected = format!("git --git-dir '{}' --work-tree '{cwd}' merge --abort", outside.path().join(".git").display());
         assert!(check_worker_git_commit_scope_for_command(cwd, &redirected).is_some());
     }

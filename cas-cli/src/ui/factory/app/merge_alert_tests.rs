@@ -1675,7 +1675,7 @@ fn raw_pr_merge_waits_for_pr_head_checks_without_protection_gh2260() {
         let prompt = f.relay().into_iter().find(|prompt| prompt.is_merge_ready()).unwrap();
         let evidence = prompt.merge_alert.as_ref().unwrap();
         let commands: Vec<_> = prompt.text.split('`').skip(1).step_by(2).collect();
-        let merges: Vec<_> = commands.iter().flat_map(|command| crate::qa_pass::github_merges_in(command)).collect();
+        let merges: Vec<_> = commands.iter().flat_map(|command| crate::qa_pass::github_gate::github_merges_in(command)).collect();
         assert_eq!(merges.len(), 1, "{target}: {:?}", commands);
         assert_eq!(merges[0].match_head.as_deref(), Some(evidence.factory_tip.as_str()));
         assert!(commands.iter().any(|command| command.split_whitespace().collect::<Vec<_>>()

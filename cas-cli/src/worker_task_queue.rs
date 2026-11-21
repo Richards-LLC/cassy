@@ -111,6 +111,24 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
     crate::factory_isolation::verify_worker_worktree_binding(&worker.name, checkout, None).map_err(error)
 }
 
+/// cas-22c6: why a queued start must not switch `worker`'s checkout yet,
+/// using the worker's registered detached runs and its checkout's status.
+fn queue_checkout_busy(root: &Path, worker: &Agent) -> Option<&'static str> {
+    if crate::factory_worker_runs::snapshot(root, &worker.name, None, chrono::Utc::now())
+        .is_ok_and(|runs| runs.running)
+    {
+        return Some("a detached run is still using the worker's checkout");
+    }
+    let checkout = worker.metadata.get("clone_path")?;
+    let status = std::process::Command::new("git")
+        .current_dir(checkout)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()?;
+    (status.status.success() && !status.stdout.is_empty())
+        .then_some("the worker's checkout has uncommitted changes")
+}
+
 /// Only this module can construct a start principal on behalf of a worker.
 pub(crate) struct QueueStartPrincipal(Agent, File);
 impl QueueStartPrincipal {
@@ -731,6 +749,21 @@ impl CasCore {
             if spawns.has_pending_spawn(&worker.name, Some(session)).map_err(error)? {
                 return Ok(Some(format!("Task queue waiting for context recycle completion before {id}")));
             }
+        }
+        // cas-22c6 (GH #2286): the start below switches the worker's checkout.
+        // A detached proof run still reading it, or uncommitted work in it,
+        // would lose its tree mid-run. Wait; queue repair retries the start.
+        if let Some(busy) = queue_checkout_busy(&self.cas_root, &worker) {
+            // gate[G-161 start]: Queued start waits while the worker's checkout is busy
+            let note = crate::gates::tag("G-161", format!(
+                "Task queue waiting before {id}: {busy}. The start resumes once that clears; \
+                 finish or stop it to start sooner."
+            ));
+            if queue.notes.last() != Some(&note) {
+                queue.notes.push(note.clone());
+                queues.save(session, &worker.name, &mut queue).map_err(error)?;
+            }
+            return Ok(Some(note));
         }
         let mut reserved_epoch = None;
         let result = async {

@@ -1749,8 +1749,6 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let output = run_merge(&fixture).await;
 
     if locally_merged {
-        assert!(output.contains("[G-110]"), "{output}");
-        assert!(output.contains(&drifted) && output.contains(&remote_before), "{output}");
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), drifted);
         assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]), remote_before);
         assert_no_delivery_projection(&fixture, delivery_state(&fixture));

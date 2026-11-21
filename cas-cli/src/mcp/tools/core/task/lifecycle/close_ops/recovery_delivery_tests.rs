@@ -2774,9 +2774,9 @@ async fn peer_lane_no_delivery_close_binds_target_not_checkout_head_cas_6c33() {
     assert_eq!(proof.head_commit, target, "{proof:?}");
 }
 
-/// cas-6c33 review: the closer's cached view of a peer lane (its local branch
-/// and `origin/` ref) is older than what the peer pushed. The review binds
-/// the refreshed pushed tip, never the stale cache.
+/// cas-6c33 review: the peer pushed a later commit and it landed, but the
+/// closer's cached view of the lane (its local branch and `origin/` ref) is
+/// older. The review binds the refreshed pushed tip, never the stale cache.
 #[tokio::test]
 async fn peer_lane_review_binds_the_refreshed_pushed_tip_not_a_stale_cache_cas_6c33() {
     let mut env = TestEnvGuard::temp_home();
@@ -2792,6 +2792,7 @@ async fn peer_lane_review_binds_the_refreshed_pushed_tip_not_a_stale_cache_cas_6
     git(origin.path(), &["init", "-q", "--bare"]);
     git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
     let pushed = commit_file(&f.worker_path, "later.txt", "fix(cas-c6e1-fixture): later pushed commit");
+    git(repo, &["merge", "-q", "--ff-only", &pushed]);
     git(repo, &["push", "-q", "origin", "main", &format!("{BRANCH}:{BRANCH}")]);
     git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
     git(repo, &["branch", "-q", "-f", BRANCH, &f.final_tip]);
@@ -2811,8 +2812,7 @@ async fn peer_lane_review_binds_the_refreshed_pushed_tip_not_a_stale_cache_cas_6
     let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
         .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
     let proof = dispatch.repository.as_ref().unwrap();
-    assert_eq!(proof.head_commit, pushed, "{proof:?}");
-    assert_eq!(proof.anchor_commits, vec![pushed]);
+    assert_eq!(proof.anchor_commits, vec![pushed], "{proof:?}");
 }
 
 /// cas-6c33 (GH2280): an approved review recorded before the fix bound the

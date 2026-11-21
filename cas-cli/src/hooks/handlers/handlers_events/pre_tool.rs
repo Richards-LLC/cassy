@@ -9574,6 +9574,13 @@ EOF
             format!("builtin -- let 'y={operand}'"),
             format!("command -pp -p -- let 'y={operand}'"),
             format!("op=declare; builtin \"$op\" -i y='{operand}'"),
+            // GH #1866: a counter is numeric only while the script provably keeps it so.
+            format!("missing=0; printf -v \"mis\"sing '%s' '{operand}'; echo $((missing+1))"),
+            format!("missing=0; read -r missing <<< '{operand}'; echo $((missing+1))"),
+            format!("missing=0; missing='{operand}'; echo $((missing+1))"),
+            format!("missing=0; c=eval; $c 'true'; echo $((missing+1))"),
+            "if false; then missing=0; fi; echo $((missing+1))".to_owned(),
+            "echo $((missing+1)); missing=0".to_owned(),
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();
@@ -9595,6 +9602,9 @@ EOF
             "let '(1+2)*3'",
             "(( (1+2)*3 ))",
             "echo '$(( x ))' '$[ x ]'",
+            // GH #1866 replay: a read-only inventory with a shell-local counter.
+            "missing=0; for p in a b; do [ -f \"$p\" ] || missing=$((missing+1)); done; echo $missing",
+            "n=0; while [ $n -lt 3 ]; do n=$(( n + 1 )); done; ((n++)); echo \"${n}\"",
         ] {
             let response = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();

@@ -123,16 +123,183 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
-/// Only numeric source is inert under arithmetic's recursive evaluation. Even
-/// a bare variable can contain an array subscript that executes a substitution.
-fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
-    if expression.bytes().all(|ch| ch.is_ascii_digit() || ch.is_ascii_whitespace()
-        || b"()+-*/%<>=!&|^~?:,".contains(&ch))
-    {
-        Ok(())
-    } else {
-        Err("an unresolved arithmetic operand")
+thread_local! {
+    /// Names [`numeric_locals`] proved numeric in the script being resolved.
+    static NUMERIC_LOCALS: std::cell::RefCell<HashSet<String>> = Default::default();
+}
+
+/// Scopes [`NUMERIC_LOCALS`] to one script; a nested payload restores its parent's.
+struct NumericLocalsScope(HashSet<String>);
+
+impl NumericLocalsScope {
+    fn enter(names: HashSet<String>) -> Self {
+        Self(NUMERIC_LOCALS.with(|locals| locals.replace(names)))
     }
+}
+
+impl Drop for NumericLocalsScope {
+    fn drop(&mut self) {
+        NUMERIC_LOCALS.with(|locals| *locals.borrow_mut() = std::mem::take(&mut self.0));
+    }
+}
+
+/// Only numeric source is inert under arithmetic's recursive evaluation. Even
+/// a bare variable can contain an array subscript that executes a substitution,
+/// so an operand name is accepted only when the script itself keeps it numeric
+/// ([`numeric_locals`], GH #1866).
+fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
+    let bytes = expression.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch.is_ascii_digit() || ch.is_ascii_whitespace() || b"()+-*/%<>=!&|^~?:,".contains(&ch) {
+            index += 1;
+            continue;
+        }
+        let (start, braced) = match (ch, bytes.get(index + 1)) {
+            (b'$', Some(b'{')) => (index + 2, true),
+            (b'$', _) => (index + 1, false),
+            _ => (index, false),
+        };
+        let end = start + bytes[start..].iter().take_while(|ch| ch.is_ascii_alphanumeric() || **ch == b'_').count();
+        let name = &expression[start..end];
+        let closed = !braced || bytes.get(end) == Some(&b'}');
+        if !closed || !is_shell_variable_name(name) || !NUMERIC_LOCALS.with(|locals| locals.borrow().contains(name)) {
+            return Err("an unresolved arithmetic operand");
+        }
+        index = end + usize::from(braced);
+    }
+    Ok(())
+}
+
+/// Shell-local names a script keeps numeric, so arithmetic over them cannot
+/// evaluate injected source (GH #1866). A name qualifies only when its first
+/// occurrence is a literal-integer assignment that runs unconditionally (no
+/// control construct, pipe, group or substitution before it), and every later
+/// occurrence is another assignment of an integer or of `$((...))`, a plain
+/// `$name`/`${name}` read, or an operand inside an arithmetic span. Any other
+/// use (`read`, `for name in`, `declare`, `${name:=...}`, quoted text, ...)
+/// disqualifies it.
+fn numeric_locals(source: &str) -> HashSet<String> {
+    // A builtin can assign a name spelled through quoting (`printf -v "mis"sing`)
+    // or a computed command can be one; then no textual proof holds.
+    let lexed = factory_shell_lex(source, false, 0);
+    if lexed.unresolved_at.is_some() {
+        return HashSet::new();
+    }
+    let assigning = shell_statements_from_tokens(lexed.tokens).iter().any(|words| {
+        let mut words = words.iter().map(String::as_str).skip_while(|word| {
+            matches!(*word, "!" | "{" | "}" | "if" | "then" | "elif" | "else" | "fi" | "do" | "done"
+                | "while" | "until" | "for" | "select" | "case" | "esac" | "in" | "time" | "function")
+                || word.split_once('=').is_some_and(|(name, _)| is_shell_variable_name(name))
+        });
+        words.next().is_some_and(|command| {
+            !command.bytes().all(|ch| ch.is_ascii_alphanumeric() || b"_./+-=:,%@[]".contains(&ch))
+                || matches!(shell_word_basename(command), "eval" | "read" | "printf" | "declare" | "typeset"
+                    | "local" | "export" | "readonly" | "mapfile" | "readarray" | "getopts" | "source" | "."
+                    | "trap" | "command" | "builtin" | "exec" | "env" | "alias" | "enable" | "wait" | "fc")
+        })
+    });
+    if assigning {
+        return HashSet::new();
+    }
+    let bytes = source.as_bytes();
+    let ident = |ch: u8| ch.is_ascii_alphanumeric() || ch == b'_';
+    // Spans inside `((...))` and `$((...))`, which the arithmetic checks validate.
+    let mut arithmetic = Vec::new();
+    let mut at = 0;
+    while let Some(found) = source[at..].find("((") {
+        let open = at + found;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (offset, &ch) in bytes.iter().enumerate().skip(open) {
+            match ch {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { break };
+        arithmetic.push(open..close);
+        at = close;
+    }
+    let in_arithmetic = |position: usize| arithmetic.iter().any(|span| span.contains(&position));
+    // The value of an assignment starting at `value`: an integer or one `$((...))`.
+    let numeric_value = |value: usize| -> Option<usize> {
+        let digits = bytes[value..].iter().take_while(|ch| ch.is_ascii_digit()).count();
+        if digits > 0 {
+            return Some(value + digits);
+        }
+        let span = arithmetic.iter().find(|span| span.start == value + 1 && bytes.get(value) == Some(&b'$'))?;
+        Some(span.end + 1)
+    };
+    let ends_word = |position: usize| bytes.get(position).is_none_or(|ch| b" \t\n;&|)".contains(ch));
+    let unconditional = |prefix: &str| {
+        !prefix.contains(['|', '&', '(', '{', '`', '$', '<', '>'])
+            && !prefix.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|word| matches!(word,
+                "if" | "then" | "elif" | "else" | "while" | "until" | "for" | "do" | "case" | "select" | "function"))
+    };
+    let mut candidates: Vec<&str> = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if ident(bytes[index]) && (index == 0 || !ident(bytes[index - 1])) {
+            let end = index + bytes[index..].iter().take_while(|ch| ident(**ch)).count();
+            let name = &source[index..end];
+            if bytes.get(end) == Some(&b'=') && is_shell_variable_name(name) && !candidates.contains(&name) {
+                candidates.push(name);
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    let mut names = HashSet::new();
+    for name in candidates {
+        let mut first = true;
+        let mut keeps_numeric = true;
+        let mut from = 0;
+        while let Some(found) = source[from..].find(name) {
+            let start = from + found;
+            let end = start + name.len();
+            from = end;
+            if (start > 0 && ident(bytes[start - 1])) || bytes.get(end).is_some_and(|ch| ident(*ch)) {
+                continue;
+            }
+            let before = &source[..start];
+            let assignment_head = before.is_empty()
+                || before.ends_with([' ', '\t', '\n', ';', '&', '|', '(']);
+            let assigns = bytes.get(end) == Some(&b'=') && bytes.get(end + 1) != Some(&b'=') && assignment_head;
+            let use_ok = if first {
+                assigns && unconditional(before) && bytes[end + 1..].first().is_some_and(u8::is_ascii_digit)
+                    && numeric_value(end + 1).is_some_and(ends_word)
+            } else if in_arithmetic(start) {
+                true
+            } else if assigns {
+                numeric_value(end + 1).is_some_and(ends_word)
+            } else if before.ends_with('$') {
+                true
+            } else if before.ends_with("${") {
+                bytes.get(end) == Some(&b'}')
+            } else {
+                in_arithmetic(start)
+            };
+            first = false;
+            if !use_ok {
+                keeps_numeric = false;
+                break;
+            }
+        }
+        if keeps_numeric && !first {
+            names.insert(name.to_string());
+        }
+    }
+    names
 }
 
 /// `test` receives expanded arguments as data; a captured shell exit status is
@@ -930,6 +1097,7 @@ fn collect_script(
     }
     check_heredoc_boundaries(script)?;
     let projected = shell_command_without_heredoc_bodies(script);
+    let _numeric_locals = NumericLocalsScope::enter(numeric_locals(&projected));
     let mut lexed = factory_shell_lex(&projected, false, 0);
     if lexed.unresolved_at.is_some() {
         return Err("an unresolved shell payload");

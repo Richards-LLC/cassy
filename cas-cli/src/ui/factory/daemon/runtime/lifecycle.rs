@@ -212,6 +212,49 @@ fn extend_progressing_verification_dispatches(
         .count()
 }
 
+/// cas-5f88: the requesting MCP process retries a verifier launch on its own
+/// thread, so a requester that exits leaves its dispatch Pending. The daemon
+/// is the durable owner: each sweep launches this session's dispatches that
+/// were never launched and are past the requester's own first attempt. The
+/// claim inside the launch admits one verifier per dispatch, so a requester
+/// still retrying cannot double it. Returns how many reviews were started.
+pub(super) fn launch_unlaunched_verification_dispatches(
+    cas_dir: &std::path::Path,
+    session: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    /// Leaves the requester's first attempt to land before the daemon steps in.
+    const REQUESTER_GRACE_SECS: i64 = 30;
+    let since = now - chrono::Duration::seconds(REQUESTER_GRACE_SECS);
+    let dispatches = match cas_store::unlaunched_pending_verification_dispatches(cas_dir, since, now, 20) {
+        Ok(dispatches) => dispatches,
+        Err(error) => {
+            tracing::warn!(%error, "cas-5f88: unlaunched verification dispatches unavailable");
+            return 0;
+        }
+    };
+    let Ok(agents) = crate::store::open_agent_store(cas_dir) else { return 0; };
+    let mut launched = 0;
+    for dispatch in dispatches {
+        // Another daemon owns another session's reviews.
+        let ours = agents.get(&dispatch.owner_agent_id)
+            .is_ok_and(|owner| owner.factory_session.as_deref() == Some(session));
+        if !ours {
+            continue;
+        }
+        match crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+            cas_dir, session, &dispatch.id,
+        ) {
+            Ok(started) => launched += usize::from(started.is_some()),
+            Err(error) => tracing::warn!(
+                dispatch_id = %dispatch.id, %error,
+                "cas-5f88: verifier launch for an unlaunched dispatch refused; the next sweep retries"
+            ),
+        }
+    }
+    launched
+}
+
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
 /// no verdict wakes the supervisor through a durable worker-attention relay,
 /// one per dispatch (the relay is keyed on the dispatch id, so each sweep's

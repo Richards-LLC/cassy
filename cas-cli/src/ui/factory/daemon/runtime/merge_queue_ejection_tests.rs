@@ -62,11 +62,18 @@ fn failing_job_names_the_job_and_its_failed_step() {
         Some("Fast Validation — CI tiers › Test release publication guards")
     );
     // cas-25ce: the log's failing tests ride along, each once, for the
-    // worker's one batched repair.
+    // worker's one batched repair. cas-d5f6: the log is real `gh run view
+    // --log-failed` output (run 44882742591), whose lines carry a
+    // job/step/timestamp prefix and colour codes.
+    const LOG: &str = include_str!("fixtures/gh-log-failed-44882742591.txt");
+    let red = [
+        "gates::registry_tests::every_registered_refusal_site_emits_its_code",
+        "mcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests::retargeted_remote_only_epic_parks_unmerged_delivery_cas_1cc7",
+    ];
     let with_tests = Fake {
         job: Some("Rust Suite"),
         step: Some("nextest"),
-        log: Some("test a::passes ... ok\ntest a::red ... FAILED\ntest b::red ... FAILED\ntest a::red ... FAILED\n"),
+        log: Some(LOG),
         ..Fake::default()
     };
     // cas-f2ea: one watcher's lookups keep the named job across polls, so a
@@ -75,10 +82,15 @@ fn failing_job_names_the_job_and_its_failed_step() {
     for _ in 0..3 {
         assert_eq!(
             lookups.failing_job(&with_tests, Some(1)).as_deref(),
-            Some("Rust Suite › nextest (failing tests: a::red, b::red)")
+            Some(format!("Rust Suite › nextest (failing tests: {})", red.join(", ")).as_str())
         );
     }
     assert_eq!(with_tests.log_reads.get(), 1);
+    // These names feed the class-audit fact.
+    assert_eq!(lookups.failing_test_names(Some(1)), red);
+    // nextest's own status lines name the same tests without libtest output.
+    let nextest: String = LOG.lines().filter(|line| line.contains("FAIL^[[0m [")).map(|line| format!("{line}\n")).collect();
+    assert_eq!(crate::ui::factory::daemon::runtime::ci_watch::failing_tests(&nextest).collect::<Vec<_>>(), red);
     let job_only = Fake {
         job: Some("macOS Check"),
         step: None,
@@ -185,13 +197,14 @@ fn deliveries_skip_a_parked_task_whose_pr_merge_is_recorded_cas_c24e() {
     let temp = tempfile::TempDir::new().unwrap();
     let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
     let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-    for (id, merged) in [("cas-open-pr", false), ("cas-merged-pr", true)] {
+    // GH #2282: a PR into develop is observed like one into main.
+    for (id, merged, target) in [("cas-develop-pr", false, "develop"), ("cas-open-pr", false, "main"), ("cas-merged-pr", true, "main")] {
         let mut task = cas_types::Task::new(id.to_string(), id.to_string());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some(format!("worker-{id}"));
         task.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:fixture".to_string(),
-            target_branch: "main".to_string(),
+            target_branch: target.to_string(),
         });
         task.deliverables.delivery_pr_number = Some(7);
         if merged {
@@ -200,6 +213,7 @@ fn deliveries_skip_a_parked_task_whose_pr_merge_is_recorded_cas_c24e() {
         }
         store.add(&task).unwrap();
     }
-    let polled: Vec<_> = awaiting_merge_deliveries(&cas_dir).into_iter().map(|d| d.task_id).collect();
-    assert_eq!(polled, vec!["cas-open-pr".to_string()], "a landed PR is not polled again");
+    let mut polled: Vec<_> = awaiting_merge_deliveries(&cas_dir).into_iter().map(|d| d.task_id).collect();
+    polled.sort();
+    assert_eq!(polled, vec!["cas-develop-pr".to_string(), "cas-open-pr".to_string()], "a landed PR is not polled again");
 }

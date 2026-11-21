@@ -1139,6 +1139,54 @@ impl GhCiTransport {
         Ok(output.stdout)
     }
 
+    /// Read the existing lane evidence, never the display/log attribution.
+    /// The run and companion plan bind each caused test to this exact head.
+    fn lane_caused_tests(&self, run_id: u64, head: &str) -> Result<Vec<String>, CiWatchError> {
+        #[derive(Deserialize)]
+        struct Artifact { id: u64, name: String, size_in_bytes: u64, expired: bool }
+        #[derive(Deserialize)]
+        struct Artifacts { artifacts: Vec<Artifact> }
+        let response: Artifacts = self.gh_json(&[
+            "api".into(), format!("repos/{}/actions/runs/{run_id}/artifacts?per_page=100", self.repo),
+        ])?;
+        let prefix = format!("lane-impact-{run_id}-");
+        let mut names = Vec::new();
+        for artifact in response.artifacts.into_iter().filter(|artifact| {
+            !artifact.expired && artifact.size_in_bytes <= 64 * 1024 * 1024
+                && artifact.name.strip_prefix(prefix.as_str()).is_some_and(|suffix|
+                    suffix == "own" || suffix.strip_prefix("ring-")
+                        .is_some_and(|shard| shard.parse::<u32>().is_ok()))
+        }).take(8) {
+            // Artifact IDs are immutable; repeated red polls reuse the bytes.
+            let bytes = crate::gh_budget::shared_read(
+                &format!("lane-impact-{}-{}", self.repo, artifact.id), Duration::from_secs(86400),
+                || self.gh_bytes(&["api".into(), format!("repos/{}/actions/artifacts/{}/zip", self.repo, artifact.id)]),
+            )?;
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+                .map_err(|error| CiWatchError::Malformed(format!("invalid lane evidence ZIP: {error}")))?;
+            let mut matches_head = false;
+            let mut caused = Vec::new();
+            for index in 0..archive.len() {
+                let Ok(mut file) = archive.by_index(index) else { continue };
+                let name = Path::new(file.name()).file_name().and_then(|name| name.to_str()).unwrap_or("").to_string();
+                if file.size() > 1024 * 1024 || !(name == "lane.json" || name.ends_with("-attribution.json")) { continue; }
+                let Ok(data) = serde_json::from_reader::<_, serde_json::Value>(&mut file) else { continue };
+                if name == "lane.json" {
+                    matches_head = data["plan"]["head"].as_str() == Some(head);
+                } else if let Some(rows) = data["caused"].as_array() {
+                    caused.extend(rows.iter().filter_map(|row| row["test"].as_str())
+                        .map(str::trim).filter(|name| !name.is_empty()).map(str::to_string));
+                }
+            }
+            if matches_head {
+                for name in caused {
+                    if !names.contains(&name) { names.push(name); }
+                }
+            }
+        }
+        Ok(names)
+    }
+
     fn merge_queue_listing(&self, fresh: bool) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
         let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
             .ok_or_else(|| {
@@ -1446,7 +1494,35 @@ pub(crate) fn read_github(
     let ci_rearms = delivery_ci_rearms(cas_dir, session_name, &transport)?;
     let candidates = super::queue_and_events::ci_completed_candidates(cas_dir, session_name);
     let ci_wakes = (collect_ci_wakes(&transport, &candidates), !candidates.is_empty() || !ci_rearms.is_empty());
-    let failures = mark_merged_failures(project, collect_failures(&transport, watched_branches)?);
+    // Train deliveries have lane CI even when their target is not main.
+    // Keep their exact parked branch/anchor separate from the PR-only list.
+    let tasks = crate::store::open_task_store_cached(cas_dir).ok();
+    let lanes = tasks.as_ref().and_then(|store| store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok())
+        .unwrap_or_default();
+    let mut watched = watched_branches.clone();
+    watched.extend(lanes.iter().filter_map(|task| task.deliverables.parked_branch.clone()));
+    let failures = mark_merged_failures(project, collect_failures(&transport, &watched)?);
+    for failure in &failures {
+        let matching: Vec<_> = lanes.iter().filter(|task|
+            task.deliverables.parked_branch.as_deref() == Some(failure.branch.as_str())
+                && task.deliverables.factory_branch_anchor.as_deref() == Some(failure.head_sha.as_str())).collect();
+        if matching.is_empty() { continue; }
+        match transport.lane_caused_tests(failure.run_id, &failure.head_sha) {
+            Ok(names) => for task in matching {
+                // A slow artifact read must not attach facts to a replacement delivery.
+                if tasks.as_ref().and_then(|store| store.get(&task.id).ok()).is_some_and(|current|
+                    current.status == cas_types::TaskStatus::AwaitingMerge
+                        && current.deliverables.parked_branch == task.deliverables.parked_branch
+                        && current.deliverables.factory_branch_anchor == task.deliverables.factory_branch_anchor)
+                {
+                    crate::mcp::tools::core::task::repair_class::record_failing_tests(cas_dir, &task.id, &names);
+                }
+            },
+            Err(error) => tracing::debug!(run = failure.run_id, %error, "lane class-audit evidence unavailable"),
+        }
+    }
+    // Parked branches augment evidence collection, not the caller's relay scope.
+    let failures = failures.into_iter().filter(|failure| watched_branches.contains(&failure.branch)).collect();
     let mut queue_poll = collect_tracked_merge_queue_ejections(
         &transport,
         &deliveries,
@@ -1793,13 +1869,52 @@ pub(crate) fn first_failing_test(log: &str) -> Option<String> {
 pub(crate) fn failing_tests(log: &str) -> impl Iterator<Item = String> + '_ {
     let mut seen = std::collections::HashSet::new();
     log.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let test = line.strip_prefix("test ")?;
-            let (name, outcome) = test.rsplit_once(" ... ")?;
-            (outcome.contains("FAILED")).then(|| name.trim().to_string())
-        })
+        .filter_map(|line| failing_test(&log_text(line)))
         .filter(move |name| seen.insert(name.clone()))
+}
+
+/// The test a libtest `test <name> ... FAILED` line or a nextest
+/// `FAIL [time] (n/m) <binary> <name>` line names.
+fn failing_test(text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Some(test) = text.strip_prefix("test ") {
+        let (name, outcome) = test.rsplit_once(" ... ")?;
+        return outcome.contains("FAILED").then(|| name.trim().to_string());
+    }
+    text.strip_prefix("FAIL [")?.split_whitespace().last().map(str::to_string)
+}
+
+/// cas-d5f6: a `gh run view --log-failed` line is `job<TAB>step<TAB>timestamp
+/// text`, with colour codes as ESC bytes or gh's caret form `^[[31;1m`.
+/// Return the text alone.
+fn log_text(line: &str) -> String {
+    let mut text = line;
+    let mut columns = line.splitn(3, '\t');
+    if let (Some(_), Some(_), Some(rest)) = (columns.next(), columns.next(), columns.next()) {
+        text = rest.split_once(' ')
+            .filter(|(stamp, _)| chrono::DateTime::parse_from_rfc3339(stamp).is_ok())
+            .map_or(rest, |(_, after)| after);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(['\u{1b}', '^']) {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let code = tail.strip_prefix("\u{1b}[").or_else(|| tail.strip_prefix("^[[")).and_then(|body| {
+            let end = body.find(|c: char| !c.is_ascii_digit() && c != ';')?;
+            body[end..].starts_with('m').then(|| &body[end + 1..])
+        });
+        match code {
+            Some(after) => rest = after,
+            // A lone ESC or caret is ordinary text (both are one byte).
+            None => {
+                out.push_str(&tail[..1]);
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(crate) fn relay_body(failure: &CiFailure) -> String {

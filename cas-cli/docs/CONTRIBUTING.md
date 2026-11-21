@@ -153,6 +153,13 @@ focus/spawn publication guards: recorded originating host, expected-absent push,
 existing remote preservation and explicit child repository/branch targets.
 Publication failures are visible in the successful task receipt for recovery.
 
+An epic child created with an explicit `target_branch` owns that delivery
+branch even when it matches the epic's base. Supplying only `target_repo`
+keeps branch inheritance; selecting the live epic lane follows lane renames.
+For historical rows whose raw target differs from the effective target, a live
+supervisor can repair the binding with `proof_scope_fix=true` and the same
+`target_branch`; unchanged raw and effective targets still refuse a no-op repair.
+
 ## Staffing behind a published release
 
 Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
@@ -343,9 +350,13 @@ the same `branch`, `head` and `expected_remote` fields. Empty `expected_remote`
 requires the successor's destination ref to be absent; otherwise supply its
 observed full SHA. The source must belong to the task's recorded worker, whose
 registration or retirement evidence must exist and whose process/heartbeat must
-be dead. Live task leases, moved source tips, unrelated refs, changed remote tips
-and divergent successor branches refuse recovery. A destination already at the
-requested SHA is an idempotent replay.
+be dead. For a retained local lease, the same action verifies the exact source
+worker's recorded process is dead, releases only that lease generation and
+acquires its bounded recovery lease. It does not require `task release` (which
+clears source assignment), same-name spawning, or recycling a worker into a new
+session. A live, foreign or unverifiable lease holder, moved source tip,
+unrelated ref, changed remote tip or divergent successor branch refuses
+recovery. A destination already at the requested SHA is an idempotent replay.
 
 Recovery publishes on `factory/<successor>-<task>` through the ordinary private
 push guard, records intent and result on the task, and rebinds its assignee and
@@ -2250,6 +2261,17 @@ an unknown outcome and wakes the supervisor; daemon startup and heartbeats
 recover unlocked journals after process loss. Recovery retries note/notice
 persistence with the same continuation identity, never the close mutation.
 
+Worker close execution holds a process-shared lock before the handler starts,
+through post-park publication and its outcome writer. Shutdown and recycle
+acquire the exclusive side at admission and again at actual teardown; force
+cannot discard a pending close. A refusal leaves the worker's bindings and
+live mail intact. A post-park owner-publication error carries
+`code=park_publication_failed`; its journal retains a retry of `publish_ready`
+for daemon recovery, bound to that delivery cycle, branch and tip. Superseded
+deliveries retire that retry without publishing a newer delivery or closing
+again. The original failure and any recovery outcome each have a stable
+continuation identity.
+
 Optional resource notifications and factory recall have bounded response waits.
 Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;
@@ -2761,6 +2783,13 @@ With no train open, the existing merge behavior applies.
 Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
 managed `cas` MCP server. It preserves the conversation and confirms a new
 live server PID and its recorded version. A command echo is not success.
+Queued supervisor commands survive daemon restart and reexec in local SQLite
+metadata (`commander.command.v1.*`), keyed by session, supervisor, device and
+command reference. Only never-typed commands resume at a native turn boundary.
+A durable pre-write claim makes a restarted submission uncertain rather than
+replaying it. A daemon receipt confirming that supervisor exit abandoned a
+command before typing is Not sent; a potentially stale Queued card alone
+remains uncertain and reconciles late submission or outcome evidence.
 The exact native `/mcp reconnect cas` interaction was verified against a
 healthy, isolated stdio server on Claude Code **2.1.311, 2.1.316 and 2.1.318**.
 The minimum supported version is **2.1.311**. Older or unknown running Claude
@@ -3318,7 +3347,11 @@ exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
 Each check runs once (operator decisions D1–D3, cas-eac2). A factory worker's
 pre-push hook runs the no-build fast rows (`scripts/fast-rows-pre-push.sh`) and
-writes a PASS receipt for the pushed tip; a missing tool fails the push. Failed
+writes a PASS receipt for the pushed tip; a missing tool fails the push. The
+range is the lane's own work: a first push compares with its task target, and a
+re-push after merging newer target commits compares with the target merge-base
+instead of the replaced tip, so a train's dist rebuild is never owed by a lane
+(cas-10de). Failed
 attempts print a retained log directory under the Git common directory's
 `cas/fast-rows/<sha>.logs.*`, containing `gate.log`, detailed row logs and timings.
 Each attempt has its own directory so a later push preserves the original failure.
@@ -3439,7 +3472,20 @@ Richards-LLC/cassy` keeps the slim lane on hosted runners, and unsetting
 `systemctl disable --now cassy-actions-runner-3 cassy-actions-runner-4` and
 reverting `lane.yml`'s label.
 
-The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+The normal epic close follows the green queue landing. In downstream repositories
+without a merge queue, epic close requires successful required CI checks on the
+refreshed exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA.
+CI authority comes from GitHub branch-protection required contexts and app IDs;
+unavailable metadata, unprotected branches and empty requirements refuse CI proof.
+Job names need no Cassy-specific vocabulary. Completed post-merge skips count only
+when that exact merge has two parents, its full Git tree equals its second
+parent's tree (including workflow/config), every source check succeeded, all
+required checks are covered, and each skipped target check has a successful
+source check with the same name/app identity. The target also needs a successful
+check. Changed trees, missing tests, pending, failed, cancelled and budget-blocked
+checks refuse. The receipt records merge SHA, source SHA, tree and required check
+identities; no ancestor search or new test run is performed. An authenticated
+supervisor may use `supervisor_override=true` with an audited reason. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.

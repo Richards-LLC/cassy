@@ -247,11 +247,13 @@ describe("supervisor command receipts", () => {
     vi.useFakeTimers();
     try {
       for (const command of ["exit", "finish", "usage"] as const) {
-        for (const ordering of ["ended", "reject-ended", "ended-reject", "ended-status"] as const) {
+        for (const phase of ["queued", "submitted"] as const) {
+        for (const ordering of ["ended", "reject-ended", "ended-reject", "ended-status", "ended-observed"] as const) {
           const send = vi.fn().mockReturnValue(true);
           const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
           await session.run(command, true);
           const ref = [...session.receipts.keys()][0];
+          session.receive({ client_ref: ref, command, phase, detail: "Pending", output: "", interactive: false });
           const disconnected = "The session is reconnecting, so the message was not sent. Retry once live.";
           if (ordering === "reject-ended") session.reject(ref, disconnected);
           session.ended("prompt_input_exit");
@@ -260,13 +262,15 @@ describe("supervisor command receipts", () => {
             await vi.advanceTimersByTimeAsync(125_000);
             session.receive({ client_ref: ref, command, phase: "submitted", detail: "Awaiting harness", output: "", interactive: false });
           }
+          if (ordering === "ended-observed") session.receive({ client_ref: ref, command, phase: "observed", detail: "Native outcome", output: "", interactive: false });
           const receipt = session.receipts.get(ref)!;
-          expect(receipt.phase, `${command}/${ordering}`).toBe(command === "exit" ? "observed" : "unconfirmed");
-          expect(receipt.detail).toContain("prompt_input_exit");
+          const submitted = phase === "submitted" || ordering === "ended-status";
+          expect(receipt.phase, `${command}/${phase}/${ordering}`).toBe(ordering === "ended-observed" || command === "exit" && submitted ? "observed" : "unconfirmed");
           const sent = send.mock.calls.length;
           await vi.advanceTimersByTimeAsync(125_000);
           expect(send).toHaveBeenCalledTimes(sent);
           expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
+        }
         }
       }
     } finally { vi.clearAllTimers(); vi.useRealTimers(); }
@@ -305,6 +309,11 @@ describe("supervisor command receipts", () => {
       const refused: CommandReceipt = { client_ref: ref, command: "exit", phase: "refused", detail: "Not sent: control was refused. Retry after taking control.", output: "", interactive: false };
       ended.receive({ ...refused, command: "usage" });
       expect(ended.receipts.get(ref)?.phase).toBe("submitted");
+      ended.receive({ ...refused, phase: "queued" });
+      ended.ended("prompt_input_exit");
+      expect(ended.receipts.get(ref)?.phase).toBe("unconfirmed");
+      // Only a per-command daemon refusal proves this queued command was
+      // abandoned without typing; generic session-end evidence cannot.
       ended.receive(refused);
       ended.ended("prompt_input_exit");
       ended.receive({ ...refused, phase: "submitted", detail: "Late pending status" });
@@ -314,6 +323,30 @@ describe("supervisor command receipts", () => {
       await expect(unsent.run("exit", true)).rejects.toThrow(Error);
       unsent.ended("prompt_input_exit");
       expect(unsent.receipts.size).toBe(0);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("reads a stopped session's retained outcome without resending, and stays Unconfirmed without one (cas-b521)", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const retained of ["refused", "missing"] as const) {
+        const send = vi.fn().mockReturnValue(true);
+        let answers: (CommandReceipt | "retry" | undefined)[] = [];
+        const readRetained = vi.fn(async () => answers.shift());
+        const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {}, readRetained });
+        await session.run("compact", false);
+        const ref = [...session.receipts.keys()][0];
+        const queued: CommandReceipt = { client_ref: ref, command: "compact", phase: "queued", detail: "Queued", output: "", interactive: false };
+        session.receive(queued);
+        // The daemon may still be tearing down: the hub answers 409 first.
+        answers = ["retry", retained === "refused" ? { ...queued, phase: "refused", detail: "Command not sent." } : undefined];
+        session.ended("daemon_stopped");
+        session.ended("daemon_stopped");
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(session.receipts.get(ref)?.phase, retained).toBe(retained === "refused" ? "refused" : "unconfirmed");
+        expect(readRetained, retained).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
+      }
     } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 

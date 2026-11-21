@@ -769,6 +769,66 @@ esac
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
         self.assertTrue(ran.exists(), pushed.stderr)
 
+    def test_checkpoint_scope_repair_preserves_target_tests_cas_3c12(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        self.assertEqual(command(self.repo, "git", "init", "-q", "--bare", str(remote)).returncode, 0)
+        self.assertEqual(command(self.repo, "git", "remote", "add", "origin", str(remote)).returncode, 0)
+        self.write("scripts/check-test-shape.py", (ROOT / "scripts/check-test-shape.py").read_text())
+        path = "cas-cli/src/scope_tests.rs"
+        original = '#[test] fn legacy() { assert!(error.contains("please try again later")); }\n'
+        self.write(path, original)
+        self.write("assigned.txt", "obsolete assigned content\n")
+        self.commit()
+        target = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(command(self.repo, "git", "checkout", "-qb", "factory/lane").returncode, 0)
+        self.write(path, '#[test] fn legacy() { assert!(result.is_err()); }\n')
+        self.commit()
+        checkpoint = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        # Seed the returned checkpoint before installing the real push hook.
+        self.assertEqual(self.push().returncode, 0)
+        hook = self.repo / ".git/hooks/pre-push"
+        hook.write_text('#!/bin/sh\nexec bash scripts/fast-rows-pre-push.sh "$@"\n')
+        hook.chmod(0o755)
+        root = self.repo / ".cas"
+        root.mkdir()
+        with (self.repo / ".git/info/exclude").open("a") as exclude:
+            exclude.write("\n/.cas/\n")
+        self.write(path, original)
+        (self.repo / "assigned.txt").unlink()
+        self.commit()
+        repair = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(command(self.repo, "git", "diff", "--name-only", target, repair).stdout.splitlines(),
+                         ["assigned.txt"])
+        self.assertEqual(command(self.repo, "git", "merge-base", "--is-ancestor", checkpoint, repair).returncode, 0)
+        with sqlite3.connect(root / "cas.db") as db:
+            db.execute("CREATE TABLE tasks (status TEXT, deliverables TEXT)")
+            for branch, start, expected in [("factory/other", target, 1),
+                                            ("factory/lane", repair, 1),
+                                            ("factory/lane", target, 0)]:
+                with self.subTest(branch=branch, start=start):
+                    db.execute("DELETE FROM tasks")
+                    db.execute("INSERT INTO tasks VALUES (?, ?)", ("in_progress", json.dumps({
+                        "work_target": {"target_branch": "target"},
+                        "factory_branch_start": {"branch": branch, "base_sha": start},
+                    })))
+                    db.commit()
+                    pushed = self.push(CAS_BIN="/nonexistent/cas")
+                    self.assertEqual(pushed.returncode, expected, pushed.stdout + pushed.stderr)
+                    if expected:
+                        self.assertIn("TEST_ASSERTION_PROSE", pushed.stderr)
+                    published = command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane")
+                    self.assertEqual(published.stdout.split()[0], checkpoint if expected else repair)
+        # Only byte-identical restoration is exempt: newly introduced prose in
+        # that very file still refuses, and the accepted remote tip stays put.
+        self.write(path, original + '#[test] fn introduced() { assert!(error.contains("please contact support")); }\n')
+        self.commit()
+        refused = self.push(CAS_BIN="/nonexistent/cas")
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("TEST_ASSERTION_PROSE", refused.stderr)
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()[0], repair)
+        self.assertEqual(command(self.repo, "git", "status", "--porcelain").stdout, "")
+        self.assertFalse((self.repo / "cargo-called").exists())
+
     def test_epic_push_refuses_stale_hub_web_dist_cas_1efb(self):
         remote = Path(self.scratch.name) / "remote.git"
         command(self.repo, "git", "init", "-q", "--bare", str(remote))

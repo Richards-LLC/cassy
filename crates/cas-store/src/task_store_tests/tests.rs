@@ -12,6 +12,35 @@ fn create_test_store() -> (TempDir, SqliteTaskStore) {
     (temp, store)
 }
 
+/// Whole-row writers (including sync) cannot turn task metadata into train
+/// publication authority, even by stripping its enrollment label first.
+#[test]
+fn train_owner_projection_cas_6456() {
+    let (_temp, store) = create_test_store();
+    let mut train = Task::new("cas-6456-train".into(), "Train".into());
+    train.task_type = TaskType::Epic;
+    train.labels = vec!["release-train".into(), "train-owner-enrolled-v1".into()];
+    train.epic_verification_owner = Some("prior".into());
+    store.add(&train).unwrap();
+    let original = store.get(&train.id).unwrap();
+    for strip_labels in [false, true] {
+        let mut attempted = original.clone();
+        attempted.epic_verification_owner = Some("unverified".into());
+        attempted.title = "Conflicting replica".into();
+        if strip_labels { attempted.labels.clear(); }
+        assert!(store.update(&attempted).is_err());
+        assert!(store.update_from_sync(&attempted, &original).unwrap().is_none());
+        assert_eq!(store.get(&train.id).unwrap().epic_verification_owner, original.epic_verification_owner);
+        assert_eq!(store.get(&train.id).unwrap().title, original.title);
+    }
+    assert!(store.patch_execution_state(&train.id, &json!({"train_owner": null})).is_err());
+    // Same-value ownership and independent task edits retain normal semantics.
+    let mut unchanged = original.clone();
+    unchanged.title = "Independent title edit".into();
+    store.update(&unchanged).unwrap();
+    assert_eq!(store.get(&train.id).unwrap().title, unchanged.title);
+}
+
 /// cas-7678: the factory daemon opens the task store uncached many times a
 /// second, and each open ran the whole schema init (DDL plus two full task
 /// scans) under the shared connection; contention errors named it in 41 of

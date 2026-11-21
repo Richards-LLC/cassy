@@ -1793,13 +1793,52 @@ pub(crate) fn first_failing_test(log: &str) -> Option<String> {
 pub(crate) fn failing_tests(log: &str) -> impl Iterator<Item = String> + '_ {
     let mut seen = std::collections::HashSet::new();
     log.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let test = line.strip_prefix("test ")?;
-            let (name, outcome) = test.rsplit_once(" ... ")?;
-            (outcome.contains("FAILED")).then(|| name.trim().to_string())
-        })
+        .filter_map(|line| failing_test(&log_text(line)))
         .filter(move |name| seen.insert(name.clone()))
+}
+
+/// The test a libtest `test <name> ... FAILED` line or a nextest
+/// `FAIL [time] (n/m) <binary> <name>` line names.
+fn failing_test(text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Some(test) = text.strip_prefix("test ") {
+        let (name, outcome) = test.rsplit_once(" ... ")?;
+        return outcome.contains("FAILED").then(|| name.trim().to_string());
+    }
+    text.strip_prefix("FAIL [")?.split_whitespace().last().map(str::to_string)
+}
+
+/// cas-d5f6: a `gh run view --log-failed` line is `job<TAB>step<TAB>timestamp
+/// text`, with colour codes as ESC bytes or gh's caret form `^[[31;1m`.
+/// Return the text alone.
+fn log_text(line: &str) -> String {
+    let mut text = line;
+    let mut columns = line.splitn(3, '\t');
+    if let (Some(_), Some(_), Some(rest)) = (columns.next(), columns.next(), columns.next()) {
+        text = rest.split_once(' ')
+            .filter(|(stamp, _)| chrono::DateTime::parse_from_rfc3339(stamp).is_ok())
+            .map_or(rest, |(_, after)| after);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(['\u{1b}', '^']) {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let code = tail.strip_prefix("\u{1b}[").or_else(|| tail.strip_prefix("^[[")).and_then(|body| {
+            let end = body.find(|c: char| !c.is_ascii_digit() && c != ';')?;
+            body[end..].starts_with('m').then(|| &body[end + 1..])
+        });
+        match code {
+            Some(after) => rest = after,
+            // A lone ESC or caret is ordinary text (both are one byte).
+            None => {
+                out.push_str(&tail[..1]);
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(crate) fn relay_body(failure: &CiFailure) -> String {

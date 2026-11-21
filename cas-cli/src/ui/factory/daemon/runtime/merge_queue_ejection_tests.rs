@@ -62,11 +62,18 @@ fn failing_job_names_the_job_and_its_failed_step() {
         Some("Fast Validation — CI tiers › Test release publication guards")
     );
     // cas-25ce: the log's failing tests ride along, each once, for the
-    // worker's one batched repair.
+    // worker's one batched repair. cas-d5f6: the log is real `gh run view
+    // --log-failed` output (run 44882742591), whose lines carry a
+    // job/step/timestamp prefix and colour codes.
+    const LOG: &str = include_str!("fixtures/gh-log-failed-44882742591.txt");
+    let red = [
+        "gates::registry_tests::every_registered_refusal_site_emits_its_code",
+        "mcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests::retargeted_remote_only_epic_parks_unmerged_delivery_cas_1cc7",
+    ];
     let with_tests = Fake {
         job: Some("Rust Suite"),
         step: Some("nextest"),
-        log: Some("test a::passes ... ok\ntest a::red ... FAILED\ntest b::red ... FAILED\ntest a::red ... FAILED\n"),
+        log: Some(LOG),
         ..Fake::default()
     };
     // cas-f2ea: one watcher's lookups keep the named job across polls, so a
@@ -75,10 +82,15 @@ fn failing_job_names_the_job_and_its_failed_step() {
     for _ in 0..3 {
         assert_eq!(
             lookups.failing_job(&with_tests, Some(1)).as_deref(),
-            Some("Rust Suite › nextest (failing tests: a::red, b::red)")
+            Some(format!("Rust Suite › nextest (failing tests: {})", red.join(", ")).as_str())
         );
     }
     assert_eq!(with_tests.log_reads.get(), 1);
+    // These names feed the class-audit fact.
+    assert_eq!(lookups.failing_test_names(Some(1)), red);
+    // nextest's own status lines name the same tests without libtest output.
+    let nextest: String = LOG.lines().filter(|line| line.contains("FAIL^[[0m [")).map(|line| format!("{line}\n")).collect();
+    assert_eq!(crate::ui::factory::daemon::runtime::ci_watch::failing_tests(&nextest).collect::<Vec<_>>(), red);
     let job_only = Fake {
         job: Some("macOS Check"),
         step: None,

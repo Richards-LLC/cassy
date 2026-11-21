@@ -1153,6 +1153,68 @@ mod tests {
         }
     }
 
+    /// cas-1797 (GH #2267): a routed delivery whose evidence a peer already
+    /// holds as committed, synced proof re-parks during a Cloud upload outage
+    /// by citing that exact proof. A required file with no such proof still
+    /// refuses the park.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routed_park_reuses_synced_peer_proof_during_an_upload_outage_gh2267() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(503)).mount(&server).await;
+        let ledger = "schema: 2\ncovers: cas-2267-fixture\n\n\
+            | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+            | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+            | M01 | home | ok [source: a.rs:1] | visible: ok | PASS | fixture | shots/home.png | - |\n";
+        let evidence: [(&str, &[u8]); 2] = [("LEDGER.md", ledger.as_bytes()), ("shots/home.png", b"\x89PNG approved capture")];
+        let mut task = cas_types::Task::new("cas-2267-fixture".into(), "approved routed delivery".into());
+        task.notes = format!("BUILD_ROUTE: {}", serde_json::json!({
+            "key": "route-1", "source_machine_id": "prowl-fixture", "sender_agent_id": "sup",
+            "recipient_agent_id": "worker", "recipient": "worker", "free_slots": 1, "load_per_cpu": null}));
+        // The proof the peer's earlier park published and its reviewer fetched.
+        for (index, (name, bytes)) in evidence.iter().enumerate() {
+            let record = PublishedArtifact {
+                id: format!("art-peer{index}"), task_id: "cas-2267-fixture".into(),
+                name: Path::new(name).file_name().unwrap().to_str().unwrap().into(),
+                mime: "application/octet-stream".into(), size_bytes: bytes.len() as u64,
+                sha256: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)),
+                cloud_artifact_id: Some(format!("cloud-peer{index}")), status: "committed".into(),
+                cloud_url: None, slack_permalink: None, created_at: "2026-11-21T08:00:00Z".into(),
+                revocation: None,
+            };
+            task.notes.push_str(&format!("\n{MARKER}{}", serde_json::to_string(&record).unwrap()));
+        }
+        let mut parking = PeerReviewer::new(&server.uri(), task);
+        env.set("CAS_ROOT", &parking.root);
+        for (name, bytes) in &evidence {
+            let file = parking.evidence_dir().join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+        let unreviewed = parking.evidence_dir().join("shots/new.png");
+        std::fs::write(&unreviewed, b"\x89PNG never published").unwrap();
+        parking.task.deliverables.parked_close_reason = Some(format!("VERIFIED `{}`", unreviewed.display()));
+        tokio::task::spawn_blocking(move || {
+            let refused = publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap_err();
+            assert!(refused.contains("new.png") && !refused.contains("home.png") && !refused.contains("LEDGER.md"), "{refused}");
+            std::fs::remove_file(&unreviewed).unwrap();
+            parking.task.deliverables.parked_close_reason = None;
+            publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
+            let task = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
+            let manifest = task.notes.lines().find_map(|line| {
+                serde_json::from_str::<EvidenceSync>(line.strip_prefix(EVIDENCE_SYNC)?).ok()
+            }).expect("the park records its manifest");
+            let files: Vec<(&str, Option<&str>)> = manifest.files.iter()
+                .map(|file| (file.name.as_str(), file.artifact_id.as_deref())).collect();
+            assert_eq!(files, [("LEDGER.md", Some("art-peer0")), ("shots/home.png", Some("art-peer1"))]);
+        }).await.unwrap();
+        // Only the unreviewed capture was attempted (once, plus one retry).
+        let begins = server.received_requests().await.unwrap().iter()
+            .filter(|request| request.url.path() == "/api/artifacts/begin").count();
+        assert_eq!(begins, 2);
+    }
+
     /// GH #2079: a delivery parked on one machine leaves nested captures
     /// (`proof/`) and top-level logs in its task evidence directory. The merge
     /// owner, holding only the synced task notes, restores each at the path the

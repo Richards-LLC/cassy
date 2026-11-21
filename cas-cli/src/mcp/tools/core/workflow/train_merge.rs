@@ -11,14 +11,14 @@ use serde::{Deserialize, Serialize};
 use crate::mcp::CasCore;
 use crate::worktree::{GitOperations, target_lock};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     task: String,
     branch: String,
     sha: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Queue {
     id: String,
     train: String,
@@ -34,6 +34,45 @@ struct Queue {
     waiting: Option<String>,
     #[serde(default)]
     ci_override: Option<String>,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    advancement: Option<Advancement>,
+    #[serde(default)]
+    advancement_reclaims: Vec<AdvancementReclaim>,
+}
+
+const ADVANCEMENT_SECONDS: i64 = 120;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Advancement {
+    token: String,
+    pid: u32,
+    #[serde(default)]
+    starttime: Option<u64>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Advancement {
+    fn stale_reason(&self) -> Option<&'static str> {
+        if self.expires_at <= chrono::Utc::now() {
+            Some("expired")
+        } else if !self.starttime.map_or_else(
+            || crate::mcp::daemon::pid_alive(self.pid),
+            |stamp| crate::mcp::daemon::pid_matches_fingerprint(self.pid, stamp),
+        ) {
+            Some("orphaned")
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct AdvancementReclaim {
+    lease: Advancement,
+    reason: String,
+    reclaimed_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Queue {
@@ -41,8 +80,22 @@ impl Queue {
         self.next < self.entries.len()
     }
 
+    fn reclaim_advancement(&mut self) -> bool {
+        if let Some(reason) = self.advancement.as_ref().and_then(Advancement::stale_reason) {
+            let lease = self.advancement.take().expect("stale lease");
+            tracing::warn!(train = %self.train, token = %lease.token, pid = lease.pid, reason,
+                "train advancement lease reclaimed");
+            self.advancement_reclaims.push(AdvancementReclaim {
+                lease, reason: reason.into(), reclaimed_at: chrono::Utc::now(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
     fn render(&self) -> String {
-        format!(
+        let mut receipt = format!(
             "Train merge {}: {} of {} processed on {}.{}{}",
             self.id,
             self.next,
@@ -57,7 +110,12 @@ impl Queue {
             } else {
                 " Queue complete; single merges are released."
             },
-        )
+        );
+        if let Some(reclaimed) = self.advancement_reclaims.last() {
+            receipt.push_str(&format!("\nAdvancement lease reclaimed: token={} pid={} reason={} at={}",
+                reclaimed.lease.token, reclaimed.lease.pid, reclaimed.reason, reclaimed.reclaimed_at));
+        }
+        receipt
     }
 }
 
@@ -81,7 +139,31 @@ fn read(path: &Path) -> Result<Option<Queue>> {
     }
 }
 
-fn save(path: &Path, queue: &Queue) -> Result<()> {
+// Only local metadata I/O is inside this lock. Candidate preparation, CI,
+// store calls and publication must never retain it.
+fn save(path: &Path, queue: &mut Queue) -> Result<()> {
+    let root = path.parent().and_then(Path::parent).context("queue root missing")?;
+    let common = GitOperations::new(queue.repo.clone()).canonical_repo_key()?;
+    let _state = target_lock::lock_delivery_target(root, &common,
+        &format!("train-merge-state/{}", queue.target))?;
+    let current = read(path)?;
+    if let Some(current) = current.as_ref() {
+        ensure!(if current.id == queue.id { current.revision == queue.revision }
+            else { !current.active() && queue.revision == 0 },
+            crate::gates::tag("G-113", "train queue changed during advancement; retry with its current state"));
+    } else {
+        ensure!(queue.revision == 0, "train queue disappeared during advancement");
+    }
+    let revision = current.map_or(0, |current| current.revision).checked_add(1)
+        .context("train queue revision overflow")?;
+    let previous_revision = queue.revision;
+    queue.revision = revision;
+    let result = write_queue(path, queue);
+    if result.is_err() { queue.revision = previous_revision; }
+    result
+}
+
+fn write_queue(path: &Path, queue: &Queue) -> Result<()> {
     let parent = path.parent().context("queue directory missing")?;
     std::fs::create_dir_all(parent)?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
@@ -160,17 +242,52 @@ pub(crate) fn owner(root: &Path, repo: &Path, target: &str) -> Option<String> {
         .map(|queue| queue.train)
 }
 
-fn driver_lock(
-    root: &Path,
-    repo: &Path,
-    target: &str,
-) -> Result<Option<target_lock::DeliveryTargetLock>> {
-    let common = GitOperations::new(repo.to_path_buf()).canonical_repo_key()?;
-    Ok(target_lock::try_lock_delivery_target(
-        root,
-        &common,
-        &format!("train-merge-driver/{target}"),
-    )?)
+/// A bounded operation lease, separate from the short queue metadata lock.
+/// A reclaimed driver cannot save a stale revision or clear its successor's token.
+struct AdvancementGuard {
+    path: PathBuf,
+    token: String,
+}
+
+impl AdvancementGuard {
+    fn claim(path: &Path, queue: &mut Queue) -> Result<Option<Self>> {
+        queue.reclaim_advancement();
+        if queue.advancement.is_some() { return Ok(None); }
+        let token = uuid::Uuid::new_v4().to_string();
+        let pid = std::process::id();
+        queue.advancement = Some(Advancement {
+            token: token.clone(), pid, starttime: crate::mcp::daemon::read_pid_starttime(pid),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(ADVANCEMENT_SECONDS),
+        });
+        save(path, queue)?;
+        Ok(Some(Self { path: path.into(), token }))
+    }
+
+    fn current(&self) -> Result<Option<Queue>> {
+        let Some(mut queue) = read(&self.path)? else { return Ok(None) };
+        let Some(lease) = queue.advancement.as_mut().filter(|lease|
+            lease.token == self.token && lease.stale_reason().is_none()) else { return Ok(None) };
+        lease.expires_at = chrono::Utc::now() + chrono::Duration::seconds(ADVANCEMENT_SECONDS);
+        save(&self.path, &mut queue)?;
+        Ok(Some(queue))
+    }
+}
+
+impl Drop for AdvancementGuard {
+    fn drop(&mut self) {
+        let release = || -> Result<()> {
+            if let Some(mut queue) = read(&self.path)?
+                && queue.advancement.as_ref().is_some_and(|lease| lease.token == self.token)
+            {
+                queue.advancement = None;
+                save(&self.path, &mut queue)?;
+            }
+            Ok(())
+        };
+        if let Err(error) = release() {
+            tracing::debug!(%error, "train advancement release deferred to lease expiry");
+        }
+    }
 }
 
 impl CasCore {
@@ -224,14 +341,13 @@ impl CasCore {
                 .context("project repository missing")?
                 .to_path_buf(),
         };
-        let _driver = driver_lock(&self.cas_root, &repo, &target)?
-            .context(crate::gates::tag("G-113", "train merge is being advanced; retry this request"))?;
         let path = path(&self.cas_root, &repo, &target)?;
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
             ensure!(crate::cloud::peer_mailbox::owns_recipient(&self.cas_root, &actor, &queue.supervisor)
                 && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
                 crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
+            if queue.reclaim_advancement() { save(&path, &mut queue)?; }
             queue.supervisor = actor.id.clone();
             queue.owner_generation = generation.clone();
             // GH #1819: entries already merged or closed need no daemon pass.
@@ -289,7 +405,7 @@ impl CasCore {
                         .map_err(|error| anyhow::anyhow!(error.message.to_string()))?;
                 }
             }
-            save(&path, &queue)?;
+            save(&path, &mut queue)?;
             // GH #2169: appended entries' reviews start now, not at the next daemon scan.
             start_queued_reviews(self, &queue, &*tasks, queue.next);
             let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
@@ -332,7 +448,7 @@ impl CasCore {
             ids,
             &mut seen,
         )?;
-        let queue = Queue {
+        let mut queue = Queue {
             id: uuid::Uuid::new_v4().to_string(),
             train: train.into(),
             repo: repo.clone(),
@@ -345,11 +461,14 @@ impl CasCore {
             outcomes: vec![],
             waiting: None,
             ci_override,
+            revision: 0,
+            advancement: None,
+            advancement_reclaims: vec![],
         };
         let common = GitOperations::new(repo).canonical_repo_key()?;
         let target_lock = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
             .context(crate::gates::tag("G-113", "target merge already in progress; retry train_merge after it finishes"))?;
-        save(&path, &queue)?;
+        save(&path, &mut queue)?;
         // GH #2169: every queued delivery's review starts now, outside the publication lock.
         drop(target_lock);
         start_queued_reviews(self, &queue, &*tasks, 0);
@@ -526,17 +645,13 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         if !queue.active() || queue.session != session {
             continue;
         }
-        let Some(_driver) = driver_lock(root, &queue.repo, &queue.target)? else {
-            continue;
-        };
-        let Some(mut queue) = read(&path)? else {
-            continue;
-        };
+        let Some(mut queue) = read(&path)? else { continue };
+        let Some(driver) = AdvancementGuard::claim(&path, &mut queue)? else { continue };
         // GH #2017: only a queue whose own target missed its conflict scan waits.
         if let Some(reason) = unchecked.get(&queue.target) {
             if queue.waiting.as_ref() != Some(reason) {
                 queue.waiting = Some(reason.clone());
-                save(&path, &queue)?;
+                save(&path, &mut queue)?;
             }
             continue;
         }
@@ -569,12 +684,17 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         ensure!(queue.owner_generation.is_empty() || queue.owner_generation == generation,
             crate::gates::tag("G-113", "train merge owner generation changed"));
         loop {
+            let Some(current) = driver.current()? else { break };
+            queue = current;
             // Settled entries advance even while CI holds the next merge.
             settle(root, &path, &mut queue, &*tasks)?;
             if !queue.active() {
                 break;
             }
             start_queued_reviews(&core, &queue, &*tasks, queue.next + 1);
+            let Some(current) = driver.current()? else { break };
+            queue = current;
+            if !queue.active() { break; }
             if let Err(error) = crate::train_ci::guard(
                 &core,
                 &queue.train,
@@ -584,10 +704,10 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 None,
             ) {
                 queue.waiting = Some(error.to_string());
-                save(&path, &queue)?;
+                save(&path, &mut queue)?;
                 break;
             }
-            let entry = &queue.entries[queue.next];
+            let entry = queue.entries[queue.next].clone();
             if let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, &entry.task)?
                 && matches!(
                     dispatch.state,
@@ -601,9 +721,12 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                         .map_err(|error| anyhow::anyhow!(error.message.to_string()))?;
                 }
                 queue.waiting = Some(crate::gates::tag("G-115", format!("{} awaiting dispatch {}", entry.task, dispatch.id)));
-                save(&path, &queue)?;
+                save(&path, &mut queue)?;
                 break;
             }
+            let Some(current_queue) = driver.current()? else { break };
+            queue = current_queue;
+            if !queue.active() || queue.entries[queue.next].task != entry.task { continue; }
             let expected = crate::factory_ci_retry::Retry {
                 task: entry.task.clone(),
                 worktree: entry.branch.clone(),
@@ -621,8 +744,11 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 ci_rerun: Vec::new(),
             };
             let result = core.worktree_merge_queued(&expected, &queue.id).await;
+            let Some(current_queue) = driver.current()? else { break };
+            queue = current_queue;
+            if !queue.active() || queue.entries[queue.next].task != entry.task { continue; }
             let current = tasks.get(&entry.task)?;
-            if current.status != TaskStatus::AwaitingMerge || published(&queue, entry, true)? {
+            if current.status != TaskStatus::AwaitingMerge || published(&queue, &entry, true)? {
                 // Re-read the durable result at the top, including a conflict
                 // return or a merge committed just before a previous crash.
                 continue;
@@ -639,7 +765,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                     .collect::<Vec<_>>()
                     .join("\n"),
             });
-            save(&path, &queue)?;
+            save(&path, &mut queue)?;
             break;
         }
         if !queue.active() {
@@ -1038,6 +1164,84 @@ mod tests {
         assert!(operations.is_ancestor(&fixture.shas[1], "origin/epic/train"));
         assert!(operations.is_ancestor(&fixture.shas[2], "origin/epic/train"));
         assert_eq!(tasks.get(&fixture.ids[0]).unwrap().status, TaskStatus::AwaitingMerge);
+    }
+
+    /// A stalled later review must not reserve the entire train indefinitely.
+    /// Replay publication, a held dispatch, its approval, an append and resume
+    /// while the retired driver's OS handle still exists.
+    #[tokio::test]
+    async fn stalled_advancement_recovers_approved_head_and_appends_cas_deb2() {
+        for holder in ["expired", "orphaned", "live"] {
+            let mut fixture = Fixture::build(false);
+            fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+            fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+            std::fs::write(fixture.root.join("config.toml"),
+                "[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+            let tasks = fixture.core.open_task_store().unwrap();
+            let mut held = tasks.get(&fixture.ids[1]).unwrap();
+            held.depth = TaskDepth::Deep;
+            tasks.update(&held).unwrap();
+            fixture.start_with(&fixture.ids[..2]).await;
+            resume_pending(&fixture.root, "queue-session").await.unwrap();
+            let queue_path = path(&fixture.root, fixture._repo.path(), "epic/train").unwrap();
+            let before = read(&queue_path).unwrap().unwrap();
+            assert_eq!(before.next, 1);
+            let dispatch = cas_store::get_latest_verification_dispatch(&fixture.root, &held.id)
+                .unwrap().unwrap();
+            assert!(matches!(dispatch.state,
+                VerificationDispatchState::Pending | VerificationDispatchState::Claimed));
+            // Retain the historical long-lived flock, just as the incident's
+            // blocked daemon does. New queue metadata operations must not wait
+            // for this unrelated, unbounded legacy operation to return.
+            let common = GitOperations::new(fixture._repo.path().to_path_buf()).canonical_repo_key().unwrap();
+            let legacy = target_lock::try_lock_delivery_target(
+                &fixture.root, &common, "train-merge-driver/epic/train",
+            ).unwrap().unwrap();
+            let mut exited = std::process::Command::new("true").spawn().unwrap();
+            let dead_pid = exited.id();
+            exited.wait().unwrap();
+            let now = chrono::Utc::now();
+            let mut persisted: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&queue_path).unwrap()).unwrap();
+            persisted["advancement"] = serde_json::json!({
+                "token": "retired-advance", "pid": if holder == "orphaned" { dead_pid } else { std::process::id() },
+                "expires_at": now + chrono::Duration::seconds(if holder == "expired" { -1 } else { 120 }),
+            });
+            std::fs::write(&queue_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+            let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+            let result = service.verification(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"add", "task_id":held.id, "dispatch_id":dispatch.id,
+                "status":"approved", "summary":"Review the held train candidate",
+            })).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+            let mut stale_snapshot = read(&queue_path).unwrap().unwrap();
+            fixture.start_with(&fixture.ids[2..]).await;
+            assert!(save(&queue_path, &mut stale_snapshot).is_err(), "{holder}: stale driver overwrote append");
+            let appended = read(&queue_path).unwrap().unwrap();
+            assert_eq!(appended.entries.len(), 3, "{holder}");
+            assert_eq!(appended.next, 1, "{holder}");
+            let persisted: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&queue_path).unwrap()).unwrap();
+            if holder == "live" {
+                assert_eq!(persisted["advancement"]["token"], "retired-advance");
+                // Completion by that live owner releases its lease; appending
+                // above must neither steal it nor discard the added entry.
+                let mut persisted = persisted;
+                persisted["advancement"] = serde_json::Value::Null;
+                std::fs::write(&queue_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+            } else {
+                assert!(persisted["advancement"].is_null(), "{holder}");
+                assert_eq!(persisted["advancement_reclaims"].as_array().unwrap().len(), 1, "{holder}");
+            }
+            drop(legacy);
+            resume_pending(&fixture.root, "queue-session").await.unwrap();
+            let complete = read(&queue_path).unwrap().unwrap();
+            assert!(!complete.active(), "{holder}: {}", complete.render());
+            let git = GitOperations::new(fixture._repo.path().to_path_buf());
+            for sha in &fixture.shas {
+                assert!(git.is_ancestor(sha, "origin/epic/train"), "{holder}: {sha}");
+            }
+        }
     }
 
     #[tokio::test]

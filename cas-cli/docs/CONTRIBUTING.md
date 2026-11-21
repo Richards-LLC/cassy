@@ -2995,13 +2995,16 @@ command and changes no worker admission guard.
 Build admission reads Linux `/proc/pressure/cpu` and `/proc/pressure/memory`
 `some avg10` stall percentages, plus `MemAvailable` from `/proc/meminfo`.
 Valid CPU PSI replaces the raw load check, so unrelated I/O-heavy work does not
-block an otherwise healthy host. Missing or malformed CPU PSI falls back to
-one-minute load divided by CPU count. Missing memory probes remain unknown.
+block an otherwise healthy host. When neither CPU PSI nor a native CPU utilisation sample is available, admission
+falls back to one-minute load divided by CPU count. Missing memory probes remain
+unknown.
 Memory pressure and the memory floor are rechecked even when a proof continuation
 carries its earlier CPU admission. Swap usage alone is not a refusal signal;
-PSI measures time lost to contention. macOS reads one-minute load with `getloadavg`
-and estimates available memory from free plus inactive pages via `host_statistics64`;
-PSI stays unavailable there.
+PSI measures time lost to contention. macOS measures CPU utilisation from
+32-bit Mach ticks over a 250 ms window, including counter wraparound, and compares
+it with `max_cpu_pressure_percent`. One-minute load from `getloadavg` is only the
+fallback when CPU sampling fails. macOS estimates available memory from free plus
+inactive pages via `host_statistics64`; PSI stays unavailable there.
 
 Supervisors advertise `build_capacity_v1` in existing registration and heartbeat
 metadata: free builder slots, one-minute load, CPU count and available CPU/memory
@@ -3073,8 +3076,8 @@ candidate directories use the release-scratch GC naming and ownership protocol.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
-| `factory.build_guard.max_load_ratio` | `1.0` | Positive finite fallback load/CPU ceiling |
-| `factory.build_guard.max_cpu_pressure_percent` | `90.0` | Maximum CPU `some avg10`, 0–100% |
+| `factory.build_guard.max_load_ratio` | `1.0` | Positive finite load/CPU ceiling if both CPU PSI and native CPU sampling are unavailable |
+| `factory.build_guard.max_cpu_pressure_percent` | `90.0` | Maximum Linux CPU PSI `some avg10` or macOS measured CPU utilisation, 0–100% |
 | `factory.build_guard.max_memory_pressure_percent` | `10.0` | Maximum memory `some avg10`, 0–100% |
 | `factory.build_guard.min_available_memory_gib` | `2` | Minimum available GiB; 0 disables this floor |
 

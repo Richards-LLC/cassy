@@ -4459,6 +4459,42 @@ mod tests {
         );
     }
 
+    /// GH #2163: a lane bound to an epic is told to merge the released trunk,
+    /// whose unnamed commits changed other specs. Park and the capped runner
+    /// must own only the task's spec edits, before and after that sync.
+    #[test]
+    fn released_trunk_merge_brings_no_stability_obligation_gh2163() {
+        use crate::factory_worker_check::{PassingTests, diff_base, javascript, stability::{self, Identity, Proof}};
+        let dir = fixture();
+        let p = dir.path();
+        let case = |name: &str| format!("test('{name}', () => {{}});\n");
+        git(p, &["checkout", "-qb", "epic", "main"]);
+        commit(p, "own.test.js", &case("kept"), "cas-taska: epic work");
+        git(p, &["checkout", "-q", "main"]);
+        commit(p, "qbo.test.js", &(case("kept") + &case("released")), "Update QBO sync spec (#412)");
+        git(p, &["checkout", "-q", "-B", "factory/worker", "epic"]);
+        commit(p, "own.test.js", &(case("kept") + &case("typed")), "cas-taskb: type the renderer spec");
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "Merge remote-tracking branch 'origin/main'"]);
+        let tip = commit(p, "own.test.js", &(case("kept") + &case("typed") + &case("synced")),
+            "cas-taskb: retype after sync");
+        let window = window();
+        let paths = paths(p, "epic", &window, Some(&tip)).unwrap();
+        assert_eq!(paths, ["own.test.js"]);
+        let ranges = range_bounds(p, "epic", &window, Some(&tip)).unwrap();
+        let (tests, widened) = stability::requirements(p, &tip, "epic", &paths, Some(&ranges)).unwrap();
+        let owned = vec![Identity::exact("own.test.js", "synced"), Identity::exact("own.test.js", "typed")];
+        assert_eq!((tests, widened), (owned.clone(), vec![]));
+        // The runner selects the same tests from the file the worker names,
+        // and its receipt alone satisfies park.
+        let base = diff_base(p, Some("epic")).unwrap();
+        assert_eq!(javascript::changed_tests(p, &base, &tip, &paths, None).unwrap(), owned);
+        let root = tempfile::tempdir().unwrap();
+        stability::record(root.path(), p, &tip, Proof { runner: "jest".into(), tests: owned.clone(),
+            consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+        let passing = PassingTests::new(root.path(), p, &tip).with_target("epic");
+        assert!(stability::missing(&passing, &owned).is_empty());
+    }
+
     /// cas-24d8: the ownership walk skips edges that leave the path's blob
     /// unchanged (a long run of unrelated commits, a side merge that never
     /// touches the file) without losing the edge that does change it.

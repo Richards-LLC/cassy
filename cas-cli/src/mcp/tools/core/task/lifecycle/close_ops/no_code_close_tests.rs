@@ -4002,5 +4002,25 @@ async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
             assert_eq!(b_after.status, b_before.status);
             assert_eq!(b_after.deliverables.factory_branch_anchor, b_before.deliverables.factory_branch_anchor);
         }
+        // Attribution does not grant worker review authority. The supervisor
+        // returns A through request_changes; hold unfinished B before restart.
+        let start = serde_json::json!({"action":"start", "id":id});
+        let error = f.worker.task(Parameters(serde_json::from_value(start.clone()).unwrap())).await.unwrap_err();
+        assert!(crate::gates::codes_in(&error.message).contains(&"G-05"));
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let returned = call(&f.supervisor, serde_json::json!({"action":"request_changes", "id":id, "reason":"Correct the reviewed delivery"})).await;
+        assert_eq!(f.task(id).status, TaskStatus::Open, "{returned}");
+        env.set("CAS_AGENT_ROLE", "worker");
+        if !b_parked {
+            call(&f.worker, serde_json::json!({"action":"update", "id":b.id, "status":"blocked"})).await;
+        }
+        // First start delivers the unread correction decision without mutation.
+        let _ = f.worker.task(Parameters(serde_json::from_value(start.clone()).unwrap())).await;
+        let resumed = call(&f.worker, start).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{resumed}");
+        assert_eq!(git(&checkout, &["branch", "--show-current"]), lane);
+        assert!(agents.list_active_leases().unwrap().iter()
+            .filter(|lease| lease.agent_id == "nocode-worker-session")
+            .all(|lease| lease.task_id == id));
     }
 }

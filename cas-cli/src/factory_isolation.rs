@@ -610,6 +610,33 @@ mod tests {
     /// Supervisors legitimately sit on trunk in the shared checkout; the
     /// worker-identity check must not fire for them.
 
+    /// cas-ea31: the Git hooks and the Rust resolver must admit exactly the
+    /// same task-branch suffixes; the hooks run with no registry or binary.
+    #[test]
+    fn hook_task_branch_predicate_matches_rust_grammar_cas_ea31() {
+        use crate::ui::factory::daemon::runtime::teams::TeamsManager;
+        let suffixes = [
+            "cas-ea31", "cas-73b8.1", "cas-ef33-diag", "release-notes", "staging",
+            "e9e5", "2", "2-cas-x", "cas--x", "a-.b-c", "", "x/y-z",
+        ];
+        for template in [TeamsManager::WORKER_PRE_COMMIT_HOOK, TeamsManager::WORKER_PRE_PUSH_HOOK] {
+            let start = template.find("own_task_branch() {").expect("hook defines own_task_branch");
+            let end = start + template[start..].find("\n}\n").expect("function end") + 3;
+            let script = format!(
+                "expected=factory/kevin\n{}for b in \"$@\"; do if own_task_branch \"$b\"; then echo 1; else echo 0; fi; done\n",
+                &template[start..end],
+            );
+            let branches: Vec<String> = suffixes.iter().map(|suffix| format!("factory/kevin-{suffix}")).collect();
+            let output = std::process::Command::new("sh").arg("-c").arg(&script).arg("sh")
+                .args(&branches).output().expect("run hook predicate");
+            assert!(output.status.success(), "{output:?}");
+            let shell: Vec<bool> = String::from_utf8_lossy(&output.stdout).lines().map(|line| line == "1").collect();
+            let rust: Vec<bool> = branches.iter()
+                .map(|branch| own_task_branch_task_id("kevin", branch).is_some()).collect();
+            assert_eq!(shell, rust, "{suffixes:?}");
+        }
+    }
+
     /// cas-73b8: a worker whose `factory/<name>` is frozen for a parked
     /// delivery commits its next task on `factory/<name>-<task-id>`.
     #[test]

@@ -12498,6 +12498,20 @@ mod worker_commit_guard_tests {
         assert!(check_worker_git_commit_scope_for_command(cwd, "git cherry-pick HEAD").is_some());
         assert!(check_worker_git_commit_scope_for_command(cwd, "git reset --hard").is_some());
         assert!(check_worker_git_commit_scope_for_command(cwd, "git switch -C factory/sibling").is_some());
+        // cas-ea31 / cas-7e76a: no worker named worker-staging exists, so the
+        // refusal must not invent one, and every way out it prints must pass.
+        let refused = check_worker_git_commit_scope_for_command(cwd, "git commit -m wip")
+            .expect("an unowned suffix branch is not committable");
+        assert!(refused.starts_with("WORKER_BRANCH_NOT_OWNED"), "{refused}");
+        let remedies: Vec<&str> = refused.lines().map(str::trim)
+            .filter(|line| line.starts_with("git ")).collect();
+        for remedy in ["git restore --staged --worktree .", "git switch factory/worker"] {
+            assert!(remedies.contains(&remedy), "{refused}");
+        }
+        assert!(remedies.iter().any(|line| line.starts_with("git diff HEAD > ")), "{refused}");
+        for remedy in remedies {
+            assert!(check_worker_git_commit_scope_for_command(cwd, remedy).is_none(), "{remedy}");
+        }
         let redirected = format!("git --git-dir '{}' --work-tree '{cwd}' merge --abort", outside.path().join(".git").display());
         assert!(check_worker_git_commit_scope_for_command(cwd, &redirected).is_some());
     }

@@ -1746,3 +1746,24 @@ fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
         .unwrap();
     assert_eq!(renewals, 1);
 }
+
+/// cas-ea31 (N1): a factory name must not extend another registered factory
+/// name with a letter-led part. `ab` would otherwise own `factory/ab-cd-12`'s
+/// branches by syntax, in Rust and in the Git hooks alike.
+#[test]
+fn factory_names_cannot_share_a_branch_namespace_cas_ea31() {
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
+    let worker = |id: &str, name: &str| Agent::new_with_role(id.into(), name.into(), AgentRole::Worker);
+    store.register(&worker("ab-id", "ab")).unwrap();
+    let overlap = store.register(&worker("abcd-id", "ab-cd-12")).expect_err("ab-cd-12 shares ab's namespace");
+    assert!(overlap.to_string().contains("WORKER_NAME_OVERLAPS"), "{overlap}");
+    store.register(&worker("ab-id", "ab")).expect("re-registering the same name");
+    store.register(&worker("ab2-id", "ab-2")).expect("a digit-led extension never parses as a task");
+    let mut renamed = worker("other-id", "other");
+    store.register(&renamed).unwrap();
+    renamed.name = "ab-cd-12".into();
+    let rename = store.update(&renamed).expect_err("a rename gets the same check");
+    assert!(rename.to_string().contains("WORKER_NAME_OVERLAPS"), "{rename}");
+    assert!(store.get("abcd-id").is_err());
+}

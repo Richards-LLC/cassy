@@ -1,0 +1,10 @@
+title: Successor recovery preserves retained work and exact lease ownership
+statement: >-
+  A successor supervisor recovers a crashed local worker's committed, unpushed
+  branch across factory sessions without task release clearing source ownership.
+  Only a source-matched, locally provable dead registration's exact lease epoch
+  is retired. Live, foreign, remote and unverifiable holders remain unchanged.
+  The original checkout and commits survive publication and normal reassignment.
+tasks: [cas-2086]
+journeys: []
+invariants: []

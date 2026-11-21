@@ -10064,7 +10064,7 @@ impl CasCore {
                     if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {
                         if self.get_agent_id()? != worker.id { return Err(Self::error(ErrorCode::INVALID_REQUEST,crate::gates::tag("G-113","Only the registered host worker may publish its park"))); }
                         if let Err(error) = crate::cloud::peer_mailbox::train_parks::publish_ready(&self.cas_root,&task,&worker) {
-                            let mut reply = Self::tool_error(format!("Delivery is parked, but its owner notification is not durable: {error}. The close journal retains publication for daemon recovery; do not close again."));
+                            let mut reply = Self::tool_error(format!("Delivery is parked, but its owner notification is not durable: {error}. The close journal retains publication for daemon recovery; do not close again. code=park_publication_failed"));
                             reply.structured_content = Some(serde_json::json!({
                                 "code": "park_publication_failed", "task_id": task.id,
                                 "mutation_outcome": "COMMITTED",

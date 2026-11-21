@@ -1874,47 +1874,67 @@ mod lifecycle_friction_tests {
 
     #[tokio::test]
     async fn cas_5dc0_request_changes_recovers_a_blocked_parked_verifier_failure() {
+        use serde_json::json;
         let mut env = TestEnvGuard::temp_home();
-        let (_dir, core, task, dispatch) = fixture(&mut env);
-        let findings = "Correction required with detailed findings. ".repeat(75);
-        let failure = core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
-            "task_id":task.id,"dispatch_id":dispatch.id,"status":"rejected","summary":findings
-        })).unwrap())).await.unwrap();
-        assert!(
-            format!("{failure:?}").contains(&findings),
-            "failure findings must stay complete"
-        );
-        let tasks = core.open_task_store().unwrap();
-        let mut blocked = tasks.get(&task.id).unwrap();
-        blocked.status = TaskStatus::Blocked;
-        tasks.update(&blocked).unwrap();
-        let result = core
-            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest { class_audit: None,
-                id: task.id.clone(),
-                reason: "Fix the rejected delivery while keeping its ownership".into(),
-            }))
-            .await
-            .expect("blocked parked deliveries need the same audited correction exit");
-        assert_ne!(result.is_error, Some(true), "{result:?}");
-        // cas-cff4: the output states what was sent, never implying a handoff.
-        let output = format!("{result:?}");
-        assert!(output.contains("Assignee implementer NOT notified"), "{output}");
-        let reopened = tasks.get(&task.id).unwrap();
-        assert_eq!(reopened.status, TaskStatus::Open);
-        assert_eq!(reopened.assignee, task.assignee);
-        assert!(reopened.deliverables.factory_branch_anchor.is_none());
-        assert!(
-            reopened
-                .deliverables
-                .historical_factory_branch_anchors
-                .contains(&"a".repeat(40))
-        );
-        assert!(!reopened.pending_verification);
-        assert_eq!(
-            cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
-                .unwrap()
-                .state,
-            cas_types::VerificationDispatchState::Invalidated
-        );
+        // One verdict/request_changes contract, including legacy JSON, empty
+        // findings, invalid names and union with names another producer saved.
+        for (triage, severity, seeded, expected) in [
+            (Some(json!({"failing_tests":["gates::case_one", "gates::case_one"]})), "blocking", false, vec!["gates::case_one"]),
+            (Some(json!({"failing_tests":[]})), "blocking", false, vec![]),
+            (None, "blocking", false, vec![]),
+            (Some(json!({"failing_tests":["gates::case_one", "not a test", "", "bad:::name"]})), "blocking", false, vec!["gates::case_one"]),
+            (Some(json!({"failing_tests":["gates::case_one"]})), "warning", false, vec![]),
+            (Some(json!({"failing_tests":["gates::case_one"]})), "blocking", true, vec!["gates::older_case", "gates::case_one"]),
+        ] {
+            let (_dir, core, task, dispatch) = fixture(&mut env);
+            let tasks = core.open_task_store().unwrap();
+            if seeded {
+                crate::mcp::tools::core::task::repair_class::record_failing_tests(
+                    &core.cas_root, &task.id, &["gates::older_case".into()]);
+            }
+            let mut issue = json!({"file":"src/lib.rs", "severity":severity,
+                "category":"correctness", "problem":"Recorded failing behavior"});
+            if let Some(triage) = triage { issue["triage"] = triage; }
+            let verdict = core.cas_verification_add(Parameters(serde_json::from_value(json!({
+                "task_id":task.id, "dispatch_id":dispatch.id, "status":"rejected",
+                "summary":"Correct the reviewed behavior", "issues":json!([issue]).to_string(),
+            })).unwrap())).await.unwrap();
+            assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+            let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id)
+                .unwrap().unwrap();
+            assert_eq!(recorded.status, VerificationStatus::Rejected);
+            assert_eq!(recorded.issues.len(), 1); // Old verdicts load through the real store.
+            let state = tasks.get_execution_state(&task.id).unwrap();
+            if expected.is_empty() {
+                assert!(state.as_ref().is_none_or(|s| s.get("failing_tests").is_none()), "{state:?}");
+            } else {
+                assert_eq!(state.unwrap()["failing_tests"], json!(expected));
+            }
+            let mut blocked = tasks.get(&task.id).unwrap();
+            blocked.status = TaskStatus::Blocked;
+            tasks.update(&blocked).unwrap();
+            let request = || Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+                class_audit: None, id: task.id.clone(), reason: "Correct the rejected delivery".into(),
+            });
+            let result = core.cas_task_request_changes(request()).await;
+            if expected.is_empty() {
+                assert_ne!(result.unwrap().is_error, Some(true));
+            } else {
+                let refusal = result.unwrap_err();
+                assert!(refusal.message.contains("CLASS_AUDIT_REQUIRED"), "{refusal:?}");
+                assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Blocked);
+                let mut classified = request();
+                classified.0.class_audit = Some("test(gates::)".into());
+                assert_ne!(core.cas_task_request_changes(classified).await.unwrap().is_error, Some(true));
+            }
+            let reopened = tasks.get(&task.id).unwrap();
+            assert_eq!(reopened.status, TaskStatus::Open);
+            assert_eq!(reopened.assignee, task.assignee);
+            assert!(reopened.deliverables.factory_branch_anchor.is_none());
+            assert!(reopened.deliverables.historical_factory_branch_anchors.contains(&"a".repeat(40)));
+            assert!(!reopened.pending_verification);
+            assert_eq!(cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id).unwrap().state,
+                cas_types::VerificationDispatchState::Invalidated);
+        }
     }
 }

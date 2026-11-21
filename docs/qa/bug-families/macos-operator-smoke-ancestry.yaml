@@ -1,0 +1,4 @@
+title: macOS operator smoke leaves factory ancestry
+statement: All four operator entry points run through a clean transient launchd job and refuse explicit agent invocations; clearing environment variables alone cannot remove parent-process ancestry. Production ancestry guards remain enforced.
+found: 2026-11-21
+tasks: [cas-da66]

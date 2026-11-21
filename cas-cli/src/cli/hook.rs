@@ -141,6 +141,8 @@ fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
         // disposable diagnostic ref with no task or review bound to it.
         ensure!(sha(&remote) && branch.ends_with("-diag")
             && crate::factory_isolation::own_task_branch_task_id(&worker, &branch).is_some()
+            && crate::factory_isolation::classify_worker_binding_in(&root, &worker, Some(&branch))
+                == crate::factory_isolation::WorkerBinding::Own
             && remote_ref == format!("refs/heads/{branch}"), "H-40: deletion requires an owned diagnostic ref");
         let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         cas_store::shared_db::install_busy_handler(&conn)?;
@@ -165,7 +167,7 @@ fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
         return Ok(());
     }
     ensure!(sha(&local) && sha(&remote), "H-40: checkpoint pushes cannot delete or use unknown tips");
-    ensure!(!worker.is_empty() && crate::factory_isolation::classify_worker_binding(&worker, Some(&branch))
+    ensure!(!worker.is_empty() && crate::factory_isolation::classify_worker_binding_in(&root, &worker, Some(&branch))
         == crate::factory_isolation::WorkerBinding::Own && remote_ref == format!("refs/heads/{branch}"),
         "H-40: checkpoint source and destination must be the worker's own branch");
     let git = crate::worktree::GitOperations::new(std::env::current_dir()?);

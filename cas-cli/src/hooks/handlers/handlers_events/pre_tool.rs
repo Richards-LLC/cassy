@@ -854,6 +854,7 @@ fn handle_pre_tool_use_checked(
                             &input.cwd,
                             cmd,
                             registered_worktree.as_deref(),
+                            cas_root,
                         )
                     {
                         if let Some(root) = cas_root {
@@ -3311,18 +3312,19 @@ fn worker_git_scope_violation_for_command(
     cwd: &str,
     command: &str,
 ) -> Option<(GitCommandTarget, String)> {
-    worker_git_scope_violation_for_command_with_worktree(cwd, command, None)
+    worker_git_scope_violation_for_command_with_worktree(cwd, command, None, None)
 }
 
 fn worker_git_scope_violation_for_command_with_worktree(
     cwd: &str,
     command: &str,
     registered_worktree_root: Option<&std::path::Path>,
+    cas_root: Option<&std::path::Path>,
 ) -> Option<(GitCommandTarget, String)> {
     git_write_targets(cwd, command)
         .into_iter()
         .find_map(|target| {
-            check_worker_git_commit_scope_at_target(&target, registered_worktree_root)
+            check_worker_git_commit_scope_at_target(&target, registered_worktree_root, cas_root)
                 .map(|message| (target, message))
         })
 }
@@ -3373,12 +3375,13 @@ fn git_target_is_head_navigation(target: &GitCommandTarget) -> bool {
 /// Switching to a non-protected branch is the only way to unblock.
 #[cfg(test)]
 pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
-    check_worker_git_commit_scope_at_target(&GitCommandTarget::from_cwd(cwd), None)
+    check_worker_git_commit_scope_at_target(&GitCommandTarget::from_cwd(cwd), None, None)
 }
 
 fn check_worker_git_commit_scope_at_target(
     target: &GitCommandTarget,
     registered_worktree_root: Option<&std::path::Path>,
+    cas_root: Option<&std::path::Path>,
 ) -> Option<String> {
     if target.uncertain_scope {
         return Some("WORKER COMMIT GUARD: Cannot determine nested shell command scope. Use the plain -c '<cmd>' form inside your assigned worktree; split deeply nested commands into explicit operations.".to_string());
@@ -3456,10 +3459,15 @@ fn check_worker_git_commit_scope_at_target(
     // Recovery in a registered checkout must remain possible after an
     // incidental suffix was mistaken for another worker. Compare actual Git
     // directories too: --git-dir/--work-tree must not redirect this allowance.
+    let classify = |worker: &str, branch: &str| match cas_root {
+        Some(root) => crate::factory_isolation::classify_worker_binding_in(root, worker, Some(branch)),
+        None => crate::factory_isolation::classify_worker_binding_at(worker, Some(branch),
+            clone_path.as_deref().map(std::path::Path::new).unwrap_or_else(|| std::path::Path::new(&cwd))),
+    };
     if is_isolated && let GitHeadAction::Recover { branch } = &target.head_action {
         let owned = branch.as_deref().is_none_or(|branch| {
             std::env::var("CAS_AGENT_NAME").ok().is_some_and(|worker|
-                crate::factory_isolation::classify_worker_binding(&worker, Some(branch))
+                classify(&worker, branch)
                     == crate::factory_isolation::WorkerBinding::Own)
         });
         let git_dir = |output: std::io::Result<std::process::Output>| output.ok()
@@ -3608,12 +3616,13 @@ fn check_worker_git_commit_scope_at_target(
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
     {
-        match crate::factory_isolation::classify_worker_binding(&registered_name, Some(&branch)) {
+        match classify(&registered_name, &branch) {
             crate::factory_isolation::WorkerBinding::Own => {}
             crate::factory_isolation::WorkerBinding::Sibling { owner } => {
                 return Some(crate::factory_isolation::sibling_misbinding_message(
                     &registered_name,
                     &owner,
+                    &branch,
                     &cwd,
                 ));
             }
@@ -12537,16 +12546,18 @@ mod worker_commit_guard_tests {
             let output = std::process::Command::new("git").args(["switch", "-C", branch])
                 .current_dir(repo.path()).output().unwrap();
             assert!(output.status.success(), "{output:?}");
-            let result = worker_git_scope_violation_for_command_with_worktree(
-                repo.path().to_str().unwrap(), command, Some(repo.path()),
-            );
-            if result.is_some() != denied { failures.push((branch, denied, result.map(|(_, message)| message))); }
-            assert!(worker_git_scope_violation_for_command_with_worktree(
-                foreign.path().to_str().unwrap(), command, Some(repo.path()),
-            ).is_some());
-            assert!(worker_git_scope_violation_for_command_with_worktree(
-                repo.path().to_str().unwrap(), "git switch -C factory/worker", Some(repo.path()),
-            ).is_none());
+            for registry in [None, Some(root.as_path())] {
+                let result = worker_git_scope_violation_for_command_with_worktree(
+                    repo.path().to_str().unwrap(), command, Some(repo.path()), registry,
+                );
+                if result.is_some() != denied { failures.push((branch, denied, result.map(|(_, message)| message))); }
+                assert!(worker_git_scope_violation_for_command_with_worktree(
+                    foreign.path().to_str().unwrap(), command, Some(repo.path()), registry,
+                ).is_some());
+                assert!(worker_git_scope_violation_for_command_with_worktree(
+                    repo.path().to_str().unwrap(), "git switch -C factory/worker", Some(repo.path()), registry,
+                ).is_none());
+            }
         }
         assert!(failures.is_empty(), "{failures:?}");
     }

@@ -2733,7 +2733,7 @@ impl CasCore {
                 .or_else(|| declared_repo_context.as_ref().map(|context| context.repo_root.as_path()))
             && let Some(branch) = crate::factory_isolation::branch_at(checkout)
             && matches!(
-                crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
+                crate::factory_isolation::classify_worker_binding_in(&self.cas_root, &worker.name, Some(&branch)),
                 crate::factory_isolation::WorkerBinding::Sibling { .. }
             )
         {
@@ -2959,7 +2959,8 @@ impl CasCore {
                     }
                     let mut worker_branch = checkout_branch
                         .filter(|branch| {
-                            crate::factory_isolation::classify_worker_binding(
+                            crate::factory_isolation::classify_worker_binding_in(
+                                &self.cas_root,
                                 &worker.name,
                                 Some(branch),
                             ) == crate::factory_isolation::WorkerBinding::Own

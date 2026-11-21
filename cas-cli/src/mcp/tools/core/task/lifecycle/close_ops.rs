@@ -13280,6 +13280,7 @@ impl CasCore {
                 // cas-8606 follow-through: any of the worker's own branches,
                 // including a per-task branch, as on the System-B path.
                 let expected_branch = system_b_expected_branch(
+                    &self.cas_root,
                     assignee,
                     crate::factory_isolation::branch_at(&worktree.path).as_deref(),
                 );
@@ -13294,6 +13295,7 @@ impl CasCore {
                 .as_deref()
                 .expect("System B requires assignee");
             let expected_branch = system_b_expected_branch(
+                &self.cas_root,
                 assignee,
                 crate::factory_isolation::branch_at(path).as_deref(),
             );
@@ -20233,10 +20235,10 @@ fn resolve_system_b_worktree_path_for_repo(
 /// branch is ordinary, and was refused for cas-ac390, cas-bf07 and five
 /// cas-459b deliveries. A sibling worker's branch, trunk, or a detached HEAD
 /// is still refused.
-fn system_b_expected_branch(assignee: &str, current: Option<&str>) -> String {
+fn system_b_expected_branch(cas_root: &std::path::Path, assignee: &str, current: Option<&str>) -> String {
     match current {
         Some(branch)
-            if crate::factory_isolation::classify_worker_binding(assignee, Some(branch))
+            if crate::factory_isolation::classify_worker_binding_in(cas_root, assignee, Some(branch))
                 == crate::factory_isolation::WorkerBinding::Own =>
         {
             branch.to_string()
@@ -48474,12 +48476,20 @@ mod merge_reality_tests {
     /// a sibling worker's branch, trunk or a detached HEAD.
     #[test]
     fn pre_close_worktree_accepts_any_own_worker_branch_cas_8606() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        for name in ["happy-octopus-83", "wild-heron-20"] {
+            crate::store::open_agent_store(&root).unwrap().register(&cas_types::Agent::new_with_role(
+                format!("id-{name}"), name.into(), cas_types::AgentRole::Worker,
+            )).unwrap();
+        }
         for own in [
             "factory/happy-octopus-83",
             "factory/happy-octopus-83-cas-2ee2",
             "factory/happy-octopus-83-cas-8606",
         ] {
-            assert_eq!(system_b_expected_branch("happy-octopus-83", Some(own)), own);
+            assert_eq!(system_b_expected_branch(&root, "happy-octopus-83", Some(own)), own);
         }
         for foreign in [
             Some("factory/wild-heron-20"),
@@ -48489,7 +48499,7 @@ mod merge_reality_tests {
             None,
         ] {
             assert_eq!(
-                system_b_expected_branch("happy-octopus-83", foreign),
+                system_b_expected_branch(&root, "happy-octopus-83", foreign),
                 "factory/happy-octopus-83",
                 "{foreign:?}"
             );

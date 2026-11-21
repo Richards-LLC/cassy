@@ -8,7 +8,7 @@ use cas_types::{Agent, AgentRole, Task};
 
 use crate::bounded_process::{Deadline, run_command};
 use crate::factory_isolation::{
-    WorkerBinding, classify_worker_binding, verify_worker_worktree_binding, worker_task_branch,
+    WorkerBinding, classify_worker_binding_in, verify_worker_worktree_binding, worker_task_branch,
 };
 use crate::mcp::tools::core::task::lifecycle::close_ops;
 use crate::store::{open_task_store, open_worktree_store};
@@ -213,7 +213,7 @@ pub(super) fn adopt_task_branch(
     // this task's source branch. Prove the registered path is a real root
     // and accept only that exact source, never an unrelated foreign branch.
     let foreign_source = current_branch == source_branch
-        && classify_worker_binding(&receiver.name, Some(&current_branch)) != WorkerBinding::Own;
+        && classify_worker_binding_in(cas_root, &receiver.name, Some(&current_branch)) != WorkerBinding::Own;
     verify_worker_worktree_binding(
         &receiver.name,
         destination,

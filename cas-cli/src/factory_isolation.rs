@@ -1,7 +1,7 @@
 //! Canonical worktree binding for factory workers (cas-30c6).
 //!
-//! A spawned worker owns exactly one branch — `factory/<its own name>` — and
-//! exactly one directory, the worktree checked out on that branch. Every
+//! A spawned worker owns its registered `factory/<name>` branch namespace and
+//! exactly one directory, the worktree checked out on its branch. Every
 //! surface that answers "which repository am I bound to?" must resolve that
 //! same canonical binding from the worker's *registered identity*, never from
 //! whatever directory the ambient process happens to be sitting in:
@@ -88,7 +88,7 @@ pub fn own_task_branch_task_id<'a>(worker_name: &str, branch: &'a str) -> Option
         .filter(|task_id| is_task_id_like(task_id))
 }
 
-/// The worker named by a `factory/<name>` branch, if it is one.
+/// The raw name component of a factory ref, not a registered owner identity.
 pub fn factory_branch_owner(branch: &str) -> Option<&str> {
     branch
         .trim()
@@ -100,7 +100,7 @@ pub fn factory_branch_owner(branch: &str) -> Option<&str> {
 /// registered identity owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerBinding {
-    /// HEAD is the worker's own `factory/<name>` branch — correctly bound.
+    /// HEAD is in the worker's own factory branch namespace.
     Own,
     /// HEAD is another worker's factory branch.
     Sibling { owner: String },
@@ -139,6 +139,44 @@ pub fn classify_worker_binding(worker_name: &str, branch: Option<&str>) -> Worke
         },
         None if matches!(branch, "main" | "master" | "staging") => WorkerBinding::SharedTrunk,
         None => WorkerBinding::Other,
+    }
+}
+
+/// Resolve temporary and task branches against registered workers, preferring
+/// the longest registered namespace. `worker-staging` can be another worker;
+/// an unregistered `-staging` suffix alone never creates a worker identity.
+/// Unavailable registry evidence retains the conservative legacy predicate.
+pub(crate) fn classify_worker_binding_in(
+    cas_root: &Path,
+    worker_name: &str,
+    branch: Option<&str>,
+) -> WorkerBinding {
+    let fallback = || classify_worker_binding(worker_name, branch);
+    let Some(name) = branch.and_then(factory_branch_owner) else { return fallback(); };
+    let Ok(store) = crate::store::open_agent_store(cas_root) else { return fallback(); };
+    let Ok(agents) = store.list(None) else { return fallback(); };
+    let caller = agents.iter().find(|agent| agent.name == worker_name.trim() || agent.id == worker_name.trim())
+        .map(|agent| agent.name.as_str()).unwrap_or(worker_name.trim());
+    let owner = agents.iter().filter(|agent| agent.role == cas_types::AgentRole::Worker)
+        .filter(|agent| !agent.name.is_empty() && (name == agent.name || name.strip_prefix(agent.name.as_str())
+            .is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1)))
+        .max_by_key(|agent| agent.name.len());
+    match owner {
+        Some(owner) if owner.name == caller => WorkerBinding::Own,
+        Some(owner) => WorkerBinding::Sibling { owner: owner.name.clone() },
+        None => fallback(),
+    }
+}
+
+/// Use the checkout's store, never an ambient CAS_ROOT from another project.
+pub(crate) fn classify_worker_binding_at(
+    worker_name: &str,
+    branch: Option<&str>,
+    path: &Path,
+) -> WorkerBinding {
+    match crate::store::find_cas_root_ignoring_env(path) {
+        Ok(root) => classify_worker_binding_in(&root, worker_name, branch),
+        Err(_) => classify_worker_binding(worker_name, branch),
     }
 }
 
@@ -234,15 +272,14 @@ pub fn verify_worker_worktree_binding(
     if branch.as_deref().map(str::trim) == Some(expected_branch.as_str()) {
         return Ok(());
     }
-    // cas-73b8: a worktree left on the worker's own per-task branch is still
-    // that worker's worktree.
-    if branch
-        .as_deref()
-        .is_some_and(|branch| own_task_branch_task_id(worker_name, branch).is_some())
-    {
+    // Task and temporary branches remain owned unless a longer registered
+    // worker namespace claims them (cas-73b8, cas-ea31).
+    let binding = classify_worker_binding_at(worker_name, branch.as_deref(), path);
+    if binding == WorkerBinding::Own
+        && branch.as_deref() != Some(expected_worker_branch(worker_name).as_str()) {
         return Ok(());
     }
-    match classify_worker_binding(worker_name, branch.as_deref()) {
+    match binding {
         // Reachable only when the caller's expected branch disagrees with the
         // worker's canonical one; refuse rather than pick a winner.
         WorkerBinding::Own => anyhow::bail!(
@@ -271,11 +308,11 @@ pub fn verify_worker_worktree_binding(
 ///
 /// Shared by the PreToolUse commit guard and `my_context` so both name the
 /// same canonical binding.
-pub fn sibling_misbinding_message(worker_name: &str, owner: &str, cwd: &str) -> String {
+pub fn sibling_misbinding_message(worker_name: &str, owner: &str, branch: &str, cwd: &str) -> String {
     let expected_branch = expected_worker_branch(worker_name);
     format!(
         "🚫 WORKER ISOLATION MISBINDING: you are '{worker_name}', but {cwd} is checked out on \
-         'factory/{owner}' — that is worker '{owner}''s worktree.\n\n\
+         '{branch}' — that is worker '{owner}''s worktree.\n\n\
          Committing here would put your work on another worker's branch, where its owner and the \
          supervisor's merge sequence will not expect it.\n\n\
          You own '{expected_branch}'. Move to your own worktree before committing:\n  \
@@ -372,18 +409,22 @@ pub fn render_worker_binding(
 
     let expected_branch = expected_worker_branch(worker_name);
     let location = clone_path.unwrap_or("this session's working directory");
-    match classify_worker_binding(worker_name, branch) {
+    let binding = clone_path.map(Path::new)
+        .map(|path| classify_worker_binding_at(worker_name, branch, path))
+        .unwrap_or_else(|| classify_worker_binding(worker_name, branch));
+    match binding {
         WorkerBinding::Own => {
             output.push_str(&format!(
-                "**Worktree Binding**: OK — own branch {expected_branch}\n"
+                "**Worktree Binding**: OK — owned factory namespace {expected_branch}\n"
             ));
         }
         WorkerBinding::Sibling { owner } => {
             output.push_str(&format!(
-                "\n🚫 **ISOLATION MISBINDING**: {location} is checked out on 'factory/{owner}', \
+                "\n🚫 **ISOLATION MISBINDING**: {location} is checked out on '{}', \
                  which belongs to worker '{owner}', not to you ('{worker_name}'). You own \
                  '{expected_branch}'. Do not commit from here — report this to your supervisor \
-                 and have your worker respawned onto its own worktree.\n"
+                 and have your worker respawned onto its own worktree.\n",
+                branch.unwrap_or("<unknown>"),
             ));
         }
         WorkerBinding::SharedTrunk => {

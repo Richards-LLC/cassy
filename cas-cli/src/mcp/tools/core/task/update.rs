@@ -612,6 +612,7 @@ fn parked_assignment_note(
 /// the declared target. Apply the same preconditions before waiving assignment
 /// staleness; start checks them again before it changes the branch.
 fn clean_idle_assignment_note(
+    cas_root: &std::path::Path,
     task_store: &dyn cas_store::TaskStore,
     worker: &cas_types::Agent,
     task: &Task,
@@ -646,7 +647,7 @@ fn clean_idle_assignment_note(
         return None;
     }
     let branch = crate::factory_isolation::branch_at(path)?;
-    if crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch))
+    if crate::factory_isolation::classify_worker_binding_in(cas_root, &worker.name, Some(&branch))
         != crate::factory_isolation::WorkerBinding::Own
     {
         return None;
@@ -803,7 +804,7 @@ impl CasCore {
                 && behind_count > 0
             {
                 if let Some(note) =
-                    clean_idle_assignment_note(task_store, worker, task, assignment_status)
+                    clean_idle_assignment_note(&self.cas_root, task_store, worker, task, assignment_status)
                 {
                     warnings.push(note);
                 } else {

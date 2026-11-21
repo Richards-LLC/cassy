@@ -581,6 +581,7 @@ pub(crate) fn publish_routed_evidence(
         evidence_files(&dir).map_err(|error| fail(error.to_string()))?
     } else { Vec::new() };
     let mut unpublished = Vec::new();
+    let mut cited_names = std::collections::BTreeSet::new();
     // A close can also cite a capped runner log in the worker checkout.
     // Publish only evidence locations, never arbitrary source mentions.
     for (index, segment) in task.deliverables.parked_close_reason.as_deref().unwrap_or_default().split('`').enumerate() {
@@ -599,7 +600,11 @@ pub(crate) fn publish_routed_evidence(
             if path.is_dir() { continue; }
             if !path.is_file() {
                 unpublished.push(format!("{}: missing or not a regular file", path.display()));
-            } else if !paths.iter().any(|(_, existing)| *existing == path) {
+            } else if let Some((name, _)) = paths.iter().find(|(_, existing)| *existing == path) {
+                // A direct close citation makes an already scanned copy
+                // required even when the ledger does not list it.
+                cited_names.insert(name.clone());
+            } else {
                 let leaf = path.file_name().and_then(|name| name.to_str()).unwrap_or("proof.log");
                 paths.push((format!("cited/{leaf}"), path));
             }
@@ -611,7 +616,8 @@ pub(crate) fn publish_routed_evidence(
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let required = required_evidence(&dir);
+    let ledger_required = required_evidence(&dir);
+    let required = |name: &str| ledger_required(name) || cited_names.contains(name);
     // A stalled uncited copy must not spend the budget needed by the ledger.
     paths.sort_by_key(|(name, _)| !required(name));
     let deadline = std::time::Instant::now() + PUBLISH_BUDGET;

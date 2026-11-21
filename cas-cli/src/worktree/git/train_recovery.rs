@@ -85,6 +85,7 @@ impl Snapshot {
         let mut snapshot = Self {
             reference,
             tip: String::new(),
+            transition_audit: None,
             record: Record {
                 protocol: 1,
                 project: project.into(),
@@ -100,6 +101,7 @@ impl Snapshot {
                 quiescence: None,
                 accepted: None,
                 operator_claim: None,
+                audit: None,
             },
         };
         let external = checks.external_clear(&snapshot)?;
@@ -221,7 +223,8 @@ impl Snapshot {
         checks: &impl TransferChecks,
     ) -> Result<Self, String> {
         claim.validate()?;
-        let live = Self::read(repo, &self.record.train)?;
+        let mut live = Self::read(repo, &self.record.train)?;
+        live.transition_audit = self.transition_audit.clone();
         if live.tip != self.tip {
             return Err("TRAIN_TRANSFER_CONFLICT: expected authority moved".into());
         }

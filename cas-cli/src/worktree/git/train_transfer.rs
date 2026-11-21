@@ -15,7 +15,8 @@ fn conflict() -> String {
 
 impl Snapshot {
     pub(super) fn coherent(&self, repo: &Path) -> Result<Self, String> {
-        let live = Self::read(repo, &self.record.train)?;
+        let mut live = Self::read(repo, &self.record.train)?;
+        live.transition_audit = self.transition_audit.clone();
         if live.tip != self.tip {
             return Err(conflict());
         }
@@ -47,9 +48,12 @@ impl Snapshot {
     pub(super) fn append_observing(
         &self,
         repo: &Path,
-        record: Record,
+        mut record: Record,
         expected_target: &str,
     ) -> Result<Self, String> {
+        if self.transition_audit.is_some() {
+            record.audit = self.transition_audit.clone();
+        }
         let live = Self::read(repo, &self.record.train)?;
         if live.tip != self.tip {
             return Err(conflict());
@@ -170,7 +174,8 @@ impl Snapshot {
         prior_generation: &str,
         checks: &impl TransferChecks,
     ) -> Result<Self, String> {
-        let live = Self::read(repo, &self.record.train)?;
+        let mut live = Self::read(repo, &self.record.train)?;
+        live.transition_audit = self.transition_audit.clone();
         if live.observed_target(repo)? != live.record.target_sha {
             return Err("TRAIN_TRANSFER_TARGET_DIVERGED: operator adoption required".into());
         }

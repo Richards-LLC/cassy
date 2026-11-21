@@ -611,6 +611,7 @@ fn factory_req(action: &str) -> FactoryRequest {
 
 fn coord_req(action: &str) -> CoordinationRequest {
     CoordinationRequest {
+        owner_transfer: None,
         detail: None,
         peer: None,
         json: None,
@@ -8872,6 +8873,7 @@ fn coord_msg(
     urgent: Option<bool>,
 ) -> CoordinationRequest {
     CoordinationRequest {
+        owner_transfer: None,
         detail: None,
         peer: None,
         json: None,

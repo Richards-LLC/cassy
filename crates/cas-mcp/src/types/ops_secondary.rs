@@ -1024,6 +1024,30 @@ pub struct FactoryRequest {
 ///   release_claim, transfer_claim, accept_claim.
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
 ///   worktree_merge, worktree_status.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainOwnerTransferAction {
+    Prepare,
+    Quiesce,
+    Accept,
+    Abort,
+}
+
+/// Train transfer input contains references and audit data, never caller or
+/// successor incarnation claims. The service resolves registered identities.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TrainOwnerTransferRequest {
+    pub operation: TrainOwnerTransferAction,
+    pub expected_authority: String,
+    pub expected_generation: String,
+    pub transfer_id: String,
+    pub request_id: String,
+    pub reason: String,
+    #[serde(default)]
+    pub successor: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinationRequest {
@@ -1033,6 +1057,10 @@ pub struct CoordinationRequest {
         description = "Operation. `inbox` is an alias of `inbox_poll`; `interrupt` is `message` with urgent=true. Per-action rules are on the parameters they govern."
     )]
     pub action: String,
+
+    /// train_owner_transfer only: typed operation and exact authority scope.
+    #[serde(default)]
+    pub owner_transfer: Option<TrainOwnerTransferRequest>,
 
     /// Expand peer supervisors, or inspect deferred supervisor relays.
     #[schemars(

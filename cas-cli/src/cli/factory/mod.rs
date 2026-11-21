@@ -737,8 +737,30 @@ pub struct KillAllArgs {
 }
 
 /// `cas factory train` actions (cas-dcc9).
+#[derive(clap::ValueEnum, Debug, Clone, PartialEq, Eq)]
+pub enum OwnerTransferAction { Prepare, Quiesce, Accept, Abort }
+
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum TrainCommand {
+    /// Explicit ownership transfer; never infers quiescence from heartbeat age.
+    OwnerTransfer {
+        train: String,
+        #[arg(value_enum)]
+        operation: OwnerTransferAction,
+        #[arg(long)]
+        expected_authority: String,
+        #[arg(long)]
+        expected_generation: String,
+        #[arg(long)]
+        transfer_id: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        reason: String,
+        /// Canonical registered supervisor id; required only for prepare.
+        #[arg(long)]
+        successor: Option<String>,
+    },
     /// Merge this train's parked deliveries in order; the daemon resumes
     /// automatically after candidate verification or pending CI.
     Merge {
@@ -1345,6 +1367,22 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::CiWatchDryRun { minutes, session } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("ci-watch-dry-run requires a Cassy project"))?;
                 println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
+                Ok(())
+            }
+            FactoryCommands::Train { command: TrainCommand::OwnerTransfer { train, operation, expected_authority,
+                expected_generation, transfer_id, request_id, reason, successor } } => {
+                use cas_mcp::types::{TrainOwnerTransferAction as Action, TrainOwnerTransferRequest};
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("train owner-transfer requires a Cassy project"))?;
+                let core = crate::mcp::CasCore::for_cli(root.to_path_buf());
+                let request = TrainOwnerTransferRequest {
+                    operation: match operation { OwnerTransferAction::Prepare => Action::Prepare,
+                        OwnerTransferAction::Quiesce => Action::Quiesce, OwnerTransferAction::Accept => Action::Accept,
+                        OwnerTransferAction::Abort => Action::Abort },
+                    expected_authority: expected_authority.clone(), expected_generation: expected_generation.clone(),
+                    transfer_id: transfer_id.clone(), request_id: request_id.clone(), reason: reason.clone(), successor: successor.clone(),
+                };
+                let receipt = core.train_owner_transfer(train, &request).map_err(anyhow::Error::msg)?;
+                println!("{receipt}");
                 Ok(())
             }
             FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks, supervisor_override, reason } } => {

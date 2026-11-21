@@ -223,6 +223,7 @@ fn disable_system_a(cas_root: &Path) {
 /// Build a minimal CoordinationRequest with only `action` set.
 fn coord_req(action: &str) -> CoordinationRequest {
     CoordinationRequest {
+        owner_transfer: None,
         detail: None,
         peer: None,
         json: None,

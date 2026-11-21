@@ -533,6 +533,99 @@ fn train_authority_raw_writer_divergence_cas_6456() {
     assert_eq!(fixture.target(), raw);
 }
 
+#[test]
+fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() {
+    use cas_mcp::types::{TrainOwnerTransferAction as Action, TrainOwnerTransferRequest as Request};
+    use serde_json::{Value, json};
+    use std::{cell::{Cell, RefCell}, rc::Rc};
+
+    struct Provider { state: Rc<RefCell<Value>>, reads: Rc<Cell<usize>> }
+    impl crate::train_owner::provider::Provider for Provider {
+        fn prs(&self, branch: &str, _: Option<&str>) -> Result<Value, String> {
+            self.reads.set(self.reads.get() + 1);
+            let state = self.state.borrow();
+            if state["error"] == true { return Err("read failed".into()); }
+            Ok(json!({"data": {"repository": {"nameWithOwner": "test/fixture", "pullRequests": {
+                "nodes": [{"number": 1, "state": "OPEN", "headRefName": branch,
+                    "autoMergeRequest": state["autoMergeRequest"], "mergeQueueEntry": state["mergeQueueEntry"]}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}}}))
+        }
+        fn runs(&self, _: &str) -> Result<Value, String> {
+            self.reads.set(self.reads.get() + 1);
+            let active = self.state.borrow()["active"] == true;
+            Ok(if active { json!({"total_count": 1, "workflow_runs": [{"id": 44}]}) }
+                else { json!({"total_count": 0, "workflow_runs": []}) })
+        }
+    }
+    let fixture = Fixture::new();
+    let root = crate::store::init_cas_dir(&fixture.left).unwrap();
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='fixture'\n").unwrap();
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    let agents = core.open_agent_store().unwrap();
+    let actor = Fixture::service_actor();
+    let mut successor = actor.clone();
+    successor.id = "owner-b".into(); successor.name = "owner-b".into();
+    successor.factory_session = Some("session-b".into()); successor.cc_session_id = Some("harness-b".into());
+    for agent in [&actor, &successor] { agents.register(agent).unwrap(); agents.update(agent).unwrap(); }
+    let successor_identity = crate::train_owner::identity(&successor, &successor.id).unwrap();
+    let original = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+    let quiesced = original.prepare(&fixture.left, &fixture.actor, &successor_identity, "service-transfer").unwrap()
+        .quiesce(&fixture.left, &fixture.actor, &Settled::default()).unwrap();
+    let tasks = core.open_task_store().unwrap();
+    let mut train = crate::types::Task::new("cas-6456".into(), "train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.branch = Some(original.record.target.clone());
+    train.labels = vec!["release-train".into(), crate::train_owner::ENROLLED.into()];
+    train.epic_verification_owner = Some(actor.id.clone());
+    tasks.add(&train).unwrap();
+    let request = Request { operation: Action::Accept, expected_authority: quiesced.tip.clone(),
+        expected_generation: original.record.generation.clone(), transfer_id: "service-transfer".into(),
+        request_id: uuid::Uuid::new_v4().to_string(), reason: "move publisher".into(), successor: None };
+    let state = Rc::new(RefCell::new(json!({})));
+    let reads = Rc::new(Cell::new(0));
+    let checks = crate::train_owner::provider::fixture_checks(Provider { state: state.clone(), reads: reads.clone() });
+    // A registered supervisor who is not the named successor cannot accept,
+    // and cannot choose its own fingerprint in the request.
+    core.set_agent_id_for_testing(actor.id.clone());
+    assert!(core.train_owner_transfer_checked(&train, &request, &checks).is_err());
+    assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, quiesced.tip);
+    assert_eq!(reads.get(), 0);
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    core.set_agent_id_for_testing(successor.id.clone());
+    // Every unchanged-target accept must freshly reject armed PR, queue, run
+    // and unknown/error states before changing authority or task projection.
+    for pending in [json!({"autoMergeRequest": {"enabledAt": "now"}}),
+        json!({"mergeQueueEntry": {"id": "queue"}}), json!({"active": true}), json!({"error": true})] {
+        *state.borrow_mut() = pending;
+        let error = core.train_owner_transfer_checked(&train, &request, &checks).unwrap_err();
+        assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING"));
+        assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, quiesced.tip);
+        assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner, train.epic_verification_owner);
+    }
+    *state.borrow_mut() = json!({});
+    let receipt = core.train_owner_transfer_checked(&train, &request, &checks).unwrap();
+    let accepted = Snapshot::read(&fixture.left, &train.id).unwrap();
+    assert_eq!(accepted.record.identity, successor_identity);
+    assert_eq!(receipt["authority"], accepted.tip);
+    assert_eq!(accepted.record.audit.as_ref().unwrap()["request_id"], request.request_id);
+    assert_eq!(accepted.record.audit.as_ref().unwrap()["actor"], successor.id);
+    assert_ne!(accepted.record.generation, original.record.generation);
+    assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some(successor.id.as_str()));
+    let clock = tasks.get(&train.id).unwrap().updated_at;
+    // Simulate retry with the pre-accept authority and stale A projection.
+    // Fresh provider reads precede idempotent repair as well.
+    *state.borrow_mut() = json!({"autoMergeRequest": {"enabledAt": "later"}});
+    assert!(core.train_owner_transfer_checked(&train, &request, &checks).is_err());
+    *state.borrow_mut() = json!({});
+    let before = reads.get();
+    let retry = core.train_owner_transfer_checked(&train, &request, &checks).unwrap();
+    assert!(reads.get() > before);
+    assert_eq!(retry, receipt);
+    assert_eq!(tasks.get(&train.id).unwrap().updated_at, clock);
+    assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, accepted.tip);
+}
+
 #[derive(Default)]
 struct Settled {
     reads: std::cell::Cell<usize>,

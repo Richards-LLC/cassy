@@ -46,6 +46,8 @@ pub(crate) struct Record {
     pub accepted: Option<Acceptance>,
     #[serde(default)]
     pub operator_claim: Option<serde_json::Value>,
+    #[serde(default)]
+    pub audit: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,7 @@ pub(crate) struct Snapshot {
     pub reference: String,
     pub tip: String,
     pub record: Record,
+    pub(super) transition_audit: Option<serde_json::Value>,
 }
 
 pub(super) struct AtomicUpdate {
@@ -113,6 +116,10 @@ fn record_commit(repo: &Path, parent: Option<&str>, record: &Record) -> Result<S
 }
 
 impl Snapshot {
+    pub(crate) fn audited(mut self, audit: serde_json::Value) -> Self {
+        self.transition_audit = Some(audit);
+        self
+    }
     pub(crate) fn observed_target(&self, repo: &Path) -> Result<String, String> {
         let target = format!("refs/heads/{}", self.record.target);
         command(repo, &["check-ref-format", &target], None)?;
@@ -155,7 +162,7 @@ impl Snapshot {
         if record.protocol != 1 || record.train != train {
             return Err("TRAIN_TRANSFER_FENCE_UNAVAILABLE: record scope/protocol mismatch".into());
         }
-        Ok(Self { reference, tip, record })
+        Ok(Self { reference, tip, record, transition_audit: None })
     }
 
     pub(crate) fn publish(&self, git: &GitOperations, actor: &Identity, head: &str) -> Result<TargetPushOutcome, String> {

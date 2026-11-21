@@ -1153,6 +1153,11 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
                 .get(crate::mcp::daemon::PID_STARTTIME_KEY)
                 .and_then(|s| s.parse::<u64>().ok())
         }),
+        ppid: agent.ppid,
+        ppid_starttime: agent
+            .metadata
+            .get(crate::mcp::daemon::PPID_STARTTIME_KEY)
+            .and_then(|s| s.parse::<u64>().ok()),
         clone_path,
         session_id,
         cli,
@@ -1171,6 +1176,11 @@ pub(crate) struct ResolvedWorker {
     /// path captured one. Used by `execute_kill` to refuse SIGKILL on a
     /// PID whose fingerprint no longer matches (= PID was recycled).
     pub pid_starttime: Option<u64>,
+    /// Harness PID and its own start-time fingerprint. Eager MCP
+    /// registration records the `cas serve` helper as `pid` and the
+    /// harness here (cas-9aa3).
+    pub ppid: Option<u32>,
+    pub ppid_starttime: Option<u64>,
     pub clone_path: Option<String>,
     pub session_id: String,
     /// The harness this worker runs (cas-058f) — determines transcript
@@ -2228,6 +2238,9 @@ fn macos_kill_identity_matches(
         .and_then(|name| name.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    // The npm Claude Code package installs its native client as `claude.exe`
+    // on macOS too (cas-9aa3).
+    let basename = basename.strip_suffix(".exe").unwrap_or(&basename).to_string();
     let expected = match cli {
         cas_mux::SupervisorCli::Claude => "claude",
         cas_mux::SupervisorCli::Codex => "codex",
@@ -2273,14 +2286,83 @@ fn macos_process_executable(pid: u32) -> Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
 }
 
+/// The process `cas factory kill` must verify and stop on macOS, with the
+/// fingerprint recorded for it. Eager MCP registration stores the `cas serve`
+/// helper as `pid` and the harness as `ppid`; the helper is not the worker, so
+/// the harness wins while its own fingerprint still matches (cas-9aa3).
 #[cfg(target_os = "macos")]
-fn verify_macos_tracked_worker(w: &ResolvedWorker, pid: u32) -> Result<()> {
+fn macos_kill_target(w: &ResolvedWorker, kill_pid: Option<u32>) -> Option<(u32, Option<u64>)> {
+    w.ppid
+        .zip(w.ppid_starttime)
+        .filter(|(ppid, stored)| crate::mcp::daemon::read_pid_starttime(*ppid) == Some(*stored))
+        .map(|(ppid, stored)| (ppid, Some(stored)))
+        .or_else(|| kill_pid.map(|pid| (pid, w.pid_starttime)))
+}
+
+/// A worker's Bash tool runs each command in its own process group, so
+/// `killpg` on the harness misses those shells, and a recursive shell keeps
+/// forking while it is being killed (cas-9aa3). Stop the harness and every
+/// same-user descendant until all are stopped and no new one appears (a
+/// stopped process cannot fork), then SIGKILL the descendants; the caller's
+/// `killpg` ends the harness group. Syscalls only, so this works while the
+/// user's process slots are exhausted and fork fails. Returns the count killed.
+#[cfg(target_os = "macos")]
+fn kill_descendant_tree(root: u32) -> usize {
+    fn bsd_status(pid: u32) -> Option<(u32, libc::uid_t)> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+        let written = unsafe {
+            libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+        };
+        (written == size).then_some((info.pbi_status, info.pbi_uid))
+    }
+    fn children(pid: u32) -> Vec<u32> {
+        let mut buffer = vec![0 as libc::pid_t; 4096];
+        let bytes = (buffer.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: the kernel writes at most `bytes` into the buffer.
+        let count = unsafe { libc::proc_listchildpids(pid as libc::pid_t, buffer.as_mut_ptr().cast(), bytes) };
+        buffer.truncate(usize::try_from(count).unwrap_or(0).min(buffer.len()));
+        buffer.into_iter().filter(|child| *child > 0).map(|child| child as u32).collect()
+    }
+    let uid = unsafe { libc::getuid() };
+    let settled = |pid: u32| bsd_status(pid).is_none_or(|(status, _)| status == libc::SSTOP || status == libc::SZOMB);
+    let mut owned = std::collections::BTreeSet::new();
+    // SAFETY: signalling an identity-verified pid has no effect on this process.
+    unsafe { libc::kill(root as libc::pid_t, libc::SIGSTOP) };
+    for _ in 0..400 {
+        let mut pending = vec![root];
+        let mut fresh = false;
+        while let Some(parent) = pending.pop() {
+            for child in children(parent) {
+                if bsd_status(child).is_some_and(|(_, owner)| owner == uid) {
+                    if owned.insert(child) {
+                        fresh = true;
+                        unsafe { libc::kill(child as libc::pid_t, libc::SIGSTOP) };
+                    }
+                    pending.push(child);
+                }
+            }
+        }
+        if !fresh && settled(root) && owned.iter().all(|pid| settled(*pid)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for pid in &owned {
+        unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+    }
+    owned.len()
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_tracked_worker(w: &ResolvedWorker, pid: u32, fingerprint: Option<u64>) -> Result<()> {
     let executable = macos_process_executable(pid)?;
     let started_at = crate::mcp::daemon::read_pid_starttime(pid)
         .ok_or_else(|| anyhow!("cannot read start time for tracked pid {pid}; refusing kill"))?;
     let registered_at = u64::try_from(w.registered_at.timestamp_micros())
         .map_err(|_| anyhow!("invalid registration time for `{}`; refusing kill", w.name))?;
-    macos_kill_identity_matches(&executable, w.cli, started_at, registered_at, w.pid_starttime)
+    macos_kill_identity_matches(&executable, w.cli, started_at, registered_at, fingerprint)
         .map_err(|reason| anyhow!("tracked pid {pid} identity mismatch: {reason}; refusing kill"))
 }
 
@@ -2414,14 +2496,16 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
     let mut summary = Vec::<String>::new();
 
     let resolved_pid = find_worker_pid(&RealProcessTable, &w.name);
+    #[cfg(not(target_os = "macos"))]
     let kill_pid = pick_kill_pid(w.pid, resolved_pid);
     #[cfg(target_os = "macos")]
-    let tracked_identity_verified = match kill_pid {
-        Some(pid) if crate::mcp::daemon::pid_alive(pid) => {
-            verify_macos_tracked_worker(&w, pid)?;
-            true
+    let (kill_pid, tracked_identity_verified) = match macos_kill_target(&w, pick_kill_pid(w.pid, resolved_pid)) {
+        Some((pid, fingerprint)) if crate::mcp::daemon::pid_alive(pid) => {
+            verify_macos_tracked_worker(&w, pid, fingerprint)?;
+            (Some(pid), true)
         }
-        Some(_) => false, // ESRCH: the tracked process is already dead.
+        // ESRCH: the tracked process is already dead.
+        Some((pid, _)) => (Some(pid), false),
         None => bail!(
             "no tracked PID or process identity for `{}`; refusing lease reset",
             w.name
@@ -2480,6 +2564,11 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         // fine — the ESRCH/pid_alive checks downstream still
                         // handle that safely.
                         let group_pid = resolve_group_leader_pid(pid).unwrap_or(pid);
+                        #[cfg(target_os = "macos")]
+                        if tracked_identity_verified {
+                            let killed = kill_descendant_tree(pid);
+                            summary.push(format!("SIGKILL delivered to {killed} descendant process(es) of {pid}"));
+                        }
                         match send_sigkill(group_pid) {
                             Ok(()) => {
                                 if fingerprint_override {summary.push(crate::gates::override_tag("G-143",""));}
@@ -4912,6 +5001,91 @@ mod tests {
         )
         .unwrap_err();
         assert!(fingerprint.contains("fingerprint"), "{fingerprint}");
+    }
+
+    /// cas-9aa3: the npm package's native client is `claude.exe`, and eager
+    /// MCP registration records the `cas serve` helper as `pid` beside the
+    /// harness `ppid`. Kill verifies the fingerprint-matched harness instead of
+    /// refusing on the helper; a stale harness fingerprint falls back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_kill_targets_the_registered_harness_not_its_mcp_helper_cas_9aa3() {
+        let npm_claude = Path::new("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe");
+        assert!(macos_kill_identity_matches(npm_claude, cas_mux::SupervisorCli::Claude, 100, 101, None).is_ok());
+        let mut harness = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let helper = std::process::id();
+        let started = crate::mcp::daemon::read_pid_starttime(harness.id()).unwrap();
+        let mut w = ResolvedWorker {
+            name: "w".into(),
+            pid: Some(helper),
+            registered_at: chrono::Utc::now(),
+            pid_starttime: crate::mcp::daemon::read_pid_starttime(helper),
+            ppid: Some(harness.id()),
+            ppid_starttime: Some(started),
+            clone_path: None,
+            session_id: "s".into(),
+            cli: cas_mux::SupervisorCli::Claude,
+            transcript_path: None,
+            account_dir: None,
+            factory_session: None,
+        };
+        assert_eq!(macos_kill_target(&w, Some(helper)), Some((harness.id(), Some(started))));
+        w.ppid_starttime = Some(started + 1);
+        assert_eq!(macos_kill_target(&w, Some(helper)), Some((helper, w.pid_starttime)));
+        harness.kill().unwrap();
+        harness.wait().unwrap();
+    }
+
+    /// cas-9aa3: a recursive shell in its own process group survives `killpg`
+    /// of the harness and keeps forking. The tree kill stops and kills every
+    /// descendant, including ones forked mid-kill, and leaves an unrelated
+    /// process alone. Bounded: the respawner forks at most 200 sleeps.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tree_kill_stops_a_respawning_tree_across_process_groups_cas_9aa3() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let sleeper = tmp.path().join("sleep");
+        std::os::unix::fs::symlink("/bin/sleep", &sleeper).unwrap();
+        let pidfile = tmp.path().join("respawner.pid");
+        let script = format!(
+            "set -m; ( i=0; while [ $i -lt 200 ]; do {s} 30 & i=$((i+1)); sleep 0.01; done; wait ) & echo $! > {p}; wait",
+            s = sleeper.display(),
+            p = pidfile.display()
+        );
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", &script]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        // SAFETY: setsid() is async-signal-safe; it keeps the tree out of
+        // this test's process group, like a factory harness.
+        unsafe {
+            command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
+        let mut root = command.spawn().unwrap();
+        let mut sibling = std::process::Command::new(&sleeper).arg("30").spawn().unwrap();
+        let mut respawner = None;
+        for _ in 0..100 {
+            respawner = std::fs::read_to_string(&pidfile).ok().and_then(|pid| pid.trim().parse::<u32>().ok());
+            if respawner.is_some() { break; }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let respawner = respawner.expect("respawner pid");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_ne!(resolve_group_leader_pid(respawner), Some(root.id()), "the respawner must escape killpg");
+        let tree = || {
+            let output = std::process::Command::new("pgrep").args(["-f", &sleeper.display().to_string()]).output().unwrap();
+            String::from_utf8_lossy(&output.stdout).lines().filter_map(|pid| pid.trim().parse::<u32>().ok())
+                .filter(|pid| *pid != sibling.id()).collect::<Vec<_>>()
+        };
+        assert!(!tree().is_empty(), "the respawner has forked");
+
+        assert!(kill_descendant_tree(root.id()) > 1);
+        send_sigkill(root.id()).unwrap();
+        root.wait().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(tree(), Vec::<u32>::new(), "no descendant escapes the tree kill");
+        assert!(crate::mcp::daemon::pid_alive(sibling.id()), "an unrelated process survives");
+        sibling.kill().unwrap();
+        sibling.wait().unwrap();
     }
 
     #[cfg(target_os = "macos")]

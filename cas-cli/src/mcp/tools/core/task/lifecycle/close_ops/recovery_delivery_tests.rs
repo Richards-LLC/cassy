@@ -2674,6 +2674,7 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         let _env = TestEnvGuard::new();
         let root = std::path::PathBuf::from(root);
         let fail_sync = std::env::var_os("CAS_D893_FAIL_SYNC").is_some();
+        let inline = std::env::var_os("CAS_D893_INLINE").is_some();
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("recovery-session".into());
         let hook_root = root.clone();
@@ -2695,7 +2696,8 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         let handler = core.clone();
         let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
         let args = serde_json::json!({"action":"close", "id":TASK});
-        service.call_with_deadline_and_grace("task", args.as_object(), Duration::from_secs(45), Duration::ZERO,
+        service.call_with_deadline_and_grace("task", args.as_object(), Duration::from_secs(45),
+            if inline { Duration::from_secs(45) } else { Duration::ZERO },
             async move { handler.cas_task_close(Parameters(TaskCloseRequest {
                 no_delivery: None, id: TASK.into(), reason: Some("Recovered final pushed tip".into()),
                 commit_receipt: Some(tip), supervisor_override: None, stranded_branch_override: None,
@@ -2710,7 +2712,7 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         return;
     }
     let mut env = TestEnvGuard::temp_home();
-    for fail_sync in [false, true] {
+    for (fail_sync, inline) in [(false, false), (true, false), (true, true)] {
         let f = fixture(&mut env);
         let root = f.dir.path().join(".cas");
         let listener = UnixListener::bind(root.join("close.sock")).unwrap();
@@ -2719,6 +2721,7 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         let mut child_env = vec![("CAS_D893_CHILD".into(), root.to_string_lossy().into_owned()),
             ("CAS_ROOT".into(), root.to_string_lossy().into_owned())];
         if fail_sync { child_env.push(("CAS_D893_FAIL_SYNC".into(), "1".into())); }
+        if inline { child_env.push(("CAS_D893_INLINE".into(), "1".into())); }
         let pty = cas_mux::Pty::spawn(WORKER, cas_mux::PtyConfig {
             command: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
             args: vec![NAME.into(), "--exact".into(), "--nocapture".into()],
@@ -2746,10 +2749,16 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         let mut parked = accept();
         parked.read_exact(&mut [0]).unwrap();
         assert_eq!(open_task_store(&root).unwrap().get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
-        let mut outcome = accept();
-        let mut byte = [0];
-        outcome.read_exact(&mut byte).unwrap();
-        assert_eq!(&byte, b"A");
+        let answered = || {
+            let mut stream = accept();
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"A");
+            stream
+        };
+        // The inline row stops before a late journal exists, proving that
+        // shutdown admission cannot race the handler's first durable park.
+        let outcome = if inline { None } else { Some(answered()) };
         let stop = app.shutdown_worker(WORKER, false).await;
         if stop.is_ok() {
             crate::mcp::tools::service::close_continuation::recover(&root);
@@ -2760,6 +2769,8 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         assert!(app.shutdown_worker_for_recycle(WORKER).await.unwrap_err().to_string().contains("code=worker_close_pending"));
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
         parked.write_all(b"R").unwrap();
+        let mut outcome = outcome.unwrap_or_else(answered);
+        let mut byte = [0];
         outcome.read_exact(&mut byte).unwrap();
         assert_eq!(&byte, b"D");
         app.shutdown_worker(WORKER, true).await.unwrap();
@@ -2781,6 +2792,17 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
             let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
             let notices = queue.list_pending("supervisor-session").unwrap();
             assert_eq!(notices.iter().filter(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed").count(), 1);
+            // A later delivery never inherits this old publication promise.
+            let mut next = task.clone();
+            next.status = TaskStatus::InProgress;
+            next.deliverables.delivery_cycle += 1;
+            open_task_store(&root).unwrap().update(&next).unwrap();
+            for _ in 0..2 { crate::mcp::tools::service::close_continuation::recover(&root); }
+            let next = open_task_store(&root).unwrap().get(TASK).unwrap();
+            assert_eq!(next.status, TaskStatus::InProgress);
+            assert_eq!(next.notes.matches("CLOSE_RECOVERY_OUTCOME:").count(), 1);
+            assert!(next.notes.contains("code=park_publication_superseded"));
+            assert!(!journals[0].exists());
         } else {
             assert_eq!(cas_store::list_qa_passes(&root, TASK).unwrap().len(), 1);
         }

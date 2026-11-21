@@ -9557,8 +9557,11 @@ mod cas_6b42_peer_delivery_tests {
     /// delivery that soundwave's store still showed in progress. That merge
     /// names the peer instead of "branch missing"; once the park syncs, the
     /// pushed branch resolves at the recorded tip without a local worktree.
-    #[test]
-    fn a_peer_machine_delivery_merges_from_origin_at_its_recorded_tip_cas_6b42() {
+    #[tokio::test]
+    async fn a_peer_machine_delivery_merges_from_origin_at_its_recorded_tip_cas_6b42() {
+        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+        for team in [false, true] {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let (origin, repo) = (dir.path().join("origin.git"), dir.path().join("work"));
@@ -9584,6 +9587,7 @@ mod cas_6b42_peer_delivery_tests {
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         env.set("CAS_ROOT", &cas_dir);
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='cas-src'\n").unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
         agents.register(&cas_types::Agent::new_with_role(
             "sup-soundwave".into(), "calm-koala-86".into(), cas_types::AgentRole::Supervisor,
@@ -9601,6 +9605,7 @@ mod cas_6b42_peer_delivery_tests {
             target_branch: "main".into(),
         };
         let mut task = cas_types::Task::new("cas-aa10".into(), "Startup brief submits".into());
+        task.origin_project = Some("cas-src".into());
         task.status = cas_types::TaskStatus::InProgress;
         task.assignee = Some("lively-eagle-82".into());
         task.deliverables.work_target = Some(work_target.clone());
@@ -9611,10 +9616,57 @@ mod cas_6b42_peer_delivery_tests {
             .err().expect("a locally in-progress peer delivery is never merged here");
         assert!(refused.message.contains("prowl-machine-cas-6b42") && refused.message.contains("lively-eagle-82"), "{refused:?}");
 
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.deliverables.parked_branch = Some(branch.into());
-        task.deliverables.factory_branch_anchor = Some(anchor.clone());
-        crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+        // GH #2214: the train owner's later note must not hide the builder's
+        // completed park. Exercise actual stores and HTTP pull rather than
+        // fabricating AwaitingMerge in the merge owner's store.
+        let builder = tempfile::tempdir().unwrap();
+        let builder_root = crate::store::init_cas_dir(builder.path()).unwrap();
+        let builder_tasks = crate::store::open_task_store_local(&builder_root).unwrap();
+        let mut parked = task.clone();
+        let parked_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        parked.status = cas_types::TaskStatus::AwaitingMerge;
+        parked.deliverables.record_park(Some(branch), Some(&anchor), parked.assignee.as_deref());
+        parked.notes = crate::mcp::tools::core::task::audit::parked_note(parked_at, "MERGE REQUIRED");
+        parked.updated_at = parked_at;
+        builder_tasks.add(&parked).unwrap();
+        let parked = builder_tasks.get(&parked.id).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        tasks.add(&task).unwrap();
+        let owner_note = "[2026-11-21 22:00] Train owner bookkeeping after peer park";
+        tasks.append_note(&task.id, owner_note).unwrap();
+        assert!(tasks.get(&task.id).unwrap().updated_at > parked.updated_at);
+        let server = MockServer::start().await;
+        let endpoint = if team { "/api/teams/park-team/sync/pull" } else { "/api/sync/pull" };
+        Mock::given(method("GET")).and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks":[parked], "team_id":"park-team", "pulled_at":chrono::Utc::now().to_rfc3339(), "status":"ok"
+            }))).mount(&server).await;
+        let queue = std::sync::Arc::new(SyncQueue::open(&cas_dir).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
+            endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
+        }, CloudSyncerConfig::default(), "cas-src".into(), &cas_dir);
+        let entries = crate::store::open_store_local(&cas_dir).unwrap();
+        let rules = crate::store::open_rule_store_local(&cas_dir).unwrap();
+        let skills = crate::store::open_skill_store_local(&cas_dir).unwrap();
+        let result = if team {
+            syncer.pull_team("park-team", "cas-src", &*entries, &*tasks, &*rules, &*skills)
+        } else {
+            syncer.pull(&*entries, &*tasks, &*rules, &*skills,
+                &*crate::store::open_spec_store(&cas_dir).unwrap(), &*crate::store::open_event_store(&cas_dir).unwrap(),
+                &*crate::store::open_prompt_store(&cas_dir).unwrap(), &*crate::store::open_file_change_store(&cas_dir).unwrap(),
+                &*crate::store::open_commit_link_store(&cas_dir).unwrap())
+        }.unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        task = tasks.get(&task.id).unwrap();
+        // Drive the same G-96 resolver which rejects the incident's unsynced
+        // InProgress row, then consume the exact pushed branch/anchor below.
+        let bound = core.parked_delivery_for_worker("lively-eagle-82")
+            .expect("Cloud park reaches merge admission");
+        assert_eq!(bound.0.id, task.id);
+        assert!(task.notes.contains(owner_note));
+        assert_eq!(task.deliverables.parked_branch.as_deref(), Some(branch));
+        assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
         let source = core.task_merge_source(&repo, Some(&task), "lively-eagle-82").unwrap();
         let manager = crate::worktree::WorktreeManager::new(&repo, Default::default()).unwrap();
         let remote = core
@@ -9660,6 +9712,7 @@ mod cas_6b42_peer_delivery_tests {
         assert!(refused.message.contains("[G-96]"));
         assert_eq!(git(&repo, &["rev-parse", branch]), local);
         assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
+        }
     }
 
     /// GH #1689/#1692: an epic child whose task target is the repository's

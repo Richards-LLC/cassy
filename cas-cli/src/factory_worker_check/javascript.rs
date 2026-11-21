@@ -2285,9 +2285,13 @@ mod tests {
         git(&["commit", "--quiet", "-am", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
         let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()], None).unwrap();
-        assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
+        // GH #2223: both are environment-gated; an active gate still owes 5 passes.
+        let gated = |name: &str| Identity { environment_gated: true, ..id(file, name) };
+        assert_eq!(tests, [gated("aliased keeps consent"), gated("legal keeps consent")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, None, &[]).unwrap();
+        // Node reports canonical paths (macOS /var -> /private/var).
+        let root = repo.path().canonicalize().unwrap();
+        let proof = execute_tests(cas_root.path(), &root, &head, "node", None, &tests, None, &[]).unwrap();
         assert_eq!(proof.consecutive_passes, 5);
 
         for wrapper in ["runIf(true)", "skipIf(false)"] {
@@ -2346,14 +2350,16 @@ mod tests {
         assert_eq!(tests, [gated("aliased live eval"), id(file, "kept"), gated("live eval")]);
 
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, None, &[]).unwrap();
+        // Node reports canonical paths (macOS /var -> /private/var).
+        let root = repo.path().canonicalize().unwrap();
+        let proof = execute_tests(cas_root.path(), &root, &head, "node", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.tests, proof.inactive), (vec![id(file, "kept")], vec![gated("aliased live eval"), gated("live eval")]));
-        let passing = super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        let passing = super::super::PassingTests::new(cas_root.path(), &root, &head);
         assert!(super::super::stability::missing(&passing, &tests).is_empty());
 
         // Nothing executed: refused with the environment to set, no receipt.
         let only_gated = [gated("live eval")];
-        let refusal = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &only_gated, None, &[])
+        let refusal = execute_tests(cas_root.path(), &root, &head, "node", None, &only_gated, None, &[])
             .unwrap_err().to_string();
         assert!(refusal.contains("G-61"), "{refusal}");
         // An active gated test that fails is a failure.

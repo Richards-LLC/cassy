@@ -2870,19 +2870,8 @@ fn resolve_system_b_merge_target(
                     // cas-7305: `task update target_branch=<trunk>` pins the
                     // target, so it is the supervisor's choice, not a stale
                     // standalone default. The merge still reports its trunk push.
-                    if task.deliverables.work_target_pinned {
-                        return Ok(ResolvedSystemBMergeTarget {
-                            branch: trunk.clone(),
-                            reason: format!(
-                                "trunk {trunk} (task {task_id}'s explicit WorkTarget retarget off parent \
-                                 epic {} lane {lane}; authorized for worker {assignee})",
-                                epic.id
-                            ),
-                            trunk_fallback: true,
-                            epic_lane: false,
-                        });
-                    }
-                    if !allow_trunk {
+                    let explicit = task.deliverables.work_target_pinned;
+                    if !allow_trunk && !explicit {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
                             message: Cow::from(crate::gates::tag("G-140",format!(
@@ -2898,10 +2887,15 @@ fn resolve_system_b_merge_target(
                             data: None,
                         });
                     }
+                    let authorization = if allow_trunk {
+                        "explicit allow_trunk=true"
+                    } else {
+                        "explicit task retarget to trunk"
+                    };
                     return Ok(ResolvedSystemBMergeTarget {
                         branch: trunk.clone(),
                         reason: format!(
-                            "trunk {trunk} (explicit allow_trunk=true; task {task_id} WorkTarget \
+                            "trunk {trunk} ({authorization}; task {task_id} WorkTarget \
                              pins trunk although parent epic {} delivers on {lane}; authorized \
                              for worker {assignee})",
                             epic.id
@@ -3145,9 +3139,10 @@ fn resolve_system_b_merge_target(
         let (reason, trunk_fallback) = if branch == trunk && !pinned.is_empty() {
             (
                 format!(
-                    "trunk {trunk} (allow_trunk=true or an explicit task retarget; assignee {assignee}'s current \
+                    "trunk {trunk} ({}; assignee {assignee}'s current \
                      task(s) [{task_ids}] pin trunk although their parent epic delivers on its \
                      own lane ({}); no task_id given)",
+                    if allow_trunk { "explicit allow_trunk=true" } else { "explicit task retarget to trunk" },
                     pinned.join(", ")
                 ),
                 true,
@@ -6553,14 +6548,16 @@ impl CasCore {
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
         post_merge_test_delay().await;
         let trunk_notice = if trunk_fallback {
+            // cas-7305: without allow_trunk, a pinned task retarget authorized it.
+            let authorization = if allow_trunk { "allow_trunk=true" } else { "the task's explicit retarget to trunk" };
             if push_outcome.is_published() {
                 format!(
-                    "⚠️ TRUNK PUSH COMPLETE — allow_trunk=true authorized and published this \
+                    "⚠️ TRUNK PUSH COMPLETE — {authorization} authorized and published this \
                      merge to {push_branch}. This may trigger a production deployment.\n\n"
                 )
             } else {
                 format!(
-                    "⚠️ TRUNK FALLBACK MERGED LOCALLY — allow_trunk=true authorized this merge \
+                    "⚠️ TRUNK FALLBACK MERGED LOCALLY — {authorization} authorized this merge \
                      to {push_branch}, but it was not published. Inspect Push state before \
                      retrying.\n\n"
                 )

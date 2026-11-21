@@ -457,6 +457,33 @@ mod tests {
             drop(fixture);
             reclaim_test_tmp(&cas, &worktree).unwrap();
         }
+        // Git's ceiling can hide a checkout from the resolver. Admission must
+        // inspect physical ancestors itself, including linked-worktree files.
+        for git_file in [false, true] {
+            let namespace = tempfile::tempdir().unwrap();
+            let repository = namespace.path().join("repository");
+            std::fs::create_dir_all(&repository).unwrap();
+            if git_file {
+                std::fs::write(repository.join(".git"), format!("gitdir: {}\n", outer.path().join(".git").display())).unwrap();
+            } else {
+                assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&repository).status().unwrap().success());
+            }
+            let ceiling = repository.join("ceiling");
+            let scratch = ceiling.join("scratch");
+            std::fs::create_dir_all(&scratch).unwrap();
+            #[cfg(unix)]
+            let scratch = if git_file {
+                let alias = namespace.path().join("external-alias");
+                std::os::unix::fs::symlink(&scratch, &alias).unwrap();
+                alias
+            } else { scratch };
+            std::fs::write(cas.join("config.toml"), format!("[factory]\nscratch_root = {:?}\n", scratch.to_str().unwrap())).unwrap();
+            env.set("GIT_CEILING_DIRECTORIES", ceiling.canonicalize().unwrap());
+            assert!(test_tmp_dir(&cas, &worktree).starts_with(&scratch));
+            let error = prepare_test_tmp(&cas, &worktree).expect_err("selected TMPDIR inside a checkout must be refused");
+            assert!(crate::gates::codes_in(&error.to_string()).contains(&"H-50".to_string()));
+            assert!(crate::gates::find("H-50").is_some());
+        }
     }
 
     #[test]

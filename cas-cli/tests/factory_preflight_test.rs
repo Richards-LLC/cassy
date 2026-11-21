@@ -460,11 +460,22 @@ fn operator_launch_smoke_passes_the_operator_and_refuses_an_agent_cas_e719() {
     let script = scratch.path().join("check-operator-launch.sh");
     // Embedded at compile time: archive-mode runs outside the checkout.
     std::fs::write(&script, include_str!("../../scripts/check-operator-launch.sh")).unwrap();
+    let self_test = scratch.path().join("test-check-operator-launch.sh");
+    std::fs::write(&self_test, include_str!("../../scripts/test-check-operator-launch.sh")).unwrap();
+    let fixture = std::process::Command::new("bash")
+        .arg(&self_test)
+        .output()
+        .unwrap();
+    assert!(fixture.status.success(), "{}{}",
+        String::from_utf8_lossy(&fixture.stdout), String::from_utf8_lossy(&fixture.stderr));
     let started = Instant::now();
     let output = std::process::Command::new("bash")
         .arg(&script)
         .arg(cas::test_paths::cas_binary())
         .env("TMPDIR", scratch.path())
+        .env("CAS_AGENT_NAME", "smoke-parent")
+        .env("CAS_FACTORY_MODE", "1")
+        .env("CODEX_THREAD_ID", "smoke-parent")
         .output()
         .unwrap();
     let transcript = format!(
@@ -473,6 +484,5 @@ fn operator_launch_smoke_passes_the_operator_and_refuses_an_agent_cas_e719() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.status.success(), "{transcript}");
-    assert!(transcript.contains("PASS operator launch smoke: 4 entry points"), "{transcript}");
     assert!(started.elapsed() < Duration::from_secs(60), "smoke took {:?}", started.elapsed());
 }

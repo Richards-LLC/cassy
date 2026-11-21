@@ -14136,6 +14136,46 @@ mod spawn_lifecycle_tests {
             .expect("consecutive calls resolve the same authenticated default");
     }
 
+    /// cas-9ab7: a spawn resolved right after another one refused for a
+    /// missing default Codex home. Concurrent spawns' `codex login status`
+    /// probes outlast their 2 s timeout, so the second registry read cannot
+    /// confirm the account the first spawn took.
+    #[cfg(unix)]
+    #[test]
+    fn back_to_back_codex_spawns_resolve_the_same_account_cas_9ab7() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.163.0'; exit 0; fi\n\
+            if [ -f \"$HOME/contended\" ]; then sleep 3; fi\n\
+            if [ -f \"$CODEX_HOME/auth.json\" ]; then echo 'Logged in'; else echo 'Not logged in'; exit 1; fi\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::env::var_os("CODEX_SPAWN_FIXTURE_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mcp::tools::service::factory_ops::spawn_lifecycle_tests::back_to_back_codex_spawns_resolve_the_same_account_cas_9ab7", "--nocapture"])
+                .env("PATH", &bin)
+                .env("CODEX_SPAWN_FIXTURE_CHILD", "1")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let account = env.home().join(".codex-b@example.com");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(account.join("auth.json"), "{}").unwrap();
+        let resolve = || {
+            let mut specs = vec![spec_for(cas_mux::SupervisorCli::Codex, None)];
+            let notice = recommend_spawn_accounts(&mut specs, false, &Default::default(), &Default::default(),
+                chrono::Utc::now(), |provider| crate::account_registry::collect_for(provider, env.home(), false));
+            preflight_account_auth(&specs).map(|()| specs[0].config_dir.clone()).map_err(|error| format!("{error}{notice}"))
+        };
+        let first = resolve().unwrap();
+        assert_eq!(first.as_deref(), account.to_str());
+        std::fs::write(env.home().join("contended"), "").unwrap();
+        assert_eq!(resolve().unwrap_or_else(|error| panic!("{error}")), first);
+    }
+
     #[test]
     fn a_logged_out_account_refuses_the_spawn_by_name_before_any_worktree_exists() {
         let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"))];

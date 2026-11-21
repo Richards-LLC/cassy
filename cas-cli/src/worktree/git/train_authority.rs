@@ -55,14 +55,6 @@ pub(super) struct AtomicUpdate {
     pub next: String,
 }
 
-fn target_tip(repo: &Path, target: &str) -> Result<String, String> {
-    let reference = format!("refs/heads/{target}");
-    command(repo, &["check-ref-format", &reference], None)?;
-    let remote = command(repo, &["ls-remote", "--refs", "origin", &reference], None)?;
-    remote.split_whitespace().next().map(str::to_string)
-        .ok_or_else(|| "TRAIN_TRANSFER_FENCE_UNAVAILABLE: target missing".into())
-}
-
 fn command(repo: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(repo).env("GIT_TERMINAL_PROMPT", "0")
@@ -100,6 +92,22 @@ fn record_commit(repo: &Path, parent: Option<&str>, record: &Record) -> Result<S
 }
 
 impl Snapshot {
+    fn observed_target(&self, repo: &Path) -> Result<String, String> {
+        let target = format!("refs/heads/{}", self.record.target);
+        command(repo, &["check-ref-format", &target], None)?;
+        // Read both refs in one advertisement. A proper concurrent publication
+        // changes authority too; it is a CAS conflict, not an unfenced writer.
+        let remote = command(repo, &["ls-remote", "--refs", "origin", &self.reference, &target], None)?;
+        let refs: std::collections::BTreeMap<&str, &str> = remote.lines().filter_map(|line| {
+            line.split_once('\t').map(|(sha, name)| (name, sha))
+        }).collect();
+        if refs.get(self.reference.as_str()).copied() != Some(self.tip.as_str()) {
+            return Err("TRAIN_TRANSFER_CONFLICT: remote authority moved during observation".into());
+        }
+        refs.get(target.as_str()).map(|sha| sha.to_string())
+            .ok_or_else(|| "TRAIN_TRANSFER_FENCE_UNAVAILABLE: target missing".into())
+    }
+
     pub(crate) fn read(repo: &Path, train: &str) -> Result<Self, String> {
         let reference = reference(train)?;
         let remote = command(repo, &["ls-remote", "--refs", "origin", &reference], None)?;
@@ -121,7 +129,7 @@ impl Snapshot {
         if live.record.phase != Phase::Active {
             return Err("TRAIN_OWNER_DRAINING: train publications are held".into());
         }
-        if target_tip(&git.repo_root, &live.record.target)? != live.record.target_sha {
+        if live.observed_target(&git.repo_root)? != live.record.target_sha {
             return Err("TRAIN_TRANSFER_TARGET_DIVERGED: adopt the exact remote SHA through operator recovery".into());
         }
         if live.tip != self.tip {
@@ -142,7 +150,7 @@ impl Snapshot {
         if outcome.is_published() {
             let confirmed = Self::read(&git.repo_root, &next.train)?;
             if !git.is_ancestor(&next_tip, &confirmed.tip)
-                || target_tip(&git.repo_root, &next.target)? != confirmed.record.target_sha {
+                || confirmed.observed_target(&git.repo_root)? != confirmed.record.target_sha {
                 return Err("TRAIN_TRANSFER_TARGET_DIVERGED: publication readback disagrees with authority history".into());
             }
         }

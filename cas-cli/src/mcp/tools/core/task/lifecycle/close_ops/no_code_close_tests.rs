@@ -3269,6 +3269,67 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
     }
 }
 
+/// cas-22c6 (GH #2286): strong-cheetah-31 at 12:06 PM ET. A detached proof run
+/// was reading the worker's checkout when its park advanced the queue, and the
+/// auto-start switched that checkout to the next task's branch mid-run. The
+/// start waits, with a code, until the run ends, and then proceeds.
+#[tokio::test]
+async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let config = f.cas_dir().join("config.toml");
+    let mut body = std::fs::read_to_string(&config).unwrap();
+    body.push_str("[orchestration.auto_prompt]\nenabled=false\n");
+    std::fs::write(&config, body).unwrap();
+    let repo = f.dir.path();
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("queue-session".into());
+        agent.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        if agent.role == AgentRole::Worker {
+            agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        }
+        agents.update(&agent).unwrap();
+    }
+    git(&checkout, &["reset", "--hard", "main"]);
+    std::fs::write(checkout.join("feature.txt"), "task A\n").unwrap();
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "-qm", "feat(cas-22c6a): task A"]);
+    git(&checkout, &["push", "-q", "--force", "origin", LANE]);
+    let delivered = git(&checkout, &["rev-parse", "HEAD"]);
+    let first = assigned("cas-22c6a", TaskType::Task, "main");
+    f.put(&first);
+    claim(&f, &first.id);
+    let mut next = assigned("cas-22c6b", TaskType::Task, "main");
+    next.status = TaskStatus::Open;
+    next.assignee = None;
+    f.put(&next);
+    let queued = call(&f.supervisor, serde_json::json!({
+        "action":"update", "id":next.id, "assignee":WORKER, "task_ids":[next.id],
+    })).await;
+    assert!(!queued.contains("REJECTED"), "{queued}");
+    // The journey run, still in flight in the worker's checkout.
+    let log = f.cas_dir().join("journey.log");
+    std::fs::write(&log, "").unwrap();
+    let run = crate::factory_worker_runs::register(&f.cas_dir(), &checkout, &log, chrono::Utc::now())
+        .unwrap().expect("the run belongs to the worker's checkout");
+    crate::factory_worker_runs::bind(&f.cas_dir(), &run, std::process::id()).unwrap();
+    let parked = call(&f.worker, serde_json::json!({"action":"close", "id":first.id, "reason":"Delivered"})).await;
+    assert_eq!(f.task(&first.id).status, TaskStatus::AwaitingMerge, "{parked}");
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(&next.id).status, TaskStatus::Open, "started under a running proof");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "the checkout moved mid-run");
+    let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
+        .unwrap().get("queue-session", WORKER).unwrap();
+    assert!(queue.notes.iter().any(|note| crate::gates::codes_in(note).contains(&"G-161")), "{:?}", queue.notes);
+    crate::factory_worker_runs::finish(&f.cas_dir(), &run, 0, chrono::Utc::now()).unwrap();
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(&next.id).status, TaskStatus::InProgress, "the start proceeds once the run ends");
+}
+
 fn queue_control_fixture(env: &mut TestEnvGuard) -> Fixture {
     let f = fixture(env, "main");
     env.set("CAS_FACTORY_SESSION", "queue-session");

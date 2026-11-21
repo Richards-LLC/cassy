@@ -561,9 +561,9 @@ fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathB
         .map_err(anyhow::Error::msg)
 }
 
-/// Publish required park evidence for a reviewer on either machine. Ordinary
-/// deliveries require portable artifacts too; routed builds additionally keep
-/// their strict manifest restoration before review (cas-dae1).
+/// Publish close-reason citations for a reviewer on either machine. Routed
+/// builds additionally require their ledger evidence and strict restoration;
+/// uncited ordinary QA captures remain best effort (cas-dae1, cas-2de9).
 pub(crate) fn publish_routed_evidence(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -617,7 +617,8 @@ pub(crate) fn publish_routed_evidence(
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let ledger_required = required_evidence(&dir);
-    let required = |name: &str| ledger_required(name) || cited_names.contains(name);
+    let required = |name: &str| name.starts_with("cited/") || cited_names.contains(name)
+        || (routed && ledger_required(name));
     // A stalled uncited copy must not spend the budget needed by the ledger.
     paths.sort_by_key(|(name, _)| !required(name));
     let deadline = std::time::Instant::now() + PUBLISH_BUDGET;
@@ -685,7 +686,7 @@ pub(crate) fn publish_routed_evidence(
         serde_json::to_string(&manifest).map_err(|error| fail(error.to_string()))?,
     );
     if !skipped.is_empty() {
-        note.push_str(&format!("\nNot published (not cited by the ledger): {}", skipped.join("; ")));
+        note.push_str(&format!("\nNot published (optional for this park): {}", skipped.join("; ")));
     }
     let tasks = crate::store::open_task_store(cas_root).map_err(|error| fail(error.to_string()))?;
     tasks.append_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;

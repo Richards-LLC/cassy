@@ -6,3 +6,5 @@
   missing files under the configured evidence directory or worktree test logs.
   Successful uploads are retained for the next attempt; optional uncited copies
   keep their existing best-effort publication within the shared time budget.
+  Ordinary log-only and waived-evidence parks keep local QA artifacts optional
+  when the close reason does not cite them.

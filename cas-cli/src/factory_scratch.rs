@@ -481,7 +481,7 @@ mod tests {
             env.set("GIT_CEILING_DIRECTORIES", ceiling.canonicalize().unwrap());
             assert!(test_tmp_dir(&cas, &worktree).starts_with(&scratch));
             let error = prepare_test_tmp(&cas, &worktree).expect_err("selected TMPDIR inside a checkout must be refused");
-            assert!(crate::gates::codes_in(&error.to_string()).contains(&"H-50".to_string()));
+            assert!(crate::gates::codes_in(&error.to_string()).contains(&"H-50"));
             assert!(crate::gates::find("H-50").is_some());
         }
     }

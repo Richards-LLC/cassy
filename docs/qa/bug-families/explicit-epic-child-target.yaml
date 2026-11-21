@@ -1,0 +1,11 @@
+title: Explicit epic-child target branches survive the delivery lifecycle
+statement: >-
+  An explicit off-lane branch at child creation or update stays authoritative
+  for display, start and merge, even when it equals the epic base. A supervisor
+  can repair a historical unpinned target using the same stored branch when
+  its effective target differs. Repository-only defaults and the epic lane
+  continue to follow lane renames.
+tasks: [cas-e721]
+fixed_by: [cas-e721]
+journeys: []
+invariants: []

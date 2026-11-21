@@ -1840,15 +1840,13 @@ impl CasCore {
                     data: None,
                 })?;
         // A child created under an epic follows that epic's live delivery lane
-        // unless the caller explicitly selected a *different* target.  The
-        // default branch resolver stamps `main` (or the repository default)
-        // when a caller supplies only the repository, so checking only
-        // `target_branch.is_none()` lets an otherwise bare trunk target defeat
-        // the epic lane (GH #625). Treat a target equal to the epic's own
-        // WorkTarget as the implicit default too; a distinct target remains
-        // task-owned authority.
+        // unless the caller explicitly selected a branch. A repository-only
+        // declaration carries the resolver's default branch and still inherits
+        // the lane (GH #625). A supplied branch is task-owned authority, even
+        // when it equals the epic's base (GH #2210).
         let mut inherited_default_note = None;
         let mut inherited_delivery_mode = None;
+        let mut work_target_pinned = false;
         let inherited_from_epic = epic_id
             .as_deref()
             .map(|epic_id| {
@@ -1863,16 +1861,15 @@ impl CasCore {
             .and_then(|epic| {
                 inherited_delivery_mode = Some(epic.delivery_mode);
                 let inherited = super::repo_context::inherited_work_target_from_epic(&epic)?;
-                let matches_epic_default = declared_work_target.as_ref().is_some_and(|target| {
-                    epic.deliverables
-                        .work_target
-                        .as_ref()
-                        .is_some_and(|epic_target| {
-                            target.repo_selector == epic_target.repo_selector
-                                && (target_branch.is_none()
-                                    || target.target_branch == epic_target.target_branch)
-                        })
-                });
+                // An explicit selection of the live lane still follows lane
+                // renames, matching ordinary task updates. Off-lane choices
+                // must survive the shared show/start/merge default resolver.
+                work_target_pinned = target_branch.is_some()
+                    && declared_work_target.as_ref().is_some_and(|target| target != &inherited);
+                let matches_epic_default = target_branch.is_none()
+                    && declared_work_target.as_ref().is_some_and(|target| {
+                        target.repo_selector == inherited.repo_selector
+                    });
                 // An explicitly different repository binding is task-owned
                 // authority even if its branch was omitted.
                 if declared_work_target.is_none() || matches_epic_default {
@@ -2023,6 +2020,7 @@ impl CasCore {
             branch: None,
             deliverables: crate::types::TaskDeliverables {
                 work_target,
+                work_target_pinned,
                 source_claim_override: source_admission.override_grant.clone(),
                 ..Default::default()
             },

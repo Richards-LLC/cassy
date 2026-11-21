@@ -2603,6 +2603,7 @@ async fn supervisor_stability_exception_reaches_park_gh2041() {
 #[tokio::test]
 async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     let mut env = TestEnvGuard::temp_home();
+    for history in ["review", "typed-error", "legacy-error", "absent"] {
     let f = fixture_with_surface(&mut env, "service.py", false);
     let repo = f.dir.path();
     let root = repo.join(".cas");
@@ -2642,10 +2643,85 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
         commit_receipt: Some(f.final_tip.clone()), supervisor_override: None,
         no_delivery: None, stranded_branch_override: None, search_manifest: None,
     });
+    let verifications = supervisor.open_verification_store().unwrap();
+    let mut prior_error = None;
+    if history.ends_with("error") {
+        let dispatch = (history == "typed-error").then(|| {
+            let proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
+                repo, "main", vec![f.final_tip.clone()],
+            ).unwrap();
+            cas_store::create_verification_dispatch_bound(
+                &root, TASK, "supervisor-session", "supervisor-session",
+                &cas_types::VerificationProofBoundary::task_at(proof),
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap()
+        });
+        let mut error = cas_types::Verification::new("ver-bwrap-error".into(), TASK.into());
+        error.status = VerificationStatus::Error;
+        error.summary = "Reviewer sandbox startup failed before review".into();
+        error.dispatch_id = dispatch.as_ref().map(|dispatch| dispatch.id.clone());
+        if dispatch.is_some() {
+            error.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+            error.agent_id = Some("supervisor-session".into());
+            error.issuer_agent_id = error.agent_id.clone();
+            verifications.add(&error).unwrap();
+        } else {
+            error.provenance = cas_types::VerificationProvenance::System;
+            cas_store::add_system_verification(&root, &error).unwrap();
+        }
+        if let Some(dispatch) = dispatch {
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            cas_store::resolve_verification_dispatch_with_conn(
+                &conn, &dispatch.id, "supervisor-session", None, true,
+            ).unwrap();
+        }
+        prior_error = Some(serde_json::to_value(error).unwrap());
+    }
+    let dispatch_before = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap();
     let held = text(supervisor.cas_task_close(request()).await.unwrap());
     assert!(crate::gates::codes_in(&held).contains(&"G-70"), "{held}");
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
-    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    assert_eq!(serde_json::to_value(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()).unwrap(), serde_json::to_value(&dispatch_before).unwrap());
+    if history != "review" {
+        // Replay the machine command actually emitted by G-70, including its
+        // reason; changes to human prose or reason wording cannot break this.
+        let command = held.split('`').find(|part| part.contains("task action=close") && part.contains("supervisor_override=true")).unwrap();
+        let mut arguments = serde_json::Map::new();
+        for token in shell_words::split(command).unwrap() {
+            if let Some((key, value)) = token.split_once('=') {
+                if key == "action" { continue; }
+                arguments.insert(key.into(), if key == "supervisor_override" {
+                    serde_json::Value::Bool(value.parse().unwrap())
+                } else { value.into() });
+            }
+        }
+        let replay = || Parameters(serde_json::from_value::<TaskCloseRequest>(arguments.clone().into()).unwrap());
+        assert_eq!(replay().0.id, TASK);
+        assert_eq!(replay().0.commit_receipt.as_deref(), Some(f.final_tip.as_str()));
+        assert_eq!(replay().0.supervisor_override, Some(true));
+        // An environment role cannot give the worker supervisor authority.
+        let _ = f.core.cas_task_close(replay()).await;
+        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+        // Missing integration refuses without discarding the original Error.
+        git(repo, &["reset", "--hard", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+        let _ = supervisor.cas_task_close(replay()).await;
+        assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed);
+        git(repo, &["reset", "--hard", &merged]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+        let output = text(supervisor.cas_task_close(replay()).await.unwrap());
+        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{history}: {output}");
+        let latest = verifications.get_latest_for_task(TASK).unwrap().unwrap();
+        assert_eq!(latest.status, VerificationStatus::Skipped);
+        assert_eq!(latest.agent_id.as_deref(), Some("supervisor-session"));
+        assert!(tasks.get(TASK).unwrap().notes.contains(arguments["reason"].as_str().unwrap()));
+        if let Some(error) = prior_error {
+            assert_eq!(serde_json::to_value(verifications.get("ver-bwrap-error").unwrap()).unwrap(), error);
+        }
+        assert!(!matches!(verifications.get_latest_for_task(TASK).unwrap(), Some(verdict) if verdict.status == VerificationStatus::Approved));
+        assert_eq!(serde_json::to_value(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()).unwrap(), serde_json::to_value(dispatch_before).unwrap());
+        continue;
+    }
     let contained = supervisor.worktree_merge(
         BRANCH, false, Some(TASK), true, Some(false), false, None,
     ).await.unwrap();
@@ -2684,6 +2760,7 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     assert_eq!(verdict.provenance, cas_types::VerificationProvenance::SupervisorDirect);
     let closed = text(supervisor.cas_task_close(request()).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
+    }
 }
 
 /// GH #2282 (gabber, Nov 21): a delivery parked for `target` that later lands
@@ -3114,6 +3191,9 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // macOS inherits the listener's O_NONBLOCK; the read
+                        // timeout only bounds a blocking stream.
+                        stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
                         return stream;
                     }

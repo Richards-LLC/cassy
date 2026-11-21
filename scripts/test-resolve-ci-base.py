@@ -184,58 +184,83 @@ class LaneBaseTests(unittest.TestCase):
         self.assertEqual(self.classify()['comparison-base'], self.git('rev-parse', 'HEAD'))
 
     def test_published_release_deletes_only_merged_remote_epics_idempotently(self):
+        shipped = 'epic/release-train-shipped'
+        opened = 'epic/release-train-open'
+        self.git('checkout', '-q', '--detach', self.main)
+        self.git('commit', '--allow-empty', '-qm', 'release: v9.99.7',
+                 '-m', 'Release-Version: 9.99.7',
+                 '-m', f'Prepared by scripts/release.sh on {shipped} from main 9.99.6.')
+        cut = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-q', '-B', 'main', self.main)
+        self.git('merge', '--no-ff', '-qm', 'land the prepared release', cut)
+        released = self.git('rev-parse', 'HEAD')
         remote = self.repo / '.git' / 'origin.git'
         self.git('init', '--bare', '-q', str(remote))
         self.git('remote', 'add', 'origin', str(remote))
-        self.git('push', '-q', 'origin', f'{self.main}:refs/heads/main',
-                 f'{self.main}:refs/heads/epic/merged', f'{self.epic}:refs/heads/epic/live')
+        self.git('push', '-q', 'origin', f'{released}:refs/heads/main',
+                 f'{cut}:refs/heads/{shipped}', f'{released}:refs/heads/{opened}',
+                 f'{self.epic}:refs/heads/epic/live')
         workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
-        step = next((s for s in workflow['jobs']['release']['steps']
-                     if s.get('id') == 'cleanup-epics'), None)
-        self.assertIsNotNone(step)
-        # Execute the workflow's actual cleanup, against a disposable origin.
+        step = next(s for s in workflow['jobs']['release']['steps'] if s.get('id') == 'cleanup-epics')
+        # Execute the actual publish step; all pushes go to this temporary bare repo.
         shutil.copy2(ROOT / 'scripts/cleanup-merged-epics.sh', self.repo / 'scripts')
         for _ in range(2):
             result = subprocess.run(['bash', '-e', '-c', step['run']], cwd=self.repo,
-                                    env=dict(os.environ, GITHUB_SHA=self.main, DEFAULT_BRANCH='main',
+                                    env=dict(os.environ, GITHUB_SHA=released, DEFAULT_BRANCH='main',
                                              GITHUB_STEP_SUMMARY=str(self.repo / '.git' / 'summary')),
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             refs = self.git('ls-remote', '--heads', 'origin')
-            self.assertNotIn('refs/heads/epic/merged', refs)
+            self.assertNotIn(f'refs/heads/{shipped}', refs)
+            self.assertIn(f'{released}\trefs/heads/{opened}', refs)
             self.assertIn(f'{self.epic}\trefs/heads/epic/live', refs)
-        summary = (self.repo / '.git' / 'summary').read_text()
-        self.assertIn('refs/heads/epic/merged', summary)
 
-        # A publication SHA outside the default branch cannot authorize deletion.
-        result = subprocess.run(['bash', str(ROOT / 'scripts/cleanup-merged-epics.sh'),
-                                 self.epic, 'origin/main'], cwd=self.repo,
+        script = str(ROOT / 'scripts/cleanup-merged-epics.sh')
+        # An unpublished SHA cannot authorize deletion, even with a live default.
+        result = subprocess.run(['bash', script, self.epic, 'origin/main'], cwd=self.repo,
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(f'{self.epic}\trefs/heads/epic/live', self.git('ls-remote', '--heads', 'origin'))
+        # A published SHA without the release preparation record deletes nothing.
+        self.git('push', '-q', 'origin', f'{self.main}:refs/heads/{shipped}')
+        result = subprocess.run(['bash', script, self.main, 'origin/main'], cwd=self.repo,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'{self.main}\trefs/heads/{shipped}', self.git('ls-remote', '--heads', 'origin'))
 
-        # Later main progress does not authorize pruning beyond the released SHA.
-        self.git('push', '-q', 'origin', f'{self.epic}:refs/heads/main',
-                 f'{self.main}:refs/heads/epic/raced')
-        # Advance after fetch but before push advertises refs. A pre-push hook
-        # would race too late and test the server's ordinary CAS, not our lease.
+        # Race only the recorded shipped branch after fetch, before push. A
+        # later default tip cannot authorize deleting newer work on that branch.
+        self.git('push', '-q', 'origin', f'{cut}:refs/heads/{shipped}')
+        self.git('commit', '--allow-empty', '-qm', 'later default progress')
+        advanced = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', f'{advanced}:refs/heads/main')
         race_bin = self.repo / '.git' / 'race-bin'
         race_bin.mkdir()
         real_git = shlex.quote(shutil.which('git'))
         wrapper = race_bin / 'git'
         wrapper.write_text(f'#!/bin/sh\nif [ "$1" = push ]; then\n'
                            f'  {real_git} --git-dir={shlex.quote(str(remote))} update-ref '
-                           f'refs/heads/epic/raced {self.epic} {self.main} || exit 1\n'
+                           f'refs/heads/{shipped} {advanced} {cut} || exit 1\n'
                            f'fi\nexec {real_git} "$@"\n')
         wrapper.chmod(0o755)
-        result = subprocess.run(['bash', str(ROOT / 'scripts/cleanup-merged-epics.sh'),
-                                 self.main, 'origin/main'], cwd=self.repo,
+        result = subprocess.run(['bash', script, released, 'origin/main'], cwd=self.repo,
                                 env=dict(os.environ, PATH=f'{race_bin}{os.pathsep}{os.environ["PATH"]}'),
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         refs = self.git('ls-remote', '--heads', 'origin')
-        for branch in ('live', 'raced'):
-            self.assertIn(f'{self.epic}\trefs/heads/epic/{branch}', refs)
+        self.assertIn(f'{advanced}\trefs/heads/{shipped}', refs)
+        self.assertIn(f'{released}\trefs/heads/{opened}', refs)
+
+        # Conflicting cut identities cannot authorize either branch's deletion.
+        self.git('commit', '--allow-empty', '-qm', 'release: v9.99.7',
+                 '-m', 'Release-Version: 9.99.7',
+                 '-m', f'Prepared by scripts/release.sh on {opened} from main 9.99.6.')
+        ambiguous = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', f'{ambiguous}:refs/heads/main')
+        result = subprocess.run(['bash', script, ambiguous, 'origin/main'], cwd=self.repo,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.git('ls-remote', '--heads', 'origin'),
+                         refs.replace(f'{advanced}\trefs/heads/main', f'{ambiguous}\trefs/heads/main'))
 
 
 if __name__ == '__main__':

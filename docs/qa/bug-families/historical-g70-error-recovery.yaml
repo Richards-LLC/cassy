@@ -1,0 +1,10 @@
+title: Prescribed historical recovery after a reviewer error
+statement: >-
+  A live registered supervisor can replay the exact G-70 recovery command for
+  an already-integrated recorded delivery after a legacy or resolved typed
+  reviewer ERROR. The recovery records a skip and retains the error/dispatch
+  audit, without manufacturing pre-merge approval. Missing integration or an
+  unauthorized caller cannot use the recovery.
+tasks: [cas-e705]
+journeys: []
+invariants: []

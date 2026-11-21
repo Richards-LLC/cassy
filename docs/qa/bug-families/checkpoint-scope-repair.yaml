@@ -1,4 +1,0 @@
-title: Checkpoint scope repair preserves target-identical tests
-statement: Pre-push fast rows must admit byte-identical restoration to the active task's recorded target while refusing introduced prose assertions. Wrong branch bindings and recorded bases after the checkpoint cannot exempt files.
-found: 2026-11-21
-tasks: [cas-3c12]

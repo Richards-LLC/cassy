@@ -1,4 +1,0 @@
-title: Concurrent Codex spawns resolve the same account when a login probe times out
-statement: A spawn whose Codex login probe times out under concurrent spawns still selects the registered account a single spawn would, rather than falling back to a missing default Codex home and refusing.
-found: 2026-11-21
-tasks: [cas-9ab7]

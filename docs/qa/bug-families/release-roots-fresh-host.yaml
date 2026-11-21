@@ -1,4 +1,0 @@
-title: Release delivery on a host with no project registry records the supplied project
-statement: On a new machine or an isolated HOME where no project was ever registered, cas release installed and cas release published create the empty host registry and record the release for the supplied project, instead of failing with a missing known_repos table.
-found: 2026-11-21
-tasks: [cas-6b73]

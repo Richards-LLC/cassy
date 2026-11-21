@@ -1,4 +1,0 @@
-title: Retained-work recovery matches a worker's checkout through symlinked path spellings
-statement: A live worker whose recorded checkout path differs from Git's listing only by a symlink (macOS /var vs /private/var) is recognised as the checkout's owner and kept out of the retained-work banner, while retired workers' local work is still reported.
-found: 2026-11-21
-tasks: [cas-55a5]

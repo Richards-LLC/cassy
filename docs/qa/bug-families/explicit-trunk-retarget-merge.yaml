@@ -1,4 +1,0 @@
-title: An explicit trunk retarget of an epic task merges without allow_trunk
-statement: A supervisor's task update target_branch to trunk pins the target, so worktree_merge accepts it without allow_trunk and still reports the trunk push. request_changes on in-progress work refuses with the replayable note and worker message that return the findings.
-found: 2026-11-21
-tasks: [cas-7305]

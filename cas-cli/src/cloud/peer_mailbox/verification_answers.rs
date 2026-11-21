@@ -363,8 +363,9 @@ pub(crate) fn recheck(
                ORDER BY (parent.status IN ('closed','cancelled')),d.created_at DESC,parent.id ASC LIMIT 1)
            AND ?5=(SELECT id FROM verifications WHERE dispatch_id=?6 ORDER BY created_at DESC,id DESC LIMIT 1)
            AND EXISTS(SELECT 1 FROM verifications WHERE id=?5 AND task_id=?1 AND dispatch_id=?6
-               AND status='supervisor_call' AND provenance='task_verifier' AND agent_id=?7 AND summary=?8))",
-        rusqlite::params![q.task,q.train,q.owner,task.deliverables.delivery_cycle,q.question,q.dispatch,q.verifier,q.summary],
+               AND status=?9 AND status_detail IS ?10 AND provenance='task_verifier' AND agent_id=?7 AND summary=?8))",
+        rusqlite::params![q.task,q.train,q.owner,task.deliverables.delivery_cycle,q.question,q.dispatch,q.verifier,q.summary,
+            VerificationStatus::SupervisorCall.storage_status(), VerificationStatus::SupervisorCall.storage_detail()],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     let dispatch =

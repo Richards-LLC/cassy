@@ -1762,7 +1762,7 @@ fn verifier_launch_requester_child_cas_5f88() {
     ) else {
         return;
     };
-    let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
     let task = core.open_task_store().unwrap().get(task.to_str().unwrap()).unwrap();
     let dispatch = cas_store::get_verification_dispatch(&root, dispatch.to_str().unwrap()).unwrap();
     let retry = crate::mcp::tools::core::workflow::premerge_verification::launch_automatic_verifier(

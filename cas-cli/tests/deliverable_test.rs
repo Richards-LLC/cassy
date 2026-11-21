@@ -664,22 +664,30 @@ fn deliverable_css_map_brand_declares_every_report_role_the_close_gate_requires(
         ":root{--nw-bg:#fffdf3;--nw-ink:#232124;--nw-muted:#6b6670;--nw-line:#e4e0d8;--nw-accent:#ff682f}\n",
     )
     .unwrap();
-    let maps = "bg: \"--nw-bg\"\n  surface: \"--nw-bg\"\n  ink: \"--nw-ink\"\n  text-muted: \"--nw-muted\"\n  line: \"--nw-line\"\n  verdict: \"--nw-accent\"";
-    for (extra, evidence) in [("", "--evidence:var(--ink-muted)"), ("\n  evidence: \"--nw-accent\"", "--evidence:var(--nw-accent)")] {
+    let maps = "bg: \"--nw-bg\"\n  surface: \"--nw-bg\"\n  ink: \"--nw-ink\"\n  line: \"--nw-line\"\n  verdict: \"--nw-accent\"";
+    for (extra, evidence) in [
+        ("\n  text-muted: \"--nw-muted\"", Some("--evidence:var(--ink-muted)")),
+        ("\n  text-muted: \"--nw-muted\"\n  evidence: \"--nw-accent\"", Some("--evidence:var(--nw-accent)")),
+        // No evidence role and no alias for one: refused here, not at close.
+        ("", None),
+    ] {
         fs::write(
             root.join("DESIGN.md"),
             format!("---\nname: Northwind\nsource:\n  - styles/tokens.css\nmaps:\n  {maps}{extra}\n---\n"),
         )
         .unwrap();
-        let output = cas_cmd(root)
+        fs::remove_file(root.join("report/final.html")).ok();
+        let assert = cas_cmd(root)
             .args(["--json", "deliverable", "finalize", "report/draft.html"])
             .args(["--audience", "customer", "--out", "report/final.html"])
             .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        let receipt: Value = serde_json::from_slice(&output).unwrap();
+            .code(if evidence.is_some() { 0 } else { 1 });
+        let receipt: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+        let Some(evidence) = evidence else {
+            assert_eq!(receipt["findings"][0]["code"], "brand-roles-unresolved", "{receipt}");
+            assert!(!root.join("report/final.html").exists());
+            continue;
+        };
         assert_eq!(receipt["findings"], Value::Array(vec![]), "{receipt}");
         let html = fs::read_to_string(root.join("report/final.html")).unwrap();
         let gate = cas::deliverable::report_quality::check(&html, None);

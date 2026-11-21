@@ -208,14 +208,15 @@ DARK_SCHEME = re.compile(r'@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)')
 FONT_FILE = re.compile(r'url\("(\./[\w./-]+\.woff2)"\)')
 
 
-def design_md(project_root, path, meta, head):
+def design_md(project_root, path, meta, head, required=()):
     """Tokens a DESIGN.md names: its CSS `source` files and `maps` roles.
 
     Returns None unless the file lists at least one existing .css source and
     a maps block of `role: "--variable"` entries. The CSS is inlined as-is
     (relative .woff2 faces become data URIs), so it may hold only custom
     properties, @media/selector blocks and @font-face rules: no network URL
-    and no markup. Each role becomes `--role: var(--variable)`.
+    and no markup. Each role becomes `--role: var(--variable)`. Returns
+    (css, unresolved): the `required` roles neither declared nor aliased.
     """
     sources = meta.get('source')
     sources = [sources] if isinstance(sources, str) else sources if isinstance(sources, list) else []
@@ -247,9 +248,10 @@ def design_md(project_root, path, meta, head):
     # Declared roles stay authoritative; a report role neither maps nor sheets
     # define takes the project's semantic alias, as value keys do.
     present = {role for role, _ in roles} | set(re.findall(r'--([a-z][a-z0-9-]*)\s*:', '\n'.join(css)))
-    aliases += ['--' + role + ':var(--' + alias + ')' for role, alias in alias_roles(present)[0].items()]
-    aliases = ';'.join(aliases)
-    return '\n'.join(css) + '\n:root{' + aliases + '}'
+    filled = alias_roles(present)[0]
+    aliases += ['--' + role + ':var(--' + alias + ')' for role, alias in filled.items()]
+    unresolved = [role for role in required if role not in present and role not in filled]
+    return '\n'.join(css) + '\n:root{' + ';'.join(aliases) + '}', unresolved
 
 
 # --- design-spec value keys: colors, typography, rounded.
@@ -463,7 +465,7 @@ def brand_mark(root, chain, profile=None):
     return None, None
 
 
-def resolve(project_root, *, defaults, tokens=None, audience='internal', surface=None):
+def resolve(project_root, *, defaults, tokens=None, audience='internal', surface=None, required=()):
     """Return {receipt, css, mark_uri}; css is None when a finding refuses the brand."""
     root = Path(project_root).resolve()
     profile = profile_meta(root)
@@ -485,9 +487,17 @@ def resolve(project_root, *, defaults, tokens=None, audience='internal', surface
                 receipt['design']['inherits_base'] = final.strip()
             for path, meta, head in chain:
                 try:
-                    css = design_md(root, path, meta, head)
+                    css, unresolved = design_md(root, path, meta, head, required) or (None, [])
                 except ValueError as error:
                     warnings.append(str(error) + '; using its design-spec value keys')
+                if css and unresolved:
+                    # The report close gate requires these roles; refuse now, not at close.
+                    message = (f'{rel(root, path)} maps declare no report role or alias for: '
+                               + ', '.join('--' + role for role in unresolved))
+                    if audience == 'customer':
+                        findings.append({'code': 'brand-roles-unresolved', 'message': message})
+                    else:
+                        warnings.append(message)
                 if css:
                     receipt['source'], receipt['type'] = 'design-md-css', {'faces_inlined': css.count('data:font/woff2')}
                     receipt['tokens'] = {'from': rel(root, path)}
@@ -527,10 +537,12 @@ def main():
     parser.add_argument('--tokens', type=Path)
     parser.add_argument('--surface', type=Path)
     parser.add_argument('--audience', choices=('internal', 'customer'), default='internal')
+    parser.add_argument('--required-roles', default='', help='comma-separated roles the report close gate requires')
     args = parser.parse_args()
     try:
         result = resolve(args.root, defaults=args.defaults, tokens=args.tokens,
-                         audience=args.audience, surface=args.surface)
+                         audience=args.audience, surface=args.surface,
+                         required=[role for role in args.required_roles.split(',') if role])
     except (ValueError, KeyError, OSError, TypeError) as error:
         parser.exit(2, 'brand: ' + str(error) + '\n')
     json.dump(result, sys.stdout)

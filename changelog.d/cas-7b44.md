@@ -6,4 +6,6 @@
   for a missing `--evidence`. Now: the CSS-map brand path fills each missing
   report role from the project's own semantic alias, exactly as the
   design-spec value-key path does, so brand, finalize and the close gate
-  agree. Roles the DESIGN.md maps explicitly still win.
+  agree. Roles the DESIGN.md maps explicitly still win. A customer brand whose
+  maps leave a required role with no declaration or alias is refused by
+  `brand` and `finalize` with `brand-roles-unresolved`, instead of later at close.

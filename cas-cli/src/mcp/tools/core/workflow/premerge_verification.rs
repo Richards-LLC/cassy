@@ -429,7 +429,10 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn fail(message: impl std::fmt::Display) -> McpError {
+// Keep the registered refusal producer unambiguous for authority-site audits.
+use self::premerge_verification_refusal as fail;
+
+fn premerge_verification_refusal(message: impl std::fmt::Display) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
         crate::gates::tag("G-104",
@@ -1374,7 +1377,7 @@ impl CasCore {
                 {
                     // GH #2023: a retry after a failed attempt starts one
                     // replacement; say so rather than "finish this verdict".
-                    let mut error = fail(format!(
+                    let mut error = premerge_verification_refusal(format!(
                         "task {}: merge held on verification dispatch {}. An automatic verifier replacement is scheduled on this exact dispatch. Approval continues the merge automatically; verdicts needing attention wake you. Do not spawn another verifier",
                         task.id, dispatch.id
                     ));
@@ -1384,7 +1387,7 @@ impl CasCore {
                     return Err(error);
                 }
                 if dispatch.state == cas_types::VerificationDispatchState::TimedOut {
-                    return Err(fail(format!(
+                    return Err(premerge_verification_refusal(format!(
                         "exact dispatch {} timed out. A registered supervisor must recover it. {} Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
                         dispatch.id,
                         automatic::direct_verdict(dispatch),
@@ -1393,7 +1396,7 @@ impl CasCore {
                         task.id,
                     )));
                 }
-                return Err(fail(format!(
+                return Err(premerge_verification_refusal(format!(
                     "task {}: merge held on verification dispatch {} ({:?}); finish this exact verdict before retrying the merge",
                     task.id, dispatch.id, dispatch.state
                 )));

@@ -1,0 +1,4 @@
+title: Release readiness follows the supervisor that froze the train after a handoff
+statement: After a cross-machine handoff, the receiving live supervisor's freeze takes over the train's release ownership, so auto-cut runs on its machine. Refusals name the owner and its machine, and the cut notice counts each delivery merged into the train once, including merged deliveries awaiting their verdict.
+found: 2026-11-21
+tasks: [cas-1d33]

@@ -324,10 +324,50 @@ fn train(store: &dyn cas_store::TaskStore, train_id: &str) -> Result<Task> {
 
 /// Freeze a train at its current tip. Repeating it reports the standing freeze.
 pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&str>) -> Result<String> {
-    freeze_with_promotion(root, train_id, actor, reason, false).map(|(detail, _)| detail)
+    freeze_with_promotion(root, train_id, actor, None, reason, false).map(|(detail, _)| detail)
 }
 
-fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Option<&str>, promote: bool) -> Result<(String, Value)> {
+/// GH #1826: the live supervisor that freezes a train is its release owner.
+/// It takes over a recorded owner that is departed, stale or on another
+/// machine, such as the peer that handed the train over. A live owner of
+/// another factory session on this machine keeps the train. Returns the
+/// audit sentence when ownership moved.
+fn take_ownership(root: &Path, task: &mut Task, taker: &cas_types::Agent) -> Result<Option<String>> {
+    let owner = task.epic_verification_owner.clone();
+    if owner.as_deref().is_some_and(|owner| owner == taker.id || owner == taker.name) {
+        return Ok(None);
+    }
+    let machine = cas_types::Agent::get_or_generate_machine_id();
+    let agents = crate::store::open_agent_store(root)?.list(None)?;
+    let kept = owner.as_deref().is_some_and(|owner| {
+        agents.iter().any(|agent| {
+            (agent.id == owner || agent.name == owner)
+                && crate::supervisor_notices::is_live(agent)
+                && agent.factory_session != taker.factory_session
+                && agent.machine_id.as_deref().is_none_or(|id| id == machine)
+        })
+    });
+    if kept {
+        return Ok(None);
+    }
+    task.epic_verification_owner = Some(taker.id.clone());
+    Ok(Some(format!(
+        "supervisor {} ({}) took over release ownership of {} from {}",
+        taker.name,
+        taker.id,
+        task.id,
+        owner.as_deref().unwrap_or("no recorded owner")
+    )))
+}
+
+fn freeze_with_promotion(
+    root: &Path,
+    train_id: &str,
+    actor: &str,
+    taker: Option<&cas_types::Agent>,
+    reason: Option<&str>,
+    promote: bool,
+) -> Result<(String, Value)> {
     let store = crate::store::open_task_store(root)?;
     let mut task = store.get(train_id).with_context(|| format!("{train_id} not found"))?;
     ensure!(task.task_type == crate::types::TaskType::Epic && !task.is_terminal(), "{train_id} is not an open epic");
@@ -340,17 +380,30 @@ fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Optio
     }
     ensure!(!is_cut_train(&task), "{train_id} is already cut; it accepts no merges");
     let machine = crate::cloud::peers::machine_label_for(root);
+    let taken = match taker {
+        Some(taker) => take_ownership(root, &mut task, taker)?,
+        None => None,
+    };
+    let ownership = taken.as_deref().map(|taken| format!(" Ownership: {taken}.")).unwrap_or_default();
     if let Some(freeze) = active(root, &task) {
         // A repeat freeze by the operator takes ownership of a standing freeze.
-        if actor.starts_with("operator") && !operator_frozen(&task) {
+        let operator_takes = actor.starts_with("operator") && !operator_frozen(&task);
+        if operator_takes {
             task.labels.retain(|label| label != SUPERVISOR_LIFTABLE_LABEL);
+        }
+        if operator_takes || taken.is_some() {
             task.updated_at = Utc::now();
             store.update(&task)?;
+        }
+        if operator_takes {
             store.append_note(train_id, &format!("RELEASE FREEZE: {actor} took ownership of the standing freeze on {train_id}; machine={machine}"))?;
+        }
+        if let Some(taken) = &taken {
+            store.append_note(train_id, &format!("RELEASE OWNER: {taken} by freezing it; machine={machine}"))?;
         }
         let train_ci = crate::train_ci::freeze_dispatch(root, &task);
         return Ok((format!(
-            "TRAIN FROZEN: {train_id} at {}. {}",
+            "TRAIN FROZEN: {train_id} at {}. {}{ownership}",
             short(&freeze.tip),
             summary_with_run(root, &task, &freeze, Utc::now(), &train_ci)
         ), train_ci));
@@ -380,12 +433,15 @@ fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Optio
         train_id,
         &format!("RELEASE FREEZE: {actor} froze {train_id} at {} on tip {tip}: {reason}; machine={machine}", eastern(now)),
     )?;
+    if let Some(taken) = &taken {
+        store.append_note(train_id, &format!("RELEASE OWNER: {taken} by freezing it; machine={machine}"))?;
+    }
     let freeze = Freeze { at: DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now), tip };
     let train_ci = crate::train_ci::freeze_dispatch(root, &task);
     Ok((format!(
         "TRAIN FROZEN: {train_id} at {}. {}. Merges, new staffing and CI retries into {lane} are refused on every machine \
          except `{REPAIR_LABEL}` tasks while the train is red; new tasks join the next train. \
-         The freeze ends on publication, an operator lift in Commander, or an audited supervisor lift.",
+         The freeze ends on publication, an operator lift in Commander, or an audited supervisor lift.{ownership}",
         short(&freeze.tip),
         summary_with_run(root, &task, &freeze, now, &train_ci)
     ), train_ci))
@@ -456,7 +512,7 @@ impl crate::mcp::CasCore {
                 "TRAIN_FREEZE_CONFIRMATION_REQUIRED: train_freeze is a release freeze, not a temporary CI hold. It ends on publication of its tip, an operator lift in Commander, or the train supervisor's audited decision=lift with a reason. Confirm with reason=\"release-freeze: <reason>\". For a temporary CI wait, coordinate peers to defer merges; see CONTRIBUTING's Temporary CI merge hold follow-up. No freeze was applied by this call."
             ))?;
         let _lock = crate::mcp::tools::core::task::release_train::lock_trains_blocking(&self.cas_root)?;
-        freeze_with_promotion(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason), promote)
+        freeze_with_promotion(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(&actor), Some(reason), promote)
             .map(|(detail, train_ci)| serde_json::json!({"detail": detail, "train_ci": train_ci}).to_string())
     }
 
@@ -613,7 +669,9 @@ mod tests {
         epic.branch = Some("epic/operator-release".into());
         let lane = epic.effective_epic_branch().unwrap().to_string();
         epic.deliverables.work_target.as_mut().unwrap().target_branch = lane.clone();
-        epic.epic_verification_owner = Some(supervisor.id);
+        // GH #1826: prowl's supervisor handed the train over; its synced
+        // owner names a supervisor this machine has never registered.
+        epic.epic_verification_owner = Some("lively-fox-47".into());
         store.update(&epic).unwrap();
         let remote = TempDir::new().unwrap();
         git(remote.path(), &["init", "-q", "--bare"]);
@@ -646,6 +704,7 @@ mod tests {
         assert_eq!(promoted[0].id, epic.id);
         assert_eq!(promoted[0].deliverables.work_target.as_ref().unwrap().repo_selector, "project:freeze-test");
         assert_eq!(freeze_of(&promoted[0]).unwrap().tip, tip);
+        assert_eq!(promoted[0].epic_verification_owner.as_deref(), Some("freeze-supervisor"), "the freezing supervisor owns the train");
         // Auto-cut waits for unfinished repairs; the fixture's repair has finished.
         let mut repair = store.get("cas-fix").unwrap();
         repair.status = cas_types::TaskStatus::Closed;
@@ -944,6 +1003,26 @@ mod tests {
         assert_ne!(lift_via_tool(&service, Some("cut refused")).await.unwrap().is_error, Some(true));
         assert!(freeze_of(&store.get("cas-tr").unwrap()).is_none());
         assert_eq!(lift_decision(&store.get("cas-tr").unwrap())["operator_freeze"], true);
+    }
+
+    /// GH #1826: freezing takes over a departed or peer-machine owner, but a
+    /// live owner of another factory session on this machine keeps its train.
+    #[tokio::test]
+    async fn freeze_leaves_a_live_owner_of_another_session_its_train_gh_1826() {
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, root) = fixture();
+        let _owner = supervisor_service(&root, "sup-id", "release-session");
+        let other = supervisor_service(&root, "other-sup", "other-session");
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut train = store.get("cas-tr").unwrap();
+        train.epic_verification_owner = Some("sup-id".into());
+        store.update(&train).unwrap();
+        let request = serde_json::json!({"action": "train_freeze", "id": "cas-tr", "reason": "release-freeze: other session"});
+        other.factory(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
+        let train = store.get("cas-tr").unwrap();
+        assert!(freeze_of(&train).is_some());
+        assert_eq!(train.epic_verification_owner.as_deref(), Some("sup-id"));
     }
 
     /// The operator's Commander lift clears the same gate.

@@ -140,7 +140,7 @@ impl Snapshot {
         let live = self.coherent(repo)?;
         live.require_actor(actor)?;
         if live.record.phase != Phase::Active {
-            return Err("TRAIN_OWNER_DRAINING: admissions are held".into());
+            return Err(crate::gates::tag("G-113", "TRAIN_OWNER_DRAINING: admissions are held"));
         }
         Ok(())
     }
@@ -161,10 +161,10 @@ impl Snapshot {
     pub(crate) fn publish(&self, git: &GitOperations, actor: &Identity, head: &str) -> Result<TargetPushOutcome, String> {
         let live = Self::read(&git.repo_root, &self.record.train)?;
         if live.record.generation != self.record.generation || live.record.identity != *actor {
-            return Err("TRAIN_OWNER_GENERATION_CHANGED: owner/incarnation/generation changed".into());
+            return Err(crate::gates::tag("G-113", "TRAIN_OWNER_GENERATION_CHANGED: owner/incarnation/generation changed"));
         }
         if live.record.phase != Phase::Active {
-            return Err("TRAIN_OWNER_DRAINING: train publications are held".into());
+            return Err(crate::gates::tag("G-113", "TRAIN_OWNER_DRAINING: train publications are held"));
         }
         if live.observed_target(&git.repo_root)? != live.record.target_sha {
             return Err("TRAIN_TRANSFER_TARGET_DIVERGED: adopt the exact remote SHA through operator recovery".into());

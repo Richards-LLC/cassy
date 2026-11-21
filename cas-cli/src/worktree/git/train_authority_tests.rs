@@ -329,6 +329,9 @@ fn train_authority_stale_owner_publication_cas_6456() {
     replacement.registered_at = chrono::Utc::now();
     agents.register(&replacement).unwrap();
     agents.update(&replacement).unwrap();
+    // Registration intentionally retires same-name predecessors. Restore the
+    // active row to replay the separate two-live-registrations conflict case.
+    agents.update(&actor).unwrap();
     // A matching name/session cannot retire a still-live predecessor.
     assert!(!crate::cloud::peer_mailbox::owns_recipient(
         &root,

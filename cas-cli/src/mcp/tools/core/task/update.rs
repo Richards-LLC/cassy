@@ -1182,7 +1182,7 @@ impl CasCore {
             && req.epic_verification_owner.as_deref().is_some_and(|owner|
                 normalize_epic_verification_owner(owner) != task.epic_verification_owner.as_deref().and_then(normalize_epic_verification_owner)) {
             return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                "TRAIN_OWNER_TRANSFER_REQUIRED: change release-train ownership through the explicit quiescence protocol"));
+                crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: change release-train ownership through the explicit quiescence protocol")));
         }
         let original_updated_at = task.updated_at;
         if proof_scope_fix {
@@ -1815,7 +1815,7 @@ impl CasCore {
                 != supplied.contains(&crate::train_owner::ENROLLED)
                 || (super::release_train::is_release_train(&task) && !supplied.contains(&super::release_train::RELEASE_TRAIN_LABEL)) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "TRAIN_OWNER_TRANSFER_REQUIRED: enrollment metadata is managed by the train authority"));
+                    crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: enrollment metadata is managed by the train authority")));
             }
             if labels.trim().is_empty() {
                 // Clearing user labels cannot erase finding provenance or

@@ -74,15 +74,16 @@ pub(crate) fn require_owner(
     if actor.role != AgentRole::Supervisor
         || !crate::cloud::peer_mailbox::owns_recipient(root, actor, owner)
     {
-        return Err(
-            "TRAIN_OWNER_GENERATION_CHANGED: caller is not the authenticated train owner".into(),
-        );
+        return Err(crate::gates::tag(
+            "G-113",
+            "TRAIN_OWNER_GENERATION_CHANGED: caller is not the authenticated train owner",
+        ));
     }
     if train.epic_verification_owner.as_deref() != Some(owner.as_str()) {
-        return Err(
-            "TRAIN_OWNER_SYNC_CONFLICT: repair the owner projection from the accepted transfer"
-                .into(),
-        );
+        return Err(crate::gates::tag(
+            "G-113",
+            "TRAIN_OWNER_SYNC_CONFLICT: repair the owner projection from the accepted transfer",
+        ));
     }
     let identity = identity(actor, owner)?;
     let mut live = snapshot.clone();
@@ -91,14 +92,20 @@ pub(crate) fn require_owner(
         // through its verified retirement chain. Reusing an id/fingerprint or
         // matching a name cannot refresh a process incarnation.
         if actor.id == *owner {
-            return Err("TRAIN_OWNER_GENERATION_CHANGED: actor incarnation changed without a predecessor claim".into());
+            return Err(crate::gates::tag(
+                "G-113",
+                "TRAIN_OWNER_GENERATION_CHANGED: actor incarnation changed without a predecessor claim",
+            ));
         }
         let repo =
             crate::train_guardrails::train_repo_root(root, train).map_err(|e| e.to_string())?;
         live = live.refresh_incarnation(&repo, &live.record.identity, &identity)?;
     }
     if live.record.phase != Phase::Active {
-        return Err("TRAIN_OWNER_DRAINING: admissions are held".into());
+        return Err(crate::gates::tag(
+            "G-113",
+            "TRAIN_OWNER_DRAINING: admissions are held",
+        ));
     }
     let repo = crate::train_guardrails::train_repo_root(root, train).map_err(|e| e.to_string())?;
     live.validate_admission(&repo, &identity)?;

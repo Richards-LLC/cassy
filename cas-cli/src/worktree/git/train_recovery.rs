@@ -151,9 +151,10 @@ impl Snapshot {
         let live = self.coherent(repo)?;
         live.require_actor(prior)?;
         if prior.owner != successor.owner || successor.incarnation.trim().is_empty() {
-            return Err(
-                "TRAIN_OWNER_GENERATION_CHANGED: restart cannot change logical owner".into(),
-            );
+            return Err(crate::gates::tag(
+                "G-113",
+                "TRAIN_OWNER_GENERATION_CHANGED: restart cannot change logical owner",
+            ));
         }
         if prior == successor {
             return Ok(live);

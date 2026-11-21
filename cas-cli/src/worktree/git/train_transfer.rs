@@ -30,7 +30,10 @@ impl Snapshot {
 
     pub(super) fn require_actor(&self, actor: &Identity) -> Result<(), String> {
         if self.record.identity != *actor {
-            return Err("TRAIN_OWNER_GENERATION_CHANGED: owner incarnation changed".into());
+            return Err(crate::gates::tag(
+                "G-113",
+                "TRAIN_OWNER_GENERATION_CHANGED: owner incarnation changed",
+            ));
         }
         Ok(())
     }

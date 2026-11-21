@@ -334,13 +334,13 @@ fn take_ownership(root: &Path, task: &mut Task, taker: &cas_types::Agent) -> Res
     if is_release_train(task) || task.labels.iter().any(|label| label == crate::train_owner::ENROLLED) {
         if let Some(owner) = owner.as_deref() {
             ensure!(crate::cloud::peer_mailbox::owns_recipient(root, taker, owner),
-                "TRAIN_OWNER_TRANSFER_REQUIRED: freeze cannot take over another train owner");
+                crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: freeze cannot take over another train owner"));
             crate::factory_session_scope::require_train_owner(root, task, taker)
                 .map_err(anyhow::Error::msg)?;
             return Ok(None);
         }
         ensure!(!task.labels.iter().any(|label| label == crate::train_owner::ENROLLED),
-            "TRAIN_OWNER_TRANSFER_REQUIRED: enrolled owner projection is missing");
+            crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: enrolled owner projection is missing"));
     }
     if owner.as_deref().is_some_and(|owner| owner == taker.id || owner == taker.name) {
         return Ok(None);

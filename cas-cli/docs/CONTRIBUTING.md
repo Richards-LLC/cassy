@@ -2249,8 +2249,14 @@ blocking pool. Once publication or the checked Closed/AwaitingMerge disposition
 commits, the response adds no post-commit grace: it names that outcome while
 close follow-up, dispatch and notes finish in the background. A committed park
 is still awaiting merge. Gate/audit writes alone do not certify a close, and a
-close still evaluating gates reports `IN_PROGRESS` at its deadline. The final
-continuation outcome is recorded in task notes. Receipts and tracing include
+close still evaluating gates reports `IN_PROGRESS` at its deadline. Retained
+closes return a normal, non-error MCP result with structured `mutation_outcome`,
+`continuation_id`, `task_id`, `elapsed_ms`, `budget_ms` and `timings`. Only a
+checked Closed/AwaitingMerge disposition reports `COMMITTED`; intermediate
+writes remain `IN_PROGRESS`. Read `task action=show id=<task_id>` instead of
+retrying the close. The final `CLOSE_OUTCOME` task note carries the same
+continuation identity, including a late refusal or successful park.
+Receipts and tracing include
 inclusive merge-tree, push, close-gate, dispatch and note timings; `+` means a
 phase is still running and zero means no measured work in that phase yet.
 

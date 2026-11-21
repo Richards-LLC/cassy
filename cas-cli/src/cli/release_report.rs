@@ -1602,9 +1602,10 @@ fn fetch_release_pr(project_root: &Path, repo: &str, version: &str) -> anyhow::R
 }
 
 /// Recognize generated report PDFs, including custom output directories with
-/// their generated Markdown companion. Other files keep normal publication
-/// context; a version-looking filename alone does not confer release identity.
-fn report_pdf_version(path: &Path) -> Option<String> {
+/// their generated Markdown companion. Strict front matter is required to
+/// confer a released epic's identity; a malformed generated report can only
+/// retain focused release context. A filename alone cannot confer either.
+fn report_pdf_version(path: &Path, require_closed_frontmatter: bool) -> Option<String> {
     let path = fs::canonicalize(path).ok()?;
     if path.extension()?.to_str()? != "pdf" {
         return None;
@@ -1613,13 +1614,18 @@ fn report_pdf_version(path: &Path) -> Option<String> {
     let report_directory = path.parent()?.file_name()?.to_str()? == "release-reports";
     let generated_source = || fs::read_to_string(path.with_extension("md")).ok().is_some_and(|source| {
         let mut lines = source.lines().peekable();
-        if lines.peek() == Some(&"---") {
-            lines.next();
-            if !lines.by_ref().any(|line| line == "---") {
-                return false;
+        let title = if require_closed_frontmatter {
+            if lines.peek() == Some(&"---") {
+                lines.next();
+                if !lines.by_ref().any(|line| line == "---") {
+                    return false;
+                }
             }
-        }
-        lines.find(|line| !line.trim().is_empty()).is_some_and(|title| title.starts_with("# ") && title.ends_with(&format!(" v{version}")))
+            lines.find(|line| !line.trim().is_empty())
+        } else {
+            lines.find(|line| line.starts_with("# "))
+        };
+        title.is_some_and(|title| title.starts_with("# ") && title.ends_with(&format!(" v{version}")))
             && source.contains("\n## Evidence and scope\n")
     });
     (report_directory || generated_source()).then_some(version)
@@ -1630,24 +1636,31 @@ fn report_pdf_version(path: &Path) -> Option<String> {
 /// callers can explicitly name --epic. Mixed attachments never borrow a PDF's
 /// release identity for an unrelated deliverable.
 pub(crate) fn publication_epic_for_reports(cas_root: &Path, files: &[PathBuf]) -> Option<String> {
-    // Inference only replaces a focused epic's gate; without focus there is
-    // no publication context to override and no need for a GitHub lookup.
-    crate::ui::factory::preferred_epic_id_from_session_metadata()?;
-    let first = report_pdf_version(files.first()?)?;
-    if files.iter().skip(1).any(|path| report_pdf_version(path).as_deref() != Some(&first)) {
+    // No focus means no context to replace and no GitHub lookup.
+    let focused = crate::ui::factory::preferred_epic_id_from_session_metadata()?;
+    if !files.iter().any(|path| report_pdf_version(path, false).is_some()) {
         return None;
     }
-    let project = cas_root.parent()?;
-    let config = Config::load(cas_root).ok()?;
-    let repo = config.issue_repo_registry_for_project(project).project?;
-    let branch = fetch_release_pr(project, &repo, &first).ok()??.head_ref?;
-    let store = crate::store::open_task_store(cas_root).ok()?;
-    let mut epics = store.list(None).ok()?.into_iter().filter(|task| {
-        task.task_type == cas_types::TaskType::Epic
-            && task.effective_epic_branch() == Some(branch.as_str())
-    });
-    let epic = epics.next()?;
-    epics.next().is_none().then_some(epic.id)
+    // Only recognizable release reports retain this fallback. Ordinary support
+    // files stay unbound; ambiguous/mixed reports cannot escape verification.
+    let released = (|| {
+        let first = report_pdf_version(files.first()?, true)?;
+        if files.iter().skip(1).any(|path| report_pdf_version(path, true).as_deref() != Some(&first)) {
+            return None;
+        }
+        let project = cas_root.parent()?;
+        let config = Config::load(cas_root).ok()?;
+        let repo = config.issue_repo_registry_for_project(project).project?;
+        let branch = fetch_release_pr(project, &repo, &first).ok()??.head_ref?;
+        let store = crate::store::open_task_store(cas_root).ok()?;
+        let mut epics = store.list(None).ok()?.into_iter().filter(|task| {
+            task.task_type == cas_types::TaskType::Epic
+                && task.effective_epic_branch() == Some(branch.as_str())
+        });
+        let epic = epics.next()?;
+        epics.next().is_none().then_some(epic.id)
+    })();
+    released.or(Some(focused))
 }
 
 /// Split one snapshot of issue states into this release's closures.

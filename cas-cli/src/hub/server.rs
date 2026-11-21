@@ -33,6 +33,8 @@ mod secret_request;
 mod account_routes;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
+#[path = "command_receipts.rs"]
+mod command_receipts;
 #[path = "local_image.rs"]
 mod local_image;
 
@@ -258,6 +260,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route(
             "/v1/sessions/{session}/quality",
             get(quality::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/commands/{client_ref}",
+            get(command_receipts::read::<R>).options(preflight::<R>),
         )
         .route(
             "/v1/sessions/{session}/lease",
@@ -720,6 +726,7 @@ async fn machine<R: SessionReadModel>(
                 "tailscale_serve",
                 "cloud_device_suggestions",
                 "supervisor_commands",
+                "retained_command_receipts",
             ],
             transport: metadata.transport,
             cloud_devices: metadata.cloud_devices,

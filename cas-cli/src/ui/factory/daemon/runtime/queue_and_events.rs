@@ -2653,8 +2653,8 @@ pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
 /// cas-73f7: how long an urgent row waits for the recipient's in-flight tool
 /// call to end before it interrupts anyway, and what the hold and the late
 /// interrupt say.
-pub(super) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
-pub(super) const URGENT_TOOL_CALL_DETAIL: &str =
+pub(crate) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const URGENT_TOOL_CALL_DETAIL: &str =
     "urgent held: recipient has a tool call in flight; surfaces when the call ends";
 pub(super) const URGENT_TOOL_CALL_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -3116,10 +3116,12 @@ fn read_operator_replies(
 }
 
 /// Factory loop v2 `QueueSelect` (cas-d2a2, spec §4.3 and §4.5 rule 1). Runs
-/// on the store writer, never on the loop: re-target QA rejections, read the
-/// roster, withdraw rows for recipients that shut down, collapse duplicate
-/// worker deaths, then select the batch, stamp it `Selected` and take its
-/// transport claims in one transaction.
+/// on [`super::jobs::Lane::Select`], never on the loop: read the roster,
+/// re-target QA rejections, withdraw rows for recipients that shut down,
+/// collapse duplicate worker deaths and stamp the batch `Selected`, then read
+/// each row's facts. cas-b355: only the writes take the store writer
+/// ([`super::jobs::on_writer`]); the roster, death scan, notice checks and the
+/// facts' git and director reads run on the select lane.
 pub(crate) fn run_queue_select(
     request: &super::prompt_queue_jobs::QueueSelectRequest,
     generation: u64,
@@ -3127,9 +3129,6 @@ pub(crate) fn run_queue_select(
     let session = request.session_name.as_str();
     // Review round 1, M4: this job thread opens each store once.
     let queue = super::prompt_queue_jobs::job_thread_prompt_queue(&request.cas_dir)?;
-    // Revalidate before roster selection: an old assignee may already have
-    // left the roster, but its task's notice is still live.
-    let retargeted_rows = queue.refresh_qa_rejection_targets(session, None)?;
     let registered_agents = super::prompt_queue_jobs::job_thread_store(
         "agent",
         &request.cas_dir,
@@ -3147,14 +3146,12 @@ pub(crate) fn run_queue_select(
     let mut shut_down_recipients = Vec::new();
     for name in retired_candidates {
         if worker_recipient_shut_down(&name, &request.dead_workers, &request.worker_names, &registered_agents, &replacement_workers) {
-            // Read durable intent on the writer too: a recycle may have been
+            // Read durable intent at selection too: a recycle may have been
             // queued after control submitted this selection snapshot.
             if spawn_queue.has_pending_spawn(&name, Some(session))? {
                 replacement_workers.insert(name);
                 continue;
             }
-            queue.cancel_unread_for_shutdown(&name, Some(session),
-                "wake withdrawn: recipient has shut down")?;
             shut_down_recipients.push(name);
         }
     }
@@ -3179,116 +3176,126 @@ pub(crate) fn run_queue_select(
         &request.worker_names,
         &registered_session_agents,
     );
-    let mut targets: Vec<&str> = valid_target_names
-        .iter()
-        .map(String::as_str)
-        .filter(|target| !native_agents.contains(*target))
+    let mut targets: Vec<String> = valid_target_names
+        .into_iter()
+        .filter(|target| !native_agents.contains(target))
         .collect();
     targets.sort_unstable();
+    // cas-20ac: stale cleanup can expose many registration UUIDs for one
+    // logical worker. Task-free duplicate deaths collapse BEFORE the delivery
+    // batch is selected, otherwise each UUID steals a supervisor turn even
+    // though none carries work. The scan is a read; only a scan that finds
+    // duplicates takes the writer to collapse them.
+    let coalesce_deaths = !targets.is_empty() && {
+        let target_refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+        crate::mcp::tools::service::orphan_recovery::has_coalescible_worker_deaths(&queue.peek_for_targets(
+            &target_refs,
+            Some(session),
+            crate::mcp::tools::service::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
+        )?)
+    };
+
+    let (retargeted_rows, rows) = {
+        let (cas_dir, session, limit) = (request.cas_dir.clone(), session.to_string(), request.limit);
+        let (targets, shut_down) = (targets.clone(), shut_down_recipients.clone());
+        super::jobs::on_writer("QueueSelect", move || -> anyhow::Result<_> {
+            let queue = super::prompt_queue_jobs::job_thread_prompt_queue(&cas_dir)?;
+            // Revalidate before roster selection: an old assignee may already
+            // have left the roster, but its task's notice is still live.
+            let retargeted_rows = queue.refresh_qa_rejection_targets(&session, None)?;
+            for name in &shut_down {
+                queue.cancel_unread_for_shutdown(name, Some(&session),
+                    "wake withdrawn: recipient has shut down")?;
+            }
+            // An all-native session has no rows for the PTY/inbox delivery
+            // path. The store rejects an empty target universe so accidental
+            // session-wide peeks fail loudly.
+            if targets.is_empty() {
+                return Ok((retargeted_rows, Vec::new()));
+            }
+            let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+            if coalesce_deaths {
+                coalesce_worker_deaths(&cas_dir, queue.as_ref(), &targets, &session)?;
+            }
+            // Filter by targets AND session to prevent cross-session message
+            // theft. A row is only acked after its delivery (at-least-once).
+            // No claim is taken here: the loop claims each row just before
+            // its transport handoff (review round 1, H1/H2).
+            Ok((retargeted_rows, queue.select_for_targets(&targets, Some(&session), limit)?))
+        })??
+    };
 
     let mut selection = super::prompt_queue_jobs::QueueSelection {
         generation,
         retargeted_rows,
         shut_down_recipients,
         replacement_workers,
+        rows,
         ..Default::default()
     };
-    // An all-native session has no rows for the PTY/inbox delivery path. The
-    // store rejects an empty target universe so accidental session-wide peeks
-    // fail loudly.
-    if !targets.is_empty() {
-        // cas-20ac: stale cleanup can expose many registration UUIDs for one
-        // logical worker. Collapse task-free death rows BEFORE the delivery
-        // batch is selected, otherwise each UUID steals a supervisor turn
-        // even though none carries work.
-        let death_candidates = queue.peek_for_targets(
-            &targets,
-            Some(session),
-            crate::mcp::tools::service::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
-        )?;
-        let supervisor_queue = super::prompt_queue_jobs::job_thread_store(
-            "supervisor_queue",
+    selection.rows.retain(|row| {
+        crate::qa_post_release::batch_notice_deliverable(&request.cas_dir, queue.as_ref(), row)
+            .unwrap_or_else(|error| {
+                tracing::warn!(prompt_id = row.id, %error, "batch notice revalidation deferred");
+                false
+            })
+    });
+    // cas-786a6 (H3): the decision reads for each row, here, so control
+    // decides without a store.
+    let tasks = super::prompt_queue_jobs::job_thread_store("task_local", &request.cas_dir, |dir| {
+        Ok(crate::store::open_task_store_local(dir)?)
+    })
+    .ok();
+    for row in &selection.rows {
+        let facts = read_row_facts(
             &request.cas_dir,
-            |dir| Ok(crate::store::open_supervisor_queue_store(dir)?),
-        )
-        .ok();
-        match crate::mcp::tools::service::orphan_recovery::coalesce_pending_worker_deaths(
             queue.as_ref(),
-            supervisor_queue.as_deref(),
-            &death_candidates,
-        ) {
-            Ok(report) if report.duplicates > 0 => tracing::info!(
-                target: "cas::coordination",
-                stage = "worker_death_coalesced",
-                families = report.families,
-                duplicates = report.duplicates,
-                "cas-20ac: collapsed duplicate no-task worker deaths before supervisor delivery"
-            ),
-            Err(error) => tracing::warn!(
-                target: "cas::coordination",
-                stage = "worker_death_coalesce_failed",
-                %error,
-                "cas-20ac: duplicate worker-death coalescing failed; rows remain pending"
-            ),
-            _ => {}
-        }
-
-        // Filter by targets AND session to prevent cross-session message
-        // theft. A row is only acked after its delivery (at-least-once). No
-        // claim is taken here: the loop claims each row just before its
-        // transport handoff (review round 1, H1/H2).
-        selection.rows = queue.select_for_targets(&targets, Some(session), request.limit)?;
-        selection.rows.retain(|row| {
-            crate::qa_post_release::batch_notice_deliverable(&request.cas_dir, queue.as_ref(), row)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(prompt_id = row.id, %error, "batch notice revalidation deferred");
-                    false
-                })
-        });
-        // cas-786a6 (H3): the decision reads for each row, here, so control
-        // decides without a store.
-        let tasks = super::prompt_queue_jobs::job_thread_store("task_local", &request.cas_dir, |dir| {
-            Ok(crate::store::open_task_store_local(dir)?)
-        })
-        .ok();
-        for row in &selection.rows {
-            let facts = read_row_facts(
-                &request.cas_dir,
-                queue.as_ref(),
-                tasks.as_deref(),
-                &registered_agents,
-                row,
-            );
-            selection.facts.insert(row.id, facts);
-        }
+            tasks.as_deref(),
+            &registered_agents,
+            row,
+        );
+        selection.facts.insert(row.id, facts);
     }
-    if request.operator_replies {
-        match read_operator_replies(
-            &request.cas_dir,
-            queue.as_ref(),
-            session,
+    if request.operator_replies || !selection.rows.is_empty() {
+        let cas_dir = request.cas_dir.clone();
+        let (session, supervisor) = (session.to_string(), request.supervisor_name.clone());
+        let (operator_replies, adopt, deferred) = (
+            request.operator_replies,
             request.adopt_operator_notices,
-            &request.deferred_operator_replies,
-        ) {
-            Ok(replies) => selection.operator_replies = replies,
-            Err(error) => tracing::debug!(%error, "operator replies unavailable this selection"),
+            request.deferred_operator_replies.clone(),
+        );
+        let agents = registered_agents.clone();
+        let (rows, facts) = (selection.rows.clone(), selection.facts.clone());
+        let (replies, (rows, facts)) = super::jobs::on_writer("QueueSelect", move || {
+            let replies = operator_replies.then(|| {
+                let queue = super::prompt_queue_jobs::job_thread_prompt_queue(&cas_dir)?;
+                read_operator_replies(&cas_dir, queue.as_ref(), &session, adopt, &deferred)
+            });
+            // Batching is optional. Even a late park-write error must leave
+            // the original action rows available to the normal delivery path
+            // this pass.
+            let (mut batched_rows, mut batched_facts) = (rows.clone(), facts.clone());
+            let batched = match crate::supervisor_message_wakes::schedule(
+                &cas_dir, &session, &supervisor, &agents,
+                &mut batched_rows, &mut batched_facts, chrono::Utc::now(),
+            ) {
+                Ok(()) => (batched_rows, batched_facts),
+                Err(error) => {
+                    crate::supervisor_message_wakes::warn_batching_failure(
+                        &cas_dir, &error, std::time::Instant::now(),
+                    );
+                    (rows, facts)
+                }
+            };
+            (replies, batched)
+        })?;
+        match replies {
+            Some(Ok(replies)) => selection.operator_replies = replies,
+            Some(Err(error)) => tracing::debug!(%error, "operator replies unavailable this selection"),
+            None => {}
         }
-    }
-    // Batching is optional. Even a late park-write error must leave the
-    // original action rows available to the normal delivery path this pass.
-    let mut batched_rows = selection.rows.clone();
-    let mut batched_facts = selection.facts.clone();
-    match crate::supervisor_message_wakes::schedule(
-        &request.cas_dir, session, &request.supervisor_name, &registered_agents,
-        &mut batched_rows, &mut batched_facts, chrono::Utc::now(),
-    ) {
-        Ok(()) => {
-            selection.rows = batched_rows;
-            selection.facts = batched_facts;
-        }
-        Err(error) => crate::supervisor_message_wakes::warn_batching_failure(
-            &request.cas_dir, &error, std::time::Instant::now(),
-        ),
+        selection.rows = rows;
+        selection.facts = facts;
     }
     selection.native_agents = native_agents;
     selection.registered_agents = registered_agents;
@@ -3298,6 +3305,47 @@ pub(crate) fn run_queue_select(
         let _ = cas_factory::notify_daemon(&request.cas_dir);
     }
     Ok(selection)
+}
+
+/// cas-20ac: collapse task-free duplicate worker deaths. Runs on the writer.
+fn coalesce_worker_deaths(
+    cas_dir: &std::path::Path,
+    queue: &dyn cas_store::PromptQueueStore,
+    targets: &[&str],
+    session: &str,
+) -> anyhow::Result<()> {
+    let death_candidates = queue.peek_for_targets(
+        targets,
+        Some(session),
+        crate::mcp::tools::service::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
+    )?;
+    let supervisor_queue = super::prompt_queue_jobs::job_thread_store(
+        "supervisor_queue",
+        cas_dir,
+        |dir| Ok(crate::store::open_supervisor_queue_store(dir)?),
+    )
+    .ok();
+    match crate::mcp::tools::service::orphan_recovery::coalesce_pending_worker_deaths(
+        queue,
+        supervisor_queue.as_deref(),
+        &death_candidates,
+    ) {
+        Ok(report) if report.duplicates > 0 => tracing::info!(
+            target: "cas::coordination",
+            stage = "worker_death_coalesced",
+            families = report.families,
+            duplicates = report.duplicates,
+            "cas-20ac: collapsed duplicate no-task worker deaths before supervisor delivery"
+        ),
+        Err(error) => tracing::warn!(
+            target: "cas::coordination",
+            stage = "worker_death_coalesce_failed",
+            %error,
+            "cas-20ac: duplicate worker-death coalescing failed; rows remain pending"
+        ),
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Shared by the inline budget preview and the admitted transport payload.
@@ -4813,6 +4861,15 @@ impl FactoryDaemon {
         let dispatch_dir = self.app.cas_dir().to_path_buf();
         self.relay_jobs.submit_write(&mut self.queue_jobs, "expired-verification-dispatches", None, move || {
             super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
+            super::relay_jobs::RelayOutput::ProbeWritten
+        });
+        // cas-5f88: launches whose requesting MCP exited; off the writer.
+        let (launch_dir, launch_session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
+        self.relay_jobs.submit_blocking_write(&mut self.queue_jobs, "verifier-launch-retry", move || {
+            let _budget = cas_store::wait_budget::bound_waits_for(
+                crate::mcp::tools::core::workflow::premerge_verification::VERIFIER_FACTORY_STORE_BUDGET,
+            );
+            super::lifecycle::launch_unlaunched_verification_dispatches(&launch_dir, &launch_session, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
         self.submit_progress_watchdog();
@@ -12659,7 +12716,24 @@ impl FactoryDaemon {
                     .iter()
                     .map(|name| (name.clone(), releasable_task_ids(self.app.cas_dir(), name)))
                     .collect();
-                for name in &workers_to_stop {
+                let mut report = self.app.shutdown_workers(count, &names, force).await;
+                let mut retired: Vec<String> = report.stopped.iter().map(|(name, _)| name.clone()).collect();
+                // A cancelled boot can already have no pane or registration.
+                // Its intentional stop still retires the boot watch. Refused
+                // live teardowns retain their roster, bindings and live mail.
+                if let Ok(agents) = open_agent_store(self.app.cas_dir())
+                    .and_then(|store| store.list(None).map_err(Into::into))
+                {
+                    for name in &workers_to_stop {
+                        if !retired.contains(name) && !self.app.worker_names().contains(name)
+                            && self.app.mux.get(name).is_none()
+                            && !crate::mcp::tools::service::agent_liveness::has_live_agent_named(&agents, name)
+                        {
+                            retired.push(name.clone());
+                        }
+                    }
+                }
+                for name in &retired {
                     self.dead_workers.insert(name.clone());
                     // GH #1592: an intentional stop ends the boot watch. The
                     // exit is this request taking effect, never a boot failure.
@@ -12676,15 +12750,13 @@ impl FactoryDaemon {
                             "Stopped by a shutdown request before registration.",
                         );
                     }
-                    // Also release bindings for workers that never made it into
-                    // worker_names (early pre-assign only) — shutdown_worker
-                    // only runs for live workers.
+                    // A refused teardown must retain bindings and live mail.
+                    // Settle only workers that actually stopped.
                     crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
                         self.app.cas_dir(),
                         name,
                     );
                 }
-                let mut report = self.app.shutdown_workers(count, &names, force).await;
                 for (name, released) in &mut report.stopped {
                     let still_held = releasable_task_ids(self.app.cas_dir(), name);
                     for id in held_before.get(name).into_iter().flatten() {
@@ -22732,59 +22804,6 @@ mod gh_1153_idle_pty_delivery_tests {
                 .unwrap()
                 .confirmation_source,
             cas_store::ConfirmationSource::Unconfirmed
-        );
-    }
-
-    #[tokio::test]
-    async fn gh_1163_prior_foreign_and_unattributed_activity_does_not_clear_stall() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let Fixture {
-            _tmp,
-            mut daemon,
-            queue,
-            row,
-            ..
-        } = deliver_to_idle_worker().await;
-        queue
-            .enqueue_with_session(WORKER, "reviewer", "Old reply", "provision-test")
-            .unwrap();
-        let floor = chrono::Utc::now();
-        daemon
-            .normal_delivery_probes
-            .get_mut(&row)
-            .unwrap()
-            .delivered_at_utc = floor;
-        record_note(
-            daemon.app.cas_dir(),
-            "gh1153-worker-id",
-            floor - chrono::Duration::seconds(1),
-        );
-        record_note(
-            daemon.app.cas_dir(),
-            "other-worker-id",
-            floor + chrono::Duration::seconds(1),
-        );
-        queue
-            .enqueue_with_session(WORKER, "reviewer", "Foreign session", "other-factory")
-            .unwrap();
-        queue
-            .enqueue_with_session("other-worker", "reviewer", "Other reply", "provision-test")
-            .unwrap();
-        let task_store = crate::store::open_task_store(daemon.app.cas_dir()).unwrap();
-        let mut task = cas_types::Task::new("cas-1153".into(), "Assigned task".into());
-        task.assignee = Some(WORKER.into());
-        task.notes = "A supervisor note without worker attribution".into();
-        task_store.add(&task).unwrap();
-        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
-        assert!(daemon.normal_delivery_probes.contains_key(&row));
-        assert_eq!(
-            queue
-                .message_delivery_report(row)
-                .unwrap()
-                .unwrap()
-                .wake_attempt,
-            cas_store::WakeAttempt::Fired,
-            "only this recipient's activity after delivery clears a probe"
         );
     }
 

@@ -1594,3 +1594,91 @@ fn cas_d49a_merged_delivery_with_exited_job_wakes_once_across_lost_reads_and_res
     assert_eq!(next.len(), 1, "a new tip is a new episode");
     assert!(!next[0].text.contains("Detached job"), "the same exit is reported once: {}", next[0].text);
 }
+
+/// GH #2260: --auto can publish immediately on an unprotected target.
+/// The actual pre-tool boundary must judge this PR head's check evidence,
+/// including when independent QA is disabled and no required checks exist.
+#[test]
+fn raw_pr_merge_waits_for_pr_head_checks_without_protection_gh2260() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    std::fs::write(root.join("config.toml"), "[qa]\nindependent_pass=false\n").unwrap();
+    env.set("CAS_ROOT", &root);
+    let gh = dir.path().join("gh");
+    let response = dir.path().join("pr.json");
+    env.set("CAS_2260_RESPONSE", &response);
+    crate::test_paths::warm_stub(&gh, "#!/bin/sh\n[ \"$1 $2\" = 'pr view' ] || exit 92\n/bin/cat \"$CAS_2260_RESPONSE\"\n");
+    env.set("CAS_QA_GH", &gh);
+    // Captured verbatim from gh pr view 1920 --repo Richards-LLC/cassy
+    // --json headRefOid,statusCheckRollup on 2026-11-21. Variant rows alter
+    // only check outcomes; the response envelope and CheckRun shape are real.
+    let captured: serde_json::Value = serde_json::from_str(include_str!("fixtures/gh-pr-view-1920.json")).unwrap();
+    let head = captured["headRefOid"].as_str().unwrap();
+    let check_run = |status: &str, conclusion: serde_json::Value| {
+        let mut check = captured["statusCheckRollup"][0].clone();
+        check["status"] = status.into();
+        check["conclusion"] = conclusion;
+        if status == "IN_PROGRESS" { check["completedAt"] = serde_json::Value::Null; }
+        check
+    };
+    for role in ["supervisor", "worker"] {
+        for (check, code) in [
+            (check_run("IN_PROGRESS", serde_json::Value::Null), Some("PR_CI_PENDING")),
+            (check_run("COMPLETED", "FAILURE".into()), Some("PR_CI_FAILED")),
+            (serde_json::json!({"__typename":"StatusContext","context":"backend","state":"PENDING"}), Some("PR_CI_PENDING")),
+            (serde_json::json!({"__typename":"StatusContext","context":"backend","state":"ERROR"}), Some("PR_CI_FAILED")),
+            (check_run("COMPLETED", "SUCCESS".into()), None),
+            (check_run("COMPLETED", "SKIPPED".into()), None),
+        ] {
+            let mut payload = captured.clone();
+            payload["statusCheckRollup"].as_array_mut().unwrap().push(check.clone());
+            std::fs::write(&response, serde_json::to_vec(&payload).unwrap()).unwrap();
+            let input = crate::hooks::HookInput {
+                session_id: "unprotected-pr-merge".into(),
+                cwd: dir.path().display().to_string(),
+                hook_event_name: "PreToolUse".into(), tool_name: Some("Bash".into()),
+                agent_role: Some(role.into()),
+                tool_input: Some(serde_json::json!({"command":"gh pr merge 2260 --repo acme/private --auto --merge"})),
+                ..Default::default()
+            };
+            let output = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&root)).unwrap();
+            let output = serde_json::to_value(output).unwrap();
+            let specific = &output["hookSpecificOutput"];
+            if let Some(code) = code {
+                assert_eq!(specific["permissionDecision"], "deny", "{role} {check}: {output}");
+                let reason = specific["permissionDecisionReason"].as_str().unwrap();
+                assert!(reason.contains(code), "{reason}");
+                assert!(reason.contains(head), "{reason}");
+                let name = check["name"].as_str().or_else(|| check["context"].as_str()).unwrap();
+                assert!(reason.contains(name), "{reason}");
+            } else {
+                assert_ne!(specific["permissionDecision"], "deny", "{role} {check}: {output}");
+            }
+        }
+    }
+    drop(env);
+    // Exercise the active-worker producer, which supersedes the idle relay.
+    // Assert executable command routing/head identity, never prose wording.
+    for target in ["main", "master"] {
+        let mut f = Fixture::new();
+        f.in_progress();
+        git(f.repo.path(), &["branch", target, "epic/test"]);
+        git(f.repo.path(), &["push", "-q", "origin", target]);
+        let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.deliverables.work_target.as_mut().unwrap().target_branch = target.into();
+        store.update(&task).unwrap();
+        f.app.set_director_data_for_test(DirectorData::load_with_stores_for_project(
+            &f.app.cas_dir, None, false, None, None,
+        ).unwrap());
+        let prompt = f.relay().into_iter().find(|prompt| prompt.is_merge_ready()).unwrap();
+        let evidence = prompt.merge_alert.as_ref().unwrap();
+        let commands: Vec<_> = prompt.text.split('`').skip(1).step_by(2).collect();
+        let merges: Vec<_> = commands.iter().flat_map(|command| crate::qa_pass::github_gate::github_merges_in(command)).collect();
+        assert_eq!(merges.len(), 1, "{target}: {:?}", commands);
+        assert_eq!(merges[0].match_head.as_deref(), Some(evidence.factory_tip.as_str()));
+        assert!(commands.iter().any(|command| command.split_whitespace().collect::<Vec<_>>()
+            == ["gh", "pr", "view", "<number>", "--json", "headRefOid,statusCheckRollup"]));
+    }
+}

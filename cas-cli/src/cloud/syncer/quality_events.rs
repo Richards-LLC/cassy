@@ -63,6 +63,8 @@ pub struct QualitySyncSummary {
     pub refused: usize,
     /// The server returned 404/501 for a direction of this route.
     pub capability_absent: bool,
+    /// Another round held the quality-sync lock, so this one did not run.
+    pub deferred: bool,
 }
 
 #[derive(Debug, Deserialize)]

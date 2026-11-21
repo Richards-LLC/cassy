@@ -751,6 +751,37 @@ mod reused_factory_branch_tests {
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), tip);
     }
 
+    /// cas-2c75: a reused lane whose only off-target commit already shipped on
+    /// origin's trunk, and which lacks the epic's tip, starts from the epic tip
+    /// rather than resuming on its stale base.
+    #[test]
+    fn released_only_lane_resets_to_the_moved_epic_cas_2c75() {
+        let repo = repo();
+        let origin = tempfile::tempdir().expect("origin dir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(repo.path(), &["remote", "add", "origin", &origin.path().display().to_string()]);
+        git(repo.path(), &["push", "origin", "main"]);
+        git(repo.path(), &["checkout", "-b", "epic/train"]);
+        std::fs::write(repo.path().join("epic"), "epic\n").expect("epic file");
+        git(repo.path(), &["add", "epic"]);
+        git(repo.path(), &["commit", "-m", "epic work"]);
+        git(repo.path(), &["checkout", "-b", "factory/test-worker", "main"]);
+        std::fs::write(repo.path().join("released"), "released\n").expect("released file");
+        git(repo.path(), &["add", "released"]);
+        git(repo.path(), &["commit", "-m", "released fix"]);
+        git(repo.path(), &["push", "origin", "factory/test-worker:main"]);
+        let identity = super::close_ops::TaskCommitIdentity {
+            task_id: Some("cas-2c75".into()),
+            ..Default::default()
+        };
+
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "epic/train", Some(&identity), None, |_| None)
+            .expect("a released-only lane starts");
+
+        assert_eq!(result, ReusedFactoryBranchStart::Reset);
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), git(repo.path(), &["rev-parse", "epic/train"]));
+    }
+
     #[test]
     fn matching_target_base_is_left_untouched() {
         let repo = repo();

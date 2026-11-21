@@ -460,3 +460,27 @@ async fn unsupported_estimates_hold_their_cursor_without_blocking_other_events()
         assert_eq!(cloud.0.lock().unwrap().rows.len(),3);
     }).await.unwrap();
 }
+
+/// cas-2c75: an explicit round that finds another one holding the quality lock
+/// reports it deferred; an empty summary would read as "nothing new".
+#[tokio::test(flavor = "multi_thread")]
+async fn busy_quality_lock_reports_a_deferred_round_cas_2c75() {
+    let server = MockServer::start().await;
+    let cloud = MockCloud::default();
+    Mock::given(TeamRoute).respond_with(cloud.clone()).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let syncer = machine(&root, &endpoint, "acme/this");
+        emit(&root, "held");
+        let lease = crate::cloud::sync_lease::SyncLease::try_acquire_quality(&root).unwrap().unwrap();
+        let busy = syncer.sync_quality_events(true).unwrap();
+        assert!(busy.deferred && busy.pushed == 0, "{busy:?}");
+        drop(lease);
+        let ran = syncer.sync_quality_events(true).unwrap();
+        assert!(!ran.deferred && ran.pushed == 1, "{ran:?}");
+    })
+    .await
+    .unwrap();
+}

@@ -2564,6 +2564,52 @@ mod tests {
             Err("this is subsequent target progress, not the delivery landing".to_string())
         );
     }
+    /// cas-2c75: a merge retried after its target moved builds against the new
+    /// target tip; it never joins a build still running for the old one.
+    #[test]
+    fn candidate_for_a_moved_target_does_not_join_the_stale_build_cas_2c75() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let target = commit_file(repo, ".gitignore", ".cas/\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
+        run(repo, &["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut task = Task::new("cas-2c75".into(), "Moved target".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(source.clone());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let digest = context_digest(&root, &task).unwrap();
+        let stale = root.join("verification-candidates").join(bound_candidate_key(&task.id,
+            &repo.canonicalize().unwrap(), "factory/w", &source, "main", &target, &digest, None).unwrap());
+        // The build for the old target waits on its candidate lock.
+        let held = crate::worktree::target_lock::lock_delivery_target(
+            &root, repo, &format!("candidate:{}", stale.display()),
+        ).unwrap();
+        let first = {
+            let (core, task, repo, digest) = (core.clone(), task.clone(), repo.to_path_buf(), digest.clone());
+            std::thread::spawn(move || core.build_verification_candidate(&task, &repo, "factory/w", "main", digest, None))
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while candidate_preparations().lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the first build never started");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let moved = commit_file(repo, "README.md", "moved\n", "target moves");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            drop(held);
+        });
+        let candidate = core.build_verification_candidate(&task, repo, "factory/w", "main", digest, None);
+        release.join().unwrap();
+        let _ = first.join().unwrap();
+        assert_eq!(candidate.unwrap().target_sha, moved, "the retry joined the stale-target build");
+    }
+
     #[test]
     fn slow_candidate_build_returns_hold_and_reuses_cache_cas_352b() {
         use std::sync::mpsc;

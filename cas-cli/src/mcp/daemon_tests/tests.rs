@@ -340,6 +340,53 @@ async fn cloud_pull_ticks_while_indexing_is_held_cas_154b() {
     assert!(quality_released_entity.load(Ordering::SeqCst), "quality events retained the entity-sync lease");
 }
 
+/// cas-2c75: a shutdown that lands while the entity-sync worker is mid-pull
+/// lets that pull finish, so the final sync gets the store lease and runs
+/// instead of finding it busy and reporting nothing pending.
+#[tokio::test]
+async fn shutdown_mid_sync_still_runs_the_final_sync_cas_2c75() {
+    use std::sync::atomic::AtomicUsize;
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(&env.home().join("project")).unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(&root, "shutdown-sync").unwrap();
+    let server = MockServer::start().await;
+    let team = "550e8400-e29b-41d4-a716-446655440000";
+    let mut cloud = CloudConfig::default();
+    cloud.endpoint = server.uri();
+    cloud.token = Some("synthetic-shutdown-token".into());
+    cloud.set_team(team, "fixture-team");
+    cloud.save_to_cas_dir(&root).unwrap();
+    // Pull 1 is the startup sync; pull 2 is the worker's, still in flight at
+    // shutdown; pull 3 can only be the final sync.
+    let pulls = Arc::new(AtomicUsize::new(0));
+    let worker_pulling = Arc::new(tokio::sync::Notify::new());
+    let (count, pulling) = (pulls.clone(), worker_pulling.clone());
+    Mock::given(method("GET")).and(path(format!("/api/teams/{team}/sync/pull")))
+        .respond_with(move |_: &wiremock::Request| {
+            let body = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [], "pulled_at": "2026-11-21T00:00:00Z",
+            }));
+            if count.fetch_add(1, Ordering::SeqCst) == 1 {
+                pulling.notify_one();
+                return body.set_delay(Duration::from_secs(3));
+            }
+            body
+        }).mount(&server).await;
+    let daemon = Arc::new(EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root, index_code: false, min_idle_secs: 0, code_index_interval_secs: 1000,
+        cloud_sync_interval_secs: 1, maintenance_interval_secs: 10000,
+        index_history: false, index_history_docs: false, embed_drain: false,
+        ..Default::default()
+    }));
+    let worker = daemon.clone();
+    let run = tokio::spawn(async move { worker.run().await });
+    tokio::time::timeout(Duration::from_secs(20), worker_pulling.notified()).await.unwrap();
+    daemon.shutdown();
+    tokio::time::timeout(Duration::from_secs(30), run).await.unwrap().unwrap().unwrap();
+    assert_eq!(pulls.load(Ordering::SeqCst), 3, "the final sync found the store lease still held");
+}
+
 /// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
 /// around queue writes and HTTP. A hub sweep already in flight must win;
 /// after it releases, the daemon must sync and keep competing holders out.

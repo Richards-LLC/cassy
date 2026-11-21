@@ -10539,9 +10539,12 @@ impl CasCore {
                 // the recovery decision; the content gate above has already proven
                 // (or reviewed the drop of) its tree effect, so one close carries
                 // both authorizations. Tier 2 keeps its retained adversarial review.
+                // The cited commit may be the containing merge, so the recorded
+                // delivery anchor itself must also be on the target.
                 let contained_recovery = (supervisor_override && !tier_two && !is_epic
                     && !in_cassy_merge_close()
-                    && task.deliverables.factory_branch_anchor.is_some()
+                    && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor|
+                        commit_is_merged_into_parent(&close_project_root, anchor, &resolved_parent_branch))
                     && self.resolve_live_supervisor_authority().is_ok())
                 .then_some(req.commit_receipt.as_deref())
                 .flatten()

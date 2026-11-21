@@ -2326,17 +2326,19 @@ async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_g
     let mut errored = cas_types::Verification::new("ver-errored".into(), TASK.into());
     errored.status = VerificationStatus::Error;
     supervisor.open_verification_store().unwrap().add(&errored).unwrap();
-    let close_with = |reason: String| supervisor.cas_task_close(Parameters(TaskCloseRequest {
+    let close_with = |receipt: &str, reason: String| supervisor.cas_task_close(Parameters(TaskCloseRequest {
         no_delivery: None,
         id: TASK.into(),
         reason: Some(reason),
-        commit_receipt: Some(f.final_tip.clone()),
+        commit_receipt: Some(receipt.into()),
         supervisor_override: Some(true),
         stranded_branch_override: None,
         search_manifest: None,
     }));
     let tasks = open_task_store(&cas_dir).unwrap();
-    let unintegrated = text(close_with(format!("reviewed-drop: {} -- early", f.final_tip)).await.unwrap());
+    // A target commit cited before the delivery itself lands authorizes nothing.
+    let base = git(repo, &["rev-parse", "main"]);
+    let unintegrated = text(close_with(&base, format!("reviewed-drop: {base} -- early")).await.unwrap());
     assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{unintegrated}");
     // The merge fact lands, but a target-side resolution replaces its footer.
     git(repo, &["merge", "--no-ff", "-s", "ours", BRANCH, "-m", "land delivery by git"]);
@@ -2344,10 +2346,10 @@ async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_g
     git(repo, &["add", "footer.css"]);
     git(repo, &["commit", "-qm", "supersede footer spacing"]);
     let replacement = git(repo, &["rev-parse", "HEAD"]);
-    let unreviewed = text(close_with("Reviewed the integrated historical delivery and missing pre-merge approval".into()).await.unwrap());
+    let unreviewed = text(close_with(&f.final_tip, "Reviewed the integrated historical delivery and missing pre-merge approval".into()).await.unwrap());
     assert!(crate::gates::codes_in(&unreviewed).contains(&"G-56"), "{unreviewed}");
     assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed);
-    let closed = text(close_with(format!("reviewed-drop: {replacement} -- later footer spacing supersedes it")).await.unwrap());
+    let closed = text(close_with(&f.final_tip, format!("reviewed-drop: {replacement} -- later footer spacing supersedes it")).await.unwrap());
     let task = tasks.get(TASK).unwrap();
     assert_eq!(task.status, TaskStatus::Closed, "{closed}");
     assert!(task.notes.contains(&replacement) && task.notes.contains(&f.final_tip), "{}", task.notes);

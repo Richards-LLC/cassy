@@ -300,6 +300,9 @@ export class SupervisorCommandSession {
   supported = false;
   private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly endedCommands = new Map<string, string>();
+  /** A queued receipt can predate typing. Retain that uncertainty through
+   * disconnect errors until a newer per-command submission/outcome arrives. */
+  private readonly queuedCommands = new Set<string>();
   private readonly exitSentAt = new Map<string, number>();
   /** Commands the daemon has answered with a receipt, so a later error can't mean "never ran". */
   private readonly acknowledged = new Set<string>();
@@ -334,6 +337,8 @@ export class SupervisorCommandSession {
     if (!current || current.command !== receipt.command) return;
     if (current.phase === "cancelled") return;
     if (current.phase === "refused" && receipt.phase !== "refused") return;
+    if (receipt.phase === "queued") this.queuedCommands.add(receipt.client_ref);
+    else if (receipt.phase === "submitted" || receipt.phase === "observed") this.queuedCommands.delete(receipt.client_ref);
     this.receipts.set(receipt.client_ref, receipt);
     this.acknowledged.add(receipt.client_ref);
     if (settlesToToast(receipt) && !this.dismissed.has(receipt.client_ref)) {
@@ -367,10 +372,10 @@ export class SupervisorCommandSession {
   }
   private settleEnded(receipt: CommandReceipt, reason: string): void {
     if (!this.canSettleEnded(receipt)) return;
-    const queued = receipt.phase === "queued";
-    receipt.phase = queued ? "refused" : receipt.command === "exit" ? "observed" : "unconfirmed";
+    const queued = receipt.phase === "queued" || this.queuedCommands.has(receipt.client_ref);
+    receipt.phase = !queued && receipt.command === "exit" ? "observed" : "unconfirmed";
     receipt.interactive = false;
-    receipt.detail = queued ? `Command not sent: session ended (${reason}) before /${receipt.command} was typed.` : receipt.command === "exit"
+    receipt.detail = queued ? `Session ended (${reason}); /${receipt.command} was last reported queued, so submission is unconfirmed.` : receipt.command === "exit"
       ? `Session ended after Exit (${reason}). See the session-ended receipt.`
       : `Session ended (${reason}); /${receipt.command} completion was not confirmed.`;
     this.stopPoll(receipt.client_ref);

@@ -1,4 +1,4 @@
 title: Commander queued commands survive daemon restart
-statement: A queued supervisor command survives restart or reexec under the same session, supervisor, device and command reference, is typed once at the next native turn boundary, and is never replayed after an uncertain submission. A queued command abandoned when the supervisor exits shows Not sent.
+statement: A queued supervisor command survives restart or reexec under the same session, supervisor, device and command reference, is typed once at the next native turn boundary, and is never replayed after an uncertain submission. Only an authoritative per-command abandonment receipt shows Not sent. A stale Queued status at session end remains uncertain and accepts late Submitted or Observed evidence.
 found: 2026-11-21
 tasks: [cas-7d2d]

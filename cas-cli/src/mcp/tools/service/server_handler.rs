@@ -1785,17 +1785,29 @@ mod tests {
                 sender.task(Parameters(request)).await.unwrap();
                 std::future::pending().await
             };
-            let error = service
+            let result = service
                 .call_with_deadline(
                     "task",
                     arguments.as_object(),
                     std::time::Duration::from_millis(100),
                     call,
                 )
-                .await
-                .unwrap_err();
+                .await;
 
-            assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
+            let data = if arguments["action"] == "start" {
+                // A terminal start now acknowledges assignment acceptance.
+                // Create/note deadline errors still report their own commits.
+                let answer = result.unwrap();
+                assert_eq!(answer.is_error, Some(false));
+                let data = answer.structured_content.unwrap();
+                assert_eq!(data["action"], "start");
+                assert_eq!(data["task_id"], "cas-note");
+                assert_eq!(data["recovery"]["kind"], "start_context");
+                data
+            } else {
+                result.unwrap_err().data.unwrap()
+            };
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
         }
         assert_eq!(tasks.list(None).unwrap().len(), 2);
         assert_eq!(tasks.get("cas-note").unwrap().status, crate::types::TaskStatus::InProgress);

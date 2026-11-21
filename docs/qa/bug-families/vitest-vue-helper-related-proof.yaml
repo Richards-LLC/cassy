@@ -1,0 +1,6 @@
+title: Vue components and Vitest helpers select related specs for focused proof
+statement: G-61 suggests a runnable bounded related command for Vue source and helpers, including helpers under __tests__, and accepts its receipt.
+tasks: [cas-7794]
+fixed_by: [cas-7794]
+journeys: [FACTORY-CLOSE]
+invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]

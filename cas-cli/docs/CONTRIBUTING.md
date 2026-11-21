@@ -2872,6 +2872,10 @@ For a Jest source input, the suggested command is `jest --findRelatedTests
 <source file>`: the capped runner executes only that source's test dependents
 from its Jest config root and records proof for that source. It never drops the
 source selector to run the whole package; an empty related selection is not proof.
+Vitest source inputs, including Vue components and shared test helpers, use
+`vitest related --run <source file>` with the same source-specific receipt.
+Only Jest treats an arbitrary file under `__tests__` as a test by default;
+Vitest helpers there retain their source role and select importing specs.
 That wider set runs once and records a separate widened receipt at the tested
 commit. Park consumes it without executing tests; identified changed tests still
 owe five consecutive passes. Caller Jest name filters cannot narrow this proof.

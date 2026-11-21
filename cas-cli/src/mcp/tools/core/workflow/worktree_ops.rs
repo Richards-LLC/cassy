@@ -8893,6 +8893,10 @@ mod tests {
         let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
         agents.register(&owner).unwrap();
         core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let executor = cas_types::Agent::new("executor".into(), "executor".into());
+        agents.register(&executor).unwrap();
+        let executor_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        executor_core.bind_agent_identity(executor.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
         let target = |branch: &str| cas_types::WorkTarget { repo_selector: "project:merge-e721".into(), target_branch: branch.into() };
         let mut epic = cas_types::Task::new("cas-e721-epic".into(), "epic".into());
         epic.task_type = cas_types::TaskType::Epic;
@@ -8915,12 +8919,12 @@ mod tests {
             core.cas_task_create_with_target(request, repo_arg, branch, true).await.unwrap();
             let child = tasks.list(None).unwrap().into_iter().find(|task| task.title == case).unwrap();
             assert_eq!(effective_task_work_target(&child, Some(&epic)), Some(target(expected)), "{case}: create");
-            core.cas_task_start(Parameters(crate::mcp::tools::IdRequest { id: child.id.clone() })).await.unwrap();
+            executor_core.cas_task_start(Parameters(crate::mcp::tools::IdRequest { id: child.id.clone() })).await.unwrap();
             let started = tasks.get(&child.id).unwrap();
             assert_eq!(started.deliverables.work_target, Some(target(expected)), "{case}: start");
             let resolved = super::resolve_system_b_merge_target(
                 tasks.as_ref() as &dyn TaskStore, agents.as_ref() as &dyn AgentStore,
-                Some(&child.id), &owner.id, false, || "main".to_string(),
+                Some(&child.id), &executor.id, false, || "main".to_string(),
             ).unwrap();
             assert_eq!(resolved.branch, expected, "{case}: merge");
             assert_eq!(resolved.trunk_fallback, expected == "main");
@@ -8930,7 +8934,7 @@ mod tests {
             let renamed = if expected == "main" { "main" } else { "epic/renamed" };
             assert_eq!(effective_task_work_target(&started, Some(&epic)), Some(target(renamed)), "{case}: rename");
             assert_eq!(super::resolve_system_b_merge_target(
-                tasks.as_ref(), agents.as_ref(), Some(&child.id), &owner.id, false, || "main".to_string(),
+                tasks.as_ref(), agents.as_ref(), Some(&child.id), &executor.id, false, || "main".to_string(),
             ).unwrap().branch, renamed, "{case}: renamed merge");
         }
 

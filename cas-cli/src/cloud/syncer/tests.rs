@@ -6,6 +6,96 @@ use crate::cloud::syncer::*;
 use crate::store::TaskStore;
 use crate::types::{Task, TaskStatus};
 
+/// A receiver can append a note after an owner closed the same delivery.
+/// That body clock must not leave G-21 reading the old blocked status.
+#[tokio::test]
+async fn peer_receipted_close_reaches_dependency_gate_cas_223c() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};
+    use cas_types::{Dependency, DependencyType, PortablePremergeApproval, WorkTarget};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let project = "peer-terminal-fixture";
+    for team in [false, true] {
+        for case in ["merged", "unmerged", "open", "new-cycle", "foreign"] {
+            let owner_dir = tempfile::tempdir().unwrap();
+            let owner_root = crate::store::init_cas_dir(owner_dir.path()).unwrap();
+            let mut closed = Task::new(format!("cas-223c-{case}"), "owner body".into());
+            closed.origin_project = Some(project.into());
+            closed.status = TaskStatus::Closed;
+            closed.updated_at -= chrono::Duration::minutes(1);
+            closed.closed_at = Some(closed.updated_at);
+            closed.close_reason = Some("PASS immutable delivery receipt".into());
+            closed.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            closed.deliverables.parked_branch = Some("factory/peer-worker".into());
+            closed.deliverables.work_target = Some(WorkTarget {
+                repo_selector:format!("project:{project}"), target_branch:"epic/train".into(),
+            });
+            closed.deliverables.green_merge_commit = Some("b".repeat(40));
+            closed.deliverables.premerge_approval = Some(PortablePremergeApproval {
+                verdict_id:"ver-peer".into(), dispatch_id:"vdispatch-peer".into(),
+                approved_anchor:"a".repeat(40), delivery_cycle:0,
+            });
+            let mut local = closed.clone();
+            local.title = "newer receiver body".into();
+            local.notes = "[2026-11-21 21:00] Receiver discovery after the owner close".into();
+            local.status = if case == "open" { TaskStatus::Open } else { TaskStatus::Blocked };
+            local.closed_at = None;
+            local.close_reason = None;
+            local.deliverables.green_merge_commit = None;
+            local.deliverables.premerge_approval = None;
+            local.updated_at = chrono::Utc::now();
+            if case == "new-cycle" { local.deliverables.delivery_cycle = 1; }
+            if case == "unmerged" { closed.deliverables.green_merge_commit = None; }
+            if case == "foreign" { closed.origin_project = Some("another-project".into()); }
+            let owner_tasks = crate::store::open_task_store_local(&owner_root).unwrap();
+            owner_tasks.add(&closed).unwrap();
+            let remote = owner_tasks.get(&closed.id).unwrap();
+            assert!(remote.updated_at < local.updated_at);
+            let server = MockServer::start().await;
+            let endpoint = if team { "/api/teams/peer-team/sync/pull" } else { "/api/sync/pull" };
+            Mock::given(method("GET")).and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tasks":[remote], "team_id":"peer-team", "pulled_at":chrono::Utc::now().to_rfc3339(), "status":"ok"
+                }))).mount(&server).await;
+            let receiver_dir = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(receiver_dir.path()).unwrap();
+            std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id='{project}'\n")).unwrap();
+            let tasks = crate::store::open_task_store_local(&root).unwrap();
+            tasks.add(&local).unwrap();
+            let dependent = Task::new("cas-223c-dependent".into(), "dependent".into());
+            tasks.add(&dependent).unwrap();
+            tasks.add_dependency(&Dependency::new(dependent.id.clone(), local.id.clone(), DependencyType::Blocks)).unwrap();
+            assert_eq!(crate::mcp::tools::core::task::open_blocker_ids(&*tasks, &dependent.id).unwrap(), vec![local.id.clone()]);
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
+                endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
+            }, CloudSyncerConfig::default(), project.into(), &root);
+            for _ in 0..2 {
+                let entries = crate::store::open_store_local(&root).unwrap();
+                let rules = crate::store::open_rule_store_local(&root).unwrap();
+                let skills = crate::store::open_skill_store_local(&root).unwrap();
+                let result = if team {
+                    syncer.pull_team("peer-team", project, &*entries, &*tasks, &*rules, &*skills)
+                } else {
+                    syncer.pull(&*entries, &*tasks, &*rules, &*skills,
+                        &*crate::store::open_spec_store(&root).unwrap(), &*crate::store::open_event_store(&root).unwrap(),
+                        &*crate::store::open_prompt_store(&root).unwrap(), &*crate::store::open_file_change_store(&root).unwrap(),
+                        &*crate::store::open_commit_link_store(&root).unwrap())
+                }.unwrap();
+                assert!(result.errors.is_empty(), "team={team} {case}: {:?}", result.errors);
+                let blockers = crate::mcp::tools::core::task::open_blocker_ids(&*tasks, &dependent.id).unwrap();
+                assert_eq!(blockers.is_empty(), case == "merged", "team={team} {case}: {blockers:?}");
+                let received = tasks.get(&local.id).unwrap();
+                assert_eq!(received.title, local.title);
+                assert!(received.notes.contains(&local.notes));
+                assert_eq!(received.status == TaskStatus::Closed, case == "merged");
+                assert_eq!(tasks.get_dependencies(&dependent.id).unwrap().len(), 1);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn artifact_note_append_survives_personal_and_team_reconciliation_once() {
     use crate::mcp::CasCore;

@@ -2939,6 +2939,14 @@ The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close
 copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
+A package-scoped `cargo check -p <crate> --lib --no-default-features` also
+uses the capped runner. That flag is accepted once, only with `--lib`; arbitrary
+`--features`, all-feature, target, profile and environment overrides remain
+refused. Default and no-default checks have separate configuration-bound
+receipts at the same commit, and close imports each with its feature identity.
+Retrying one configuration cannot invalidate the other's receipt. Legacy check
+receipts with no feature field mean default features.
+
 Check receipts are optional compile-only evidence and do not waive test proof.
 
 When worker admission is unavailable but a supervisor has already run the

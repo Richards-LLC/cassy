@@ -3351,6 +3351,12 @@ async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
     }
     git(&checkout, &["reset", "--hard", "main"]);
     std::fs::write(checkout.join("feature.txt"), "task A\n").unwrap();
+    // The real producer, committed so the checkout itself stays clean.
+    let sources = crate::test_paths::crate_root().join("../scripts");
+    std::fs::create_dir_all(checkout.join("scripts")).unwrap();
+    for script in ["journey-eval.sh", "worker-run.sh"] {
+        std::fs::copy(sources.join(script), checkout.join("scripts").join(script)).unwrap();
+    }
     git(&checkout, &["add", "."]);
     git(&checkout, &["commit", "-qm", "feat(cas-22c6a): task A"]);
     git(&checkout, &["push", "-q", "--force", "origin", LANE]);
@@ -3367,12 +3373,8 @@ async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
         "action":"update", "id":next.id, "assignee":WORKER, "task_ids":[next.id],
     })).await;
     assert!(!queued.contains("REJECTED"), "{queued}");
-    // The journey run, still in flight in the worker's checkout.
-    let log = f.cas_dir().join("journey.log");
-    std::fs::write(&log, "").unwrap();
-    let run = crate::factory_worker_runs::register(&f.cas_dir(), &checkout, &log, chrono::Utc::now())
-        .unwrap().expect("the run belongs to the worker's checkout");
-    crate::factory_worker_runs::bind(&f.cas_dir(), &run, std::process::id()).unwrap();
+    // The journey run, held at its plan step while it reads the worker's checkout.
+    let journey = JourneyEval::start(&f.cas_dir(), &checkout);
     let parked = call(&f.worker, serde_json::json!({"action":"close", "id":first.id, "reason":"Delivered"})).await;
     assert_eq!(f.task(&first.id).status, TaskStatus::AwaitingMerge, "{parked}");
     crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
@@ -3388,9 +3390,102 @@ async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
     assert!(crate::gates::codes_in(&direct.message).contains(&"G-161"), "{direct:?}");
     assert_eq!(f.task(&next.id).status, TaskStatus::Open);
     assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "a direct start moved the checkout mid-run");
-    crate::factory_worker_runs::finish(&f.cas_dir(), &run, 0, chrono::Utc::now()).unwrap();
+    journey.finish();
     crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
     assert_eq!(f.task(&next.id).status, TaskStatus::InProgress, "the start proceeds once the run ends");
+}
+
+const JOURNEY_CLI_ARGS: &str = "CAS_22C6_CLI_ARGS";
+
+/// `scripts/journey-eval.sh` run from a worker checkout, with `cas` served by
+/// this test binary's real CLI and its plan step held until [`Self::finish`].
+struct JourneyEval {
+    child: std::process::Child,
+    release: PathBuf,
+}
+
+impl JourneyEval {
+    fn start(cas_dir: &Path, checkout: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().unwrap().keep();
+        let shims = work.join("bin");
+        std::fs::create_dir_all(&shims).unwrap();
+        let python = String::from_utf8(std::process::Command::new("sh").args(["-c", "command -v python3"])
+            .output().unwrap().stdout).unwrap().trim().to_owned();
+        // Everything but the plan (held) and the browser tooling is real Python.
+        let shim_python = format!(r#"#!/bin/sh
+case "$1" in
+  */journey-receipt.py)
+    if [ "$2" = plan ]; then
+      : > "$J_WORK/started"
+      while [ ! -e "$J_WORK/release" ]; do sleep 0.05; done
+      printf '{{"artifacts":"%s","head_sha":"fixture","workers":1,"scope":"affected","grep":""}}\n' "$J_WORK/artifacts"
+    fi
+    exit 0;;
+  */journey_dist.py) exit 0;;
+  -) case "$2" in */package.json) echo 'playwright fixture'; exit 0;; esac;;
+esac
+exec {python} "$@"
+"#);
+        // Only the run id line; libtest's own banner is not CLI output.
+        let shim_cas = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$J_WORK/args.$$\"\n\
+             {JOURNEY_CLI_ARGS}=\"$J_WORK/args.$$\" \"$J_TEST_EXE\" --exact \"$J_TEST_NAME\" --nocapture --test-threads=1 \
+             | grep -E '^[0-9a-f]{{32}}$' || :\n"
+        );
+        for (name, body) in [("python3", shim_python), ("cas", shim_cas)] {
+            std::fs::write(shims.join(name), body).unwrap();
+            std::fs::set_permissions(shims.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let name = module_path!().split_once("::").unwrap().1.to_owned() + "::journey_eval_cas_cli_child_cas_22c6";
+        let child = std::process::Command::new("bash")
+            .arg(checkout.join("scripts/journey-eval.sh"))
+            .arg(work.join("artifacts"))
+            .current_dir(checkout)
+            .env("PATH", format!("{}:{}", shims.display(), std::env::var("PATH").unwrap_or_default()))
+            .env("CAS_ROOT", cas_dir)
+            .env("CAS_BIN", shims.join("cas"))
+            .env("J_WORK", &work)
+            .env("J_TEST_EXE", std::env::current_exe().unwrap())
+            .env("J_TEST_NAME", name)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !work.join("started").exists() {
+            assert!(std::time::Instant::now() < deadline, "journey-eval never reached its plan step");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Self { child, release: work.join("release") }
+    }
+
+    fn finish(mut self) {
+        std::fs::write(&self.release, "").unwrap();
+        assert!(self.child.wait().unwrap().success(), "journey-eval failed");
+    }
+}
+
+impl Drop for JourneyEval {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.release, "");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The `cas` CLI behind [`JourneyEval`]'s shim; idle in an ordinary run.
+#[test]
+fn journey_eval_cas_cli_child_cas_22c6() {
+    let Some(args) = std::env::var_os(JOURNEY_CLI_ARGS) else { return };
+    use clap::Parser;
+    let args = std::fs::read_to_string(args).unwrap();
+    let cli = crate::cli::Cli::try_parse_from(std::iter::once("cas").chain(args.lines())).unwrap();
+    let Some(crate::cli::Commands::Factory(command)) = &cli.command else { panic!("factory command") };
+    let root = std::env::var_os("CAS_ROOT").map(PathBuf::from);
+    let result = crate::cli::factory::execute(command, &cli, root.as_deref());
+    if let Err(error) = &result {
+        eprintln!("{error:#}");
+    }
+    std::process::exit(i32::from(result.is_err()));
 }
 
 fn queue_control_fixture(env: &mut TestEnvGuard) -> Fixture {

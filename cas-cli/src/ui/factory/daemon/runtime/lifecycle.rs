@@ -5050,8 +5050,10 @@ impl FactoryDaemon {
 
     /// Release daemon-owned resources and end this factory session.
     async fn cleanup(&mut self) -> anyhow::Result<()> {
-        if self.app.mux.supervisor().is_some_and(|pane| pane.has_exited()) {
-            self.abandon_queued_supervisor_commands()?;
+        // Teardown ends every queued command. Recording that is best-effort:
+        // a failing receipt store must never skip the teardown below.
+        if let Err(error) = self.abandon_queued_supervisor_commands() {
+            tracing::warn!(%error, "could not record abandoned Commander commands");
         }
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.

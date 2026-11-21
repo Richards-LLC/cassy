@@ -68,6 +68,27 @@ struct Record {
     output_from: u64,
     /// Only a different live registry PID with a recorded version proves reload.
     reload_before: Option<u32>,
+    /// The daemon process that recorded this command.
+    birth: Birth,
+}
+
+/// A daemon process: same-PID reexec keeps both fields; a new launch under a
+/// reused session and supervisor name does not.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+struct Birth { daemon_pid: u32, daemon_pid_starttime: Option<u64> }
+impl Birth {
+    fn current() -> Self {
+        static CURRENT: std::sync::OnceLock<Birth> = std::sync::OnceLock::new();
+        *CURRENT.get_or_init(|| {
+            let daemon_pid = std::process::id();
+            Birth { daemon_pid, daemon_pid_starttime: crate::mcp::daemon::read_pid_starttime(daemon_pid) }
+        })
+    }
+    /// A missing start time cannot tell a reused PID apart, so it never matches.
+    fn is_current(&self) -> bool {
+        let current = Self::current();
+        self.daemon_pid_starttime.is_some() && *self == current
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,11 +98,12 @@ struct SavedRecord {
     before: String,
     before_command: String,
     reload_before: Option<u32>,
+    birth: Birth,
 }
 impl Record {
     fn saved(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::to_value(SavedRecord { receipt: self.receipt.clone(), at: self.at,
-            before: self.before.clone(), before_command: self.before_command.clone(), reload_before: self.reload_before })?)
+            before: self.before.clone(), before_command: self.before_command.clone(), reload_before: self.reload_before, birth: self.birth })?)
     }
 }
 
@@ -108,7 +130,16 @@ impl FactoryDaemon {
         if self.supervisor_commands.restored { return Ok(()); }
         let rows = durable::load(self.app.cas_dir(), &self.session_name, self.app.supervisor_name())?;
         for row in rows {
-            let mut saved: SavedRecord = serde_json::from_value(row)?;
+            let mut saved: SavedRecord = match serde_json::from_value(row) {
+                Ok(saved) => saved,
+                Err(error) => { tracing::warn!(%error, "skipping unreadable Commander command receipt"); continue; },
+            };
+            // Another daemon's queue ended with it; never type it into this one.
+            if saved.receipt.phase == Phase::Queued && !saved.birth.is_current() {
+                saved.receipt.phase = Phase::Refused;
+                saved.receipt.detail = "Command not sent: its factory session ended before it could be typed.".into();
+                saved.at = Utc::now();
+            }
             // Only never-typed work is replayable. Claim was committed before
             // the PTY write; a restarted daemon cannot know whether it completed.
             if saved.receipt.phase == Phase::Submitted || saved.receipt.interactive {
@@ -120,7 +151,7 @@ impl FactoryDaemon {
             let owner = (saved.receipt.device_id.clone(), saved.receipt.client_ref.clone());
             self.supervisor_commands.records.insert(owner, Record { receipt: saved.receipt,
                 started: Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now), at: saved.at,
-                before: saved.before, before_command: saved.before_command, reload_before: saved.reload_before,
+                before: saved.before, before_command: saved.before_command, reload_before: saved.reload_before, birth: saved.birth,
                 write: Box::new(|| None), hook: None, last_key: None, output_from: 0 });
         }
         self.persist_supervisor_commands()?;
@@ -139,7 +170,7 @@ impl FactoryDaemon {
         self.restore_supervisor_commands()?;
         for record in self.supervisor_commands.records.values_mut().filter(|record| record.receipt.phase == Phase::Queued) {
             record.receipt.phase = Phase::Refused;
-            record.receipt.detail = "Command not sent: the supervisor ended before it could be typed.".into();
+            record.receipt.detail = "Command not sent: the supervisor session ended before it could be typed.".into();
             record.receipt.interactive = false;
             record.at = Utc::now();
             record.started = Instant::now();
@@ -567,7 +598,7 @@ impl FactoryDaemon {
         let name = serde_json::to_value(command).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
         let receipt = Receipt { device_id: owner.0.clone(), client_ref: owner.1.clone(), command, phase: Phase::Queued,
             detail: format!("/{name} is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet."), output: String::new(), interactive: false };
-        let record = Record { receipt, started: Instant::now(), at: Utc::now(), before: String::new(), before_command: String::new(), write: Box::new(|| None), hook: None, last_key: None, output_from: 0, reload_before };
+        let record = Record { receipt, started: Instant::now(), at: Utc::now(), before: String::new(), before_command: String::new(), write: Box::new(|| None), hook: None, last_key: None, output_from: 0, reload_before, birth: Birth::current() };
         anyhow::ensure!(durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &record.saved()?, durable::Write::Reserve)?, "Command reference is already recorded; read its receipt before retrying.");
         self.supervisor_commands.records.insert(owner.clone(), record);
         self.supervisor_commands.readiness_polled = None;
@@ -644,10 +675,10 @@ impl FactoryDaemon {
             let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            let saved = serde_json::to_value(SavedRecord { receipt: receipt.clone(), at: Utc::now(), before: before.clone(), before_command: before.clone(), reload_before })?;
+            let saved = serde_json::to_value(SavedRecord { receipt: receipt.clone(), at: Utc::now(), before: before.clone(), before_command: before.clone(), reload_before, birth: Birth::current() })?;
             anyhow::ensure!(durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &saved, durable::Write::Reserve)?, "Command reference is already recorded; read its receipt before retrying.");
             let write = pane.inject_prompt_tracked(text)?;
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before });
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before, birth: Birth::current() });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         anyhow::ensure!(self.supervisor_commands.records.contains_key(&owner), "The original command receipt is unavailable. Do not resend an uncertain command.");

@@ -266,6 +266,7 @@ pub use verification_store::{
     correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets, carry_forward_approved_verification,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
+    unlaunched_pending_verification_dispatches,
     extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,

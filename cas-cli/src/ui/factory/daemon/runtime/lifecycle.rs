@@ -212,6 +212,49 @@ fn extend_progressing_verification_dispatches(
         .count()
 }
 
+/// cas-5f88: the requesting MCP process retries a verifier launch on its own
+/// thread, so a requester that exits leaves its dispatch Pending. The daemon
+/// is the durable owner: each sweep launches this session's dispatches that
+/// were never launched and are past the requester's own first attempt. The
+/// claim inside the launch admits one verifier per dispatch, so a requester
+/// still retrying cannot double it. Returns how many reviews were started.
+pub(super) fn launch_unlaunched_verification_dispatches(
+    cas_dir: &std::path::Path,
+    session: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    /// Leaves the requester's first attempt to land before the daemon steps in.
+    const REQUESTER_GRACE_SECS: i64 = 30;
+    let since = now - chrono::Duration::seconds(REQUESTER_GRACE_SECS);
+    let dispatches = match cas_store::unlaunched_pending_verification_dispatches(cas_dir, since, now, 20) {
+        Ok(dispatches) => dispatches,
+        Err(error) => {
+            tracing::warn!(%error, "cas-5f88: unlaunched verification dispatches unavailable");
+            return 0;
+        }
+    };
+    let Ok(agents) = crate::store::open_agent_store(cas_dir) else { return 0; };
+    let mut launched = 0;
+    for dispatch in dispatches {
+        // Another daemon owns another session's reviews.
+        let ours = agents.get(&dispatch.owner_agent_id)
+            .is_ok_and(|owner| owner.factory_session.as_deref() == Some(session));
+        if !ours {
+            continue;
+        }
+        match crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+            cas_dir, session, &dispatch.id,
+        ) {
+            Ok(started) => launched += usize::from(started.is_some()),
+            Err(error) => tracing::warn!(
+                dispatch_id = %dispatch.id, %error,
+                "cas-5f88: verifier launch for an unlaunched dispatch refused; the next sweep retries"
+            ),
+        }
+    }
+    launched
+}
+
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
 /// no verdict wakes the supervisor through a durable worker-attention relay,
 /// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
@@ -6192,5 +6235,50 @@ mod communication_summary_tests {
         let summary: cas_store::communication_slo::CommunicationSlos = serde_json::from_str(&summary).unwrap();
         assert_eq!(summary.lines().len(), 5);
         assert_eq!(summary.factory_session, "ended-session");
+    }
+}
+
+#[cfg(test)]
+mod verifier_launch_owner_tests {
+    use cas_store::AgentStore;
+
+    /// cas-5f88: a close requested a verifier, then the requesting MCP process
+    /// exited before its launch retry reached the daemon. The daemon's sweep
+    /// launches that dispatch once, and a later sweep does not launch it again.
+    #[test]
+    fn dispatch_whose_requester_exited_is_launched_once_cas_5f88() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("requester-exited");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        // The synchronous claim is the proof; provider preparation runs apart.
+        env.set("CAS_TEST_HUB_PATH", env.home().join("no-provider"));
+        let mut owner = cas_types::Agent::new_with_role(
+            "supervisor-a".into(), "owner".into(), cas_types::AgentRole::Supervisor,
+        );
+        owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        owner.factory_session = Some("launch-owner".into());
+        cas_store::SqliteAgentStore::open(&root).unwrap().register(&owner).unwrap();
+        let mut task = cas_types::Task::new("cas-5f88-launch".into(), "Requester exited".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.pending_verification = true;
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        // The requester wrote its dispatch; no launch request ever followed.
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, "worker-exited", &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let later = chrono::Utc::now() + chrono::Duration::minutes(1);
+
+        let first = super::launch_unlaunched_verification_dispatches(&root, "launch-owner", later);
+        let second = super::launch_unlaunched_verification_dispatches(&root, "launch-owner", later);
+
+        let launches: i64 = rusqlite::Connection::open(root.join("cas.db")).unwrap().query_row(
+            "SELECT COUNT(*) FROM verification_capabilities WHERE dispatch_id = ?1",
+            [&dispatch.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!((first, second, launches), (1, 0, 1));
     }
 }

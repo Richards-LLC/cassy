@@ -16086,6 +16086,8 @@ fn epic_anchor_content_presence_inner(
     anchor: &str,
     target: &str,
 ) -> (DeliveryContentPresence, Option<String>) {
+    let shipped_target = shipped_delivery_content_target(repo, anchor, target);
+    let target = shipped_target.as_deref().unwrap_or(target);
     let identity = TaskCommitIdentity {
         superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
@@ -16312,6 +16314,8 @@ pub(crate) fn validated_delivery_drop_review(
         .ok_or_else(|| {
             format!("delivery review must name superseding commits: reason=\"{usage}\"")
         })?;
+    let shipped_target = shipped_delivery_content_target(repo, anchor, parent);
+    let parent = shipped_target.as_deref().unwrap_or(parent);
     let origin = format!("origin/{parent}");
     let target = if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, anchor, &origin) {
         origin
@@ -16571,6 +16575,8 @@ fn anchored_delivery_content_gate_unbounded(
     commit_receipt: Option<&str>,
     supervisor_override_reason: Option<&str>,
 ) -> Option<MergeStateGateOutcome> {
+    let shipped_target = shipped_delivery_content_target(repo_path, anchor, parent_branch);
+    let parent_branch = shipped_target.as_deref().unwrap_or(parent_branch);
     let task_id = &task.id;
     // A supervisor-declined anchor is history, not this cycle's final tree.
     // A re-delivered merge container identical to the current target is an
@@ -27608,6 +27614,41 @@ fn in_parent_artifact_split(
     Some((paths, artifacts, measured))
 }
 
+/// A frozen epic may have shipped through staging and then main. Content
+/// proof follows that downstream history, including later rewrites, without
+/// retargeting the task. Both the anchor and the recorded epic tip must have
+/// landed; arbitrary side branches and immutable review snapshots cannot
+/// supply later content. Prefer origin so unpublished local work grants no
+/// additional proof when a published integration ref exists.
+fn shipped_delivery_content_target(
+    repo: &std::path::Path,
+    anchor: &str,
+    parent: &str,
+) -> Option<String> {
+    let branch = parent
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| parent.strip_prefix("origin/"))
+        .or_else(|| parent.strip_prefix("refs/heads/"))
+        .unwrap_or(parent);
+    if !branch.starts_with("epic/") {
+        return None;
+    }
+    let recorded_ref = preferred_diff_target_ref(repo, branch);
+    let recorded = resolve_branch_sha(repo, &recorded_ref)?;
+    if !git_commit_is_ancestor(repo, anchor, &recorded) {
+        return None;
+    }
+    let mut target = recorded.clone();
+    for integration in ["staging", "main"] {
+        let reference = preferred_diff_target_ref(repo, integration);
+        let Some(tip) = resolve_branch_sha(repo, &reference) else { continue };
+        if tip != target && git_commit_is_ancestor(repo, &target, &tip) {
+            target = tip;
+        }
+    }
+    (target != recorded).then_some(target)
+}
+
 /// The parent ref [`delivery_content_presence_in_parent_for_paths`] measures
 /// on: the remote branch when it holds the delivery, else the local one.
 fn in_parent_target(
@@ -27615,6 +27656,9 @@ fn in_parent_target(
     delivery_commit: &str,
     parent_branch: &str,
 ) -> Option<String> {
+    if let Some(target) = shipped_delivery_content_target(repo_path, delivery_commit, parent_branch) {
+        return Some(target);
+    }
     let origin_parent = format!("origin/{parent_branch}");
     if git_ref_exists(repo_path, &origin_parent)
         && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent)

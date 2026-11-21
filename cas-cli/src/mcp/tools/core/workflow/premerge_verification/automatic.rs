@@ -819,6 +819,77 @@ pub(super) async fn approved(
 mod tests {
     use super::*;
 
+    /// A no-code close bypasses candidate preparation. Its real launcher must
+    /// resolve peer proof before a verifier command can be prepared.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_artifacts_are_verified_before_dispatch_cas_f6ca() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bytes = b"peer design evidence\n";
+        for mode in ["good", "corrupt", "missing"] {
+            let server = MockServer::start().await;
+            let (_dir, core, _owner, mut rows) = contention_fixture(&["cas-f6ca-fixture"]);
+            env.set("CAS_ROOT", &core.cas_root);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            std::fs::write(core.cas_root.join("cloud.json"), serde_json::json!({
+                "endpoint":server.uri(), "token":"fixture-token"
+            }).to_string()).unwrap();
+            let (mut task, dispatch) = rows.pop().unwrap();
+            let record = cas_store::PublishedArtifact {
+                id:"art-peer-plan".into(), task_id:task.id.clone(), name:"decision-brief.md".into(),
+                mime:"text/markdown".into(), size_bytes:bytes.len() as u64,
+                sha256:format!("{:x}", Sha256::digest(bytes)),
+                cloud_artifact_id:Some("cloud-peer-plan".into()), status:"committed".into(),
+                cloud_url:None, slack_permalink:None, created_at:"2026-11-21T15:00:00Z".into(), revocation:None,
+            };
+            let note = format!("ARTIFACT_PROOF: {}", serde_json::to_string(&record).unwrap());
+            core.open_task_store().unwrap().append_trusted_note(&task.id, &note).unwrap();
+            task = core.open_task_store().unwrap().get(&task.id).unwrap();
+            let expected = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+                &core.cas_root, &task).unwrap().join("art-peer-plan-decision-brief.md");
+            assert!(!expected.exists());
+            let view = if mode == "missing" { ResponseTemplate::new(404) } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id":"cloud-peer-plan", "url":format!("{}/blob",server.uri()), "size_bytes":bytes.len()
+                }))
+            };
+            Mock::given(method("GET")).and(path("/api/artifacts/cloud-peer-plan/url"))
+                .respond_with(view).mount(&server).await;
+            Mock::given(method("GET")).and(path("/blob"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(
+                    if mode == "corrupt" { vec![b'x'; bytes.len()] } else { bytes.to_vec() }
+                )).mount(&server).await;
+            // Repeat a successful launch with only an imported metadata row:
+            // deleting its cached bytes must not turn that row into evidence.
+            for attempt in 0..if mode == "good" { 2 } else { 1 } {
+                let (prepared, received) = std::sync::mpsc::channel();
+                let probe = expected.clone();
+                let output = core.cas_root.join(format!("attempt-{attempt}.json"));
+                let handle = launch_with_preparation(&core, &task, &dispatch, output, move |_| {
+                    prepared.send(std::fs::read(probe)).unwrap();
+                    Err("stop before launching the fixture verifier".into())
+                }).unwrap().unwrap();
+                handle.join().unwrap();
+                let prepared = received.try_recv().ok();
+                if mode == "good" {
+                    assert_eq!(prepared.unwrap().unwrap(), bytes, "attempt {attempt}");
+                    assert!(cas_store::SqliteArtifactStore::open(&core.cas_root).unwrap().get(&record.id).unwrap().is_some());
+                    std::fs::remove_file(&expected).unwrap();
+                } else {
+                    assert!(prepared.is_none(), "unverified bytes reached verifier preparation: {mode}");
+                    assert!(!expected.exists());
+                    let prompts = crate::store::open_prompt_queue_store(&core.cas_root).unwrap().peek_all(10).unwrap();
+                    let body = format!("{prompts:?}");
+                    assert!(body.contains(&record.id));
+                    assert!(body.contains(if mode == "corrupt" { "artifact_checksum_mismatch" } else { "404" }));
+                }
+                assert_eq!(cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id).unwrap().state,
+                    cas_types::VerificationDispatchState::Pending);
+                assert!(cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).unwrap().is_none());
+            }
+        }
+    }
+
     /// GH #2023: Codex `exec` runs with approval: never, so the verifier's
     /// Cassy server must be pre-approved and launchable from its own overrides.
     #[test]

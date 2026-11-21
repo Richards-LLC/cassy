@@ -133,9 +133,11 @@ fn reconcile_restarted_factory_supervisor(
 /// a letter-led part would let the shorter name's task grammar claim the
 /// longer one's branches, so registration keeps the namespaces prefix-free.
 /// Digit-led extensions (`kevin-2`) never parse as task refs and are allowed.
+/// Only workers commit on `factory/` branches, so supervisors and primaries
+/// (`kevin-supervisor` beside worker `kevin`) cannot collide and are not checked.
 fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: &str) -> Result<()> {
     let name = name.trim();
-    if name.is_empty() || !matches!(role, "worker" | "supervisor") {
+    if name.is_empty() || role != "worker" {
         return Ok(());
     }
     let extends = |longer: &str, shorter: &str| {
@@ -145,7 +147,7 @@ fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: 
             .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphabetic()))
     };
     let mut statement = conn.prepare(
-        "SELECT name FROM agents WHERE id != ?1 AND role IN ('worker', 'supervisor')",
+        "SELECT name FROM agents WHERE id != ?1 AND role = 'worker'",
     )?;
     for other in statement.query_map(params![id], |row| row.get::<_, String>(0))? {
         let other = other?;

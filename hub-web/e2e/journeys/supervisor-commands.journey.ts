@@ -280,17 +280,17 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       let ref = "";
       await journey.stage("Choose Usage from the slash palette with the keyboard", async () => {
+        // Type before the conversation's socket is live: the palette lists the
+        // command the moment it connects, without the text changing.
+        const releaseAttach = hub.holdAttach(PELICAN);
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.getByRole("button", { name: phone ? "More conversation actions" : "Supervisor commands", exact: true })).toBeVisible();
-        // The palette lists commands only once the conversation socket is live,
-        // which can trail the header's Live; typed earlier, it says "Commands
-        // work once the conversation is connected" until the text changes.
-        await expect(async () => {
-          await input.fill("");
-          await input.fill("/us");
-          await expect(commandButtons(page)).toHaveCount(1, { timeout: 1_000 });
-        }).toPass();
+        await input.fill("/us");
+        await expect(commandPalette(page)).toBeVisible();
+        await expect(commandButtons(page)).toHaveCount(0);
+        releaseAttach();
+        await expect(commandButtons(page)).toHaveCount(1);
         await input.press("ArrowDown");
         await expect(commandButton(page, "usage")).toBeFocused();
         await page.keyboard.press("Enter");

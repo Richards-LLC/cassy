@@ -682,7 +682,7 @@ fn handle_pre_tool_use_checked(
                 "deny",
                 &crate::gates::tag("H-03", format!(
                     "🚫 NO WORKER RUST BUILDS: `{what}` is outside the capped worker exceptions. \
-                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed. Choose one target flag. \
+                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed. Choose one target flag; only --lib also accepts --no-default-features. \
                      The hook runs it under max_concurrent_builders. \
                      Commit first so a successful check records `check: PASS <sha>`. \
                      Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused (cas-4cbb). \

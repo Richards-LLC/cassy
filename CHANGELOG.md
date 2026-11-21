@@ -7,6 +7,159 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.46.0] - 2026-11-21
+
+### Fixed — CI
+
+- **Epic history stays out of factory CI comparisons** — CI excludes epic refs already merged into the default branch and selects a task fork in two linear passes. More than 64 live epic refs selects conservative validation. Successful releases delete remote epic branches contained in the published commit, recording each deletion and preserving branches that advance during cleanup.
+- **The stale-queue watchdog leaves backlog alone** — Was: the watchdog cancelled any non-merge-queue run that had waited more than 20 minutes, so when the lane runners were all busy it cancelled most factory CI. Now: a run that waits behind a busy runner able to take its jobs stays queued. A run whose runner labels have no runner at work is still cancelled after 20 minutes, and a re-run's age still counts from its own attempt.
+
+### Fixed — Task delivery
+
+- **Owned train child publication** — Park a worker's artifact-only child close for the pinned train owner instead of rejecting it as an owner-only terminal close. Other supervisors retain the existing ownership restrictions.
+
+### Fixed — Release trains
+
+- **Release readiness follows the supervisor that froze the train** — After a train is handed to a supervisor on another machine and that supervisor freezes it, the freeze moves the train's ownership to it, so auto-cut and cut notices act on its machine. A refusal now names the owner and its machine. The cut notice counts every delivery merged into the train, including those still waiting for their verdict or batch QA.
+- **A release cut keeps one next train** — Was: when work filed during a freeze had already opened the next release train, cutting the frozen train (or naming its successor in a refused merge) opened a second one, and new work and focus split across the two. Now: the cut adopts the train that already exists and opens a new one only when there is none.
+- **Shipped trains stop asking for another cut** — Was: a delayed green CI
+  observation could send `release_cut_ready` after a train had shipped. Now:
+  the emitter reloads the train and suppresses cut-ready notices for closed or
+  cut trains and for green commits contained in a version tag. Unreleased
+  trains retain their existing green-after-red notification and deduplication.
+- **Retargeting work to the next train no longer strands it without a train** — Was:
+  the new target was saved first, then the old train link was removed and the
+  new one added as two more separate writes. A failure between them left the
+  task with no parent train and with a target that a repeat of the same retarget
+  refused as unchanged. Now: the target and the parent move are saved together,
+  so a failure leaves both as they were and the retarget can be repeated. Only
+  the parent link to the old train is removed.
+
+### Fixed — Factory daemon
+
+- **Shutdown no longer skips the final cloud sync** — Was: a shutdown during a
+  background sync aborted it while it still held the store's sync lease, so the
+  final sync found the lease busy and printed "Final cloud sync complete (nothing
+  pending)" without syncing, and quality telemetry shared its 10 s bound. Now:
+  shutdown lets the in-flight sync finish, runs the final sync, then quality
+  telemetry outside that bound.
+- **A reused worker lane starts from its moved epic** — Was: a lane whose only
+  extra commits had already shipped on trunk resumed on its old base without the
+  epic's newer commits. Now: it resets to the epic tip.
+- **A merge retried after its target moved builds against the new target** — Was:
+  it could join a candidate build still running for the old target tip. Now:
+  builds are shared only for the same source and target commits.
+- **Explicit syncs say when they were deferred** — Was: `cas cloud sync` and
+  `cas ledger report` silently showed stale knowledge and quality data when
+  another round held their lock. Now: the sync summary marks knowledge and
+  quality events deferred, in text and JSON, and the ledger report says its
+  fleet rows may be stale.
+
+### Fixed — Worker delivery
+
+- **Scope repair after a checkpoint** — Pre-push test lint accepts files restored exactly to the task's recorded target without requiring unrelated test edits. Newly introduced prose assertions still refuse.
+
+### Fixed — Build admission
+
+- **macOS CPU sampling** — Preserve CPU utilisation samples across 32-bit tick counter wraparound and document the CPU threshold and load fallback. CPU and memory probes share their Mach host-port helper.
+
+### Fixed — Factory
+
+- **A live worker is no longer listed as retired work on macOS** — The session-start retained-work banner matched a worker to its checkout by comparing paths as text. On macOS a worker records its checkout under `/var`, while Git lists `/private/var`, so a live worker's checkout looked unowned and appeared as recoverable retired work. Paths that resolve to the same checkout now match. Retired workers' local work is still reported.
+- **An explicit retarget to main merges without allow_trunk** — When a supervisor moves an epic's task to the trunk branch with `task update target_branch=main`, worktree_merge now treats that as the task's chosen target and merges it without `allow_trunk`. The trunk push is still reported. A trunk target the task only carried over from before it joined the epic is still refused, and the refusal now lists the explicit retarget as an option.
+- **request_changes on in-progress work says what to do instead** — request_changes still refuses an in-progress task, since there is no parked delivery to decline. The refusal now includes two ready-to-run calls: one records the findings on the task as a decision note, and one sends them to its worker.
+- **Run related specs for Vue components and Vitest helpers** — Was: focused
+  proof could prescribe a `.vue` component that worker-check rejected, or a
+  helper with no tests. Now: it uses `vitest related --run` from the config root,
+  runs importing specs, and accepts the source-specific proof at close.
+- **Back-to-back Codex spawns pick the same account** — When several spawns ran at once, their `codex login status` checks could time out. A spawn that couldn't confirm the login skipped the registered account and refused with "the default Codex home is missing", one call after the same spawn had succeeded. A timed-out login check now still selects that registered Codex account. Logged-out, disabled, stale or never-used accounts are still skipped, and the spawn's own login check still verifies the chosen account before launch.
+- **Failed Playwright evidence survives worker-check** — A capped Playwright run now writes its traces, error contexts and JSON reports under the task's artifact directory. When the run fails, worker-check keeps that directory and names it in the failure, so the paths Playwright printed stay readable after the command returns. Before, they pointed into a temporary directory that was deleted on return. Passing runs still clean up after themselves.
+- **Worker recycles survive a briefly busy store** — Was: when another part of the factory held the shared database for a few milliseconds at the moment a worker recycle (`clear_context`) started, the recycle failed with "retry on a later pass", nothing retried it, and the supervisor had to clear the worker's context again by hand. Now: the request stays queued, the worker keeps running, and the next factory pass completes the recycle.
+
+### Fixed — Releases
+
+- **Release delivery works on a fresh host** — `cas release installed` and `cas release published` no longer stop with "no such table: known_repos" when this host has never registered a project, for example a new machine or an isolated HOME. They create the empty host registry and record the release for the supplied project.
+
+### Fixed — Violet
+
+- **A managed Slack reply no longer fails on a dropped Violet connection** — Was:
+  the first reply after an idle spell could go out on a connection Violet had
+  already closed, and Cassy reported it as "did not post" so the agent had to
+  send it again. Now: when Violet confirms it never received the post, Cassy
+  reconnects and sends it once more with the same request ID, so it posts once.
+
+### Fixed — Worker checks
+
+- **Vitest failure diagnostics** — Retain redacted assertion JSON under the task artifacts directory after a capped test failure and print its durable path. Passing receipts and the existing Playwright trace capture keep their behavior.
+
+### Fixed — Factory merge queue
+
+- **Active train appends acknowledge their saved position** — Was: queuing
+  another delivery could exceed the MCP response deadline while preparing its
+  review, even though the append was already saved. Now: active appends return
+  the committed revision and delivery positions before review preparation;
+  the existing daemon starts reviews and resumes pending verifiers.
+
+### Fixed — Task close
+
+- **A failed evidence upload no longer blocks an approved park** — Was: a
+  close uploaded every file in the task's evidence folder, including a folder
+  copied from another task, and refused the park when one upload failed; a
+  retry could run past the response deadline. Now: the park requires only the
+  ledger and the files it cites. Other files are uploaded where possible and
+  listed when they are not. Uploads are retried once within a 20-second
+  budget, and a retried close reuses everything already uploaded.
+- **Cited proof must be portable before parking** — Was: an ordinary delivery
+  could park after a cited evidence upload failed, and missing cited files were
+  silently omitted. Now: the park refuses with all unpublished paths, including
+  missing files under the configured evidence directory or worktree test logs.
+  Successful uploads are retained for the next attempt; optional uncited copies
+  keep their existing best-effort publication within the shared time budget.
+  Ordinary log-only and waived-evidence parks keep local QA artifacts optional
+  when the close reason does not cite them.
+
+### Changed — CI
+
+- **Node24 action runtimes** — Upgrade checkout, artifact transfer, cache and Node setup actions to their Node24 majors while preserving artifact paths, overwrite behavior and deployment cache settings.
+
+### Added — Developer QA
+
+- **A supported scratch QA path for the write-roots setter** — The operator-only setter for `factory.write_roots` now has a capped fixture that workers can run. In an isolated HOME and scratch project, it parses the real command and writes the scratch project's `config.toml` as the operator's pane would. It also checks that an agent tool call with the same command is still refused, as is a run from a worker process group. Nothing switches either refusal off. A capture of the installed binary stays an operator step; CONTRIBUTING documents both.
+
+### Fixed — Verification
+
+- **Check rulings and mocked outputs** — Verifiers compare deliveries with applicable stakeholder and operator rulings, and reject tests that fake outputs the real producer cannot emit. Verdicts cite the ruling or real output contract and the offending source location.
+
+### Fixed — Release
+
+- **Reuse proof when pushing an earlier commit** — Pre-push accepts a non-HEAD commit with matching fast-row and required web receipts for the push range. Missing proof still requires a clean checkout of that commit; refusal advice now points to the hook’s complete validation path.
+
+### Fixed — Worker proof
+
+- **Capped no-default-feature library checks** — Was: workers could not prove
+  a package's no-default-features repair through the capped runner. Now: one
+  explicit `--no-default-features` flag is admitted for package-scoped `--lib`
+  checks, with separate configuration-bound receipts that close can import.
+  Default proof survives a failed no-default retry. Broader feature, target,
+  build and identity overrides remain refused; compile proof does not replace
+  required tests or the landing-tree suite.
+- **Capped temporary directory isolation** — The runner now refuses a selected
+  TMPDIR with a physical `.git` ancestor using H-50, even when Git discovery is
+  stopped by a ceiling or the scratch path enters a checkout through a symlink.
+  Unsafe directories cannot be exported to Cargo and test children.
+
+### Fixed — Release validation
+
+- **macOS operator launch smoke** — Launch smoke commands now run as transient
+  launchd jobs with a clean environment and captured command exit status.
+  Previously, clearing the environment left the factory process ancestry in
+  place and correctly triggered the operator guard. Agent controls still fail
+  their launch gates; production ancestry checks remain intact.
+
+### Fixed — Release preview
+
+- **Unpinned project identity** — Preserve the live project identity in migrated private preview snapshots, including projects without config files. Live database and configuration stay unchanged, and release policy keeps its original defaults.
+
 ## [4.45.0] - 2026-11-21
 
 ### Fixed — Factory

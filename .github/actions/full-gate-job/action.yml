@@ -51,7 +51,7 @@ runs:
           save) python3 scripts/train-ci.py job-save "${args[@]}" --status "$STATUS" ;;
           *) echo "Invalid receipt phase: $PHASE" >&2; exit 1 ;;
         esac
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v6
       if: inputs.phase == 'save'
       with:
         name: ${{ steps.receipt.outputs.artifact }}

@@ -1580,12 +1580,15 @@ impl CasCore {
                     reason,
                 )
             } else {
-                cas_store::correct_parked_delivery_proof_scope(
+                // cas-cc3a: the parent move commits in the retarget's own
+                // transaction, so a failure leaves both unchanged.
+                cas_store::correct_parked_delivery_proof_scope_with_parent_move(
                     &self.cas_root,
                     &task,
                     original_updated_at,
                     &supervisor.id,
                     reason,
+                    train_move.as_ref().map(|(old, new)| (old.as_str(), new.as_str())),
                 )
             };
             correction.map_err(|error| McpError {
@@ -1594,15 +1597,10 @@ impl CasCore {
                 data: None,
             })?;
             if let Some((old_parent, new_parent)) = train_move.as_ref() {
-                task_store.remove_dependency(&task.id, old_parent)
-                    .and_then(|()| task_store.add_dependency(&Dependency::new(
-                        task.id.clone(), new_parent.clone(), DependencyType::ParentChild,
-                    )))
-                    .map_err(|error| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!("Failed to move parent to train {new_parent}: {error}")),
-                        data: None,
-                    })?;
+                let moved = |to: &String| Dependency::new(task.id.clone(), to.clone(), DependencyType::ParentChild);
+                if let Err(error) = task_store.publish_dependency_move(&moved(old_parent), &moved(new_parent)) {
+                    tracing::warn!(task_id = %task.id, %error, "cas-cc3a: parent move not queued for cloud sync");
+                }
             }
             let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
             let result_target = if methodology_fix {
@@ -2077,6 +2075,19 @@ impl CasCore {
                 })?;
             } else {
                 task.deliverables.work_target = branch_only_target;
+            }
+            // cas-7305: an explicit retarget off the parent epic's lane, such
+            // as to trunk, is the task's own delivery authority, and
+            // worktree_merge accepts it without allow_trunk. A target on the
+            // epic's lane stays inherited, so it follows a lane rename (cas-1cc7).
+            if let Some(target) = task.deliverables.work_target.as_ref()
+                && let Some(epic) = task_store.get_parent_epic(&task.id).ok().flatten()
+                && epic.effective_epic_branch().is_some_and(|lane| lane != target.target_branch)
+                && epic.branch.as_deref() != Some(target.target_branch.as_str())
+                && !(target.target_branch.starts_with("epic/")
+                    && target.target_branch.ends_with(&format!("-{}", epic.id)))
+            {
+                task.deliverables.work_target_pinned = true;
             }
             refresh_epic_lane_binding(&mut task);
             changes.push("work_target");

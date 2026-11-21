@@ -2621,3 +2621,41 @@ async fn supervisor_direct_verdict_binds_delivery_not_checkout_head_gh2240() {
     let closed = text(supervisor.cas_task_close(close(Some(f.final_tip.clone()))).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
 }
+
+/// cas-7305: request_changes on an in-progress task (a pushed PR, no park) is
+/// refused, and the refusal carries the exact calls that return the findings
+/// to its worker: a decision note and a wake, each a replayable payload.
+#[tokio::test]
+async fn request_changes_on_in_progress_work_names_the_replayable_alternative_cas_7305() {
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let root = tempfile::TempDir::new().unwrap();
+    let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+    let tasks = core.open_task_store().unwrap();
+    tasks.init().unwrap();
+    let mut task = Task::new("cas-7305-open-pr".into(), "pushed, in progress".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("worker-a".into());
+    tasks.add(&task).unwrap();
+    let before = serde_json::to_value(tasks.get(&task.id).unwrap()).unwrap();
+
+    let reason = "split the migration from the handler change";
+    let refusal = core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+        class_audit: None, id: task.id.clone(), reason: reason.into(),
+    })).await.expect_err("an in-progress task has no park to decline");
+    assert_eq!(serde_json::to_value(tasks.get(&task.id).unwrap()).unwrap(), before);
+    let payload = |tool: &str| -> serde_json::Value {
+        let line = refusal.message.lines()
+            .find_map(|line| line.strip_prefix(&format!("{tool} ")).filter(|rest| rest.starts_with('{')))
+            .unwrap_or_else(|| panic!("no {tool} payload: {}", refusal.message));
+        serde_json::from_str(line).unwrap()
+    };
+    let note = payload("task");
+    assert_eq!((note["action"].as_str(), note["id"].as_str(), note["note_type"].as_str()),
+        (Some("notes"), Some(task.id.as_str()), Some("decision")));
+    assert!(note["notes"].as_str().unwrap().contains(reason));
+    let wake = payload("coordination");
+    assert_eq!((wake["action"].as_str(), wake["target"].as_str()), (Some("message"), Some("worker-a")));
+    assert!(wake["message"].as_str().unwrap().contains(reason));
+}

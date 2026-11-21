@@ -151,7 +151,11 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
 /// A report reads the fleet's rows, so it asks for them first. Being offline or
 /// on a server without the route still leaves a correct local report.
 fn pull_before_report(cas_root: &Path) {
-    if let Err(error)=sync_ledger(cas_root) { tracing::warn!(%error,"ledger report: showing local rows; cloud sync failed"); }
+    match sync_ledger(cas_root) {
+        Ok(Some(summary)) if summary.deferred => eprintln!("ledger report: showing local rows; another cloud sync round is running, so fleet rows may be stale"),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error,"ledger report: showing local rows; cloud sync failed"),
+    }
 }
 fn sync_ledger(cas_root:&Path)->Result<Option<crate::cloud::syncer::quality_events::QualitySyncSummary>> {
     use crate::cloud::{CloudConfig,CloudSyncer,CloudSyncerConfig,SyncQueue};

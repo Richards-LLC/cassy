@@ -297,16 +297,29 @@ fn ensure_successor(repo: &Path, store: &dyn cas_store::TaskStore, train: &Task,
         }
         previous = next;
     }
-    let id = store.generate_id().map_err(|error| error.to_string())?;
-    let mut next = Task::new(id.clone(), RELEASE_TRAIN_TITLE.into());
-    next.task_type = TaskType::Epic;
-    next.labels.push(RELEASE_TRAIN_LABEL.into());
-    next.branch = Some(format!("epic/release-train-vnext-{id}"));
-    next.origin_project = previous.origin_project.clone();
-    next.epic_verification_owner = previous.epic_verification_owner.clone();
-    next.deliverables.work_target = previous.deliverables.work_target.clone();
-    store.add(&next).map_err(|error| error.to_string())?;
-    previous.labels.push(format!("{SUCCESSOR_LABEL}{id}"));
+    // GH #2181: work filed while this train was frozen lazily opened a train
+    // that already is the successor. Adopt the oldest such open train.
+    let repo_of = |task: &Task| task.deliverables.work_target.as_ref().map(|target| target.repo_selector.clone());
+    let lazy = open_trains(store, integration).into_iter().find(|other| {
+        other.created_at > train.created_at && !seen.contains(&other.id) && other.id != previous.id
+            && !accepts_no_work(other) && repo_of(other) == repo_of(&previous)
+    });
+    let next = match lazy {
+        Some(next) => next,
+        None => {
+            let id = store.generate_id().map_err(|error| error.to_string())?;
+            let mut next = Task::new(id, RELEASE_TRAIN_TITLE.into());
+            next.task_type = TaskType::Epic;
+            next.labels.push(RELEASE_TRAIN_LABEL.into());
+            next.branch = Some(format!("epic/release-train-vnext-{}", next.id));
+            next.origin_project = previous.origin_project.clone();
+            next.epic_verification_owner = previous.epic_verification_owner.clone();
+            next.deliverables.work_target = previous.deliverables.work_target.clone();
+            store.add(&next).map_err(|error| error.to_string())?;
+            next
+        }
+    };
+    previous.labels.push(format!("{SUCCESSOR_LABEL}{}", next.id));
     previous.updated_at = chrono::Utc::now();
     store.update(&previous).map_err(|error| error.to_string())?;
     publish_train_branch(repo, next.effective_epic_branch().unwrap(), integration)?;
@@ -882,5 +895,56 @@ mod tests {
             assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, newer.id);
             for id in [&stale.id, &live.id] { assert_eq!(store.get(id).unwrap().status, TaskStatus::Open); }
         }
+    }
+
+    /// GH #2181: the cut adopts a successor opened lazily during the freeze
+    /// instead of opening a second one; a cut with none still opens one.
+    #[test]
+    fn cut_adopts_the_lazy_successor_and_opens_one_only_when_none_gh2181() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = repo();
+        let repo = temp.path();
+        let bare = TempDir::new().unwrap();
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(repo, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/example/train-test.git"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(repo, &["checkout", "-qb", "epic/cut"]);
+        std::fs::write(repo.join("work.txt"), "work\n").unwrap();
+        git(repo, &["add", "work.txt"]);
+        git(repo, &["commit", "-qm", "work"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["branch", "epic/lazy"]);
+        git(repo, &["push", "-q", "origin", "epic/cut", "epic/lazy"]);
+        let tip = |branch: &str| {
+            let output = Command::new("git").args(["rev-parse", branch]).current_dir(repo).output().unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let cas_root = crate::store::init_cas_dir(repo).unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let train = |id: &str, lane: &str, age: i64| {
+            let mut task = Task::new(id.into(), RELEASE_TRAIN_TITLE.into());
+            task.task_type = TaskType::Epic;
+            task.labels = vec![RELEASE_TRAIN_LABEL.into()];
+            task.branch = Some(lane.into());
+            task.created_at -= chrono::Duration::seconds(age);
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:train-fixture".into(), target_branch: "main".into(),
+            });
+            task
+        };
+        store.add(&train("cas-b111", "epic/cut", 600)).unwrap();
+        store.add(&train("cas-b222", "epic/lazy", 60)).unwrap();
+        let trains = || store.list(None).unwrap().into_iter().filter(is_release_train).map(|t| t.id).collect::<Vec<_>>();
+        let successor = |id: &str| store.get(id).unwrap().labels.iter()
+            .find_map(|label| label.strip_prefix(SUCCESSOR_LABEL).map(str::to_string));
+
+        mark_cut_trains(&cas_root, repo, store.as_ref(), "cas-b111", &tip("epic/cut"), "main", &[]).unwrap();
+        assert_eq!(successor("cas-b111").as_deref(), Some("cas-b222"));
+        assert_eq!(trains().len(), 2);
+
+        mark_cut_trains(&cas_root, repo, store.as_ref(), "cas-b222", &tip("main"), "main", &[]).unwrap();
+        let opened = successor("cas-b222").unwrap();
+        assert!(!["cas-b111", "cas-b222"].contains(&opened.as_str()), "{opened}");
+        assert_eq!(trains().len(), 3);
     }
 }

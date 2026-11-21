@@ -120,8 +120,17 @@ struct CheckReceipt {
     head: String,
     repo: PathBuf,
     packages: Vec<String>,
+    #[serde(default)]
+    no_default_features: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     test: Option<TestReceipt>,
+}
+
+impl CheckReceipt {
+    fn check_note(&self) -> String {
+        format!("check: PASS {} packages={} no_default_features={}",
+            self.head, self.packages.join(","), self.no_default_features)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -231,7 +240,8 @@ fn package_selector(package: &str) -> Option<(&str, Option<&str>)> {
 /// broaden the scope, and arbitrary Cargo configuration or toolchains.
 pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
     let mut packages = Vec::new();
-    let mut target_selected = false;
+    let mut target_selected = None;
+    let mut no_default_features = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -239,14 +249,19 @@ pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
                 packages.push(args[index + 1].clone());
                 index += 2;
             }
-            "--lib" | "--tests" if !target_selected => {
-                target_selected = true;
+            "--lib" | "--tests" if target_selected.is_none() => {
+                target_selected = Some(args[index].as_str());
+                index += 1;
+            }
+            "--no-default-features" if !no_default_features => {
+                no_default_features = true;
                 index += 1;
             }
             _ => return None,
         }
     }
-    (target_selected && !packages.is_empty()).then_some(packages)
+    (target_selected.is_some() && !packages.is_empty()
+        && (!no_default_features || target_selected == Some("--lib"))).then_some(packages)
 }
 
 /// Only positive named-test selectors may be joined by union/intersection.
@@ -633,6 +648,7 @@ pub(crate) fn record_supervisor_test(
         recorded_at: chrono::Utc::now().to_rfc3339(),
     };
     let record = CheckReceipt {
+        no_default_features: false,
         head: evidence.head,
         repo,
         packages: vec![test.package],
@@ -1075,19 +1091,24 @@ fn receipt_path(cas_root: &Path, repo: &Path, head: &str) -> PathBuf {
         .join(format!("{head}.json"))
 }
 
+fn check_receipt_path(cas_root: &Path, repo: &Path, head: &str, no_default_features: bool) -> PathBuf {
+    let path = receipt_path(cas_root, repo, head);
+    if no_default_features { path.with_file_name(format!("{head}-no-default-features.json")) } else { path }
+}
+
+/// Close imports every valid compile configuration, without substituting it
+/// for test proof. Missing legacy configuration means Cargo's default features.
 pub(crate) fn passing_receipt(cas_root: &Path, repo: &Path, head: &str) -> Option<String> {
     let repo = repo.canonicalize().ok()?;
-    let receipt: CheckReceipt =
-        serde_json::from_slice(&std::fs::read(receipt_path(cas_root, &repo, head)).ok()?).ok()?;
-    (receipt.test.is_none()
-        && receipt.repo == repo
-        && receipt.head == head
-        && !receipt.packages.is_empty()
-        && receipt
-            .packages
-            .iter()
-            .all(|package| valid_package(package)))
-    .then(|| format!("check: PASS {head} packages={}", receipt.packages.join(",")))
+    let receipts: Vec<_> = [false, true].into_iter().filter_map(|no_default_features| {
+        let path = check_receipt_path(cas_root, &repo, head, no_default_features);
+        let receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        (receipt.test.is_none() && receipt.repo == repo && receipt.head == head
+            && receipt.no_default_features == no_default_features
+            && !receipt.packages.is_empty() && receipt.packages.iter().all(|package| valid_package(package)))
+            .then(|| receipt.check_note())
+    }).collect();
+    (!receipts.is_empty()).then(|| receipts.join("\n"))
 }
 
 fn test_receipt_path(cas_root: &Path, repo: &Path, head: &str, test: &TargetedTest) -> PathBuf {
@@ -1371,6 +1392,7 @@ fn read_passing_test_record(
     let record = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path()).ok()?).ok()?;
     let test = record.test?;
     if record.repo != repo
+        || record.no_default_features
         || !named_filter(&test.filter)
         || test.count == 0
         || test
@@ -1831,6 +1853,7 @@ pub(crate) fn record_passing_test_for_tests(
     std::fs::create_dir_all(path.parent().expect("receipt directory"))
         .expect("create receipt directory");
     let record = CheckReceipt {
+        no_default_features: false,
         head: head.to_string(),
         repo,
         packages: vec![package.to_string()],
@@ -2502,7 +2525,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     crate::factory_target_cache::parked::resume(&cas_root, &repo)?;
     let receipt = match &test {
         Some(test) => test_receipt_path(&cas_root, &repo, &head, test),
-        None => receipt_path(&cas_root, &repo, &head),
+        None => check_receipt_path(&cas_root, &repo, &head, args.iter().any(|arg| arg == "--no-default-features")),
     };
     // A failed retry must not leave an earlier PASS at this SHA.
     match std::fs::remove_file(&receipt) {
@@ -2786,6 +2809,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         None => None,
     };
     let record = CheckReceipt {
+        no_default_features: args.iter().any(|arg| arg == "--no-default-features"),
         head: head.clone(),
         repo,
         packages,
@@ -2793,13 +2817,13 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     };
     std::fs::create_dir_all(receipt.parent().context("receipt directory")?)?;
     std::fs::write(&receipt, serde_json::to_vec(&record)?)?;
-    if let Some(test) = record.test {
+    if let Some(test) = record.test.as_ref() {
         println!(
             "test: PASS {head} {} {} {}{}",
             record.packages[0], test.filter, test.count, test.path_note()
         );
     } else {
-        println!("check: PASS {head} packages={}", record.packages.join(","));
+        println!("{}", record.check_note());
     }
     Ok(())
 }
@@ -4725,7 +4749,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             ],
         )
         .unwrap();
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CAS_FACTORY_BUILD_GUARD", "off"),
             ("CAS_HOOK_HARNESS", "claude"),
             ("CAS_CLONE_PATH", repo.to_str().unwrap()),
@@ -4775,6 +4799,71 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let args = vec!["-p".into(), "cas".into(), "--tests".into()];
         execute_at(&root, &args, &repo, &fake).unwrap();
         assert!(passing_receipt(&root, &repo, &head).is_some());
+        let canonical = repo.canonicalize().unwrap();
+        let default_path = receipt_path(&root, &canonical, &head);
+        let default_bytes = std::fs::read(&default_path).unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_slice(&default_bytes).unwrap();
+        legacy.as_object_mut().unwrap().remove("no_default_features");
+        std::fs::write(&default_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(passing_receipt(&root, &repo, &head).is_some());
+        std::fs::write(&default_path, &default_bytes).unwrap();
+        let no_default = ["-p", "cas", "--lib", "--no-default-features"].map(str::to_string);
+        fake_cargo(&fake, "printf '%s\\n' \"$@\" > target/forwarded-check; exit 0");
+        for harness in ["claude", "codex"] {
+            env.set("CAS_HOOK_HARNESS", harness);
+            let mut request = request.clone();
+            request.tool_input = Some(serde_json::json!({
+                "command":"cargo check -p cas --lib --no-default-features > target/no-default.log 2>&1 &"
+            }));
+            let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            let command = value.pointer("/hookSpecificOutput/updatedInput/command").and_then(|value| value.as_str());
+            assert!(command.is_some(), "{harness}: {value}");
+            assert!(command.unwrap().contains("-- -p cas --lib --no-default-features"));
+            execute_at(&root, &no_default, &repo, &fake).unwrap();
+            assert_eq!(std::fs::read_to_string(repo.join("target/forwarded-check")).unwrap().lines().collect::<Vec<_>>(),
+                ["check", "-p", "cas", "--lib", "--no-default-features"]);
+            assert_eq!(std::fs::read(&default_path).unwrap(), default_bytes);
+            let records: Vec<serde_json::Value> = std::fs::read_dir(default_path.parent().unwrap()).unwrap()
+                .flatten().filter_map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()).collect();
+            assert_eq!(records.len(), 2);
+            assert!(records.iter().any(|record| record["no_default_features"] == false));
+            assert!(records.iter().any(|record| record["no_default_features"] == true));
+            assert_eq!(passing_receipt(&root, &repo, &head).unwrap().lines().count(), 2);
+            assert!(passing_test_packages(&root, &repo, &head).is_empty());
+            let mut mislabeled: serde_json::Value = serde_json::from_slice(&default_bytes).unwrap();
+            mislabeled["no_default_features"] = true.into();
+            std::fs::write(&default_path, serde_json::to_vec(&mislabeled).unwrap()).unwrap();
+            assert_eq!(passing_receipt(&root, &repo, &head).unwrap().lines().count(), 1);
+            std::fs::write(&default_path, &default_bytes).unwrap();
+            // The exact reader used by close also accepts the explicitly
+            // identified non-default proof alone, without relabelling it.
+            std::fs::remove_file(&default_path).unwrap();
+            assert!(passing_receipt(&root, &repo, &head).is_some());
+            std::fs::write(&default_path, &default_bytes).unwrap();
+        }
+        for command in [
+            "cargo check -p cas --tests --no-default-features",
+            "cargo check -p cas --lib --no-default-features --no-default-features",
+            "cargo check -p cas --lib --no-default-features --features mcp-proxy",
+            "cargo check -p cas --lib --no-default-features --all-features",
+            "cargo check -p cas --lib --no-default-features --workspace",
+            "cargo check -p cas --lib --no-default-features --config build.jobs=64",
+            "CARGO_BUILD_JOBS=64 cargo check -p cas --lib --no-default-features",
+            "CAS_AGENT_ROLE=supervisor cargo check -p cas --lib --no-default-features",
+        ] {
+            let mut denied = request.clone();
+            denied.tool_input = Some(serde_json::json!({"command":command}));
+            let output = crate::hooks::handlers::handle_pre_tool_use(&denied, Some(&root)).unwrap();
+            assert_eq!(serde_json::to_value(output).unwrap().pointer("/hookSpecificOutput/permissionDecision").and_then(|value| value.as_str()),
+                Some("deny"), "{command}");
+            assert!(!allowed_args(&command.split_whitespace().skip(2).map(str::to_string).collect::<Vec<_>>()));
+        }
+        // A failed no-default retry invalidates only that configuration.
+        fake_cargo(&fake, "exit 1");
+        assert!(execute_at(&root, &no_default, &repo, &fake).is_err());
+        assert_eq!(std::fs::read(&default_path).unwrap(), default_bytes);
+        assert_eq!(passing_receipt(&root, &repo, &head).unwrap().lines().count(), 1);
         for path in ["untracked.rs", "source.rs"] {
             std::fs::write(repo.join(path), "// dirt\n").unwrap();
             let _ = execute_at(&root, &args, &repo, &fake)
@@ -6568,6 +6657,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
         let path = receipt_path(root.path(), &repo, &head);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let record = CheckReceipt {
+            no_default_features: false,
             head: head.clone(),
             repo: repo.clone(),
             packages: vec!["cas".into()],

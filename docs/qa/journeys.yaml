@@ -2102,6 +2102,107 @@ bug_families:
       newer queue state. Normal target publication and supervisor authority gates
       remain in force.
     fixed_by: [cas-deb2]
+  capped-temp-git-ancestry:
+    title: Capped temporary directories exclude physical Git ancestry
+    statement: TMPDIR must resolve outside checkout ancestry. A selected path beneath any .git marker refuses admission with registered H-50 before temporary output is created or exported, including Git ceilings, linked-worktree files and symlink aliases.
+    found: 2026-11-21
+    tasks: [cas-f45a]
+  checkpoint-scope-repair:
+    title: Checkpoint scope repair preserves target-identical tests
+    statement: Pre-push fast rows must admit byte-identical restoration to the active task's recorded target while refusing introduced prose assertions. Wrong branch bindings and recorded bases after the checkpoint cannot exempt files.
+    found: 2026-11-21
+    tasks: [cas-3c12]
+  codex-spawn-login-probe-contention:
+    title: Concurrent Codex spawns resolve the same account when a login probe times out
+    statement: A spawn whose Codex login probe times out under concurrent spawns still selects the registered account a single spawn would, rather than falling back to a missing default Codex home and refusing.
+    found: 2026-11-21
+    tasks: [cas-9ab7]
+  explicit-trunk-retarget-merge:
+    title: An explicit trunk retarget of an epic task merges without allow_trunk
+    statement: A supervisor's task update target_branch to trunk pins the target, so worktree_merge accepts it without allow_trunk and still reports the trunk push. request_changes on in-progress work refuses with the replayable note and worker message that return the findings.
+    found: 2026-11-21
+    tasks: [cas-7305]
+  macos-operator-smoke-ancestry:
+    title: macOS operator smoke leaves factory ancestry
+    statement: All four operator entry points run through a clean transient launchd job and refuse explicit agent invocations; clearing environment variables alone cannot remove parent-process ancestry. Production ancestry guards remain enforced.
+    found: 2026-11-21
+    tasks: [cas-da66]
+  merged-epic-ci-base:
+    title: Merged epic refs do not accumulate task-parent comparison work
+    statement: Factory CI filters merged epic refs, bounds live-parent comparisons, and release publication safely prunes merged remote epic branches.
+    tasks: [cas-066a3]
+    fixed_by: [cas-066a3]
+    journeys: [FACTORY-MERGE, CLI-RELEASE]
+    invariants: []
+  non-head-fast-row-receipt:
+    title: Non-HEAD cut-marker pushes consult matching fast-row receipts before checkout admission
+    tasks: [cas-a267]
+    journeys: [CLI-RELEASE]
+    statement: >-
+      Push an earlier commit to an epic ref while another commit is checked out.
+      Matching commit and comparison-base PASS receipts admit the push without
+      rerunning checks on the current checkout. Missing, failed, wrong-SHA and
+      wrong-base receipts refuse. Changes requiring web output also require the
+      same-range web receipt. Missing-proof advice requires a clean checkout and
+      retry so the hook can perform every required check.
+    fixed_by: [cas-a267]
+  ordinary-park-cited-proof-portability:
+    title: Ordinary parks require portable cited proof
+    statement: A delivery cannot park while a file cited in its close reason is missing or not committed to Cloud. A refusal names all unpublished paths; successful publication records the files for a peer reviewer.
+    found: 2026-11-21
+    tasks: [cas-dae1]
+  park-evidence-publication-bounded:
+    title: Park evidence publication is bounded and requires only cited evidence
+    statement: A task close publishes its ledger and the evidence files the ledger cites within a fixed budget, retrying a failed upload once. A failed upload of a file the ledger does not cite, such as a folder copied from another task, never refuses the park; it is listed as unpublished.
+    found: 2026-11-21
+    tasks: [cas-8018]
+  release-owner-follows-freeze:
+    title: Release readiness follows the supervisor that froze the train after a handoff
+    statement: After a cross-machine handoff, the receiving live supervisor's freeze takes over the train's release ownership, so auto-cut runs on its machine. Refusals name the owner and its machine, and the cut notice counts each delivery merged into the train once, including merged deliveries awaiting their verdict.
+    found: 2026-11-21
+    tasks: [cas-1d33]
+  release-roots-fresh-host:
+    title: Release delivery on a host with no project registry records the supplied project
+    statement: On a new machine or an isolated HOME where no project was ever registered, cas release installed and cas release published create the empty host registry and record the release for the supplied project, instead of failing with a missing known_repos table.
+    found: 2026-11-21
+    tasks: [cas-6b73]
+  retained-work-symlinked-checkout:
+    title: Retained-work recovery matches a worker's checkout through symlinked path spellings
+    statement: A live worker whose recorded checkout path differs from Git's listing only by a symlink (macOS /var vs /private/var) is recognised as the checkout's owner and kept out of the retained-work banner, while retired workers' local work is still reported.
+    found: 2026-11-21
+    tasks: [cas-55a5]
+  shipped-train-cut-ready-notice:
+    title: Shipped release trains suppress late cut-ready notices
+    statement: A delayed green CI observation cannot emit release_cut_ready for a cut or terminal train, a stale open snapshot of a closed train, or a commit already contained in a version tag. Older release tags and non-version checkpoint tags preserve an unreleased train's notification.
+    found: 2026-11-21
+    tasks: [cas-74cbc]
+  train-append-acknowledgement:
+    title: Train appends acknowledge committed positions before advancement
+    statement: An active train_merge append returns its saved queue revision and requested delivery positions without waiting for origin reads or review preparation. The existing daemon subsequently prepares appended reviews and preserves ordered publication and pending-verifier recovery.
+    found: 2026-11-21
+    tasks: [cas-7f934]
+  vitest-vue-helper-related-proof:
+    title: Vue components and Vitest helpers select related specs for focused proof
+    statement: G-61 suggests a runnable bounded related command for Vue source and helpers, including helpers under __tests__, and accepts its receipt.
+    tasks: [cas-7794]
+    fixed_by: [cas-7794]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]
+  worker-check-playwright-failure-evidence:
+    title: Failed capped Playwright runs keep their traces after worker-check returns
+    statement: A failing capped Playwright run keeps its traces, error contexts and JSON reports in a directory under the task artifacts and names that path in the failure, instead of writing them to a temporary directory that is removed when worker-check exits.
+    found: 2026-11-21
+    tasks: [cas-a582]
+  worker-no-default-proof:
+    title: Worker no-default library checks retain distinct compile proof
+    statement: A package-scoped library check can disable default features through the capped runner. Feature configurations retain separate commit/repository-bound receipts, and a failure invalidates only its own configuration. Broader feature, target, resource and identity overrides remain denied; compile evidence cannot replace test proof.
+    found: 2026-11-21
+    tasks: [cas-afe3]
+  worker-recycle-store-contention:
+    title: A worker recycle that meets a brief shared-store hold is retried, not dropped
+    statement: When another factory component holds the shared database for a few milliseconds as a worker recycle or clear_context starts, the request stays queued, the old worker keeps running, and a later factory pass completes the recycle without a manual retry.
+    found: 2026-11-21
+    tasks: [cas-aea9]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

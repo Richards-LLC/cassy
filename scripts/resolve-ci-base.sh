@@ -24,31 +24,41 @@ if "$factory_push" || [[ -z "$base" || "$base" =~ ^0+$ ]]; then
     if "$factory_push"; then
         # Use the shared fork, since a sibling may advance an epic while the
         # worker runs. Only fetched same-repository epic refs supply candidates.
-        # Two incomparable maximal forks give no task parent and fail closed.
-        parents=()
+        # Merged epics cannot supply an unreleased task parent. Cap live refs
+        # at 64; overflow runs the conservative CI tier rather than truncating
+        # away a potentially incomparable parent. Git filters in one graph walk.
+        refs="$(git for-each-ref --count=65 --no-merged="$base" \
+            --format='%(refname)' refs/remotes/origin/epic/)" || exit 1
+        candidates=()
         while read -r candidate; do
-            [[ -n "$candidate" ]] || continue
+            [[ -z "$candidate" ]] || candidates+=("$candidate")
+        done <<< "$refs"
+        if (( ${#candidates[@]} > 64 )); then
+            echo 'CI base: too many live epic refs; refusing task scope' >&2
+            exit 1
+        fi
+        parents=()
+        selected=''
+        for candidate in "${candidates[@]}"; do
             if ! fork="$(git merge-base "$candidate" HEAD)"; then
                 echo 'CI base: shared epic ancestry unavailable; refusing task scope' >&2
                 exit 1
             fi
             parents+=("$fork")
-        done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/epic/)
-        selected=''
+            # If a unique greatest fork exists, this pass must select it.
+            # Defer ambiguity until all forks are seen: a later fork may join
+            # two currently incomparable parents.
+            if [[ -z "$selected" ]] || { [[ "$selected" != "$fork" ]] \
+                && git merge-base --is-ancestor "$selected" "$fork"; }; then
+                selected="$fork"
+            fi
+        done
+        # Prove the selected fork dominates every parent. At most 2*(n-1)
+        # ancestry checks across both passes, plus one against the default base.
         for candidate in "${parents[@]}"; do
-            maximal=true
-            for other in "${parents[@]}"; do
-                if [[ "$candidate" != "$other" ]] && git merge-base --is-ancestor "$candidate" "$other"; then
-                    maximal=false
-                    break
-                fi
-            done
-            if "$maximal"; then
-                if [[ -n "$selected" && "$selected" != "$candidate" ]]; then
-                    echo 'CI base: ambiguous shared epic parents; refusing task scope' >&2
-                    exit 1
-                fi
-                selected="$candidate"
+            if [[ "$candidate" != "$selected" ]] && ! git merge-base --is-ancestor "$candidate" "$selected"; then
+                echo 'CI base: ambiguous shared epic parents; refusing task scope' >&2
+                exit 1
             fi
         done
         if [[ -n "$selected" ]] && ! git merge-base --is-ancestor "$selected" "$base"; then

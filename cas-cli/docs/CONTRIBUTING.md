@@ -153,6 +153,13 @@ focus/spawn publication guards: recorded originating host, expected-absent push,
 existing remote preservation and explicit child repository/branch targets.
 Publication failures are visible in the successful task receipt for recovery.
 
+An epic child created with an explicit `target_branch` owns that delivery
+branch even when it matches the epic's base. Supplying only `target_repo`
+keeps branch inheritance; selecting the live epic lane follows lane renames.
+For historical rows whose raw target differs from the effective target, a live
+supervisor can repair the binding with `proof_scope_fix=true` and the same
+`target_branch`; unchanged raw and effective targets still refuse a no-op repair.
+
 ## Staffing behind a published release
 
 Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when

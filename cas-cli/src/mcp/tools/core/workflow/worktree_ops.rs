@@ -8859,14 +8859,18 @@ mod tests {
         );
     }
 
-    /// cas-7305: an epic child that a supervisor retargets with `task update
-    /// target_branch=main` merges to trunk without allow_trunk, and the merge
-    /// still reports its trunk push. A trunk target the child merely carried
-    /// into the epic stays refused (GH #997).
+    /// GH #2210: explicit create/update targets survive the same effective-target
+    /// resolution used by show/start and merge; only defaults follow lane renames.
     #[tokio::test]
-    async fn explicit_trunk_retarget_of_an_epic_child_merges_without_allow_trunk_cas_7305() {
+    async fn explicit_epic_child_target_survives_lifecycle_cas_e721() {
         use cas_store::{AgentStore, TaskStore};
+        use crate::mcp::tools::core::task::repo_context::effective_task_work_target;
+        use rmcp::handler::server::wrapper::Parameters;
+
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_ROOT", "CAS_CLONE_PATH"] {
+            env.remove(key);
+        }
         env.set("CAS_AGENT_ROLE", "supervisor");
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
@@ -8877,39 +8881,84 @@ mod tests {
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
-        git(&["branch", "epic/lane"]);
+        git(&["branch", "epic/lane-cas-e721-epic"]);
+        git(&["branch", "epic/renamed-cas-e721-epic"]);
         let root = repo.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"merge-7305\"\n").unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"merge-e721\"\n").unwrap();
         crate::store::known_repos::ensure_host_schema().unwrap();
         let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
         let tasks = core.open_task_store().unwrap();
         let agents = core.open_agent_store().unwrap();
-        let target = |branch: &str| cas_types::WorkTarget { repo_selector: "project:merge-7305".into(), target_branch: branch.into() };
-        let mut epic = cas_types::Task::new("cas-7305-epic".into(), "epic".into());
+        let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        agents.register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let executor = cas_types::Agent::new("executor".into(), "executor".into());
+        agents.register(&executor).unwrap();
+        let executor_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        executor_core.bind_agent_identity(executor.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let target = |branch: &str| cas_types::WorkTarget { repo_selector: "project:merge-e721".into(), target_branch: branch.into() };
+        let mut epic = cas_types::Task::new("cas-e721-epic".into(), "epic".into());
         epic.task_type = cas_types::TaskType::Epic;
-        epic.branch = Some("epic/lane".into());
-        epic.deliverables.work_target = Some(target("epic/lane"));
+        epic.branch = Some("epic/lane-cas-e721-epic".into());
+        epic.deliverables.work_target = Some(target("main"));
         tasks.add(&epic).unwrap();
-        let mut child = cas_types::Task::new("cas-7305-child".into(), "child".into());
-        child.assignee = Some("worker-a".into());
-        child.deliverables.work_target = Some(target("main"));
-        tasks.add(&child).unwrap();
-        tasks.add_dependency(&cas_types::Dependency::new(child.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
-        let resolve = || super::resolve_system_b_merge_target(
-            tasks.as_ref() as &dyn TaskStore, agents.as_ref() as &dyn AgentStore,
-            Some("cas-7305-child"), "worker-a", false, || "main".to_string(),
-        );
 
-        let stale = resolve().err().expect("a carried trunk target is refused");
-        assert_eq!(crate::gates::codes_in(&stale.message), vec!["G-140"]);
-        let request = serde_json::from_value(serde_json::json!({"id": "cas-7305-child"})).unwrap();
-        core.cas_task_update_with_target(request, None, Some("main"), false, None, None).await
-            .unwrap_or_else(|error| panic!("{}", error.message));
-        let explicit = resolve().unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(explicit.branch, "main");
-        assert!(explicit.trunk_fallback, "the trunk push is still reported");
+        for (case, branch, repo_arg, expected) in [
+            ("explicit base", Some("main"), Some(repo.to_str().unwrap()), "main"),
+            ("branch only", Some("main"), None, "main"),
+            ("repo default", None, Some(repo.to_str().unwrap()), "epic/lane-cas-e721-epic"),
+            ("implicit", None, None, "epic/lane-cas-e721-epic"),
+            ("explicit lane", Some("epic/lane-cas-e721-epic"), None, "epic/lane-cas-e721-epic"),
+        ] {
+            epic.branch = Some("epic/lane-cas-e721-epic".into());
+            tasks.update(&epic).unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "title": case, "task_type": "task", "risk": "none", "epic": epic.id,
+            })).unwrap();
+            core.cas_task_create_with_target(request, repo_arg, branch, true).await.unwrap();
+            let child = tasks.list(None).unwrap().into_iter().find(|task| task.title == case).unwrap();
+            assert_eq!(effective_task_work_target(&child, Some(&epic)), Some(target(expected)), "{case}: create");
+            executor_core.cas_task_start(Parameters(crate::mcp::tools::IdRequest { id: child.id.clone() })).await.unwrap();
+            let started = tasks.get(&child.id).unwrap();
+            assert_eq!(started.deliverables.work_target, Some(target(expected)), "{case}: start");
+            let resolved = super::resolve_system_b_merge_target(
+                tasks.as_ref() as &dyn TaskStore, agents.as_ref() as &dyn AgentStore,
+                Some(&child.id), &executor.id, false, || "main".to_string(),
+            ).unwrap();
+            assert_eq!(resolved.branch, expected, "{case}: merge");
+            assert_eq!(resolved.trunk_fallback, expected == "main");
+
+            epic.branch = Some("epic/renamed-cas-e721-epic".into());
+            tasks.update(&epic).unwrap();
+            let renamed = if expected == "main" { "main" } else { "epic/renamed-cas-e721-epic" };
+            assert_eq!(effective_task_work_target(&started, Some(&epic)), Some(target(renamed)), "{case}: rename");
+            assert_eq!(super::resolve_system_b_merge_target(
+                tasks.as_ref(), agents.as_ref(), Some(&child.id), &executor.id, false, || "main".to_string(),
+            ).unwrap().branch, renamed, "{case}: renamed merge");
+        }
+
+        // Historical rows can carry main without authority. Ordinary update
+        // and a supervisor's same-raw-target scope correction must both repair it.
+        for scope_fix in [false, true] {
+            let mut legacy = cas_types::Task::new(format!("cas-e721-legacy-{scope_fix}"), "legacy".into());
+            legacy.assignee = Some(owner.id.clone());
+            legacy.status = cas_types::TaskStatus::InProgress;
+            legacy.deliverables.work_target = Some(target("main"));
+            tasks.add(&legacy).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(legacy.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+            assert_eq!(effective_task_work_target(&legacy, Some(&epic)), Some(target("epic/renamed-cas-e721-epic")));
+            let request = serde_json::from_value(serde_json::json!({"id": legacy.id})).unwrap();
+            core.cas_task_update_with_target(request, None, Some("main"), scope_fix,
+                scope_fix.then_some("repair effective target that differs from raw target"), None).await.unwrap();
+            let repaired = tasks.get(&legacy.id).unwrap();
+            assert_eq!(effective_task_work_target(&repaired, Some(&epic)), Some(target("main")));
+            assert_eq!(super::resolve_system_b_merge_target(
+                tasks.as_ref(), agents.as_ref(), Some(&legacy.id), &owner.id, false, || "main".to_string(),
+            ).unwrap().branch, "main");
+        }
     }
+
 }
 
 #[cfg(test)]

@@ -2306,11 +2306,13 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
 }
 
 /// GH #2270: a parked delivery has no reusable verdict, then it landed by
-/// git, and a later target commit superseded one of its paths. One audited
-/// supervisor close must satisfy both the reviewed drop and the missing
-/// pre-merge approval; unintegrated or unreviewed loss still refuses.
+/// git, and a later target commit superseded one of its paths. The operator's
+/// one recorded decision for the epic authorizes the close; each close cites
+/// that decision and its containment commit, with no supervisor_override. A
+/// missing, foreign or overridden decision, an unintegrated delivery and an
+/// unreviewed drop still refuse.
 #[tokio::test]
-async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_gh2270() {
+async fn operator_decision_recovers_contained_delivery_with_reviewed_drop_gh2270() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let repo = f.dir.path();
@@ -2319,6 +2321,18 @@ async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_g
     config.set("verification.enabled", "true").unwrap();
     config.save(&cas_dir).unwrap();
     close(&f).await;
+    let tasks = open_task_store(&cas_dir).unwrap();
+    for epic in ["cas-ep2270", "cas-epother"] {
+        let mut task = Task::new(epic.into(), format!("{epic} train"));
+        task.task_type = TaskType::Epic;
+        tasks.add(&task).unwrap();
+    }
+    tasks.add_dependency(&cas_types::Dependency::new(
+        TASK.into(), "cas-ep2270".into(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    let now = chrono::Utc::now();
+    let decision = crate::recovery_decision::record(&cas_dir, tasks.as_ref(), "cas-ep2270", "close contained history", now).unwrap();
+    let foreign = crate::recovery_decision::record(&cas_dir, tasks.as_ref(), "cas-epother", "other train", now).unwrap();
     env.set("CAS_AGENT_ROLE", "supervisor");
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
@@ -2326,33 +2340,44 @@ async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_g
     let mut errored = cas_types::Verification::new("ver-errored".into(), TASK.into());
     errored.status = VerificationStatus::Error;
     supervisor.open_verification_store().unwrap().add(&errored).unwrap();
-    let close_with = |receipt: &str, reason: String| supervisor.cas_task_close(Parameters(TaskCloseRequest {
-        no_delivery: None,
-        id: TASK.into(),
-        reason: Some(reason),
-        commit_receipt: Some(receipt.into()),
-        supervisor_override: Some(true),
-        stranded_branch_override: None,
-        search_manifest: None,
-    }));
-    let tasks = open_task_store(&cas_dir).unwrap();
+    let close_with = |id: &str, receipt: &str, reason: String, override_: bool| supervisor.cas_task_close_with_dispositions(
+        Parameters(TaskCloseRequest {
+            no_delivery: None,
+            id: TASK.into(),
+            reason: Some(reason),
+            commit_receipt: Some(receipt.into()),
+            supervisor_override: override_.then_some(true),
+            stranded_branch_override: None,
+            search_manifest: None,
+        }),
+        None, None, None, None, None, None, Some(id.into()),
+    );
+    let closed_now = || tasks.get(TASK).unwrap().status == TaskStatus::Closed;
     // A target commit cited before the delivery itself lands authorizes nothing.
     let base = git(repo, &["rev-parse", "main"]);
-    let unintegrated = text(close_with(&base, format!("reviewed-drop: {base} -- early")).await.unwrap());
-    assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{unintegrated}");
+    let unintegrated = text(close_with(&decision.id, &base, format!("reviewed-drop: {base} -- early"), false).await.unwrap());
+    assert!(!closed_now(), "{unintegrated}");
     // The merge fact lands, but a target-side resolution replaces its footer.
     git(repo, &["merge", "--no-ff", "-s", "ours", BRANCH, "-m", "land delivery by git"]);
     std::fs::write(repo.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
     git(repo, &["add", "footer.css"]);
     git(repo, &["commit", "-qm", "supersede footer spacing"]);
     let replacement = git(repo, &["rev-parse", "HEAD"]);
-    let unreviewed = text(close_with(&f.final_tip, "Reviewed the integrated historical delivery and missing pre-merge approval".into()).await.unwrap());
+    let drop = format!("reviewed-drop: {replacement} -- later footer spacing supersedes it");
+    for (id, override_) in [("ord-missing", false), (foreign.id.as_str(), false), (decision.id.as_str(), true)] {
+        let refused = text(close_with(id, &f.final_tip, drop.clone(), override_).await.unwrap());
+        assert!(crate::gates::codes_in(&refused).contains(&"G-164"), "{id} {override_}: {refused}");
+        assert!(!closed_now());
+    }
+    let unreviewed = text(close_with(&decision.id, &f.final_tip, "Reviewed the integrated historical delivery".into(), false).await.unwrap());
     assert!(crate::gates::codes_in(&unreviewed).contains(&"G-56"), "{unreviewed}");
-    assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed);
-    let closed = text(close_with(&f.final_tip, format!("reviewed-drop: {replacement} -- later footer spacing supersedes it")).await.unwrap());
+    assert!(!closed_now());
+    let closed = text(close_with(&decision.id, &f.final_tip, drop, false).await.unwrap());
     let task = tasks.get(TASK).unwrap();
     assert_eq!(task.status, TaskStatus::Closed, "{closed}");
-    assert!(task.notes.contains(&replacement) && task.notes.contains(&f.final_tip), "{}", task.notes);
+    for cited in [&decision.id, &replacement, &f.final_tip] {
+        assert!(task.notes.contains(cited.as_str()), "{cited}: {}", task.notes);
+    }
     assert!(cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().is_none(),
         "recovery opens no post-merge review");
 }

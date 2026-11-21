@@ -496,6 +496,13 @@ pub struct TaskRequest {
     #[serde(default)]
     pub external_verification_receipt: Option<String>,
 
+    /// Operator recovery decision ID for a contained historical delivery.
+    #[schemars(
+        description = "close: ID from the operator's `cas task recovery-decision --scope <epic>`. A live registered supervisor cites it with commit_receipt=<containment commit> to close a contained historical delivery of that epic that has no pre-merge verdict; a reviewed-drop: reason is honored. Not combinable with supervisor_override; Tier 2 excluded."
+    )]
+    #[serde(default)]
+    pub operator_decision: Option<String>,
+
     /// Include dependencies (for show)
     #[schemars(description = "Include dependency information")]
     #[serde(default, deserialize_with = "deser::option_bool")]

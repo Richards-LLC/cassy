@@ -138,17 +138,33 @@ fn notify_green(root: &Path, epic: &cas_types::Task, previous: Option<&Value>, s
     });
     // cas-e060: where auto-cut applies, the cut poll acts on this green and
     // wakes the supervisor only when it needs notes or declines.
-    if !after_red_or_nothing || crate::mcp::tools::core::workflow::release_auto_cut::enabled(root, epic) {
+    if !after_red_or_nothing {
+        return Ok(());
+    }
+    // CI can finish after the observer's task snapshot was cut or closed.
+    let current = crate::store::open_task_store(root)?.get(&epic.id)?;
+    if current.is_terminal()
+        || crate::mcp::tools::core::task::release_train::is_cut_train(&current)
+        || crate::mcp::tools::core::workflow::release_auto_cut::enabled(root, &current)
+    {
+        return Ok(());
+    }
+    let repo = crate::train_guardrails::train_repo_root(root, &current)?;
+    let tags = crate::git_evidence::git_text(&repo, &["tag", "--list", "v*", "--contains", head])
+        .context("cannot inspect release tags before notifying cut readiness")?;
+    if tags.lines().any(|tag| tag.strip_prefix('v')
+        .is_some_and(|version| semver::Version::parse(version).is_ok()))
+    {
         return Ok(());
     }
     crate::supervisor_notices::release_action(
         root,
-        epic,
+        &current,
         crate::supervisor_notices::ReleaseNoticePhase::CutReady,
         head,
         &format!(
             "Train {} is green at {head}, run {}: cut it.",
-            epic.id,
+            current.id,
             state["run_id"].as_str().unwrap_or("unknown")
         ),
     )?;
@@ -620,15 +636,33 @@ mod tests {
     /// Nov 7: red at one tip, then the repair's green tip woke nobody.
     #[test]
     fn green_after_red_wakes_the_supervisor_once_per_tip() {
-        use cas_types::{Agent, AgentRole};
+        use cas_types::{Agent, AgentRole, TaskType};
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(dir.path())
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["checkout", "-q", "-b", "factory/train"]);
+        let heads: Vec<String> = (0..5).map(|index| {
+            git(&["commit", "-qm", &format!("CI tip {index}"), "--allow-empty"]);
+            git(&["rev-parse", "HEAD"])
+        }).collect();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(root.join("config.toml"), "[release]\nauto_cut_max_per_day=0\n").unwrap();
         let mut owner = Agent::new_with_role("sup".into(), "sup".into(), AgentRole::Supervisor);
         owner.factory_session = Some("session".into());
         crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
         let mut epic = cas_types::Task::new("cas-train".into(), "Train".into());
+        epic.task_type = TaskType::Epic;
+        epic.labels.push("release-train".into());
+        epic.branch = Some("factory/train".into());
         epic.epic_verification_owner = Some(owner.id.clone());
+        crate::store::open_task_store(&root).unwrap().add(&epic).unwrap();
         let receipt = |outcome: &str, head: &str, run: &str, previous: Option<&Value>| {
             let mut state = serde_json::json!({"outcome": outcome, "head": head, "run_id": run, "run_attempt": 1,
                 "merge_range": [], "failures": [], "last_green": previous.and_then(|p| p["last_green"].clone().as_str().map(String::from))});
@@ -641,17 +675,17 @@ mod tests {
                 .into_iter().filter(|row| row.prompt.contains("release_cut_ready")).collect::<Vec<_>>()
         };
 
-        let first_green = receipt("PASS", "aaaa", "10", None);
+        let first_green = receipt("PASS", &heads[0], "10", None);
         assert_eq!(wakes().len(), 1, "no earlier verdict: the first green wakes");
-        let red = receipt("FAIL", "bbbb", "11", Some(&first_green));
+        let red = receipt("FAIL", &heads[1], "11", Some(&first_green));
         assert_eq!(wakes().len(), 1, "red is train_ci_red, not a cut notice");
-        let green = receipt("PASS", "cccc", "12", Some(&red));
+        let green = receipt("PASS", &heads[2], "12", Some(&red));
         assert_eq!(wakes().len(), 2);
-        assert!(wakes()[1].prompt.contains("cccc") && wakes()[1].prompt.contains("run 12"), "{}", wakes()[1].prompt);
-        receipt("PASS", "cccc", "12", Some(&green));
-        let next_green = receipt("PASS", "dddd", "13", Some(&green));
+        assert!(wakes()[1].prompt.contains(&heads[2]), "{}", wakes()[1].prompt);
+        receipt("PASS", &heads[2], "12", Some(&green));
+        let next_green = receipt("PASS", &heads[3], "13", Some(&green));
         assert_eq!(wakes().len(), 2, "a repeat, or a green with no red before it, wakes nobody");
-        receipt("PASS", "eeee", "14", Some(&next_green));
+        receipt("PASS", &heads[4], "14", Some(&next_green));
         assert_eq!(wakes().len(), 2);
     }
 

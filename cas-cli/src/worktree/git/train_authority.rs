@@ -44,6 +44,8 @@ pub(crate) struct Record {
     pub quiescence: Option<serde_json::Value>,
     #[serde(default)]
     pub accepted: Option<Acceptance>,
+    #[serde(default)]
+    pub operator_claim: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +59,9 @@ pub(crate) struct Acceptance {
 #[path = "train_transfer.rs"]
 mod transfer;
 pub(crate) use transfer::TransferChecks;
+#[path = "train_recovery.rs"]
+mod recovery;
+pub(crate) use recovery::OperatorClaim;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Snapshot {

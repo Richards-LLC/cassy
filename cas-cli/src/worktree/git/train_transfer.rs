@@ -14,7 +14,7 @@ fn conflict() -> String {
 }
 
 impl Snapshot {
-    fn coherent(&self, repo: &Path) -> Result<Self, String> {
+    pub(super) fn coherent(&self, repo: &Path) -> Result<Self, String> {
         let live = Self::read(repo, &self.record.train)?;
         if live.tip != self.tip {
             return Err(conflict());
@@ -28,15 +28,32 @@ impl Snapshot {
         Ok(live)
     }
 
-    fn require_actor(&self, actor: &Identity) -> Result<(), String> {
+    pub(super) fn require_actor(&self, actor: &Identity) -> Result<(), String> {
         if self.record.identity != *actor {
             return Err("TRAIN_OWNER_GENERATION_CHANGED: owner incarnation changed".into());
         }
         Ok(())
     }
 
-    fn append(&self, repo: &Path, record: Record) -> Result<Self, String> {
-        self.coherent(repo)?;
+    pub(super) fn append(&self, repo: &Path, record: Record) -> Result<Self, String> {
+        self.append_observing(repo, record, &self.record.target_sha)
+    }
+
+    // Only explicit operator adoption may supply an observed target different
+    // from the prior record. The exact authority lease still serializes it.
+    pub(super) fn append_observing(
+        &self,
+        repo: &Path,
+        record: Record,
+        expected_target: &str,
+    ) -> Result<Self, String> {
+        let live = Self::read(repo, &self.record.train)?;
+        if live.tip != self.tip {
+            return Err(conflict());
+        }
+        if live.observed_target(repo)? != expected_target {
+            return Err("TRAIN_TRANSFER_TARGET_DIVERGED: observed target changed".into());
+        }
         let tip = record_commit(repo, Some(&self.tip), &record)?;
         let lease = format!("--force-with-lease={}:{}", self.reference, self.tip);
         let update = format!("{tip}:{}", self.reference);
@@ -58,7 +75,11 @@ impl Snapshot {
         }
         let confirmed = Self::read(repo, &record.train)?;
         let git = GitOperations::new(repo.to_path_buf());
-        if !git.is_ancestor(&tip, &confirmed.tip) {
+        if !git.is_ancestor(&tip, &confirmed.tip)
+            || confirmed.record.generation != record.generation
+            || confirmed.record.identity != record.identity
+            || confirmed.record.phase != record.phase
+        {
             return Err(conflict());
         }
         if confirmed.observed_target(repo)? != confirmed.record.target_sha {
@@ -95,7 +116,7 @@ impl Snapshot {
                 Err(conflict())
             };
         }
-        if live.record.phase != Phase::Active {
+        if !matches!(live.record.phase, Phase::Active | Phase::RecoveryHeld) {
             return Err(conflict());
         }
         let mut next = live.record.clone();
@@ -156,7 +177,7 @@ impl Snapshot {
             && live.record.accepted.as_ref().is_some_and(|a| {
                 a.transfer_id == id
                     && a.prior_generation == prior_generation
-                    && a.successor == *actor
+                    && a.successor.owner == actor.owner
                     && a.generation == live.record.generation
                     && live.record.identity == *actor
             })
@@ -204,7 +225,10 @@ impl Snapshot {
     ) -> Result<Self, String> {
         let live = self.coherent(repo)?;
         live.require_actor(actor)?;
-        if !matches!(live.record.phase, Phase::Draining | Phase::Quiesced) {
+        if !matches!(
+            live.record.phase,
+            Phase::Draining | Phase::Quiesced | Phase::RecoveryHeld
+        ) {
             return Err(conflict());
         }
         checks.external_clear(&live)?;
@@ -215,7 +239,10 @@ impl Snapshot {
         next.generation = uuid::Uuid::new_v4().to_string();
         next.accepted = None;
         next.quiescence = None;
-        next.operation = format!("abort:{}", next.transfer.as_ref().ok_or_else(conflict)?.id);
+        next.operation = match next.transfer.as_ref() {
+            Some(transfer) => format!("abort:{}", transfer.id),
+            None => "abort-recovery".into(),
+        };
         let confirmed = live.append(repo, next)?;
         checks.external_clear(&confirmed)?;
         Ok(confirmed)

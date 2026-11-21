@@ -1931,8 +1931,7 @@ impl CloudSyncer {
             Err(cas_store::StoreError::TaskNotFound(_)) => {
                 let mut task = task;
                 append_imported_park_provenance(&mut task, sync_id, source);
-                store.add(&task)?;
-                Ok(UpsertResult::Created)
+                self.add_task_from_sync(store, &task)
             }
             Err(e) => Err(e.into()),
         }
@@ -2076,6 +2075,27 @@ impl CloudSyncer {
         Ok(())
     }
 
+    fn add_task_from_sync(&self, store: &dyn TaskStore, task: &Task) -> Result<UpsertResult, CasError> {
+        let snapshot = if task.labels.iter().any(|label| label == crate::train_owner::ENROLLED)
+            || (crate::mcp::tools::core::task::release_train::is_release_train(task) && task.epic_verification_owner.is_some())
+        {
+            match crate::train_owner::synced_owner_authority(self.queue.cas_dir(), task, task) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    self.record_task_lifecycle_conflict(task, task, &format!("TRAIN_OWNER_SYNC_CONFLICT: {error}"))?;
+                    return Ok(UpsertResult::Skipped("TRAIN_OWNER_SYNC_CONFLICT"));
+                }
+            }
+        } else { None };
+        store.add(task)?;
+        if let Some(snapshot) = snapshot {
+            let current = store.get(&task.id)?;
+            crate::train_owner::repair_projection(self.queue.cas_dir(), store, &current, &snapshot)
+                .map_err(CasError::Other)?;
+        }
+        Ok(UpsertResult::Created)
+    }
+
     fn apply_task_from_sync(
         &self,
         store: &dyn TaskStore,
@@ -2084,6 +2104,19 @@ impl CloudSyncer {
         winner_side: &str,
         strategy: &str,
     ) -> Result<UpsertResult, CasError> {
+        let repaired;
+        let expected = if expected.labels.iter().chain(&remote.labels).any(|label| label == crate::train_owner::ENROLLED)
+            || (crate::mcp::tools::core::task::release_train::is_release_train(expected)
+                && remote.epic_verification_owner != expected.epic_verification_owner)
+        {
+            match crate::train_owner::project_synced_owner(self.queue.cas_dir(), store, remote, expected) {
+                Ok(current) => { repaired = current; &repaired }
+                Err(error) => {
+                    self.record_task_lifecycle_conflict(expected, remote, &format!("TRAIN_OWNER_SYNC_CONFLICT: {error}"))?;
+                    return Ok(UpsertResult::Skipped("TRAIN_OWNER_SYNC_CONFLICT"));
+                }
+            }
+        } else { expected };
         if store.update_from_sync(remote, expected)?.is_some() {
             self.journal_local_overwrite(
                 EntityType::Task,
@@ -3066,8 +3099,7 @@ impl CloudSyncer {
             Err(cas_store::StoreError::TaskNotFound(_)) => {
                 let mut task = task;
                 append_imported_park_provenance(&mut task, sync_id, source);
-                store.add(&task)?;
-                Ok(UpsertResult::Created)
+                self.add_task_from_sync(store, &task)
             }
             Err(e) => Err(e.into()),
         }
@@ -3302,8 +3334,7 @@ impl CloudSyncer {
             Err(cas_store::StoreError::TaskNotFound(_)) => {
                 let mut task = task;
                 append_imported_park_provenance(&mut task, sync_id, source);
-                store.add(&task)?;
-                Ok(UpsertResult::Created)
+                self.add_task_from_sync(store, &task)
             }
             Err(e) => Err(e.into()),
         }
@@ -5054,6 +5085,34 @@ mod web_close_tests {
             assert_eq!(fields["observer_machine"], cas_types::Agent::get_or_generate_machine_id());
             assert!(chrono::DateTime::parse_from_rfc3339(fields["observed_at"]).is_ok());
             assert_eq!(fields["prior_status"], "not_present");
+
+            // The same personal/team/owner routes must preserve train
+            // ownership and keep rejected metadata as conflict evidence.
+            let mut train = Task::new("cas-6456".into(), "Train".into());
+            train.task_type = crate::types::TaskType::Epic;
+            train.branch = Some("epic/train-cas-6456".into());
+            train.labels = vec!["release-train".into(), crate::train_owner::ENROLLED.into()];
+            train.epic_verification_owner = Some("prior".into());
+            store.add(&train).unwrap();
+            let mut unverified = train.clone();
+            unverified.epic_verification_owner = Some("unverified".into());
+            unverified.updated_at += chrono::Duration::minutes(1);
+            for fresh_import in [false, true] {
+                if fresh_import { unverified.id = "cas-6456import".into(); }
+                let outcome = match route {
+                    0 => syncer.upsert_owner_task(&*store, unverified.clone(), "train-owner", "team_pull"),
+                    1 => syncer.upsert_task(&*store, unverified.clone(), "train-personal", "personal_pull"),
+                    _ => syncer.upsert_task_with_strategy(&*store, unverified.clone(), ConflictResolution::RemoteWins, "train-team", "team_pull"),
+                }.unwrap();
+                assert!(matches!(outcome, UpsertResult::Skipped("TRAIN_OWNER_SYNC_CONFLICT")));
+                assert_eq!(store.get(&train.id).unwrap().epic_verification_owner, train.epic_verification_owner);
+                if fresh_import { assert!(store.get(&unverified.id).is_err()); }
+                let conflicts = queue.list_conflicts(10).unwrap();
+                assert!(conflicts.iter().any(|conflict| {
+                    let evidence: serde_json::Value = serde_json::from_str(&conflict.discarded_row_json).unwrap();
+                    evidence["rejected_remote"]["epic_verification_owner"] == "unverified"
+                }));
+            }
         }
     }
 }

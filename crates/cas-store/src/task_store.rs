@@ -263,6 +263,31 @@ impl SqliteTaskStore {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
 
+            // Enforce this below every local/sync whole-row caller. Stripping
+            // enrollment and changing ownership in one write is still a bypass.
+            let prior_owner: Option<(String, Option<String>, String, Option<String>, String)> = tx.query_row(
+                "SELECT labels, epic_verification_owner, task_type, branch, deliverables FROM tasks WHERE id = ?1",
+                params![task.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            ).optional()?;
+            if let Some((labels, owner, kind, branch, deliverables)) = prior_owner {
+                let labels = Self::parse_labels(&labels);
+                let enrolled = labels.iter().any(|label| label == "train-owner-enrolled-v1");
+                let release = kind == "epic" && labels.iter().any(|label| label == "release-train");
+                let enrollment_added = !enrolled && task.labels.iter().any(|label| label == "train-owner-enrolled-v1");
+                let protected_changed = (enrolled || (release && owner.is_some())) && (
+                    task.epic_verification_owner != owner
+                    || (release && !task.labels.iter().any(|label| label == "release-train"))
+                    || (enrolled && (!task.labels.iter().any(|label| label == "train-owner-enrolled-v1")
+                        || task.branch != branch || task.task_type.to_string() != kind
+                        || task.deliverables.work_target != Self::parse_deliverables(&deliverables).work_target))
+                );
+                if enrollment_added || protected_changed {
+                    if from_sync { return Ok(None); }
+                    return Err(StoreError::Other("TRAIN_OWNER_TRANSFER_REQUIRED: task metadata cannot replace train authority".into()));
+                }
+            }
+
             if let Some(expected) = expected {
                 if expected.id != task.id {
                     return Err(StoreError::Parse(
@@ -1456,6 +1481,67 @@ impl TaskStore for SqliteTaskStore {
                 )?;
             }
             Ok(next)
+        })
+    }
+
+    fn project_train_owner(
+        &self,
+        expected: &Task,
+        projection: &cas_types::TrainOwnerProjection,
+    ) -> Result<bool> {
+        projection.validate().map_err(StoreError::Parse)?;
+        if projection.train != expected.id || expected.task_type != TaskType::Epic
+            || expected.effective_epic_branch() != Some(projection.target.as_str())
+        {
+            return Err(StoreError::Other("TRAIN_OWNER_SYNC_CONFLICT: projection scope differs from task".into()));
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let (clock, status): (String, String) = tx.query_row(
+                "SELECT updated_at, status FROM tasks WHERE id = ?1", params![expected.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?.ok_or_else(|| StoreError::TaskNotFound(expected.id.clone()))?;
+            if Self::parse_datetime(&clock) != Some(expected.updated_at) || status != expected.status.to_string() {
+                return Ok(false);
+            }
+            let encoded: Option<String> = tx.query_row(
+                "SELECT state FROM task_execution_states WHERE task_id = ?1", params![expected.id],
+                |row| row.get(0),
+            ).optional()?;
+            let mut state: Value = encoded.map(|value| serde_json::from_str(&value)).transpose()?
+                .unwrap_or_else(|| serde_json::json!({}));
+            cas_types::validate_task_execution_state(&state).map_err(StoreError::Parse)?;
+            if let Some(prior) = state.get("train_owner") {
+                let prior: cas_types::TrainOwnerProjection = serde_json::from_value(prior.clone())?;
+                if prior.project != projection.project || prior.target != projection.target
+                    || prior.epoch > projection.epoch
+                    || (prior.epoch == projection.epoch && (prior.generation != projection.generation || prior.owner != projection.owner))
+                {
+                    return Err(StoreError::Other("TRAIN_OWNER_SYNC_CONFLICT: projection would replace newer or foreign authority".into()));
+                }
+                if prior == *projection && expected.epic_verification_owner.as_deref() == Some(projection.owner.as_str()) {
+                    return Ok(true);
+                }
+            }
+            state["train_owner"] = serde_json::to_value(projection)?;
+            cas_types::validate_task_execution_state(&state).map_err(StoreError::Parse)?;
+            let mut labels = expected.labels.clone();
+            if !labels.iter().any(|label| label == "train-owner-enrolled-v1") {
+                labels.push("train-owner-enrolled-v1".into());
+            }
+            let now = Utc::now().to_rfc3339();
+            tx.execute(
+                "UPDATE tasks SET epic_verification_owner = ?1, labels = ?2, updated_at = ?3 WHERE id = ?4",
+                params![projection.owner, Self::labels_to_string(&labels), now, expected.id],
+            )?;
+            tx.execute(
+                "INSERT INTO task_execution_states(task_id, state, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(task_id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+                params![expected.id, serde_json::to_string(&state)?, now],
+            )?;
+            tx.commit()?;
+            Ok(true)
         })
     }
 

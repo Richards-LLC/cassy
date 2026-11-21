@@ -757,6 +757,17 @@ pub trait TaskStore: Send + Sync {
     /// return the resulting sparse object. Null fields are deleted.
     fn patch_execution_state(&self, task_id: &str, patch: &Value) -> Result<Value>;
 
+    /// Internal projection boundary. The caller must fetch and verify Git
+    /// authority first. Atomically compare the task snapshot, persist the owner
+    /// and enrollment marker, and cache the record. Generic writes cannot do it.
+    fn project_train_owner(
+        &self,
+        _expected: &Task,
+        _projection: &cas_types::TrainOwnerProjection,
+    ) -> Result<bool> {
+        Err(StoreError::Other("train authority projection is unsupported by this store".into()))
+    }
+
     /// Update an existing task.
     ///
     /// `updated_at` is **store-owned**: the store stamps it from its own clock

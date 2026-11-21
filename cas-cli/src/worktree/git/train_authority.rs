@@ -113,7 +113,7 @@ fn record_commit(repo: &Path, parent: Option<&str>, record: &Record) -> Result<S
 }
 
 impl Snapshot {
-    fn observed_target(&self, repo: &Path) -> Result<String, String> {
+    pub(crate) fn observed_target(&self, repo: &Path) -> Result<String, String> {
         let target = format!("refs/heads/{}", self.record.target);
         command(repo, &["check-ref-format", &target], None)?;
         // Read both refs in one advertisement. A proper concurrent publication

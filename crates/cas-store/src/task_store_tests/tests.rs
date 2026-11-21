@@ -19,13 +19,14 @@ fn train_owner_projection_cas_6456() {
     let (_temp, store) = create_test_store();
     let mut train = Task::new("cas-6456-train".into(), "Train".into());
     train.task_type = TaskType::Epic;
+    train.branch = Some("epic/release-train-cas-6456-train".into());
     train.labels = vec!["release-train".into(), "train-owner-enrolled-v1".into()];
     train.epic_verification_owner = Some("prior".into());
     store.add(&train).unwrap();
     let original = store.get(&train.id).unwrap();
-    for strip_labels in [false, true] {
+    for (replace_owner, strip_labels) in [(true, false), (true, true), (false, true)] {
         let mut attempted = original.clone();
-        attempted.epic_verification_owner = Some("unverified".into());
+        if replace_owner { attempted.epic_verification_owner = Some("unverified".into()); }
         attempted.title = "Conflicting replica".into();
         if strip_labels { attempted.labels.clear(); }
         assert!(store.update(&attempted).is_err());
@@ -39,6 +40,44 @@ fn train_owner_projection_cas_6456() {
     unchanged.title = "Independent title edit".into();
     store.update(&unchanged).unwrap();
     assert_eq!(store.get(&train.id).unwrap().title, unchanged.title);
+
+    let expected = store.get(&train.id).unwrap();
+    store.patch_execution_state(&train.id, &json!({"next_step": "resume"})).unwrap();
+    let projection = cas_types::TrainOwnerProjection {
+        train: train.id.clone(), project: "fixture".into(), target: train.branch.clone().unwrap(),
+        authority: "a".repeat(40), owner: "accepted".into(), incarnation: "registered-successor".into(),
+        epoch: 2, generation: "fresh-generation".into(), phase: "active".into(),
+    };
+    let mut invalid = projection.clone();
+    invalid.epoch = 0;
+    assert!(store.project_train_owner(&expected, &invalid).is_err());
+    assert_eq!(store.get(&train.id).unwrap().epic_verification_owner, original.epic_verification_owner);
+    assert!(store.project_train_owner(&expected, &projection).unwrap());
+    let accepted = store.get(&train.id).unwrap();
+    let state = store.get_execution_state(&train.id).unwrap().unwrap();
+    assert_eq!(accepted.epic_verification_owner.as_deref(), Some("accepted"));
+    assert_eq!(state["train_owner"]["generation"], "fresh-generation");
+    assert_eq!(state["next_step"], "resume");
+    for value in [Value::Null, json!(projection), json!({"owner": "unverified"})] {
+        assert!(store.patch_execution_state(&train.id, &json!({"train_owner": value})).is_err());
+        assert_eq!(store.get_execution_state(&train.id).unwrap(), Some(state.clone()));
+    }
+    // A crash after the local commit can repeat repair without rotating the
+    // generation or task clock. A stale task snapshot cannot overwrite it.
+    assert!(store.project_train_owner(&accepted, &projection).unwrap());
+    assert_eq!(store.get(&train.id).unwrap().updated_at, accepted.updated_at);
+    assert!(!store.project_train_owner(&expected, &projection).unwrap());
+    for (epoch, generation) in [(1, "old"), (2, "another-generation")] {
+        let mut stale = projection.clone();
+        stale.epoch = epoch;
+        stale.generation = generation.into();
+        assert!(store.project_train_owner(&accepted, &stale).is_err());
+        assert_eq!(store.get_execution_state(&train.id).unwrap(), Some(state.clone()));
+    }
+    let mut stale_owner = accepted.clone();
+    stale_owner.epic_verification_owner = original.epic_verification_owner;
+    assert!(store.update_from_sync(&stale_owner, &accepted).unwrap().is_none());
+    assert_eq!(store.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some("accepted"));
 }
 
 /// cas-7678: the factory daemon opens the task store uncached many times a

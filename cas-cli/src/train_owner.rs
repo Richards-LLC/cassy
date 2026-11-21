@@ -7,6 +7,66 @@ use crate::worktree::git::train_authority::{Identity, Phase, Snapshot};
 
 pub(crate) const ENROLLED: &str = "train-owner-enrolled-v1";
 
+/// Called after authenticating the accepted successor (or by sync after
+/// fetching the shared authority). Never infer an accepted owner from task
+/// clocks, notes or model-supplied state.
+pub(crate) fn repair_projection(
+    root: &Path,
+    store: &dyn crate::store::TaskStore,
+    train: &Task,
+    snapshot: &Snapshot,
+) -> Result<Task, String> {
+    let live = authority(root, train)?.ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: authority missing")?;
+    if live.tip != snapshot.tip {
+        return Err("TRAIN_TRANSFER_CONFLICT: authority changed before projection".into());
+    }
+    let repo = crate::train_guardrails::train_repo_root(root, train).map_err(|e| e.to_string())?;
+    if live.observed_target(&repo)? != live.record.target_sha {
+        return Err("TRAIN_TRANSFER_TARGET_DIVERGED: projection cannot adopt target changes".into());
+    }
+    let record = &live.record;
+    let projection = cas_types::TrainOwnerProjection {
+        train: record.train.clone(), project: record.project.clone(), target: record.target.clone(),
+        authority: live.tip.clone(), owner: record.identity.owner.clone(), incarnation: record.identity.incarnation.clone(),
+        epoch: record.epoch, generation: record.generation.clone(),
+        phase: match record.phase {
+            Phase::Active => "active", Phase::Draining => "draining", Phase::Quiesced => "quiesced", Phase::RecoveryHeld => "recovery_held",
+        }.into(),
+    };
+    if !store.project_train_owner(train, &projection).map_err(|e| e.to_string())? {
+        return Err("TRAIN_OWNER_SYNC_CONFLICT: task changed before projection".into());
+    }
+    let confirmed = authority(root, train)?.ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: authority disappeared")?;
+    if confirmed.tip != live.tip || confirmed.observed_target(&repo)? != confirmed.record.target_sha {
+        return Err("TRAIN_TRANSFER_CONFLICT: authority changed during projection; repair from its current record".into());
+    }
+    store.get(&train.id).map_err(|e| e.to_string())
+}
+
+/// Sync cannot import an owner merely because its whole-row clock won LWW.
+pub(crate) fn project_synced_owner(
+    root: &Path,
+    store: &dyn crate::store::TaskStore,
+    incoming: &Task,
+    local: &Task,
+) -> Result<Task, String> {
+    let snapshot = synced_owner_authority(root, incoming, local)?;
+    repair_projection(root, store, local, &snapshot)
+}
+
+pub(crate) fn synced_owner_authority(root: &Path, incoming: &Task, local: &Task) -> Result<Snapshot, String> {
+    let snapshot = authority(root, local)?.ok_or("TRAIN_OWNER_SYNC_CONFLICT: synced owner has no verified authority")?;
+    if incoming.epic_verification_owner.as_deref() != Some(snapshot.record.identity.owner.as_str())
+        || incoming.effective_epic_branch() != Some(snapshot.record.target.as_str())
+        || !incoming.labels.iter().any(|label| label == ENROLLED)
+        || !crate::mcp::tools::core::task::release_train::is_release_train(incoming)
+        || incoming.deliverables.work_target != local.deliverables.work_target
+    {
+        return Err("TRAIN_OWNER_SYNC_CONFLICT: incoming owner or train scope disagrees with authority".into());
+    }
+    Ok(snapshot)
+}
+
 pub(crate) fn authority(root: &Path, train: &Task) -> Result<Option<Snapshot>, String> {
     let enrolled = train.labels.iter().any(|label| label == ENROLLED);
     if !enrolled && !crate::mcp::tools::core::task::release_train::is_release_train(train) {

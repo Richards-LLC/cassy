@@ -395,6 +395,21 @@ fn train_authority_stale_owner_publication_cas_6456() {
             &settled,
         )
         .unwrap();
+    // Replay remote accept followed by a crash before the local projection.
+    // Verified Git history repairs it before projected-owner admission checks.
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    tasks.add(&train).unwrap();
+    let original = tasks.get(&train.id).unwrap();
+    assert!(crate::train_owner::repair_projection(&root, tasks.as_ref(), &original, &admitted).is_err());
+    let mut incoming = original.clone();
+    incoming.epic_verification_owner = Some(successor.owner.clone());
+    let repaired = crate::train_owner::project_synced_owner(&root, tasks.as_ref(), &incoming, &original).unwrap();
+    assert_eq!(repaired.epic_verification_owner.as_deref(), Some(successor.owner.as_str()));
+    assert_eq!(tasks.get_execution_state(&train.id).unwrap().unwrap()["train_owner"]["generation"], accepted.record.generation);
+    let repeated = crate::train_owner::project_synced_owner(&root, tasks.as_ref(), &incoming, &repaired).unwrap();
+    assert_eq!(repeated.updated_at, repaired.updated_at);
+    assert!(crate::train_owner::project_synced_owner(&root, tasks.as_ref(), &original, &repaired).is_err());
+    assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner, repaired.epic_verification_owner);
     let tip = accepted.tip;
     let error = admitted
         .publish(

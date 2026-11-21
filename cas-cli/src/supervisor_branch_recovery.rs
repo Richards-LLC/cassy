@@ -272,17 +272,6 @@ pub(crate) fn recover(core: &CasCore, task_id: &str, payload: &str) -> Result<Re
     if !remote_tip.is_empty() {
         git.run(&["merge-base", "--is-ancestor", &remote_tip, &request.head])?;
     }
-    // No active holder may race a dead registration's rescue.
-    if let Some(lease) = core
-        .open_agent_store()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?
-        .get_lease(task_id)?
-    {
-        bail!(
-            "task has an active lease held by {}; release it through the normal task handoff first",
-            lease.agent_id
-        );
-    }
     let audit = format!(
         "[{}] BRANCH RECOVERY INTENT by {} ({}): {} at {} -> {} on origin; expected remote {}",
         chrono::Utc::now().to_rfc3339(),
@@ -302,6 +291,31 @@ pub(crate) fn recover(core: &CasCore, task_id: &str, payload: &str) -> Result<Re
     let agents = core
         .open_agent_store()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if let Some(held) = agents.get_lease(task_id)? {
+        let holder = agents.get(&held.agent_id)
+            .context("task lease holder is unverifiable; leave its lease and source alone")?;
+        // The source binding above remains the sole branch-ownership check.
+        // Only its exact, locally observable dead registration may surrender
+        // a lease. A different holder or unknown harness must stay protected.
+        if holder.role != AgentRole::Worker
+            || (holder.name != prior && holder.id != prior)
+            || holder.machine_id.as_deref() != Some(Agent::get_or_generate_machine_id().as_str())
+            || holder.pid.is_none()
+            || (holder.ppid.is_some_and(|pid| pid > 1)
+                && holder.metadata.get(crate::mcp::daemon::PPID_STARTTIME_KEY)
+                    .and_then(|value| value.parse::<u64>().ok()).is_none())
+            || crate::mcp::tools::service::agent_liveness::agent_process_is_alive(&holder)
+        {
+            bail!("task lease holder is live or unverifiable; leave its lease and source alone");
+        }
+        ensure_dead(core, prior)?;
+        if !agents.release_lease_if_owner_epoch(
+            task_id, &held.agent_id, held.epoch,
+            "authenticated successor recovery of a provably dead local worker",
+        )? {
+            bail!("task lease changed before recovery; leave the new holder alone");
+        }
+    }
     let lease = match agents.try_claim(
         task_id,
         &actor.id,

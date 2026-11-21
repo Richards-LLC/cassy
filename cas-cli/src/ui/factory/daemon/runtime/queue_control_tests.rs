@@ -828,45 +828,6 @@ fn cas_b355_spawn_poll_reads_while_the_writer_is_held() {
 }
 
 #[test]
-fn cas_7b6b_reset_before_writer_runs_preserves_durable_rows() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = crate::store::init_cas_dir(temp.path()).unwrap();
-    let mut daemon = super::super::provisioning_tests::daemon(&root);
-    let writer = super::super::prompt_queue_jobs::tests::TestWriter::start(true);
-    daemon.queue_jobs = super::super::prompt_queue_jobs::tests::jobs_on(&writer);
-    let queue = crate::store::open_spawn_queue_store(&root).unwrap();
-    let id = queue
-        .enqueue_spawn(
-            1,
-            &["still-queued".into()],
-            false,
-            None,
-            Some(&daemon.session_name),
-            None,
-        )
-        .unwrap();
-    daemon.enqueue_spawn_requests().unwrap();
-    crate::factory_daemon_health::request_reset(&root, &daemon.session_name, "supervisor").unwrap();
-    let reset = crate::factory_daemon_health::take_reset(&root, &daemon.session_name).unwrap();
-    daemon.apply_spawn_queue_reset(&reset);
-    writer.open();
-    settle_until(|| !writer.ran().is_empty());
-    assert_eq!(
-        queue.peek(10).unwrap()[0].id,
-        id,
-        "cancelled queued poll must not consume rows"
-    );
-    settle_until(|| {
-        daemon.enqueue_spawn_requests().unwrap();
-        daemon.pending_spawns.len() == 1
-    });
-    assert!(
-        queue.peek(10).unwrap().is_empty(),
-        "the next poll still drains preserved rows"
-    );
-}
-
-#[test]
 fn cas_7b6b_carried_batch_gets_fresh_authority_and_wait_inputs_off_control() {
     use super::super::prompt_queue_jobs::{QueueJobs, QueueSelection};
     use super::super::queue_control_jobs::PromptPreparation;

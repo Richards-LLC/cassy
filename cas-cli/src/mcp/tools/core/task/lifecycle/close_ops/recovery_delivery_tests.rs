@@ -515,13 +515,17 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
 /// next. With the failing tests recorded as data, a decline needs the class.
 #[tokio::test]
 async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_bc25() {
-    use crate::mcp::tools::core::task::repair_class::record_failing_tests;
+    use std::io::Write;
+    use crate::ui::factory::daemon::runtime::{ci_watch, merge_queue_ejection};
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let repo = f.dir.path();
     let root = repo.join(".cas");
     let tasks = open_task_store(&root).unwrap();
     let mut task = tasks.get(TASK).unwrap();
+    // Lane attribution applies to train deliveries too, not just PRs to main.
+    git(repo, &["branch", "epic/class-audit", "main"]);
+    task.deliverables.work_target.as_mut().unwrap().target_branch = "epic/class-audit".into();
     task.deliverables.parked_branch = Some(BRANCH.into());
     task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
         work_target: task.deliverables.work_target.clone().unwrap(),
@@ -532,7 +536,79 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
     task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
     task.status = TaskStatus::AwaitingMerge;
     tasks.update(&task).unwrap();
-    record_failing_tests(&root, TASK, &["ui::list::sorts".into(), "ui::list::filters".into()]);
+    // Replay the real CI watcher against a disposable GitHub transport. Logs
+    // include test failures, but only structured, head-bound caused receipts
+    // may create the class-audit fact (cas-0eb4).
+    git(repo, &["remote", "add", "origin", "https://github.com/example/class-audit.git"]);
+    let gh = root.join("gh");
+    let runs = serde_json::json!({"workflow_runs":[{
+        "id":91,"name":"CI","event":"push","head_branch":BRANCH,
+        "head_sha":f.final_tip,"html_url":"https://example.invalid/run/91",
+        "status":"completed","conclusion":"failure"
+    }]});
+    for (name, value) in [
+        ("runs.json", runs),
+        ("branch.json", serde_json::json!({"commit":{"sha":f.final_tip}})),
+        ("artifacts.json", serde_json::json!({"artifacts":[{
+            "id":901,"name":"lane-impact-91-own","size_in_bytes":4096,"expired":false
+        }]})),
+    ] { std::fs::write(root.join(name), serde_json::to_vec(&value).unwrap()).unwrap(); }
+    let script = format!(r#"#!/bin/sh
+case "$*" in
+  'repo view example/class-audit '*) printf '%s' '{{"nameWithOwner":"example/class-audit"}}' ;;
+  *'/actions/runs/91/artifacts'*) cat '{root}/artifacts.json' ;;
+  *'/actions/artifacts/'*'/zip'*) cat '{root}/receipt.zip' ;;
+  *'/actions/runs/91/jobs'*) printf '%s' '{{"jobs":[{{"name":"Scoped Validation — impact own tests","conclusion":"failure"}}]}}' ;;
+  *'/branches/'*) cat '{root}/branch.json' ;;
+  *'/actions/runs'*) cat '{root}/runs.json' ;;
+  'api graphql '*) printf '%s' '{{"data":{{"repository":{{"pullRequests":{{"nodes":[]}}}}}}}}' ;;
+  'pr list '*) printf '[]' ;;
+  'run view 91 '*) printf 'test log_only::decoy ... FAILED\nLane impact: caused by this delivery: log_only::decoy\n' ;;
+  *) printf 'Unexpected gh request: %s\n' "$*" >&2; exit 97 ;;
+esac
+"#, root=root.display());
+    crate::test_paths::warm_stub(&gh, &script);
+    env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+    let write_receipt = |head: &str, caused: bool, artifact_id: u64| {
+        std::fs::write(root.join("artifacts.json"), serde_json::to_vec(&serde_json::json!({"artifacts":[{
+            "id":artifact_id,"name":"lane-impact-91-own","size_in_bytes":4096,"expired":false
+        }]})).unwrap()).unwrap();
+        let file = std::fs::File::create(root.join("receipt.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, data) in [
+            ("lane.json", serde_json::json!({"head":head,"base":"base"})),
+            ("own-attribution.json", serde_json::json!({
+                "base":"base","status":if caused {"caused"} else {"inherited"},
+                "caused":if caused {serde_json::json!([
+                    {"binary":"cas","test":"ui::list::sorts"},
+                    {"binary":"cas","test":"ui::list::filters"}
+                ])} else {serde_json::json!([])},
+                "inherited":[{"binary":"cas","test":"inherited::decoy"}]
+            })),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(&serde_json::to_vec(&data).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+    };
+    let poll = || {
+        ci_watch::read_github(&root, repo, "class-audit-session",
+            &std::collections::BTreeSet::from([BRANCH.to_string()]),
+            &Default::default(), &Default::default(), &Default::default(),
+            &merge_queue_ejection::FailedRunLookups::default()).unwrap()
+    };
+    // Inherited-only receipts and stale-head receipts do not trigger, even
+    // when log text appears to attribute a named failure to this delivery.
+    for (head, caused, artifact_id) in [(f.final_tip.as_str(), false, 901), (f.predecessor.as_str(), true, 902)] {
+        write_receipt(head, caused, artifact_id);
+        assert_eq!(poll().failures.len(), 1);
+        assert!(tasks.get_execution_state(TASK).unwrap().is_none_or(|state|
+            state.get("failing_tests").is_none()));
+    }
+    write_receipt(&f.final_tip, true, 903);
+    assert_eq!(poll().failures.len(), 1);
+    assert_eq!(tasks.get_execution_state(TASK).unwrap().unwrap_or_default()["failing_tests"],
+        serde_json::json!(["ui::list::sorts", "ui::list::filters"]));
     let supervisor = CasCore::with_daemon(root.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -555,6 +631,7 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
     ] {
         let refused = supervisor.cas_task_request_changes(request(class)).await.unwrap_err();
         assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
+        assert!(refused.message.contains("CLASS_AUDIT_REQUIRED"), "{refused}");
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
     }
     // cas-adca: decode the structural field and enter the real spawn handler,

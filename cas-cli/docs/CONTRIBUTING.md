@@ -5051,6 +5051,19 @@ root. The layers are:
 A process that deliberately hides a same-user write from these checks is out
 of reach. A hard boundary needs agents running as a separate Unix user.
 
+**Scratch QA of the setter (GH #2186).** A worker cannot run the write-roots
+setter, even with an isolated HOME, `XDG_CONFIG_HOME` or `CAS_ROOT`: PreToolUse
+refuses the tool call (H-11) and the binary refuses a worker cgroup (H-41).
+Neither has a test or scratch bypass. The supported worker QA is the capped
+fixture
+`cli::config::operator_ops::tests::scratch_write_roots_setter_qa_keeps_operator_only_policy_gh_2186`.
+In an isolated HOME and scratch project it parses the real command, writes the
+scratch `config.toml` under the operator pane's cgroup, and proves that the
+same command text is still refused by H-11 from an agent and by H-41 from a
+worker cgroup. A capture of the installed binary is an operator row: the
+operator runs it from their own terminal or as `! cas …` in the supervisor's
+pane.
+
 ## Default Codex worker account
 
 Set `factory.codex_home` with `cas config set factory.codex_home "~/.codex-work"`

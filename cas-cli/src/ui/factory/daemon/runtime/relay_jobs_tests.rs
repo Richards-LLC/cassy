@@ -1915,7 +1915,10 @@ esac
         scheduled_pass(&mut daemon).await;
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(starts.exists(), "scheduled daemon recovery never started a verifier subprocess");
+    assert!(starts.exists(), "scheduled daemon recovery never started a verifier subprocess; dispatch={:?}; events={:?}",
+        cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap(),
+        crate::store::open_event_store(&cas_dir).unwrap()
+            .list_by_type(cas_types::EventType::VerificationStarted, 10).unwrap());
     // Keep the real provider alive while later normal scheduling passes try
     // to recover the same request. Count actual process starts, not claims.
     for _ in 0..3 {

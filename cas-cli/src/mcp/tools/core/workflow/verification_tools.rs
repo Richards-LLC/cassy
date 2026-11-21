@@ -2116,9 +2116,10 @@ mod lifecycle_friction_tests {
             if let Some(triage) = triage { issue["triage"] = triage; }
             let legacy = issue.get("triage").and_then(|t| t.as_object())
                 .filter(|t| !t.contains_key("failing_tests")).cloned();
+            let summary = "finding_payload_".repeat(200);
             let payload = json!({
                 "task_id":task.id, "dispatch_id":dispatch.id, "status":"rejected",
-                "summary":"Correct the reviewed behavior", "issues":json!([issue]).to_string(),
+                "summary":summary, "issues":json!([issue]).to_string(),
             });
             let verdict_request = || Parameters(serde_json::from_value(payload.clone()).unwrap());
             if case == 0 {
@@ -2134,9 +2135,12 @@ mod lifecycle_friction_tests {
             }
             let verdict = core.cas_verification_add(verdict_request()).await.unwrap();
             assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+            // Preserve the original regression's lossless caller-payload contract.
+            assert!(format!("{verdict:?}").contains(&summary));
             let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id)
                 .unwrap().unwrap();
             assert_eq!(recorded.status, VerificationStatus::Rejected);
+            assert_eq!(recorded.summary, summary);
             assert_eq!(recorded.issues.len(), 1);
             if let Some(fields) = legacy {
                 let loaded = serde_json::to_value(&recorded.issues[0].triage).unwrap();

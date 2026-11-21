@@ -921,6 +921,10 @@ pub(super) fn release_roots(current_root: Option<&Path>) -> Result<std::collecti
     if let Some(root) = current_root {
         roots.insert(root.to_path_buf());
     }
+    // cas-6b73: a fresh host or isolated HOME has no host registry yet, and
+    // the registry store opens without DDL. Create the empty registry so the
+    // listing below finds no tracked projects instead of failing the release.
+    crate::store::known_repos::ensure_host_schema()?;
     for repo in crate::worktree::discovery::list_tracked_repos()? {
         if repo.healthy {
             roots.insert(crate::store::CasContext::from_path(&repo.path)?.cas_root);
@@ -966,6 +970,16 @@ pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()
 pub(super) mod tests {
     use super::*;
     use cas_types::{Agent, AgentRole, Dependency, DependencyType, Task, TaskType, WorkTarget};
+
+    /// cas-6b73: on a fresh host (empty HOME, no known_repos table) the
+    /// supplied project root is still the release root, not a database error.
+    #[test]
+    fn release_roots_on_a_fresh_host_keep_the_current_root_cas_6b73() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::TempDir::new().unwrap();
+        let roots = release_roots(Some(project.path())).unwrap();
+        assert_eq!(roots.into_iter().collect::<Vec<_>>(), vec![project.path().to_path_buf()]);
+    }
 
     /// Shared with the release adapters' tests under a crate-unique name.
     pub(in crate::cli) fn release_fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {

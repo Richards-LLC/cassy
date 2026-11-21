@@ -561,9 +561,9 @@ fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathB
         .map_err(anyhow::Error::msg)
 }
 
-/// Publish park evidence for a reviewer on either machine. Routed builds keep
-/// their strict manifest; ordinary deliveries use the existing portable artifact
-/// references, without introducing a new review-admission gate (cas-dae1).
+/// Publish close-reason citations for a reviewer on either machine. Routed
+/// builds additionally require their ledger evidence and strict restoration;
+/// uncited ordinary QA captures remain best effort (cas-dae1, cas-2de9).
 pub(crate) fn publish_routed_evidence(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -580,6 +580,8 @@ pub(crate) fn publish_routed_evidence(
     let mut paths = if dir.exists() {
         evidence_files(&dir).map_err(|error| fail(error.to_string()))?
     } else { Vec::new() };
+    let mut unpublished = Vec::new();
+    let mut cited_names = std::collections::BTreeSet::new();
     // A close can also cite a capped runner log in the worker checkout.
     // Publish only evidence locations, never arbitrary source mentions.
     for (index, segment) in task.deliverables.parked_close_reason.as_deref().unwrap_or_default().split('`').enumerate() {
@@ -590,19 +592,34 @@ pub(crate) fn publish_routed_evidence(
             let expanded = crate::qa_evidence::expand_home(token);
             let path = if expanded.is_absolute() { expanded } else { proof_repo.join(expanded) };
             if !path.starts_with(proof_repo.join("target"))
+                && !path.starts_with(&dir)
                 && !token.contains("/.cas/artifacts/") && !token.starts_with(".cas/artifacts/")
             { continue; }
-            if path.is_file() && !paths.iter().any(|(_, existing)| *existing == path) {
+            // Directory mentions are context, but a missing cited file must
+            // not silently disappear from the peer's proof (cas-dae1).
+            if path.is_dir() { continue; }
+            if !path.is_file() {
+                unpublished.push(format!("{}: missing or not a regular file", path.display()));
+            } else if let Some((name, _)) = paths.iter().find(|(_, existing)| *existing == path) {
+                // A direct close citation makes an already scanned copy
+                // required even when the ledger does not list it.
+                cited_names.insert(name.clone());
+            } else {
                 let leaf = path.file_name().and_then(|name| name.to_str()).unwrap_or("proof.log");
-                paths.push((format!("cited/{leaf}"), path));
+                let name = format!("cited/{leaf}");
+                cited_names.insert(name.clone());
+                paths.push((name, path));
             }
         }
     }
-    if paths.is_empty() { return Ok(()); }
+    if paths.is_empty() {
+        return if unpublished.is_empty() { Ok(()) } else { Err(fail(unpublished.join("; "))) };
+    }
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let required = required_evidence(&dir);
+    let ledger_required = required_evidence(&dir);
+    let required = |name: &str| cited_names.contains(name) || (routed && ledger_required(name));
     // A stalled uncited copy must not spend the budget needed by the ledger.
     paths.sort_by_key(|(name, _)| !required(name));
     let deadline = std::time::Instant::now() + PUBLISH_BUDGET;
@@ -645,7 +662,10 @@ pub(crate) fn publish_routed_evidence(
                 };
                 match result {
                     Ok(id) => id,
-                    Err(reason) if required(&name) => return Err(fail(format!("{name}: {reason}"))),
+                    Err(reason) if required(&name) => {
+                        unpublished.push(format!("{}: {reason}", path.display()));
+                        continue;
+                    }
                     Err(reason) => {
                         skipped.push(format!("{name} ({reason})"));
                         continue;
@@ -655,6 +675,7 @@ pub(crate) fn publish_routed_evidence(
         };
         files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
     }
+    if !unpublished.is_empty() { return Err(fail(unpublished.join("; "))); }
     // Every park records where each evidence file sits under the task evidence
     // directory, so the merge owner can restore nested captures at the paths
     // the ledger cites (GH #2079). Only a routed build makes it strict.
@@ -666,7 +687,7 @@ pub(crate) fn publish_routed_evidence(
         serde_json::to_string(&manifest).map_err(|error| fail(error.to_string()))?,
     );
     if !skipped.is_empty() {
-        note.push_str(&format!("\nNot published (not cited by the ledger): {}", skipped.join("; ")));
+        note.push_str(&format!("\nNot published (optional for this park): {}", skipped.join("; ")));
     }
     let tasks = crate::store::open_task_store(cas_root).map_err(|error| fail(error.to_string()))?;
     tasks.append_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;

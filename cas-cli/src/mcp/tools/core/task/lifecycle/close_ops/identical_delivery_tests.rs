@@ -330,6 +330,77 @@ fn minified_drop_requires_audited_superseding_commit_cas_5f0b() {
 }
 
 #[test]
+fn frozen_epic_review_uses_shipped_integration_cas_161f() {
+    const SOURCE: &str = "src/footer.rs";
+    const EPIC: &str = "epic/frozen";
+    for integration in ["staging", "main", "unrelated"] {
+        let (dir, task, frozen) = fixture_with_subjects(true, None, true, SOURCE, false);
+        let repo = dir.path();
+        let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
+        git(repo, &["branch", EPIC]);
+        git(
+            repo,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{EPIC}"),
+                &frozen,
+            ],
+        );
+        let identity = task_commit_identity(&task, None);
+        let judge = |reason: Option<&str>| {
+            anchored_delivery_content_gate(&task, repo, anchor, EPIC, None, &identity, None, reason)
+        };
+        // The merge discarded this source and no subsequent edit replaces it.
+        assert!(matches!(
+            judge(None),
+            Some(MergeStateGateOutcome::Reject(_))
+        ));
+        if integration != "main" {
+            git(repo, &["checkout", "-qb", integration]);
+        }
+        let replacement = commit(
+            repo,
+            SOURCE,
+            "fn footer() { render_status(); }\n",
+            "fix: reviewed footer rewrite",
+        );
+        // Simulate a refreshed remote with a stale local integration branch.
+        git(
+            repo,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{integration}"),
+                &replacement,
+            ],
+        );
+        git(repo, &["checkout", "-q", EPIC]);
+        git(repo, &["branch", "-f", integration, &frozen]);
+        assert_eq!(git(repo, &["rev-parse", EPIC]), frozen);
+        let reason =
+            format!("reviewed-drop: {replacement} -- footer rewritten after the epic shipped");
+        let review =
+            validated_delivery_drop_review(repo, anchor, EPIC, &[SOURCE.into()], Some(&reason));
+        let outcome = judge(Some(&reason));
+        if integration == "unrelated" {
+            assert!(
+                review.is_err(),
+                "an arbitrary side branch cannot prove shipment"
+            );
+            assert!(
+                matches!(outcome, Some(MergeStateGateOutcome::Reject(_))),
+                "{outcome:?}"
+            );
+        } else {
+            assert!(review.is_ok(), "{integration}: {review:?}");
+            assert!(
+                matches!(outcome, Some(MergeStateGateOutcome::ProceedWithNote(_))),
+                "{integration}: {outcome:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn later_lane_task_cannot_supply_old_minified_snapshot_cas_5f0b() {
     let (dir, task, _) = fixture(true, false);
     let repo = dir.path();
@@ -440,7 +511,11 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             } else {
                 "imported();\nadded();\n"
             },
-            if rebound { "chore(cas-aaaa): trim helper" } else { "chore: trim helper" },
+            if rebound {
+                "chore(cas-aaaa): trim helper"
+            } else {
+                "chore: trim helper"
+            },
         );
         git(repo, &["checkout", "-q", "main"]);
         git(
@@ -457,24 +532,30 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             // GH #2168: a carry-over is rebound onto a fresh branch cut from
             // the moved target, retaining its original start for audit.
             git(repo, &["checkout", "-qb", "factory/rebound", "main"]);
-            git(repo, &["merge", "--no-ff", "factory/worker", "-m", "carry over cas-test1"]);
+            git(
+                repo,
+                &[
+                    "merge",
+                    "--no-ff",
+                    "factory/worker",
+                    "-m",
+                    "carry over cas-test1",
+                ],
+            );
             "factory/rebound"
         } else {
             git(repo, &["checkout", "-q", "factory/worker"]);
-            git(repo, &["merge", "--no-ff", "main", "-m", "sync epic (cas-test1)"]);
+            git(
+                repo,
+                &["merge", "--no-ff", "main", "-m", "sync epic (cas-test1)"],
+            );
             "factory/worker"
         };
         let anchor = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
         git(
             repo,
-            &[
-                "merge",
-                "--no-ff",
-                branch,
-                "-m",
-                "integrate worker",
-            ],
+            &["merge", "--no-ff", branch, "-m", "integrate worker"],
         );
         let mut task = Task {
             id: "cas-test1".into(),
@@ -487,16 +568,32 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
         task.deliverables.parked_branch = Some(branch.into());
         task.deliverables.factory_branch_anchor = Some(anchor.clone());
         if rebound {
-            let target = cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() };
+            let target = cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(),
+                target_branch: "main".into(),
+            };
             task.deliverables.work_target = Some(target.clone());
             task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-                work_target: target, assignee: "worker".into(), branch: branch.into(), base_sha: start,
+                work_target: target,
+                assignee: "worker".into(),
+                branch: branch.into(),
+                base_sha: start,
             });
-            task.deliverables.historical_factory_branch_anchors.push(original);
-            assert_eq!(tree_path_blob(repo, &anchor, "shared.rs"), tree_path_blob(repo, "main", "shared.rs"));
+            task.deliverables
+                .historical_factory_branch_anchors
+                .push(original);
+            assert_eq!(
+                tree_path_blob(repo, &anchor, "shared.rs"),
+                tree_path_blob(repo, "main", "shared.rs")
+            );
         }
         if rebound {
-            commit(repo, "target.rs", "unrelated();\n", "advance target after integrating the carry-over");
+            commit(
+                repo,
+                "target.rs",
+                "unrelated();\n",
+                "advance target after integrating the carry-over",
+            );
         }
         let result = close_gate(repo, &task);
         match (remove_all && !rebound, result) {
@@ -516,7 +613,10 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             git(repo, &["rm", "worker.rs"]);
             git(repo, &["commit", "-qm", "discard worker delivery"]);
             match close_gate(repo, &task) {
-                MergeStateGateOutcome::Reject(message) => assert!(crate::gates::codes_in(&message).contains(&"G-56"), "{message}"),
+                MergeStateGateOutcome::Reject(message) => assert!(
+                    crate::gates::codes_in(&message).contains(&"G-56"),
+                    "{message}"
+                ),
                 other => panic!("dropped carry-over must refuse: {other:?}"),
             }
         } else {
@@ -621,10 +721,10 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
             };
             assert!(
                 matches!(&result, MergeStateGateOutcome::Reject(message)
-                    if message.contains(expected)
-                        && (mode != "imported baseline" || message.contains(
-                            "no task-attributed non-merge content commits with a tree effect"
-                        ))),
+                if message.contains(expected)
+                    && (mode != "imported baseline" || message.contains(
+                        "no task-attributed non-merge content commits with a tree effect"
+                    ))),
                 "{mode}: {result:?}"
             );
         } else {

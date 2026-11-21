@@ -16,7 +16,7 @@ async fn peer_receipted_close_reaches_dependency_gate_cas_223c() {
     let _env = crate::test_support::TestEnvGuard::temp_home();
     let project = "peer-terminal-fixture";
     for team in [false, true] {
-        for case in ["merged", "unmerged", "open", "new-cycle", "foreign"] {
+        for case in ["merged", "unmerged", "open", "new-cycle", "foreign", "no-approval", "anchor", "target", "rework", "local-wins"] {
             let owner_dir = tempfile::tempdir().unwrap();
             let owner_root = crate::store::init_cas_dir(owner_dir.path()).unwrap();
             let mut closed = Task::new(format!("cas-223c-{case}"), "owner body".into());
@@ -47,6 +47,13 @@ async fn peer_receipted_close_reaches_dependency_gate_cas_223c() {
             if case == "new-cycle" { local.deliverables.delivery_cycle = 1; }
             if case == "unmerged" { closed.deliverables.green_merge_commit = None; }
             if case == "foreign" { closed.origin_project = Some("another-project".into()); }
+            if case == "no-approval" { closed.deliverables.premerge_approval = None; }
+            if case == "anchor" { local.deliverables.factory_branch_anchor = Some("c".repeat(40)); }
+            if case == "target" { local.deliverables.work_target.as_mut().unwrap().target_branch = "epic/rework".into(); }
+            if case == "rework" {
+                local.notes = format!("[{}] {} actor=receiver reason=changed scope",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"), crate::mcp::tools::core::task::audit::REOPENED);
+            }
             let owner_tasks = crate::store::open_task_store_local(&owner_root).unwrap();
             owner_tasks.add(&closed).unwrap();
             let remote = owner_tasks.get(&closed.id).unwrap();
@@ -70,7 +77,10 @@ async fn peer_receipted_close_reaches_dependency_gate_cas_223c() {
             queue.init().unwrap();
             let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
                 endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
-            }, CloudSyncerConfig::default(), project.into(), &root);
+            }, CloudSyncerConfig {
+                team_conflict_resolution: if case == "local-wins" { ConflictResolution::LocalWins } else { ConflictResolution::RemoteWins },
+                ..Default::default()
+            }, project.into(), &root);
             for _ in 0..2 {
                 let entries = crate::store::open_store_local(&root).unwrap();
                 let rules = crate::store::open_rule_store_local(&root).unwrap();
@@ -85,11 +95,12 @@ async fn peer_receipted_close_reaches_dependency_gate_cas_223c() {
                 }.unwrap();
                 assert!(result.errors.is_empty(), "team={team} {case}: {:?}", result.errors);
                 let blockers = crate::mcp::tools::core::task::open_blocker_ids(&*tasks, &dependent.id).unwrap();
-                assert_eq!(blockers.is_empty(), case == "merged", "team={team} {case}: {blockers:?}");
+                let resolves = case == "merged" || (case == "local-wins" && !team);
+                assert_eq!(blockers.is_empty(), resolves, "team={team} {case}: {blockers:?}");
                 let received = tasks.get(&local.id).unwrap();
                 assert_eq!(received.title, local.title);
                 assert!(received.notes.contains(&local.notes));
-                assert_eq!(received.status == TaskStatus::Closed, case == "merged");
+                assert_eq!(received.status == TaskStatus::Closed, resolves);
                 assert_eq!(tasks.get_dependencies(&dependent.id).unwrap().len(), 1);
             }
         }

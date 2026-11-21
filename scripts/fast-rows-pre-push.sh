@@ -42,6 +42,41 @@ unset $(git rev-parse --local-env-vars)
 receipts="$common/cas/fast-rows"
 status=0
 
+# The checked-out lane's task target ref, or nothing without one task context.
+task_target_ref() {
+    local target ref
+    target="$(python3 - "$common" "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" <<'PY'
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+
+root = Path(os.environ.get("CAS_ROOT") or Path(sys.argv[1]).parent / ".cas").expanduser().resolve()
+try:
+    with sqlite3.connect((root / "cas.db").as_uri() + "?mode=ro", uri=True) as db:
+        targets = set()
+        for (raw,) in db.execute("SELECT deliverables FROM tasks WHERE status='in_progress'"):
+            data = json.loads(raw or "{}")
+            if (data.get("factory_branch_start") or {}).get("branch") == sys.argv[2]:
+                target = (data.get("work_target") or {}).get("target_branch")
+                if target:
+                    targets.add(target)
+        if len(targets) == 1:
+            print(targets.pop())
+except (OSError, sqlite3.Error, ValueError):
+    pass  # No readable task context: retain the default-branch fallback.
+PY
+)" || target=''
+    [[ -n "$target" ]] || return 0
+    for ref in "origin/$target" "$target"; do
+        if git rev-parse --verify --quiet --end-of-options "$ref^{commit}" >/dev/null; then
+            printf '%s\n' "$ref"
+            return 0
+        fi
+    done
+}
+
 # gate[H-38 git-hook]: Main-checkout pre-push (factory ref needs a same-tip fast-rows PASS)
 while read -r _local_ref local_sha remote_ref remote_sha; do
     [[ ( "$remote_ref" == refs/heads/factory/* || "$remote_ref" == refs/heads/epic/* ) && "$local_sha" != "$zero" ]] || continue
@@ -72,44 +107,17 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
         continue
     fi
     # Compare a first push with its task target, not unrelated changes on main.
-    # Existing branches still compare with the tip this push replaces.
+    # Existing branches compare with the tip this push replaces, unless the
+    # lane merged newer target commits since then: those are the train's
+    # changes, not the lane's (cas-10de, GH #2285).
     base="$remote_sha"
     if [[ "$base" == "$zero" ]]; then
-        base="${ZERO_BASE_REF:-}"
-        if [[ -z "$base" ]]; then
-            target="$(python3 - "$common" "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" <<'PY'
-import json
-import os
-from pathlib import Path
-import sqlite3
-import sys
-
-root = Path(os.environ.get("CAS_ROOT") or Path(sys.argv[1]).parent / ".cas").expanduser().resolve()
-try:
-    with sqlite3.connect((root / "cas.db").as_uri() + "?mode=ro", uri=True) as db:
-        targets = set()
-        for (raw,) in db.execute("SELECT deliverables FROM tasks WHERE status='in_progress'"):
-            data = json.loads(raw or "{}")
-            if (data.get("factory_branch_start") or {}).get("branch") == sys.argv[2]:
-                target = (data.get("work_target") or {}).get("target_branch")
-                if target:
-                    targets.add(target)
-        if len(targets) == 1:
-            print(targets.pop())
-except (OSError, sqlite3.Error, ValueError):
-    pass  # No readable task context: retain the default-branch fallback.
-PY
-)" || target=''
-            if [[ -n "$target" ]]; then
-                for ref in "origin/$target" "$target"; do
-                    if git rev-parse --verify --quiet --end-of-options "$ref^{commit}" >/dev/null; then
-                        base="$ref"
-                        break
-                    fi
-                done
-            fi
-        fi
+        base="${ZERO_BASE_REF:-$(task_target_ref)}"
         base="${base:-origin/main}"
+    elif target_ref="$(task_target_ref)" && [[ -n "$target_ref" ]] \
+        && fork="$(git merge-base "$target_ref" "$local_sha" 2>/dev/null)" \
+        && ! git merge-base --is-ancestor "$fork" "$remote_sha" 2>/dev/null; then
+        base="$fork"
     fi
     base="$(git merge-base "$base" "$local_sha" 2>/dev/null || printf '%s' "$base")"
     # cas-5a04: committed Commander output must match a fresh build exactly

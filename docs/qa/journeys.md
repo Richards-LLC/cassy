@@ -71,16 +71,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Goal:** the link pairs this browser and I reach the supervisor
 - **Touches:** `hub-web/src/fragment.ts`, `hub-web/src/pair*.ts`, `hub-web/src/pending-pairing.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/storage.ts`, `hub-web/src/connection.ts`
 - **Suite:** `hub-web/e2e/journeys/pair-link.journey.ts`
-- **Gaps:** the exchange endpoint is doubled
+- **Gaps:** The exchange endpoint is doubled. The original end-to-end pair-link test was deleted under the operator flake policy (cas-6af4); fleet permission and scrolled disclosure parts remain automated.
 
 #### Steps
 
-1. Open the link the machine printed — the dialog opens by itself and the secret leaves the address bar
-2. Confirm the machine — the hub address and machine name arrive filled in from the link; only your name is left, with the focus ring on it
-3. Check the technical details — the origin and the granted scope boxes, in sentence case
-4. Pair — the exchange goes to the link's machine
-5. Reach the supervisor — the machine's supervisor is listed and opens
-6. Paired machines names each pairing's fleet permissions — the missing permission and its related note are ordered before the re-pair command, without a disabled Stop and restart button that looks like an available fleet action
+1. Open a link that grants factory:manage — the dialog names the fleet permission before pairing
+2. Pair, and the pairing holds factory:manage — the accepted exchange retains the granted permission
+3. Paired machines names each pairing's fleet permissions — the missing permission precedes its re-pair command
+4. Scroll the focused invitation form and tap Technical details — opening the disclosure preserves the scrolled form
 
 #### Expected experience
 
@@ -202,27 +200,16 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 - **Goal:** my message reaches the supervisor and I see its answer
 - **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/connection.ts`
 - **Suite:** `hub-web/e2e/journeys/reply-typed.journey.ts`
-- **Gaps:** delivery by a running daemon and operator stamping are doubled
+- **Gaps:** Delivery by a running daemon and operator stamping are doubled. The monolithic typing/refusal journey was deleted under the operator flake policy (cas-6af4); message-only pairing, revoked-send recovery and Send again parts remain automated.
 
 #### Steps
 
-1. Open the conversation — the composer names the supervisor
-2. Write and send — the message appears at once as "Sending…" and the composer clears
-3. See it delivered — durable acceptance turns "Sending…" into "Queued for supervisor", without a delivery check. Only a real supervisor transport receipt earns "Delivered" and its check. Queue acceptance and delivery remain visible after a reload and on another paired device; older history/receipts never reverse delivery or a reply. A connected machine whose supervisor has not taken a pending message says "Waiting for supervisor" in its row and header. Queue and transport receipts alone never claim the supervisor is working.
-4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
-
-   Same-name Claude replacement regression (cas-33e6): send during startup so Claude consumes the message as a queued-command attachment or through the prompt hook's incoming-message context. Its answer appears live under the original send, with the paired device and message id preserved in durable history. Queue enqueue/dequeue records alone never bind an answer, unrelated attachments do not replace the prompt, and another session's or recipient's queue row cannot supply reply binding. Reload retains exactly one answer.
-
-   Mid-turn Claude regression (cas-5e3a): a real background completion notification cannot take over an operator's answer. If a typed question and two Commander sends enter the same native turn, preserve a bound answer for each consumed question, including multiple operator envelopes delivered by one prompt hook. Repeated transport copies and text projections do not add answers. Each answer retains the original question's device and survives reload.
-5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
-   - A refused Take control keeps focus on the message — when another device holds the session the take is refused; the message names the device in control, once, in plain words, and the composer only points at it; its Take control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back on its own; keyboard focus stays on it, never the page body
-6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none); once control is taken it drops Take control and says Retry will send it, its actions are 44px targets on a phone, and Retry then sends it
-7. Dismiss a refused message and bring it back — Dismiss (the corner ×, by keyboard or mouse) or a sideways swipe on a touch screen takes the refused message out of the thread; the composer stops pointing at it and the list stops previewing it; a "1 unsent message" chip (a 44px target on a phone) brings it back with Edit and Retry, focus landing on Retry; a short swipe settles back, and under reduced motion a swipe dismisses at once with no slide
-8. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
-9. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
-10. A message Cassy can't confirm offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed · Cassy couldn't confirm delivery to <supervisor>. Retry sends it again."; the retry goes out and is delivered
-11. Not confirmed settles once the supervisor replies after it — a supervisor turn that arrives after the give-up turns the card into "Not confirmed · The supervisor has replied since; send it again only if it missed this." with no Retry, so nothing invites a duplicate send; a quiet underlined "Send again" resends it without retyping
-12. Focus on the opening card moves into the conversation — with keyboard focus on the connection card's Details while a slow relay opens the conversation, focus lands in the composer when the conversation replaces the card, never the page body; focus elsewhere (the list search) stays where it is
+1. Send while this device does not hold the session — message-only pairing sends without taking pane control
+2. Delivered without taking pane control — the transport receipt marks the message delivered
+3. A correlated revoked send names pairing while a new draft survives — refused text and newer text or file drafts stay separate
+4. The header offers usable Re-pair while Edit still recovers the refused text — pairing recovery preserves the newer draft
+5. A message whose receipt never came settles as Not confirmed — no reply or receipt is invented
+6. The lease lapses; Send again delivers without taking control — resending does not acquire terminal input
 
 #### Expected experience
 
@@ -479,20 +466,16 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 - **Goal:** I start a supervisor on a project from my phone, without SSH, and land in its conversation
 - **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`, `cas-cli/src/hub/launch_env.rs`, `cas-cli/src/hub/server.rs`, `cas-cli/src/account_selection.rs`, `hub-web/e2e/journeys/real-hub-server.mjs`
 - **Suite:** `hub-web/e2e/journeys/launch-session.journey.ts`
-- **Gaps:** the catalog suite doubles the hub protocol. The separate HUB-J13 part in `real-hub.journey.ts` crosses the real project browse, session start, reaper, daemon, PTY startup, first message and operator reply with the production-shaped absence of CAS_ROOT. Provider and service placement alone are inert. The Rust startup regression separately proves that a Teams write before pane readiness retries into the PTY once ready, without a provider generating replies. Official-login model action and surviving a hub restart remain real-machine assembly checks.
+- **Gaps:** the catalog suite doubles the hub protocol. The separate HUB-J13 part in `real-hub.journey.ts` crosses the real project browse, session start, reaper, daemon, PTY startup, first message and operator reply with the production-shaped absence of CAS_ROOT. Provider and service placement alone are inert. The Rust startup regression separately proves that a Teams write before pane readiness retries into the PTY once ready, without a provider generating replies. Official-login model action and surviving a hub restart remain real-machine assembly checks. The original new-session/account-selection/persistence and reconnecting-sheet cases were deleted under the operator flake policy (cas-6af4); the remaining grant, attach, refused-launch, browse and account parts remain automated.
 
 #### Steps
 
 1. A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
 2. The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
-3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
-4. Choose the account — every Claude account on the machine is listed with the selected project’s recommendation preselected and marked with its reset/headroom reason (falling back to the default when no recommendation exists); changing the project refreshes that recommendation using its account selection and threshold settings; the operator can select another logged-in account; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
-5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
-6. The session outlives the tab — after a reload the new session is still running and its conversation reopens
-7. A running project attaches instead of starting again — Attach opens the existing session's conversation
-8. A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
-9. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
-10. A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close stays visible and the page does not scroll sideways
+3. A running project attaches instead of starting again — Attach opens the existing session's conversation
+4. A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
+5. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
+6. A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close stays visible and the page does not scroll sideways
 
 #### Expected experience
 

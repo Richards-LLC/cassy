@@ -35,10 +35,11 @@ runs:
         python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" "${cohort[@]}" \
           --github-output "$GITHUB_OUTPUT"
 
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v6
       if: steps.script-tests.outputs.web == 'true'
       with:
         node-version: '22'
+        package-manager-cache: false
 
     - name: Provision selected suite dependencies
       if: steps.script-tests.outputs.needed == 'true'

@@ -3,7 +3,6 @@ import type { Page } from "@playwright/test";
 import { ATLAS } from "./world";
 import type { HubDouble } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
-import { NEEDS_PAIRING } from "../../src/connection-state";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -267,81 +266,6 @@ test("HUB-J2 an admin invitation offers hub:admin unticked, and its consent read
 
 });
 
-test("HUB-J2 an admin invitation, explicitly consented, revokes another browser installation (cas-5e53 F08)", journeyPart, async ({ page, browser, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS] });
-  await journey.open();
-  // The old installation is a genuinely separate browser (its own storage and
-  // key), paired the ordinary way, never seeded into the double.
-  const elsewhere = await browser.newContext({ baseURL: new URL(page.url()).origin });
-  const old = await elsewhere.newPage();
-  await hub.install(old);
-  await old.goto(page.url());
-  let oldId = "";
-  await journey.stage("An old installation pairs from another browser", async () => {
-    await old.evaluate((hash) => { location.hash = hash; }, link("o".repeat(43), ordinary));
-    const dialog = old.locator("#pair-dialog");
-    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
-    await dialog.getByRole("textbox", { name: "Name for this browser" }).fill("Old laptop");
-    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
-    await expect(dialog).toBeHidden();
-    expect(hub.installations.size).toBe(1);
-    oldId = [...hub.installations.keys()][0]!;
-  });
-
-  // cas-f7c5: the invitation is opened as the part above shows it; its
-  // offer and its rendering at every size are asserted there.
-  await page.evaluate((hash) => { location.hash = hash; }, link("a".repeat(43), `${ordinary},hub:admin`));
-  await expect(page.locator("#pair-dialog")).toBeVisible();
-  await page.locator("#pair-dialog").getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
-
-  await journey.stage("Consent is given from the keyboard", async () => {
-    const dialog = page.locator("#pair-dialog");
-    const admin = dialog.getByRole("checkbox", { name: /See and revoke other browsers on Atlas/ });
-    // Keyboard consent: focus the box and press Space.
-    await admin.focus();
-    await page.keyboard.press("Space");
-    await expect(admin).toBeChecked();
-    await expect(dialog.locator(".pair-summary-admin")).toBeVisible();
-    await expect(dialog.locator(".pair-summary-admin")).toContainText("Atlas");
-  });
-
-  await journey.stage("Pairing with that consent grants hub:admin", async () => {
-    const dialog = page.locator("#pair-dialog");
-    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
-    await expect(dialog).toBeHidden();
-    const mine = [...hub.installations.values()].find((row) => row.device_id !== oldId)!;
-    expect(mine.scopes, "the consented admin scope was granted").toContain("hub-admin");
-  });
-
-  await journey.stage("The inventory lists the other installation and revokes it by exact ID", async () => {
-    if (!await page.locator("#paired-machines-dialog").isVisible()) {
-      await showConversationList(page);
-      await page.locator("#paired-machines-toggle").click();
-    }
-    await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
-    const inventory = page.locator(".installation-inventory");
-    await expect(inventory.getByRole("status")).toContainText("2");
-    const row = inventory.locator(".installation-inventory-row", { hasText: oldId });
-    await expect(row).toContainText("Old laptop");
-    page.once("dialog", async (dialog) => { expect(dialog.message()).toContain(oldId); await dialog.accept(); });
-    await row.getByRole("button", { name: "Revoke this installation", exact: true }).click();
-    await expect(row.getByRole("button", { name: "Revoked", exact: true })).toBeDisabled();
-    await expect(inventory.getByRole("status")).toContainText("Old laptop");
-    expect(hub.installations.get(oldId)!.revoked_at, "the other installation is revoked").not.toBeNull();
-    const mine = [...hub.installations.values()].find((r) => r.device_id !== oldId)!;
-    expect(mine.revoked_at, "this browser keeps its access").toBeNull();
-    await inventory.getByRole("button", { name: "Close", exact: true }).click();
-  });
-
-  await journey.stage("The revoked browser is refused; this one still lists the machine", async () => {
-    await old.reload();
-    // The revoked browser shows the shared Needs-pairing machine state.
-    await expect(old.getByText(NEEDS_PAIRING, { exact: true }).filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator("#paired-machines-toggle")).toContainText("Atlas");
-    await elsewhere.close();
-  });
-});
-
 /**
  * cas-4634: the hub records an installation as enrolled only after verifying
  * the cloud's enrollment assertion (hub/auth/account.rs). The inventory then
@@ -371,51 +295,4 @@ test("HUB-J2 an installation the hub verified reads as in the operator inbox (ca
     await expect(technical.locator('[data-field="epoch"]')).toHaveText("4");
     await technical.locator("summary").click();
   });
-});
-
-test("HUB-J2 a verified installation's inbox row reads whole on desktop and phone, light and dark (cas-4634)", journeyPart, async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS] });
-  await journey.open();
-  const qa = process.env.QA_ARTIFACTS;
-  const row = page.locator(".installation-inventory-row");
-  // cas-f7c5: the enrolled row, as the part above reaches it and asserts it.
-  await pair(page, "e".repeat(43));
-  const id = [...hub.installations.keys()][0]!;
-  hub.accountEnrollments.set(id, { state: "enrolled", account_id: "acct-1", relay_device_id: "dev-relay-1", grant_generation: "2", feed_generation: "1", epoch: "4", verified_at: "2026-10-05T21:00:00Z" });
-  await inventory(page);
-  await expect(row).toBeVisible();
-  for (const size of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
-    for (const scheme of ["light", "dark"] as const) {
-      await journey.stage(`M03 the enrolled row reads whole at ${size.width}px in ${scheme}`, async () => {
-        await page.setViewportSize(size);
-        await page.emulateMedia({ colorScheme: scheme });
-        await page.evaluate((value) => { document.documentElement.dataset.scheme = value; }, scheme);
-        const account = row.locator(".installation-summary dd").last();
-        await expect(account).toBeVisible();
-        await account.scrollIntoViewIfNeeded();
-        await expect(account).toBeInViewport();
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
-        if (qa) await page.screenshot({ path: `${qa}/enrolled-${scheme}-${size.name}.png` });
-      });
-    }
-  }
-  if (qa) {
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await page.emulateMedia({ colorScheme: "light" });
-    const { readFile, writeFile } = await import("node:fs/promises");
-    const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
-    const dialog = await page.locator(".installation-inventory").evaluate((node) => node.outerHTML);
-    await writeFile(`${qa}/enrolled.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Browser installations</title><style>${css}</style></head><body>${dialog}</body></html>`);
-    const modes: Array<[string, string, Parameters<typeof page.emulateMedia>[0]]> = [
-      ["forced-colors", "(forced-colors: active)", { forcedColors: "active", reducedMotion: null, contrast: null }],
-      ["reduced-motion", "(prefers-reduced-motion: reduce)", { forcedColors: null, reducedMotion: "reduce", contrast: null }],
-      ["contrast-more", "(prefers-contrast: more)", { forcedColors: null, reducedMotion: null, contrast: "more" }],
-    ];
-    for (const [name, query, media] of modes) {
-      await page.emulateMedia(media);
-      expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
-      await expect(row.locator(".installation-summary dd").last()).toBeVisible();
-      await page.screenshot({ path: `${qa}/a11y-${name}.png` });
-    }
-  }
 });

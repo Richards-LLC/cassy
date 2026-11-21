@@ -71,6 +71,18 @@ fn owned_test_tmp(cas_dir: &Path, worktree: &Path) -> io::Result<Option<PathBuf>
 
 pub(crate) fn prepare_test_tmp(cas_dir: &Path, worktree: &Path) -> io::Result<PathBuf> {
     let path = test_tmp_dir(cas_dir, worktree);
+    let existing = existing_ancestor(&path)
+        .ok_or_else(|| io::Error::other("capped temporary directory has no existing ancestor"))?
+        .canonicalize()?;
+    // gate[H-50 worker-check]: Capped temporary directory excludes Git ancestry
+    for ancestor in existing.ancestors() {
+        match std::fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => return Err(io::Error::new(io::ErrorKind::PermissionDenied, crate::gates::tag("H-50",
+                format!("Capped TMPDIR {} is inside a Git work tree ({}). Set factory.scratch_root outside every checkout.", path.display(), ancestor.display())))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
+    }
     std::fs::create_dir_all(path.parent().unwrap())?;
     if path.parent().unwrap().canonicalize()?
         != path.parent().unwrap().parent().unwrap().canonicalize()?.join("t") {
@@ -420,18 +432,70 @@ mod tests {
     #[test]
     fn capped_temporary_fixtures_do_not_discover_the_checkout_cas_2085() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
-        env.remove("CAS_ROOT");
+        for name in ["CAS_ROOT", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"] {
+            env.remove(name);
+        }
         let outer = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git").args(["init", "-q"])
             .arg(outer.path()).status().unwrap();
         assert!(status.success());
         let (cas, worktree) = managed(outer.path(), Some("[factory]\n"));
-        let temporary = prepare_test_tmp(&cas, &worktree).unwrap();
-        let fixture = tempfile::tempdir_in(&temporary).unwrap();
-        assert!(crate::worktree::GitOperations::detect_repo_root(fixture.path()).is_err());
-        assert!(crate::store::find_cas_root_from(fixture.path()).is_err());
-        drop(fixture);
-        reclaim_test_tmp(&cas, &worktree).unwrap();
+        let mut roots = vec![None, Some(outer.path().join("scratch")), Some(cas.join("scratch"))];
+        #[cfg(unix)]
+        {
+            let alias = outer.path().join("checkout-alias");
+            std::os::unix::fs::symlink(outer.path(), &alias).unwrap();
+            roots.push(Some(alias.join("scratch")));
+        }
+        for root in roots {
+            let config = root.map(|root| format!("[factory]\nscratch_root = {:?}\n", root.to_str().unwrap()))
+                .unwrap_or_else(|| "[factory]\n".into());
+            std::fs::write(cas.join("config.toml"), config).unwrap();
+            let temporary = prepare_test_tmp(&cas, &worktree).unwrap();
+            let canonical = temporary.canonicalize().unwrap();
+            // Check physical ancestry too: /tmp aliases /private/tmp on macOS,
+            // and a configured symlink must not conceal the outer checkout.
+            assert!(!canonical.starts_with(outer.path().canonicalize().unwrap()));
+            assert!(canonical.ancestors().all(|ancestor| !ancestor.join(".git").exists()), "{canonical:?}");
+            let fixture = tempfile::tempdir_in(&temporary).unwrap();
+            let discovery = std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .current_dir(fixture.path())
+                .env("GIT_CEILING_DIRECTORIES", &canonical)
+                .output().unwrap();
+            assert!(!discovery.status.success(), "{discovery:?}");
+            assert!(crate::worktree::GitOperations::detect_repo_root(fixture.path()).is_err());
+            assert!(crate::store::find_cas_root_from(fixture.path()).is_err());
+            drop(fixture);
+            reclaim_test_tmp(&cas, &worktree).unwrap();
+        }
+        // Git's ceiling can hide a checkout from the resolver. Admission must
+        // inspect physical ancestors itself, including linked-worktree files.
+        for git_file in [false, true] {
+            let namespace = tempfile::tempdir().unwrap();
+            let repository = namespace.path().join("repository");
+            std::fs::create_dir_all(&repository).unwrap();
+            if git_file {
+                std::fs::write(repository.join(".git"), format!("gitdir: {}\n", outer.path().join(".git").display())).unwrap();
+            } else {
+                assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&repository).status().unwrap().success());
+            }
+            let ceiling = repository.join("ceiling");
+            let scratch = ceiling.join("scratch");
+            std::fs::create_dir_all(&scratch).unwrap();
+            #[cfg(unix)]
+            let scratch = if git_file {
+                let alias = namespace.path().join("external-alias");
+                std::os::unix::fs::symlink(&scratch, &alias).unwrap();
+                alias
+            } else { scratch };
+            std::fs::write(cas.join("config.toml"), format!("[factory]\nscratch_root = {:?}\n", scratch.to_str().unwrap())).unwrap();
+            env.set("GIT_CEILING_DIRECTORIES", ceiling.canonicalize().unwrap());
+            assert!(test_tmp_dir(&cas, &worktree).starts_with(&scratch));
+            let error = prepare_test_tmp(&cas, &worktree).expect_err("selected TMPDIR inside a checkout must be refused");
+            assert!(crate::gates::codes_in(&error.to_string()).contains(&"H-50"));
+            assert!(crate::gates::find("H-50").is_some());
+        }
     }
 
     #[test]

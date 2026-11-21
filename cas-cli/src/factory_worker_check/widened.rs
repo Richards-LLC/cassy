@@ -4,7 +4,7 @@ use super::*;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
     File(String),
-    /// Jest's dependency graph, rooted at this source file, rather than a
+    /// The runner's dependency graph, rooted at this source file, rather than a
     /// package pass that may execute thousands of unrelated tests.
     Related(String),
     Package(String),
@@ -26,15 +26,16 @@ pub(super) fn valid(proof: &Proof) -> bool {
         && match &proof.scope {
             Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
-            Scope::Related(path) => proof.runner == "jest" && !path.is_empty() && relative(path),
+            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest") && !path.is_empty() && relative(path),
             Scope::Package(path) => proof.runner != "nextest" && relative(path),
         }
 }
 
 pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
-    if javascript::javascript(path) && javascript::test_match(path) { return Scope::File(path.into()); }
-    if javascript::javascript(path) && javascript::runner_hint(repo, path) == Some("jest") {
-        return Scope::Related(path.into());
+    if javascript::javascript(path) {
+        let runner = javascript::runner_hint(repo, path);
+        if javascript::test_match(path, runner) { return Scope::File(path.into()); }
+        if matches!(runner, Some("jest" | "vitest")) { return Scope::Related(path.into()); }
     }
     let rust = path.ends_with(".rs");
     let manifest = if rust { "Cargo.toml" } else { "package.json" };
@@ -65,7 +66,10 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
             return vec![format!("cas factory worker-check --cas-root {} -- nextest run -p {package} --lib -E 'test({package})'", cas_root.display())];
         }
         if let Scope::Related(path) = scope {
-            return vec![format!("cas factory worker-check --cas-root {} -- jest --findRelatedTests {path}", cas_root.display())];
+            let runner = if javascript::runner_hint(repo, path) == Some("vitest") {
+                "vitest related --run"
+            } else { "jest --findRelatedTests" };
+            return vec![format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())];
         }
         let path = paths.iter().find(|path| &self::scope(repo, path) == scope).map(String::as_str)
             .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None }).unwrap_or(".");
@@ -82,6 +86,7 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, proof: Proof, cou
     let selection = TargetedTest { package: proof.runner.clone(), harness: None, filter: format!("test(widened_{key})") };
     let path = test_receipt_path(cas_root, &repo.canonicalize()?, head, &selection);
     let receipt = CheckReceipt { head: head.into(), repo: repo.canonicalize()?, packages: Vec::new(),
+        no_default_features: false,
         test: Some(TestReceipt { filter: selection.filter, harness: None, count, stability: None,
             widened: Some(proof), selected_log: None, host_path_opt_out: None, supervisor_recorded: None }) };
     std::fs::create_dir_all(path.parent().context("widened receipt directory")?)?;

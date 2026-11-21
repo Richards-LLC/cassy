@@ -290,6 +290,7 @@ fn persist(cas_root: &Path, repo: &Path, head: &str, mut proof: Proof) -> Result
         filter: format!("test(stability_{key})") };
     let path = test_receipt_path(cas_root, repo, head, &selection);
     let receipt = CheckReceipt {
+        no_default_features: false,
         head: head.into(), repo: repo.to_path_buf(), packages: Vec::new(),
         test: Some(TestReceipt { filter: selection.filter, harness: None,
             count: proof.tests.len() as u64, stability: Some(proof), widened: None, selected_log: None,

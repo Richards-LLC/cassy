@@ -120,6 +120,21 @@ fn cadence(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<Option<Strin
     Ok(None)
 }
 
+/// The train's synced owner as this machine resolves it (GH #1826): its name,
+/// id and registered machine, or why it does not resolve here.
+fn owner_identity(agents: &[crate::types::Agent], owner: Option<&str>) -> String {
+    let Some(owner) = owner else { return "unassigned".into() };
+    match agents.iter().filter(|agent| agent.id == owner || agent.name == owner).max_by_key(|agent| agent.registered_at) {
+        Some(agent) => format!(
+            "{} ({}) on machine {}",
+            agent.name,
+            agent.id,
+            agent.machine_id.as_deref().unwrap_or("unknown")
+        ),
+        None => format!("{owner} (not registered on this machine)"),
+    }
+}
+
 // gate[C-36 release]: Auto-cut of green release trains (daemon)
 /// One poll for a train at `tip`; `green` is its train-suite verdict there.
 /// `queue_busy` is true while any merge-queue run is in flight.
@@ -141,8 +156,10 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: b
             && agent.machine_id.as_deref() == Some(machine.as_str())
     }) {
         return Ok(Outcome::Declined(crate::gates::tag("G-122", format!(
-            "auto-cut belongs to train verification owner {}; its machine's project config governs this train",
-            train.epic_verification_owner.as_deref().unwrap_or("unassigned")
+            "auto-cut belongs to train owner {}, not to this machine ({machine}); the owner's machine's \
+             project config governs this train. A live supervisor here takes the train over by freezing \
+             it with train_freeze",
+            owner_identity(&agents, train.epic_verification_owner.as_deref())
         ))));
     }
     agents.retain(|agent| agent.machine_id.as_deref() == Some(machine.as_str()));
@@ -153,7 +170,10 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: b
     }
     let supervisor = supervisor_notices::resolve(&agents, train.epic_verification_owner.as_deref(), None);
     if supervisor.id == "operator" {
-        return Ok(Outcome::Declined("no live registered supervisor on this machine".into()));
+        return Ok(Outcome::Declined(format!(
+            "train owner {} is not live and no live successor supervisor is registered on this machine",
+            owner_identity(&agents, train.epic_verification_owner.as_deref())
+        )));
     }
     if crate::store::open_task_store(root)?.get_subtasks(&train.id)?.iter().any(|child| {
         !child.is_terminal() && child.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL)

@@ -51,6 +51,8 @@ If already merged (`$BASE` equals `HEAD`), use `git show --name-status <commit_h
 
 Apply **Code review procedure** in `skills/cas-qa-craft/references/verifier-evidence-gate.md`; its findings block completeness. **Rule-reference:** follow its Rule-reference procedure; reject omitted `Rule-driven sites:` or missing adjacent `cas-rule:` markers, and never expand verbatim `stakeholder.scope` to unrelated work.
 
+Apply **Ruling fit** and **Fake seams** in that reference to every delivery; report `RULING-FIT` and `FAKE-SEAM`. A known contradiction or impossible fake is `NOT VERIFIED` and blocking even with passing tests and no separate runtime reproduction; approve only when both are VERIFIED or NOT APPLICABLE, and escalate unresolved evidence as the reference directs.
+
 ## Phase 2: Quality (only when Phase 1 passes)
 
 Tests assert behavior or stable machine identifiers such as error codes and rule IDs. Never require human-readable wording, word lists, canonical sentences or phrase presence; changing prose alone must not fail a test. Exact caller payloads and machine protocol bytes remain data-integrity checks. Fixed safety text needs a named consumer that requires those bytes; a writing preference is insufficient. Do not record wording preferences as findings or reusable rule candidates. Require a reproduced behavior failure or a stable identifier mismatch.

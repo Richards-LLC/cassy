@@ -14136,6 +14136,57 @@ mod spawn_lifecycle_tests {
             .expect("consecutive calls resolve the same authenticated default");
     }
 
+    /// cas-9ab7: parallel spawns refused for a missing default Codex home
+    /// right after a single spawn succeeded. Their concurrent `codex login
+    /// status` probes outlast the 2 s timeout, so no registry read confirms
+    /// the account the single spawn took.
+    #[cfg(unix)]
+    #[test]
+    fn parallel_codex_spawns_resolve_the_single_spawn_account_cas_9ab7() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.163.0'; exit 0; fi\n\
+            if [ -f \"$HOME/contended\" ]; then sleep 3; fi\n\
+            if [ -f \"$CODEX_HOME/auth.json\" ]; then echo 'Logged in'; else echo 'Not logged in'; exit 1; fi\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::env::var_os("CODEX_SPAWN_FIXTURE_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mcp::tools::service::factory_ops::spawn_lifecycle_tests::parallel_codex_spawns_resolve_the_single_spawn_account_cas_9ab7", "--nocapture"])
+                // `sleep` for the contended probe; the fake codex stays first.
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("CODEX_SPAWN_FIXTURE_CHILD", "1")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let account = env.home().join(".codex-b@example.com");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(account.join("auth.json"), "{}").unwrap();
+        let home = env.home().to_path_buf();
+        let resolve = || {
+            let mut specs = vec![spec_for(cas_mux::SupervisorCli::Codex, None)];
+            let notice = recommend_spawn_accounts(&mut specs, false, &Default::default(), &Default::default(),
+                chrono::Utc::now(), |provider| crate::account_registry::collect_for(provider, &home, false));
+            preflight_account_auth(&specs).map(|()| specs[0].config_dir.clone()).map_err(|error| format!("{error}{notice}"))
+        };
+        // A single spawn is the baseline; the parallel ones then overlap
+        // while every login probe outlasts its timeout.
+        let baseline = resolve().unwrap();
+        assert_eq!(baseline.as_deref(), account.to_str());
+        std::fs::write(home.join("contended"), "").unwrap();
+        let start = std::sync::Barrier::new(4);
+        let parallel: Vec<_> = std::thread::scope(|scope| {
+            let spawns: Vec<_> = (0..4).map(|_| scope.spawn(|| { start.wait(); resolve() })).collect();
+            spawns.into_iter().map(|spawn| spawn.join().unwrap()).collect()
+        });
+        for result in parallel {
+            assert_eq!(result.unwrap_or_else(|error| panic!("{error}")), baseline);
+        }
+    }
+
     #[test]
     fn a_logged_out_account_refuses_the_spawn_by_name_before_any_worktree_exists() {
         let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"))];

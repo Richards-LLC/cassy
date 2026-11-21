@@ -71,14 +71,6 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
             "$CAS_SKIP_FAST_ROWS" "$receipts/overrides.log" >&2
         continue
     fi
-    if [[ "$local_sha" != "$(git rev-parse HEAD)" || -n "$(git status --porcelain --untracked-files=no)" ]]; then
-        printf 'pre-push: refused: %s has no fast-rows PASS and is not the clean checked-out HEAD.\n' \
-            "${local_sha:0:12}" >&2
-        printf 'FIX: check out %s with no uncommitted changes and push again (the hook runs the fast rows), or run ./scripts/release-gate.sh --fast-rows there first\n' \
-            "${local_sha:0:12}" >&2
-        status=1
-        continue
-    fi
     # Compare a first push with its task target, not unrelated changes on main.
     # Existing branches still compare with the tip this push replaces.
     base="$remote_sha"
@@ -138,6 +130,16 @@ PY
     # may not have built the web assets that this epic push changes.
     if [[ "$dist_needed" == false || "$web_proved" == true ]] \
         && head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha base=$base "; then
+        continue
+    fi
+    # A receipt proves the pushed objects, regardless of the current checkout.
+    # Only running missing checks requires this exact tip to be checked out cleanly.
+    if [[ "$local_sha" != "$(git rev-parse HEAD)" || -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        printf 'pre-push: refused: %s lacks reusable fast-row proof for base %s and is not the clean checked-out HEAD.\n' \
+            "${local_sha:0:12}" "$base" >&2
+        printf 'FIX: check out %s in a clean worktree and retry this push from that worktree; the hook runs missing fast rows and required web proof.\n' \
+            "${local_sha:0:12}" >&2
+        status=1
         continue
     fi
     printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "$base" >&2

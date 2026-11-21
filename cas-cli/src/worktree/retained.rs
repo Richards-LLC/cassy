@@ -203,6 +203,7 @@ pub(crate) fn scan_until(cas_root: &Path, deadline: Instant) -> RetainedInventor
             .find_map(|field| field.strip_prefix("HEAD "))
             .unwrap_or("unknown")
             .to_string();
+        let canonical = path.canonicalize().ok();
         let owners: Vec<_> = agents
             .iter()
             .filter(|agent| {
@@ -214,7 +215,10 @@ pub(crate) fn scan_until(cas_root: &Path, deadline: Instant) -> RetainedInventor
                                     || b.starts_with(&format!("factory/{}-cas-", agent.name))
                             })
                         },
-                        |p| Path::new(p) == path,
+                        // cas-55a5: a recorded spelling through a symlink
+                        // (macOS /var vs Git's /private/var) is the same checkout.
+                        |p| Path::new(p) == path
+                            || canonical.as_ref().is_some_and(|c| Path::new(p).canonicalize().ok().as_ref() == Some(c)),
                     ))
             })
             .collect();

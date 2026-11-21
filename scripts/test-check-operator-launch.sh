@@ -25,6 +25,13 @@ fake_cas() {
 gate=$gate
 EOF
     cat >>"$path" <<'EOF'
+# No caller/launch-manager factory identity may enter even cas init. The
+# CAS_AGENT_ROLE negative control is intentionally supplied by the smoke.
+for name in CAS_AGENT_NAME CAS_AGENT_ID CAS_SESSION_ID CAS_CLONE_PATH CAS_SUPERVISOR_NAME \
+    CAS_FACTORY_MODE CAS_FACTORY_SESSION CAS_FACTORY_WORKER_NAMES CLAUDECODE \
+    CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_SANDBOX_NETWORK_DISABLED CODEX_THREAD_ID; do
+    [[ -z "${!name:-}" ]] || exit 91
+done
 if [[ "$1" == init ]]; then
     mkdir -p .cas && printf '[factory]\nnice_cargo = true\n' >.cas/config.toml
     exit 0
@@ -67,6 +74,50 @@ if [[ "$status" -ne 0 ]]; then
     ok 'a gate that admits agents fails the smoke'
 else
     bad "an open gate passed the smoke: $output"
+fi
+
+# On Linux, exercise the Darwin transport and the real env scrub with shims
+# for native tools. This proves submission/exit/cleanup, not launchd ancestry.
+if [[ "$(uname -s)" == Linux ]]; then
+    mkdir -p "$tmp/native"
+    printf '#!/bin/bash\necho Darwin\n' >"$tmp/native/uname"
+    cat >"$tmp/native/script" <<'EOF'
+#!/bin/bash
+[[ "$1" == -q && "$2" == /dev/null && "$3" == /bin/bash && "$4" == -lc ]] || exit 92
+printf -v command_line '%q ' "$3" "$4" "$5"
+exec /usr/bin/script -qec "$command_line" /dev/null
+EOF
+    cat >"$tmp/native/launchctl" <<'EOF'
+#!/bin/bash
+set -eu
+root="$(cd "$(dirname "$0")/.." && pwd)"
+action="$1"; shift
+if [[ "$action" == remove ]]; then
+    echo remove >>"$root/launchctl.calls"
+    exit 0
+fi
+[[ "$action" == submit && "$1" == -l && "$3" == -o && "$5" == -e && "$7" == -- ]] || exit 93
+output="$4"; error="$6"; shift 7
+[[ "$1" == /usr/bin/env && "$2" == -i ]] || exit 94
+args=()
+for arg in "$@"; do
+    [[ "$arg" != PATH=* ]] || arg="PATH=$root/native:${arg#PATH=}"
+    args+=("$arg")
+done
+echo submit >>"$root/launchctl.calls"
+# A launch manager may itself have factory variables. The job must scrub them.
+CAS_FACTORY_MODE=manager CAS_AGENT_NAME=manager "${args[@]}" >"$output" 2>"$error" &
+EOF
+    chmod +x "$tmp/native/"*
+    output="$(PATH="$tmp/native:$PATH" CAS_AGENT_NAME=caller CAS_FACTORY_MODE=caller \
+        CODEX_THREAD_ID=caller bash "$script_dir/check-operator-launch.sh" "$(fake_cas fixed)" 2>&1)" && status=0 || status=$?
+    if [[ "$status" -eq 0 && -f "$tmp/launchctl.calls" \
+        && "$(grep -c '^submit$' "$tmp/launchctl.calls")" -eq 9 \
+        && "$(grep -c '^remove$' "$tmp/launchctl.calls")" -eq 9 ]]; then
+        ok 'Darwin submits all nine clean commands and removes their transient jobs'
+    else
+        bad "Darwin launch transport or factory environment scrub failed: $output"
+    fi
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

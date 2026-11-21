@@ -71,7 +71,7 @@ jobs:
       version: ${{ steps.detect.outputs.version }}
       tag: ${{ steps.detect.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
@@ -108,7 +108,7 @@ jobs:
       group: release-deps-linux-${{ github.event_name == 'push' && inputs.platform == '' && 'seed-main' || github.run_id }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
@@ -120,7 +120,7 @@ jobs:
       # after an exact-key lookup misses. Queue builds can read main's cache.
       - name: Look up release dependency cache
         id: cache-lookup
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -148,7 +148,7 @@ jobs:
       # Ordinary main cache hits do not download or compile anything.
       - name: Restore release dependencies
         if: steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -190,7 +190,7 @@ jobs:
       - name: Restore pinned Zig
         if: steps.compile.outputs.needed == 'true'
         id: zig-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .context/zig
           key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
@@ -236,7 +236,7 @@ jobs:
 
       - name: Upload artifact
         if: steps.compile.outputs.needed == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cas-x86_64-unknown-linux-gnu
           path: |
@@ -259,7 +259,7 @@ jobs:
           steps.compile.outputs.needed == 'true'
           && steps.cache-lookup.outputs.cache-hit != 'true'
           && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             ~/.cargo/registry
@@ -272,7 +272,7 @@ jobs:
           steps.compile.outputs.needed == 'true'
           && steps.zig-cache.outputs.cache-hit != 'true'
           && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .context/zig
           key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
@@ -376,7 +376,7 @@ jobs:
       CARGO_PROFILE_RELEASE_FAST_LTO: "off"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
@@ -421,7 +421,7 @@ jobs:
       - name: Look up release dependency cache
         id: cache-lookup
         if: env.SELF_HOSTED != 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -451,7 +451,7 @@ jobs:
         if: >-
           env.SELF_HOSTED != 'true'
           && (steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -469,7 +469,7 @@ jobs:
       - name: Restore pinned Zig
         if: steps.compile.outputs.needed == 'true'
         id: zig-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .context/zig
           key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
@@ -527,7 +527,7 @@ jobs:
 
       - name: Upload artifact
         if: steps.compile.outputs.needed == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cas-aarch64-apple-darwin
           path: cas-aarch64-apple-darwin.tar.gz
@@ -548,7 +548,7 @@ jobs:
           && steps.compile.outputs.needed == 'true'
           && steps.cache-lookup.outputs.cache-hit != 'true'
           && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             ~/.cargo/registry
@@ -561,7 +561,7 @@ jobs:
           steps.compile.outputs.needed == 'true'
           && steps.zig-cache.outputs.cache-hit != 'true'
           && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .context/zig
           key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}

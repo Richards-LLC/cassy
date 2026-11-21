@@ -769,6 +769,66 @@ esac
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
         self.assertTrue(ran.exists(), pushed.stderr)
 
+    def test_checkpoint_scope_repair_preserves_target_tests_cas_3c12(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        self.assertEqual(command(self.repo, "git", "init", "-q", "--bare", str(remote)).returncode, 0)
+        self.assertEqual(command(self.repo, "git", "remote", "add", "origin", str(remote)).returncode, 0)
+        self.write("scripts/check-test-shape.py", (ROOT / "scripts/check-test-shape.py").read_text())
+        path = "cas-cli/src/scope_tests.rs"
+        original = '#[test] fn legacy() { assert!(error.contains("please try again later")); }\n'
+        self.write(path, original)
+        self.write("assigned.txt", "obsolete assigned content\n")
+        self.commit()
+        target = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(command(self.repo, "git", "checkout", "-qb", "factory/lane").returncode, 0)
+        self.write(path, '#[test] fn legacy() { assert!(result.is_err()); }\n')
+        self.commit()
+        checkpoint = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        # Seed the returned checkpoint before installing the real push hook.
+        self.assertEqual(self.push().returncode, 0)
+        hook = self.repo / ".git/hooks/pre-push"
+        hook.write_text('#!/bin/sh\nexec bash scripts/fast-rows-pre-push.sh "$@"\n')
+        hook.chmod(0o755)
+        root = self.repo / ".cas"
+        root.mkdir()
+        with (self.repo / ".git/info/exclude").open("a") as exclude:
+            exclude.write("\n/.cas/\n")
+        self.write(path, original)
+        (self.repo / "assigned.txt").unlink()
+        self.commit()
+        repair = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(command(self.repo, "git", "diff", "--name-only", target, repair).stdout.splitlines(),
+                         ["assigned.txt"])
+        self.assertEqual(command(self.repo, "git", "merge-base", "--is-ancestor", checkpoint, repair).returncode, 0)
+        with sqlite3.connect(root / "cas.db") as db:
+            db.execute("CREATE TABLE tasks (status TEXT, deliverables TEXT)")
+            for branch, start, expected in [("factory/other", target, 1),
+                                            ("factory/lane", repair, 1),
+                                            ("factory/lane", target, 0)]:
+                with self.subTest(branch=branch, start=start):
+                    db.execute("DELETE FROM tasks")
+                    db.execute("INSERT INTO tasks VALUES (?, ?)", ("in_progress", json.dumps({
+                        "work_target": {"target_branch": "target"},
+                        "factory_branch_start": {"branch": branch, "base_sha": start},
+                    })))
+                    db.commit()
+                    pushed = self.push(CAS_BIN="/nonexistent/cas")
+                    self.assertEqual(pushed.returncode, expected, pushed.stdout + pushed.stderr)
+                    if expected:
+                        self.assertIn("TEST_ASSERTION_PROSE", pushed.stderr)
+                    published = command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane")
+                    self.assertEqual(published.stdout.split()[0], checkpoint if expected else repair)
+        # Only byte-identical restoration is exempt: newly introduced prose in
+        # that very file still refuses, and the accepted remote tip stays put.
+        self.write(path, original + '#[test] fn introduced() { assert!(error.contains("please contact support")); }\n')
+        self.commit()
+        refused = self.push(CAS_BIN="/nonexistent/cas")
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("TEST_ASSERTION_PROSE", refused.stderr)
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()[0], repair)
+        self.assertEqual(command(self.repo, "git", "status", "--porcelain").stdout, "")
+        self.assertFalse((self.repo / "cargo-called").exists())
+
     def test_epic_push_refuses_stale_hub_web_dist_cas_1efb(self):
         remote = Path(self.scratch.name) / "remote.git"
         command(self.repo, "git", "init", "-q", "--bare", str(remote))
@@ -860,6 +920,70 @@ esac
         self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
         self.assertEqual((self.repo / ".git/npm-calls").read_bytes(), npm_calls)
         self.assertEqual([path.stat().st_mtime_ns for path in receipts], modified)
+
+    def non_head_push_fixture(self, web_change=False):
+        remote = Path(self.scratch.name) / "remote.git"
+        self.assertEqual(command(self.repo, "git", "init", "-q", "--bare", str(remote)).returncode, 0)
+        self.assertEqual(command(self.repo, "git", "remote", "add", "origin", str(remote)).returncode, 0)
+        hook = self.repo / ".git/hooks/pre-push"
+        hook.write_text('#!/bin/sh\nexec bash scripts/fast-rows-pre-push.sh "$@"\n')
+        hook.chmod(0o755)
+        if web_change:
+            self.write("hub-web/dist/app.js", "new committed output\n")
+        else:
+            self.write("delivery.txt", "previous checked commit\n")
+        self.commit()
+        source = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("later.txt", "the checkout has moved on\n")
+        self.commit()
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("CAS_", "GIT_"))}
+        env.update(ZERO_BASE_REF=self.base, CAS_BIN="/nonexistent/fixture-cas",
+                   CARGO=str(self.repo / "cargo-tripwire"))
+        receipts = self.repo / ".git/cas/fast-rows"
+        receipts.mkdir(parents=True)
+        return source, head, env, receipts
+
+    def test_non_head_push_requires_matching_pass_receipt_cas_a267(self):
+        source, head, env, receipts = self.non_head_push_fixture()
+        receipt = receipts / f"{source}.pass"
+        ref = "refs/heads/epic/cut-marker"
+        cases = (
+            ("absent", None, False),
+            ("failed", f"fast-rows: FAIL {source} base={self.base} version=9.99.7\n", False),
+            ("wrong-sha", f"fast-rows: PASS {head} base={self.base} version=9.99.7\n", False),
+            ("wrong-base", f"fast-rows: PASS {source} base={head} version=9.99.7\n", False),
+            ("matching", f"fast-rows: PASS {source} base={self.base} version=9.99.7\n", True),
+        )
+        for name, content, allowed in cases:
+            with self.subTest(receipt=name):
+                if content is not None:
+                    receipt.write_text(content)
+                pushed = command(self.repo, "git", "push", "origin", f"{source}:{ref}", env=env)
+                self.assertEqual(pushed.returncode == 0, allowed, pushed.stdout + pushed.stderr)
+                published = command(self.repo, "git", "ls-remote", "origin", ref).stdout.split()
+                self.assertEqual(published, [source, ref] if allowed else [])
+                self.assertEqual(command(self.repo, "git", "rev-parse", "HEAD").stdout.strip(), head)
+        self.assertFalse((self.repo / "cargo-called").exists())
+        self.assertFalse(list(receipts.glob("*.logs.*")), "receipt replay must not run rows on another HEAD")
+
+    def test_non_head_push_preserves_web_receipt_range_cas_a267(self):
+        source, head, env, receipts = self.non_head_push_fixture(web_change=True)
+        (receipts / f"{source}.pass").write_text(
+            f"fast-rows: PASS {source} base={self.base} version=9.99.7\n")
+        web = receipts / f"{source}.web.pass"
+        ref = "refs/heads/epic/cut-marker"
+        for name, base, allowed in (("absent", None, False), ("wrong-base", head, False),
+                                    ("matching", self.base, True)):
+            with self.subTest(web_receipt=name):
+                if base is not None:
+                    web.write_text(f"hub-web-dist-drift: PASS {source} base={base}\n")
+                pushed = command(self.repo, "git", "push", "origin", f"{source}:{ref}", env=env)
+                self.assertEqual(pushed.returncode == 0, allowed, pushed.stdout + pushed.stderr)
+                published = command(self.repo, "git", "ls-remote", "origin", ref).stdout.split()
+                self.assertEqual(published, [source, ref] if allowed else [])
+        self.assertEqual(command(self.repo, "git", "rev-parse", "HEAD").stdout.strip(), head)
+        self.assertFalse(list(receipts.glob("*.logs.*")), "missing proof must not build a different checkout")
 
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"

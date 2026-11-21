@@ -27,7 +27,7 @@ fn safe_path(path: &str) -> bool {
 pub(super) fn javascript(path: &str) -> bool {
     matches!(
         Path::new(path).extension().and_then(|ext| ext.to_str()),
-        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts")
+        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "vue")
     )
 }
 
@@ -41,12 +41,12 @@ pub(super) fn test_file(path: &str) -> bool {
 /// name suffix, or jest's `__tests__` directory; declarations never are.
 /// `test_file` stays the wide net for files that may hold tests. A file only
 /// that net catches is a support module: a `File` run of it finds no tests,
-/// so it widens to related tests for Jest, or to its package for other runners.
-pub(super) fn test_match(path: &str) -> bool {
+/// so it widens to related tests for Jest/Vitest, or to its package otherwise.
+pub(super) fn test_match(path: &str, runner: Option<&str>) -> bool {
     let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
     !stem.ends_with(".d")
         && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
-            || path.split('/').any(|part| part == "__tests__"))
+            || (runner == Some("jest") && path.split('/').any(|part| part == "__tests__")))
 }
 
 /// A scoped JavaScript stability command, however the shell names its runner.
@@ -59,7 +59,7 @@ pub(super) struct Invocation {
     pub(super) files: Vec<String>,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
@@ -71,6 +71,7 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
         rest => rest,
     };
     let (runner, rest) = match args {
+        ["vitest", "related", rest @ ..] => ("vitest", rest),
         ["vitest", "run", rest @ ..] | ["vitest", rest @ ..] => ("vitest", rest),
         ["jest", rest @ ..] => ("jest", rest),
         ["playwright", "test", rest @ ..] | ["playwright", rest @ ..] => ("playwright", rest),
@@ -85,6 +86,7 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
         let value = match *arg {
             "--config" | "-c" => Some(*rest.next()?),
             "--runInBand" | "-i" if runner == "jest" => continue,
+            "--run" if runner == "vitest" => continue,
             "--findRelatedTests" if runner == "jest" => continue,
             "--testNamePattern" | "-t" if runner == "jest" => {
                 if rest.next()?.is_empty() { return None; }
@@ -193,6 +195,11 @@ pub(crate) fn changed_tests(
         // runtime identities for callbacks merely present in its final tree.
         if lines.is_empty() {
             continue;
+        }
+        // Vue's template/SFC grammar is not JavaScript test registration.
+        // Its runner owns dependency discovery, including the Vue transform.
+        if path.ends_with(".vue") {
+            bail!("Vue component {path} requires related-test proof");
         }
         let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
         let old = show(repo, base, path)?
@@ -1449,7 +1456,16 @@ fn execute_tests(
     }
     let mut count = 0;
     let mut attribution_notes = Vec::new();
-    let reports = tempfile::tempdir()?;
+    // GH #2172: a Playwright run writes its reports under the task's artifact
+    // directory; a failure keeps them so the traces it printed stay readable.
+    let reports = if runner == "playwright" {
+        let parent = javascript_reports_parent(cas_root, repo);
+        std::fs::create_dir_all(&parent)?;
+        tempfile::Builder::new().prefix(&format!("playwright-{}-", head.get(..12).unwrap_or(head))).tempdir_in(parent)?
+    } else {
+        tempfile::tempdir()?
+    };
+    let outcome = (|| -> Result<()> {
     for (path, selected) in by_file {
         // One config path: the caller's own `--config` wins over the
         // discovered runner config (cas-1468); never pass both.
@@ -1512,8 +1528,10 @@ fn execute_tests(
             let file = repo.join(path);
             match runner {
                 "vitest" => {
+                    if matches!(widened, Some((super::widened::Scope::Related(_), _, _))) {
+                        command.args(["related", "--run"]);
+                    } else { command.arg("run"); }
                     command
-                        .arg("run")
                         .args(&config)
                         .args([
                             "--retry",
@@ -1608,6 +1626,30 @@ fn execute_tests(
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
         } else { verify_repeats(runner, repo, &selected, run)? };
     }
+    Ok(())
+    })();
+    if let Err(error) = outcome {
+        if runner == "vitest" {
+            return Err(match retain_vitest_reports(cas_root, repo, head, reports.path()) {
+                Ok(kept) => anyhow::anyhow!(
+                    "{error:#}\nFailed Vitest assertion reports (redacted JSON) are kept at {}.",
+                    kept.display()
+                ),
+                Err(capture) => anyhow::anyhow!(
+                    "{error:#}\nCould not retain Vitest assertion reports: {capture:#}"
+                ),
+            });
+        }
+        if runner != "playwright" {
+            return Err(error);
+        }
+        // The failure stays first; the kept directory follows it.
+        let kept = reports.keep();
+        return Err(anyhow::anyhow!(
+            "{error:#}\nFailed Playwright evidence (traces, error contexts, JSON reports) is kept at {}.",
+            kept.display()
+        ));
+    }
     if super::clean_head(repo)? != head {
         bail!("repository changed during JavaScript stability run");
     }
@@ -1622,6 +1664,43 @@ fn execute_tests(
         println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
+}
+
+/// Copy only the report protocol payload; temporary scope files stay private
+/// and success receipts retain their existing lifecycle.
+fn retain_vitest_reports(cas_root: &Path, repo: &Path, head: &str, reports: &Path) -> Result<PathBuf> {
+    let parent = javascript_reports_parent(cas_root, repo);
+    std::fs::create_dir_all(&parent)?;
+    let kept = tempfile::Builder::new()
+        .prefix(&format!("vitest-{}-", head.get(..12).unwrap_or(head)))
+        .tempdir_in(parent)?;
+    let mut count = 0;
+    for entry in std::fs::read_dir(reports)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry.file_name().to_string_lossy().starts_with("report-")
+            && entry.path().extension().is_some_and(|extension| extension == "json")
+        {
+            let report: Value = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+            let redacted = crate::ai_enrichment::redact_json(&report);
+            std::fs::write(kept.path().join(entry.file_name()), serde_json::to_vec_pretty(&redacted)?)?;
+            count += 1;
+        }
+    }
+    anyhow::ensure!(count > 0, "no Vitest JSON report was produced");
+    Ok(kept.keep())
+}
+
+/// Where failure reports live: the task's artifact directory, or a shared
+/// worker-check one when no task owns the checkout.
+fn javascript_reports_parent(cas_root: &Path, repo: &Path) -> PathBuf {
+    let configured = crate::config::Config::load(cas_root).ok().and_then(|config| config.factory().artifacts_root.clone());
+    let base = crate::config::project_factory_artifacts_root(
+        cas_root,
+        &crate::config::resolved_factory_artifacts_root(configured.as_deref()),
+    );
+    let owner = crate::factory_capacity_wait::bound_task(cas_root, repo).unwrap_or_else(|| "worker-check".into());
+    base.join(owner).join("worker-check")
 }
 
 fn validate_declared_discovery(
@@ -2964,6 +3043,82 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             });
             assert_eq!(result.is_ok(), fail_at.is_none());
             assert_eq!(invocations, if fail_at.is_some() { 3 } else { 5 });
+        }
+    }
+
+    /// GH #2172/cas-7b09: producer exit must leave readable traces or assertion
+    /// reports, without retaining credentials from a JSON failure payload.
+    #[cfg(unix)]
+    #[test]
+    fn failed_javascript_reports_outlive_worker_check_cas_7b09() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for runner in ["playwright", "vitest"] {
+            let repo = tempfile::tempdir().unwrap();
+            let git = |args: &[&str]| {
+                let output = Command::new("git").current_dir(repo.path())
+                    .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                    .args(args).output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            git(&["init", "--quiet"]);
+            std::fs::write(repo.path().join(".gitignore"), "node_modules/\nsource-report.txt\n").unwrap();
+            std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+            let file = "e2e/retry.spec.ts";
+            std::fs::create_dir_all(repo.path().join("e2e")).unwrap();
+            std::fs::write(repo.path().join(file), "test('fails', async () => { expect(1).toBe(2); });\n").unwrap();
+            // A deterministic failure that writes a trace, as Playwright does.
+            let bin = repo.path().join("node_modules/.bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let secret = "fixture-credential-7b09";
+            let payload = json!({"success":false,"testResults":[{
+                "name":repo.path().join(file),"status":"failed","assertionResults":[{
+                    "fullName":"fails","status":"failed",
+                    "failureMessages":["AssertionError: expected 1 to be 2\n at retry.spec.ts:1:32"],
+                    "apiKey":secret
+                }]
+            }]});
+            std::fs::write(repo.path().join("failure.json"), payload.to_string()).unwrap();
+            let script = if runner == "playwright" {
+                "#!/bin/sh\nout=; prev=\nfor arg in \"$@\"; do [ \"$prev\" = --output ] && out=$arg; prev=$arg; done\n\
+                mkdir -p \"$out/retry-fails-chromium\" && printf trace > \"$out/retry-fails-chromium/trace.zip\"\n\
+                printf '{\"errors\":[],\"suites\":[]}' > \"$PLAYWRIGHT_JSON_OUTPUT_FILE\"\nexit 1\n"
+            } else {
+                "#!/bin/sh\nreport=; prev=\nfor arg in \"$@\"; do [ \"$prev\" = --outputFile ] && report=$arg; prev=$arg; done\n\
+                cp failure.json \"$report\"\nprintf '%s\\n' \"$report\" > source-report.txt\nexit 1\n"
+            };
+            std::fs::write(bin.join(runner), script).unwrap();
+            std::fs::set_permissions(bin.join(runner), std::fs::Permissions::from_mode(0o755)).unwrap();
+            git(&["add", "."]);
+            git(&["commit", "--quiet", "-m", "failing spec"]);
+            let head = git(&["rev-parse", "HEAD"]);
+            let cas_root = tempfile::tempdir().unwrap();
+            let artifacts = tempfile::tempdir().unwrap();
+            std::fs::write(cas_root.path().join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", artifacts.path().display().to_string())).unwrap();
+
+            let error = execute_tests(cas_root.path(), repo.path(), &head, runner, None, &[id(file, "fails")], None, &[])
+                .unwrap_err();
+            let message = format!("{error:#}");
+            // One durable copy under the artifacts root, named by the failure.
+            let kept: Vec<PathBuf> = walkdir::WalkDir::new(artifacts.path()).into_iter().filter_map(Result::ok)
+                .filter(|entry| entry.file_name() == "report-0.json").map(|entry| entry.path().parent().unwrap().to_path_buf())
+                .collect();
+            assert_eq!(kept.len(), 1, "{message}");
+            assert!(message.contains(&kept[0].display().to_string()), "{message}");
+            if runner == "playwright" {
+                assert_eq!(std::fs::read(kept[0].join("playwright-output/retry-fails-chromium/trace.zip")).unwrap(), b"trace");
+            } else {
+                let temporary = std::fs::read_to_string(repo.path().join("source-report.txt")).unwrap();
+                assert!(!Path::new(temporary.trim()).exists());
+                let retained = std::fs::read_to_string(kept[0].join("report-0.json")).unwrap();
+                let report: Value = serde_json::from_str(&retained).unwrap();
+                // Preserve the runner-supplied diagnostic protocol payload exactly.
+                assert_eq!(report["testResults"][0]["assertionResults"][0]["failureMessages"],
+                    payload["testResults"][0]["assertionResults"][0]["failureMessages"]);
+                assert!(!retained.contains(secret));
+            }
         }
     }
 

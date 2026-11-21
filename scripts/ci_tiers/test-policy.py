@@ -516,7 +516,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 for step in job['steps']:
                     # Cheap classification and trust checks still execute.
                     if (step.get('id') in ('job-receipt','classify-diff','cli-restore') or
-                        step.get('uses')=='actions/checkout@v4' or
+                        step.get('uses', '').startswith('actions/checkout@') or
                         'SELF_HOSTED_ENABLED' in step.get('env',{})):
                         continue
                     context={'inputs.full-set':True,'steps.job-receipt.outputs.reused':'true',
@@ -646,7 +646,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             self.assertEqual(log.read_text().splitlines(),
                 ['{"phase":"compile","seconds":7}', '{"phase":"tests","count":3}'])
             uploads = [step['with']['path'] for step in job['steps']
-                if step.get('uses') == 'actions/upload-artifact@v4' and step.get('if') == 'always()']
+                if step.get('uses', '').startswith('actions/upload-artifact@') and step.get('if') == 'always()']
             self.assertTrue(any(log.is_relative_to(self.root / path) for path in uploads))
 
     # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
@@ -727,7 +727,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
     def test_folded_fanin_collects_only_executed_train_shards(self):
         jobs=self.ci()['jobs']
         job=jobs['fast-validation']
-        self.assertEqual(sum(s.get('uses')=='actions/checkout@v4' for s in job['steps']),1)
+        self.assertEqual(sum(s.get('uses', '').startswith('actions/checkout@') for s in job['steps']),1)
         collect=next(s for s in job['steps'] if 'BUILD_RESULT' in s.get('env',{}))
         self.assertEqual(collect['env']['BUILD_RESULT'],'${{ needs.fast-validation-suite-build.result }}')
         self.assertEqual(collect['env']['SHARDS_RESULT'],'${{ needs.fast-validation-suite-shards.result }}')

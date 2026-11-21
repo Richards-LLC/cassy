@@ -2661,8 +2661,12 @@ async fn manual_epic_merge_with_approval_closes_on_reconcile_gh2282() {
     let recorded = supervisor.cas_verification_add(review).await.unwrap();
     assert_ne!(recorded.is_error, Some(true), "{recorded:?}");
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+    // The approval alone never closes a delivery merged outside
+    // worktree_merge; the reconcile pass's observed landing does.
     crate::factory_delivery_wake::reconcile_contained(&repo.join(".cas"), "reconcile-fixture").await.unwrap();
-    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{}", tasks.get(TASK).unwrap().notes);
+    let closed = tasks.get(TASK).unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed, "{}", closed.notes);
+    assert_eq!(closed.deliverables.green_merge_commit, Some(git(repo, &["rev-parse", "epic/gabber-train"])));
 }
 
 #[tokio::test]

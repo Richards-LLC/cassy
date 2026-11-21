@@ -428,7 +428,7 @@ fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(
         .next()?;
     let root = aliases
         .get(raw_root)
-        .map(String::as_str)
+        .map(|api| api.trim_start_matches(GATED_API))
         .unwrap_or(raw_root);
     if !matches!(root, "test" | "it" | "describe") {
         return None;
@@ -504,6 +504,7 @@ fn parsed_tests(
         path,
         lines,
         &[],
+        false,
         false,
         false,
         false,
@@ -818,6 +819,8 @@ fn declared_sites(path: &str, source: &str) -> Result<Vec<DeclaredSite>> {
 }
 
 const UNRESOLVED_API: &str = "unresolved-test-api";
+/// Alias-map prefix for an alias of an environment-gated registration.
+const GATED_API: &str = "environment-gated:";
 
 fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String, String>) {
     if node.kind() == "import_specifier"
@@ -837,11 +840,15 @@ fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String,
         && matches!(value.kind(), "parenthesized_expression" | "ternary_expression")
     {
         let api = match callee(value, source, aliases, false) {
-            Some((suite, true)) => Some(if suite { "describe" } else { "test" }),
-            _ if unresolved_callee(value, source, aliases) => Some(UNRESOLVED_API),
+            Some((suite, true)) => Some(format!(
+                "{}{}",
+                if environment_gate(value, source, aliases) { GATED_API } else { "" },
+                if suite { "describe" } else { "test" }
+            )),
+            _ if unresolved_callee(value, source, aliases) => Some(UNRESOLVED_API.to_string()),
             _ => None,
         };
-        if let Some(api) = api { aliases.insert(text(name, source).to_string(), api.to_string()); }
+        if let Some(api) = api { aliases.insert(text(name, source).to_string(), api); }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -915,9 +922,28 @@ fn skipped_registration(function: Node<'_>, source: &str) -> bool {
     }
 }
 
+/// GH #2223: `(env ? it : it.skip)`, `skipIf`/`runIf` and aliases of them let
+/// the environment decide whether the case runs, so a skipped run is by design.
+fn environment_gate(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
+    match function.kind() {
+        "call_expression" => function.child_by_field_name("function").is_some_and(|inner| {
+            inner.child_by_field_name("property").is_some_and(|property| matches!(text(property, source), "skipIf" | "runIf"))
+                || environment_gate(inner, source, aliases)
+        }),
+        "member_expression" => function.child_by_field_name("object").is_some_and(|object| environment_gate(object, source, aliases)),
+        "parenthesized_expression" => function.named_child(0).is_some_and(|inner| environment_gate(inner, source, aliases)),
+        "ternary_expression" => ["consequence", "alternative"].into_iter().any(|field| {
+            function.child_by_field_name(field).is_some_and(|branch| skipped_registration(branch, source) || environment_gate(branch, source, aliases))
+        }),
+        "identifier" => aliases.get(text(function, source)).is_some_and(|api| api.starts_with(GATED_API)),
+        _ => false,
+    }
+}
+
 // gate-audit[force]: Suite-header changes include descendant tests in the selected proof; this broadens test coverage and never bypasses a refusal.
 // gate-audit[strict]: selector Chooses the changed-scope pass that raises G-61 for an unresolvable callee or title; the non-strict inventory pass never selects tests for proof.
 // gate-audit[unresolved]: selector Inherited title-resolution state; it only makes a changed test fail closed and never accepts a refused identity.
+// gate-audit[gated]: selector Inherited environment-gate state; it labels selected identities and never removes one from the proof selection.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     node: Node<'_>,
@@ -927,6 +953,7 @@ fn walk(
     suites: &[String],
     unresolved: bool,
     templated: bool,
+    gated: bool,
     force: bool,
     strict: bool,
     aliases: &BTreeMap<String, String>,
@@ -952,6 +979,7 @@ fn walk(
         if node.child_by_field_name("function").is_some_and(|function| skipped_registration(function, source)) {
             return Ok(());
         }
+        let gated = gated || node.child_by_field_name("function").is_some_and(|function| environment_gate(function, source, aliases));
         let args = node
             .child_by_field_name("arguments")
             .context("test arguments")?;
@@ -998,7 +1026,7 @@ fn walk(
                     headers.iter().map(|(_, _, text)| text).collect::<Vec<_>>(),
                 ))?;
                 for name in names {
-                    tests.push((Identity::exact(path, name), fingerprint.clone()));
+                    tests.push((Identity { environment_gated: gated, ..Identity::exact(path, name) }, fingerprint.clone()));
                 }
             }
             return Ok(());
@@ -1045,6 +1073,7 @@ fn walk(
                     &nested,
                     unresolved,
                     templated,
+                    gated,
                     force || header_changed,
                     strict,
                     aliases,
@@ -1072,6 +1101,7 @@ fn walk(
                         path: path.to_string(),
                         name: names.join(" "),
                         parameterized: templated,
+                        environment_gated: gated,
                     },
                     text(node, source).to_string(),
                 ));
@@ -1083,7 +1113,7 @@ fn walk(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         walk(
-            child, source, path, lines, suites, unresolved, templated, force, strict, aliases,
+            child, source, path, lines, suites, unresolved, templated, gated, force, strict, aliases,
             tests,
         )?;
     }
@@ -1192,6 +1222,12 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
         proof.tests.len(),
         proof.elapsed_ms
     );
+    for test in &proof.inactive {
+        println!(
+            "stability: INACTIVE {} :: {} (environment-gated, skipped by its registration condition in all 5 runs; not counted as passing; set the environment it reads and rerun to prove it)",
+            test.path, test.name
+        );
+    }
     Ok(())
 }
 
@@ -1455,6 +1491,7 @@ fn execute_tests(
         by_file.insert(file, Vec::new());
     }
     let mut count = 0;
+    let mut inactive = BTreeSet::new();
     let mut attribution_notes = Vec::new();
     // GH #2172: a Playwright run writes its reports under the task's artifact
     // directory; a failure keeps them so the traces it printed stay readable.
@@ -1614,7 +1651,7 @@ fn execute_tests(
                 })?)?;
             Ok((success, value))
         };
-        count += if widened.is_some() && runner == "playwright" {
+        let (ran, skipped) = if widened.is_some() && runner == "playwright" {
             let (success, report) = run(0)?;
             let inherited = if success { BTreeSet::new() } else {
                 let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
@@ -1625,6 +1662,14 @@ fn execute_tests(
             };
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
         } else { verify_repeats(runner, repo, &selected, run)? };
+        count += ran;
+        inactive.extend(skipped);
+    }
+    if !tests.is_empty() && tests.iter().all(|test| inactive.contains(test)) {
+        bail!(crate::gates::tag("G-61", format!(
+            "{runner} executed zero tests: every changed test is environment-gated and its registration condition skipped it ({}); set the environment that condition reads and rerun worker-check to prove them",
+            inactive.iter().map(|test| format!("{} :: {}", test.path, test.name)).collect::<Vec<_>>().join("; ")
+        )));
     }
     Ok(())
     })();
@@ -1655,9 +1700,10 @@ fn execute_tests(
     }
     let proof = Proof {
         runner: runner.to_string(),
-        tests: tests.to_vec(),
+        tests: tests.iter().filter(|test| !inactive.contains(*test)).cloned().collect(),
         consecutive_passes: if widened.is_some() { 1 } else { 5 },
         elapsed_ms: start.elapsed().as_millis(),
+        inactive: inactive.into_iter().collect(),
     };
     if let Some((scope, _, cause)) = widened {
         super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")) }, count as u64)?;
@@ -1875,22 +1921,32 @@ fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<b
     Ok(status.success())
 }
 
+/// Executed count and the environment-gated selected tests every repeat
+/// reported inactive.
 fn verify_repeats(
     runner: &str,
     repo: &Path,
     tests: &[Identity],
     mut run: impl FnMut(usize) -> Result<(bool, Value)>,
-) -> Result<usize> {
+) -> Result<(usize, BTreeSet<Identity>)> {
     let mut count = 0;
+    let mut inactive: Option<BTreeSet<Identity>> = None;
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
-        count = validate_report(
+        let (ran, skipped) = validate_report(
             runner,
             repo,
             &report,
             tests,
             if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
         )?;
+        count = ran;
+        if inactive.as_ref().is_some_and(|previous| *previous != skipped) {
+            bail!(crate::gates::tag("G-61", format!(
+                "{runner} environment-gated tests changed between running and skipping across repeats; keep their environment fixed for all 5 runs"
+            )));
+        }
+        inactive = Some(skipped);
         if !success {
             bail!(
                 "{runner} stability failed at iteration {}; no retry",
@@ -1898,7 +1954,7 @@ fn verify_repeats(
             );
         }
     }
-    Ok(count)
+    Ok((count, inactive.unwrap_or_default()))
 }
 
 fn validate_report(
@@ -1907,15 +1963,17 @@ fn validate_report(
     report: &Value,
     tests: &[Identity],
     repeats: usize,
-) -> Result<usize> {
+) -> Result<(usize, BTreeSet<Identity>)> {
     validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new())
 }
 
 fn validate_report_with_inherited(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
     inherited: &BTreeSet<(Identity, String)>,
-) -> Result<usize> {
+) -> Result<(usize, BTreeSet<Identity>)> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
+    // Runtime rows an environment-gated selected test reported skipped.
+    let mut skipped_rows = BTreeSet::new();
     if runner == "playwright" {
         let root = report
             .get("config")
@@ -1992,6 +2050,10 @@ fn validate_report_with_inherited(
                     }
                     Some("pending" | "skipped" | "todo" | "disabled")
                         if !tests.iter().any(|test| test.selects(&id)) => {}
+                    Some("pending" | "skipped")
+                        if tests.iter().any(|test| test.environment_gated && test.selects(&id)) => {
+                        skipped_rows.insert(id);
+                    }
                     _ => bail!("{runner} stability failed: {} :: {}", id.path, id.name),
                 }
             }
@@ -2003,8 +2065,18 @@ fn validate_report_with_inherited(
             bail!("{runner} stability report was unsuccessful");
         }
     }
-    // A template identity is proved when every row it selected passed.
+    // A template identity is proved when every row it selected passed. An
+    // environment-gated one whose rows were all skipped is inactive instead.
+    let mut inactive = BTreeSet::new();
     for test in tests {
+        let skipped = skipped_rows.iter().any(|row| test.selects(row));
+        if skipped && !results.keys().any(|ran| test.selects(ran)) {
+            inactive.insert(test.clone());
+            continue;
+        }
+        if skipped {
+            bail!("{runner} environment-gated test both ran and skipped rows: {} :: {}", test.path, test.name);
+        }
         let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
         if rows.peek().is_none() || rows.any(|(_, count)| *count != repeats) {
             bail!(
@@ -2017,8 +2089,8 @@ fn validate_report_with_inherited(
     if !tests.is_empty() && results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
-    if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
-    Ok(results.len())
+    if results.is_empty() && inactive.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
+    Ok((results.len(), inactive))
 }
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
@@ -2235,6 +2307,59 @@ mod tests {
         let mixed = git(&["rev-parse", "HEAD"]);
         let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()], None).unwrap_err().to_string();
         assert!(refusal.contains("G-61"), "{refusal}");
+    }
+
+    /// gabber-studio cas-bc7a (GH #2223): an opt-in live eval registered as
+    /// `(env ? it : it.skip)` skipped by design in all 5 runs and stability
+    /// refused it as a failure. It is now recorded inactive, never passing;
+    /// a run proving no executed test, or an active failure, still refuses.
+    #[test]
+    fn environment_gated_skip_is_inactive_not_passing_gh2223() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let file = "live.test.mjs";
+        let source = |body: &str| format!(
+            "import {{ test }} from 'node:test';\nconst gate = process.env.CAS_GH2223_UNSET_LIVE_EVAL;\n\
+             const live = gate ? test : test.skip;\n\
+             test('kept', () => {{ {body} }});\n\
+             (gate ? test : test.skip)('live eval', () => {{ {body} }});\n\
+             live('aliased live eval', () => {{ {body} }});\n"
+        );
+        std::fs::write(repo.path().join(file), source("throw 0;")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(file), source("")).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let gated = |name: &str| Identity { environment_gated: true, ..id(file, name) };
+        let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()], None).unwrap();
+        assert_eq!(tests, [gated("aliased live eval"), id(file, "kept"), gated("live eval")]);
+
+        let cas_root = tempfile::tempdir().unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, None, &[]).unwrap();
+        assert_eq!((proof.tests, proof.inactive), (vec![id(file, "kept")], vec![gated("aliased live eval"), gated("live eval")]));
+        let passing = super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        assert!(super::super::stability::missing(&passing, &tests).is_empty());
+
+        // Nothing executed: refused with the environment to set, no receipt.
+        let only_gated = [gated("live eval")];
+        let refusal = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &only_gated, None, &[])
+            .unwrap_err().to_string();
+        assert!(refusal.contains("G-61"), "{refusal}");
+        // An active gated test that fails is a failure.
+        let failed = serde_json::json!({"success":true,"testResults":[{"name":file,"status":"passed",
+            "assertionResults":[{"fullName":"live eval","status":"failed"}]}]});
+        assert!(validate_report("node", Path::new("/project"), &failed, &only_gated, 1).is_err());
     }
 
     #[test]

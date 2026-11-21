@@ -1516,7 +1516,7 @@ impl ProxyEngine {
         let result = if violet_message
             && let Some(request_id) = arguments.as_ref().and_then(|args| args.get("request_id")).and_then(Value::as_str)
         {
-            self.reconcile_violet_message(caller, dispatch_kind, request_id, result).await
+            self.reconcile_violet_message(caller, dispatch_kind, request_id, arguments.as_ref(), result).await
         } else {
             result
         };
@@ -1603,13 +1603,19 @@ impl ProxyEngine {
 
     /// A lost response is never permission to repeat a write. Reconcile only
     /// the locally retained ID, through the same caller and policy boundary.
+    /// `resend` holds the post's arguments while one resend is still allowed.
     async fn reconcile_violet_message(
         &self,
         caller: &ProxyCaller,
         dispatch_kind: ProxyDispatchKind,
         request_id: &str,
+        resend: Option<&serde_json::Map<String, Value>>,
         original: Result<rmcp::model::CallToolResult>,
     ) -> Result<rmcp::model::CallToolResult> {
+        // cas-71bf: a closed or unsendable transport never handed the post over.
+        let never_sent = original.as_ref().err().is_some_and(|error| error.chain()
+            .filter_map(|cause| cause.downcast_ref::<rmcp::service::ServiceError>())
+            .any(|cause| matches!(cause, rmcp::service::ServiceError::TransportSend(_) | rmcp::service::ServiceError::TransportClosed)));
         let prior = original.as_ref().ok().and_then(violet_payload);
         let uncertain = match &original {
             Ok(_) => prior.as_ref().is_some_and(|body| body.pointer("/error/code").and_then(Value::as_str) == Some("outcome_unknown")),
@@ -1631,6 +1637,15 @@ impl ProxyEngine {
             && lookup["request_id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(request_id))
         {
             let state = lookup["state"].as_str().unwrap_or_default();
+            // cas-71bf (GH #2259): Violet holds no row for this ID, so the post
+            // never reached it. Send the same request_id once more; Violet
+            // dedupes by it. Any other outcome keeps its answer.
+            if let Some(arguments) = resend.filter(|_| never_sent && state == "not_posted" && lookup["reason"] == "request_not_found") {
+                let mut params = CallToolRequestParams::new("violet_post");
+                params.arguments = Some(arguments.clone());
+                let resent = self.call_upstream(config::VIOLET_SERVER, params).await;
+                return Box::pin(self.reconcile_violet_message(caller, dispatch_kind, request_id, None, resent)).await;
+            }
             if matches!(state, "posted" | "not_posted") {
                 if let Some(mut receipt) = lookup.get("receipt").filter(|body| body.is_object()).cloned()
                     && receipt["ok"] == (state == "posted")

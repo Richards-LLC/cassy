@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 mod frozen_train_ci;
+mod epic_ci;
 
 /// A bounded response from the `gh api` invocation used by the merge receipt.
 /// Keeping status, stdout, and stderr together lets classification distinguish
@@ -463,56 +464,8 @@ fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Option<&'static str> {
     }
 }
 
-/// Epic close reads the existing exact-default-SHA receipt. A skipped test
-/// alongside a green lint/preview is not a successfully executed suite.
-/// Share worktree_merge's bounded lookup and validation-job classifier; never
-/// fall back to an ancestor code SHA or trigger a workflow.
-pub(crate) fn epic_tip_ci_proof(sha: &str, cwd: &Path) -> Result<String, String> {
-    let binary = crate::github_repo::gh_binary();
-    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT)?;
-    let output = fetch_branch_ci(sha, cwd, &repo.canonical, &binary);
-    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
-    let runs = parsed
-        .as_ref()
-        .and_then(|value| value.get("check_runs"))
-        .and_then(serde_json::Value::as_array);
-    let complete = runs.is_some_and(|runs| {
-        !runs.is_empty()
-            && parsed
-                .as_ref()
-                .and_then(|value| value.get("total_count"))
-                .and_then(serde_json::Value::as_u64)
-                .is_none_or(|total| total <= runs.len() as u64)
-            && runs.iter().all(|run| {
-                run.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-                    && run
-                        .get("conclusion")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some()
-                    && !run
-                        .get("head_sha")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|head| head != sha)
-                    && run
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .is_none_or(|name| {
-                            !is_test_check_run(run, name)
-                                || run.get("conclusion").and_then(serde_json::Value::as_str)
-                                    == Some("success")
-                        })
-            })
-    });
-    match classify_branch_ci_response("", sha, output) {
-        BranchCiState::Green { test_checks, .. } if complete => Ok(format!(
-            "CI check-runs on exact SHA {sha} passed: {}",
-            test_checks.join(", ")
-        )),
-        _ => Err(format!(
-            "CI check-runs on exact SHA {sha} are missing, incomplete or not successful (cancelled, skipped and budget-blocked runs do not count)"
-        )),
-    }
-}
+// Epic close has stricter required-check and exact-tree rules than lane CI.
+pub(crate) use epic_ci::epic_tip_ci_proof;
 
 /// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
 /// Otherwise query the latest code commit in merge-base..tip, falling back to
@@ -5934,6 +5887,19 @@ impl CasCore {
 
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
                 .or(dirty_pushed_anchor);
+            // GH #2151: a local_merge delivery integrates its exact local
+            // anchor; only a pushed delivery owes origin source-ref proof.
+            let source_proof = if scoped_task.as_deref()
+                .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge)
+            {
+                crate::worktree::SourceProof::LocalAnchor
+            } else {
+                crate::worktree::SourceProof::PushedRef
+            };
+            let source_label = match source_proof {
+                crate::worktree::SourceProof::PushedRef => "pushed ref origin/",
+                crate::worktree::SourceProof::LocalAnchor => "local ref ",
+            };
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
             unpublished_merge_base = attempted_target_tip.clone();
             let merge_result = if publish_before_ref {
@@ -5977,10 +5943,10 @@ impl CasCore {
                     }
                 };
                 if let Some(anchor) = pushed_anchor {
-                    let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor, Some(&mut publish));
+                    let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, source_proof, Some(&mut publish));
                     if result.is_ok() {
                         pushed_source_note = format!(
-                            "\nSource: pushed ref origin/{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
+                            "\nSource: {source_label}{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
                             worktree.branch,
                         );
                     }
@@ -5992,10 +5958,10 @@ impl CasCore {
                     )
                 }
             } else if let Some(anchor) = pushed_anchor {
-                let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor, None);
+                let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, source_proof, None);
                 if result.is_ok() {
                     pushed_source_note = format!(
-                        "\nSource: pushed ref origin/{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
+                        "\nSource: {source_label}{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
                         worktree.branch,
                     );
                 }

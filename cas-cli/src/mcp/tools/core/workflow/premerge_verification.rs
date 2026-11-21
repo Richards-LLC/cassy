@@ -432,7 +432,10 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn fail(message: impl std::fmt::Display) -> McpError {
+// Keep the registered refusal producer unambiguous for authority-site audits.
+use self::premerge_verification_refusal as fail;
+
+fn premerge_verification_refusal(message: impl std::fmt::Display) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
         crate::gates::tag("G-104",
@@ -1374,6 +1377,8 @@ impl CasCore {
                         verdict_id: verdict.id,
                     }));
                 }
+                let dispatch = automatic::recover_expired_claim(self, dispatch).map_err(fail)?;
+                let dispatch = &dispatch;
                 if matches!(
                     dispatch.state,
                     cas_types::VerificationDispatchState::Pending
@@ -1383,7 +1388,7 @@ impl CasCore {
                 {
                     // GH #2023: a retry after a failed attempt starts one
                     // replacement; say so rather than "finish this verdict".
-                    let mut error = fail(format!(
+                    let mut error = premerge_verification_refusal(format!(
                         "task {}: merge held on verification dispatch {}. An automatic verifier replacement is scheduled on this exact dispatch. Approval continues the merge automatically; verdicts needing attention wake you. Do not spawn another verifier",
                         task.id, dispatch.id
                     ));
@@ -1393,7 +1398,7 @@ impl CasCore {
                     return Err(error);
                 }
                 if dispatch.state == cas_types::VerificationDispatchState::TimedOut {
-                    return Err(fail(format!(
+                    return Err(premerge_verification_refusal(format!(
                         "exact dispatch {} timed out. A registered supervisor must recover it. {} Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
                         dispatch.id,
                         automatic::direct_verdict(dispatch),
@@ -1402,7 +1407,7 @@ impl CasCore {
                         task.id,
                     )));
                 }
-                return Err(fail(format!(
+                return Err(premerge_verification_refusal(format!(
                     "task {}: merge held on verification dispatch {} ({:?}); finish this exact verdict before retrying the merge",
                     task.id, dispatch.id, dispatch.state
                 )));
@@ -1966,6 +1971,142 @@ mod tests {
             },
             inherited_supervisor_call: None,
             preparation_ms: 0,
+        }
+    }
+
+    #[test]
+    fn expired_dead_claim_merge_retry_preserves_candidate_cas_de6d() {
+        for case in ["dead", "timedout-dead", "live", "unreadable", "mismatch", "shutdown", "unknown", "foreign", "unexpired", "other-owner"] {
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            run(repo, &["init", "-q", "-b", "epic/train"]);
+            run(repo, &["config", "user.useConfigOnly", "true"]);
+            run(repo, &["config", "user.name", "Fixture"]);
+            run(repo, &["config", "user.email", "fixture@example.invalid"]);
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            env.set("CAS_ROOT", &root);
+            env.set("CAS_CLONE_PATH", repo);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='dead-claim-fixture'\n[qa]\nmode='batch'\n[verification]\nenabled=true\n").unwrap();
+            commit_file(repo, "src/lib.rs", "base\n", "base");
+            run(repo, &["checkout", "-q", "-b", "factory/worker"]);
+            let source = commit_file(repo, "src/lib.rs", "delivery\n", "delivery");
+            run(repo, &["checkout", "-q", "epic/train"]);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let mut owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+            owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+            let agents = core.open_agent_store().unwrap();
+            agents.register(&owner).unwrap();
+            core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+            let mut task = Task::new("cas-de6d-retry".into(), "Expired verifier retry".into());
+            task.depth = cas_types::TaskDepth::Deep;
+            task.assignee = Some("worker".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+            task.deliverables.parked_branch = Some("factory/worker".into());
+            task.deliverables.factory_branch_anchor = Some(source);
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:dead-claim-fixture".into(), target_branch: "epic/train".into(),
+            });
+            core.open_task_store().unwrap().add(&task).unwrap();
+            let first = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train");
+            let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
+                .unwrap_or_else(|| panic!("candidate did not dispatch: {first:?}"));
+            let mut child = cas_types::Agent::new_sub_agent("old-child".into(), "task-verifier".into(), owner.id.clone());
+            child.machine_id = owner.machine_id.clone();
+            // Reap a real subprocess before retry: no sleep or invented dead PID.
+            let mut process = std::process::Command::new("true").spawn().unwrap();
+            child.pid = Some(process.id());
+            process.wait().unwrap();
+            if matches!(case, "live" | "unreadable" | "mismatch" | "shutdown") {
+                child.pid = Some(std::process::id());
+                crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
+                if case == "mismatch" { child.pid_starttime = Some(child.pid_starttime.expect("readable fixture fingerprint") + 1); }
+            }
+            if case == "unknown" { child.pid = None; }
+            if case == "foreign" { child.machine_id = Some("peer-machine".into()); }
+            let old_capability = cas_store::issue_and_bind_server_verifier_handoff(
+                &root, &task.id, &dispatch.id, "old-attempt", &child,
+            ).unwrap();
+            if case == "shutdown" {
+                child.status = cas_types::AgentStatus::Shutdown;
+                agents.update(&child).unwrap();
+            }
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            if case != "unexpired" {
+                conn.execute("UPDATE verification_dispatches SET deadline_at=?2 WHERE id=?1",
+                    rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()]).unwrap();
+            }
+            if case == "timedout-dead" {
+                cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now()).unwrap().unwrap();
+            }
+            let retry_core = if case == "other-owner" {
+                let peer = cas_types::Agent::new_with_role("peer-owner".into(), "peer".into(), cas_types::AgentRole::Supervisor);
+                agents.register(&peer).unwrap();
+                let retry = CasCore::with_daemon(root.clone(), None, None);
+                retry.bind_agent_identity(peer.id, crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+                retry
+            } else { core.clone() };
+            let before = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            if matches!(case, "dead" | "timedout-dead") {
+                // A death observation cannot authorize a different registration
+                // or a child whose typed/legacy process fingerprint changed.
+                let mut stale_owner = owner.clone();
+                stale_owner.registered_at -= chrono::Duration::seconds(1);
+                let mut stale_child = child.clone();
+                stale_child.pid_starttime = Some(123);
+                let mut stale_legacy = child.clone();
+                stale_legacy.metadata.insert("pid_starttime".into(), "456".into());
+                for (observed_owner, observed_child) in [(&stale_owner, &child), (&owner, &stale_child), (&owner, &stale_legacy)] {
+                    let fenced = cas_store::recover_expired_dead_verifier_dispatch(&root, &dispatch.id,
+                        observed_owner, observed_child, chrono::Utc::now()).unwrap();
+                    assert_eq!(serde_json::to_value(fenced).unwrap(), serde_json::to_value(&before).unwrap());
+                }
+            }
+            if case == "unreadable" {
+                // Keep the consumer/store real; inject only a failed OS read
+                // while its PID existence probe still observes the live process.
+                let observed = automatic::recover_expired_claim_with_probes(&retry_core, &before,
+                    crate::mcp::daemon::pid_alive, |_| None).unwrap();
+                assert_eq!(observed.state, before.state, "unreadable fingerprint must retain the live claim");
+            }
+            let held = retry_core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train");
+            assert!(held.is_err(), "retry must still await an independent verdict");
+            let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert_eq!(current.id, dispatch.id, "{case}");
+            assert_eq!(current.owner_agent_id, owner.id);
+            assert_eq!(current.repository, dispatch.repository);
+            assert_eq!(current.requested_at, dispatch.requested_at);
+            assert_eq!(current.receipt_id, dispatch.receipt_id);
+            assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
+            let recover = matches!(case, "dead" | "timedout-dead" | "mismatch" | "shutdown");
+            let audits: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1",
+                [&dispatch.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(audits, i64::from(recover), "{case}");
+            if !recover {
+                assert_eq!(serde_json::to_value(&current).unwrap(), serde_json::to_value(&before).unwrap(), "{case}");
+                continue;
+            }
+            assert_eq!(current.state, cas_types::VerificationDispatchState::Pending, "{case}: {held:?}");
+            assert!(current.deadline_at > chrono::Utc::now());
+            assert!(current.verifier_agent_id.is_none() && current.capability_id.is_none());
+            let consumed: (Option<String>, String) = conn.query_row(
+                "SELECT c.consumed_at,h.state FROM verification_capabilities c JOIN verification_handoffs h ON h.capability_id=c.id WHERE c.id=?1",
+                [&old_capability.id], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert!(consumed.0.is_some());
+            assert_eq!(consumed.1, "consumed");
+            let replacement = cas_types::Agent::new_sub_agent("replacement".into(), "task-verifier".into(), owner.id.clone());
+            let new_capability = cas_store::issue_and_bind_server_verifier_handoff(&root, &task.id, &dispatch.id, "replacement-attempt", &replacement).unwrap();
+            assert_ne!(old_capability.id, new_capability.id);
+            assert!(cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, &child.id, Some(&old_capability.id), false).is_err());
+            core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap_err();
+            assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id.as_deref(), Some(replacement.id.as_str()));
         }
     }
 

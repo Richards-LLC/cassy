@@ -187,6 +187,7 @@ impl PeerMailboxRuntime {
                         return Ok(Some(PeerAckOutcome::Rejected));
                     }
                     if let Some(outcome) = train_parks::ingest(&self.cas_dir, recipient, message)? { return Ok(Some(outcome)); }
+                    if let Some(outcome) = verification_answers::ingest(&self.cas_dir, recipient, message)? { return Ok(Some(outcome)); }
                     transcript::serve(&self.cas_dir, &mailbox, recipient, message)
                 },
                 &move |recipient, message| {

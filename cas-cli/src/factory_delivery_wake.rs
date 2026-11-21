@@ -75,6 +75,17 @@ pub(crate) fn plan_task(root: &Path, task: &Task, actor: &str) -> Result<Option<
     let Some(supervisor) = owner(root, task, actor)? else { return Ok(None) };
     let sha = task.deliverables.factory_branch_anchor.as_deref()
         .filter(|sha| full_sha(sha)).context("parked delivery has no full commit SHA")?;
+    let target = delivery_target(root, task)?;
+    // cas-be96: a CI watch on a commit already in its target, or for a
+    // workflow the repository does not define, polls GitHub forever. The
+    // containment watch still reports the landing.
+    let project = root.parent().unwrap_or(root);
+    let ci = !contained(project, sha, &target) && ci_watch::local_workflow_defined(project, "CI");
+    Ok(Some(ArmPlan { supervisor, task: task.id.clone(), sha: sha.to_string(), target, ci }))
+}
+
+/// The branch a parked delivery closes against, as close resolves it.
+fn delivery_target(root: &Path, task: &Task) -> Result<String> {
     let tasks = crate::store::open_task_store_local(root)?;
     let epic = tasks.get_parent_epic(&task.id)?;
     let target = if let Some(target) = close_ops::effective_close_work_target(task, epic.as_ref()) {
@@ -88,13 +99,7 @@ pub(crate) fn plan_task(root: &Path, task: &Task, actor: &str) -> Result<Option<
             root.parent().unwrap_or(root),
         ).map_err(anyhow::Error::msg)?
     };
-    let target = ci_watch::normalize_external_target_branch(&target).to_string();
-    // cas-be96: a CI watch on a commit already in its target, or for a
-    // workflow the repository does not define, polls GitHub forever. The
-    // containment watch still reports the landing.
-    let project = root.parent().unwrap_or(root);
-    let ci = !contained(project, sha, &target) && ci_watch::local_workflow_defined(project, "CI");
-    Ok(Some(ArmPlan { supervisor, task: task.id.clone(), sha: sha.to_string(), target, ci }))
+    Ok(ci_watch::normalize_external_target_branch(&target).to_string())
 }
 
 pub(crate) fn arm_plan(root: &Path, plan: &ArmPlan) -> Result<()> {
@@ -114,10 +119,98 @@ pub(crate) fn arm_task(root: &Path, task: &Task, actor: &str) -> Result<()> {
 
 /// The commit is already on the target, locally or on its fetched remote.
 fn contained(project: &Path, sha: &str, target: &str) -> bool {
-    [format!("refs/remotes/origin/{target}"), format!("refs/heads/{target}")].iter().any(|reference| {
+    contained_tip(project, sha, target).is_some()
+}
+
+/// The target tip (fetched remote first, then local) that contains `sha`.
+fn contained_tip(project: &Path, sha: &str, target: &str) -> Option<String> {
+    [format!("refs/remotes/origin/{target}"), format!("refs/heads/{target}")].into_iter().find_map(|reference| {
         let args = ["merge-base", "--is-ancestor", sha, reference.as_str()].map(String::from);
-        ci_watch::run_external_git_command(project, &args).is_ok_and(|output| output.success)
+        if !ci_watch::run_external_git_command(project, &args).is_ok_and(|output| output.success) {
+            return None;
+        }
+        let args = ["rev-parse", "--verify", reference.as_str()].map(String::from);
+        let output = ci_watch::run_external_git_command(project, &args).ok().filter(|output| output.success)?;
+        Some(output.stdout.trim().to_string()).filter(|tip| full_sha(tip))
     })
+}
+
+/// Automatic post-merge verifiers the reconcile pass keeps running at once.
+const RECONCILE_IN_FLIGHT: usize = 4;
+
+/// GH #2282: close parked deliveries that already landed on their recorded
+/// target outside `worktree_merge`: a PR into any branch, a manual merge or a
+/// promotion. The ordinary close reuses an approval; with no verdict it
+/// dispatches the post-merge verifier, at most [`RECONCILE_IN_FLIGHT`] at
+/// once, and that approval closes the task. A recorded landing is attempted
+/// once; a gate that holds it goes to the supervisor. Uncontained deliveries
+/// are left to G-70 and the ordinary merge path.
+pub(crate) async fn reconcile_contained(root: &Path, session: &str) -> Result<()> {
+    use cas_types::VerificationDispatchState;
+    let agents = crate::store::open_agent_store(root)?;
+    let Some(supervisor) = crate::mcp::tools::service::orphan_recovery::live_session_supervisors(agents.as_ref(), session)
+        .into_iter().find_map(|id| agents.get(&id).ok().filter(|agent| agent.role == cas_types::AgentRole::Supervisor))
+    else { return Ok(()) };
+    let project_id = crate::cloud::resolve_canonical_id(root);
+    let project = root.parent().unwrap_or(root);
+    let active = |id: &str| cas_store::get_latest_verification_dispatch(root, id).ok().flatten().is_some_and(|dispatch|
+        matches!(dispatch.state, VerificationDispatchState::Pending | VerificationDispatchState::Claimed)
+            && dispatch.deadline_at > chrono::Utc::now());
+    let parked = crate::store::open_task_store_local(root)?.list(Some(TaskStatus::AwaitingMerge))?;
+    let mut in_flight = parked.iter().filter(|task| active(&task.id)).count();
+    let verifications = crate::store::open_verification_store(root)?;
+    let mut core = None;
+    for task in parked {
+        let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref().filter(|sha| full_sha(sha)) else { continue };
+        if task.task_type == cas_types::TaskType::Epic || task.deliverables.merge_conflicted
+            || task.deliverables.green_merge_commit.is_some() || active(&task.id)
+            || !crate::mcp::tools::core::task::task_owned_by_project(&task, root, project_id.as_deref())
+        {
+            continue;
+        }
+        let Ok(target) = delivery_target(root, &task) else { continue };
+        let Some(landed) = contained_tip(project, anchor, &target) else { continue };
+        let approved = close_ops::close_cycle_verdict(
+            root,
+            cas_store::get_latest_verification_dispatch(root, &task.id)?.as_ref(),
+            verifications.get_latest_for_task(&task.id)?.as_ref(),
+        )?.is_some_and(|verdict| verdict.status == cas_types::VerificationStatus::Approved);
+        if !approved && in_flight >= RECONCILE_IN_FLIGHT { continue }
+        let core = match &core {
+            Some(core) => core,
+            None => core.insert(reconcile_core(root, &supervisor)?),
+        };
+        let outcome = close_ops::as_contained_reconcile_close(core.close_after_published_merge(
+            &task.id, &landed, cas_types::MergeCiAdmission::Advisory, None,
+        )).await;
+        if active(&task.id) {
+            in_flight += 1;
+        }
+        tracing::info!(task_id = %task.id, %target, %landed, outcome = %outcome.followup(&task.id), "reconciled contained delivery");
+        let crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::Held(gate) = outcome else { continue };
+        if active(&task.id) { continue }
+        let detail = format!("Delivery {anchor} for {} is on {target} at {landed}, but Cassy's close is held. The supervisor owns this gate; the delivery remains parked.\n{gate}", task.id);
+        crate::supervisor_notices::enqueue_with_context(
+            root, &crate::supervisor_notices::Recipient::agent(&supervisor), "post_merge_close_recovery", &detail,
+            &format!("{}:{anchor}:{landed}", task.id),
+            Some(json!({"task_id": task.id, "delivery": anchor, "merge": landed, "target": target, "owner": "supervisor"})),
+        )?;
+    }
+    Ok(())
+}
+
+/// The session supervisor's server-internal identity, with a daemon so a
+/// dispatched verifier is Cassy's automatic one.
+fn reconcile_core(root: &Path, supervisor: &Agent) -> Result<crate::mcp::CasCore> {
+    let daemon = crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
+        cas_root: root.to_path_buf(),
+        cloud_sync_enabled: false,
+        ..Default::default()
+    });
+    let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, Some(std::sync::Arc::new(daemon)));
+    core.bind_agent_identity(supervisor.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(core)
 }
 
 /// A retried close has committed a new delivery boundary. Establish its

@@ -9581,6 +9581,13 @@ EOF
             format!("missing=0; c=eval; $c 'true'; echo $((missing+1))"),
             "if false; then missing=0; fi; echo $((missing+1))".to_owned(),
             "echo $((missing+1)); missing=0".to_owned(),
+            // cas-87a4 review: quoted, commented or escaped parens are not an
+            // arithmetic span, so a reassignment between them still counts.
+            "n=0; echo '(( '; n='a[$(touch /outside/cas-a3ac-must-not-execute)0]'; echo ' ))'; echo $((n+1))".to_owned(),
+            format!("n=0; echo \"((\"; n='{operand}'; echo \"))\"; echo $((n+1))"),
+            format!("n=0 # ((\nn='{operand}' # ))\necho $((n+1))"),
+            format!("n=0; echo \\(\\(; n='{operand}'; echo \\)\\); echo $((n+1))"),
+            format!("n=0 # ((\ncase y in\na) n=x\nesac\ncase z in\nb) true\nesac\nx='{operand}'; echo $((n+1))"),
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();

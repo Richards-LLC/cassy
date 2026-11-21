@@ -114,7 +114,7 @@ def human_message_literal(value):
                or re.fullmatch(r'\.[\w.-]+', value)
                or re.fullmatch(r'\[rule:\s*[\w.-]+\]', value)
                or re.fullmatch(r'(?:PASS|FAIL|SKIP) [\w.-]+', value)
-               or re.fullmatch(r'[0-9]+|[A-Z][A-Z0-9_]+|[A-Za-z0-9]+(?:[_.-][A-Za-z0-9]+)+', value)
+               or re.fullmatch(r'[0-9]+|[A-Z][A-Z0-9_]+:?|[A-Za-z0-9]+(?:[_.-][A-Za-z0-9]+)+', value)
                or re.fullmatch(r'\$[A-Z][A-Z0-9_]*|[0-9a-fA-F]{7,40}', value)
                or (not re.search(r'\s', value) and ('/' in value or value.startswith('--'))))
     return not machine

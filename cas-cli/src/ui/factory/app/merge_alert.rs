@@ -428,7 +428,9 @@ pub(super) fn ready_prompt(
     let target = target?;
     let prefix = cli.backend().capabilities().tool_prefix;
     let action = if crate::ui::factory::director::target_is_protected_default(&target) {
-        format!("Open a pull request from {} to {target} and queue it through the protected merge path.", ready.evidence.factory_branch)
+        crate::ui::factory::director::pr_publication_guidance(
+            &ready.evidence.task_id, &ready.evidence.factory_branch, &target, &ready.tip,
+        )
     } else {
         format!("Merge now: `{prefix}factory action=worktree_merge id={worker} task_id={}` into {target}.", ready.evidence.task_id)
     };

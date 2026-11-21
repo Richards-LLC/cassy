@@ -153,6 +153,13 @@ focus/spawn publication guards: recorded originating host, expected-absent push,
 existing remote preservation and explicit child repository/branch targets.
 Publication failures are visible in the successful task receipt for recovery.
 
+An epic child created with an explicit `target_branch` owns that delivery
+branch even when it matches the epic's base. Supplying only `target_repo`
+keeps branch inheritance; selecting the live epic lane follows lane renames.
+For historical rows whose raw target differs from the effective target, a live
+supervisor can repair the binding with `proof_scope_fix=true` and the same
+`target_branch`; unchanged raw and effective targets still refuse a no-op repair.
+
 ## Staffing behind a published release
 
 Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
@@ -2254,6 +2261,17 @@ an unknown outcome and wakes the supervisor; daemon startup and heartbeats
 recover unlocked journals after process loss. Recovery retries note/notice
 persistence with the same continuation identity, never the close mutation.
 
+Worker close execution holds a process-shared lock before the handler starts,
+through post-park publication and its outcome writer. Shutdown and recycle
+acquire the exclusive side at admission and again at actual teardown; force
+cannot discard a pending close. A refusal leaves the worker's bindings and
+live mail intact. A post-park owner-publication error carries
+`code=park_publication_failed`; its journal retains a retry of `publish_ready`
+for daemon recovery, bound to that delivery cycle, branch and tip. Superseded
+deliveries retire that retry without publishing a newer delivery or closing
+again. The original failure and any recovery outcome each have a stable
+continuation identity.
+
 Optional resource notifications and factory recall have bounded response waits.
 Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;
@@ -3454,7 +3472,20 @@ Richards-LLC/cassy` keeps the slim lane on hosted runners, and unsetting
 `systemctl disable --now cassy-actions-runner-3 cassy-actions-runner-4` and
 reverting `lane.yml`'s label.
 
-The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+The normal epic close follows the green queue landing. In downstream repositories
+without a merge queue, epic close requires successful required CI checks on the
+refreshed exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA.
+CI authority comes from GitHub branch-protection required contexts and app IDs;
+unavailable metadata, unprotected branches and empty requirements refuse CI proof.
+Job names need no Cassy-specific vocabulary. Completed post-merge skips count only
+when that exact merge has two parents, its full Git tree equals its second
+parent's tree (including workflow/config), every source check succeeded, all
+required checks are covered, and each skipped target check has a successful
+source check with the same name/app identity. The target also needs a successful
+check. Changed trees, missing tests, pending, failed, cancelled and budget-blocked
+checks refuse. The receipt records merge SHA, source SHA, tree and required check
+identities; no ancestor search or new test run is performed. An authenticated
+supervisor may use `supervisor_override=true` with an audited reason. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.

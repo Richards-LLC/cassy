@@ -197,13 +197,14 @@ fn deliveries_skip_a_parked_task_whose_pr_merge_is_recorded_cas_c24e() {
     let temp = tempfile::TempDir::new().unwrap();
     let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
     let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-    for (id, merged) in [("cas-open-pr", false), ("cas-merged-pr", true)] {
+    // GH #2282: a PR into develop is observed like one into main.
+    for (id, merged, target) in [("cas-develop-pr", false, "develop"), ("cas-open-pr", false, "main"), ("cas-merged-pr", true, "main")] {
         let mut task = cas_types::Task::new(id.to_string(), id.to_string());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some(format!("worker-{id}"));
         task.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:fixture".to_string(),
-            target_branch: "main".to_string(),
+            target_branch: target.to_string(),
         });
         task.deliverables.delivery_pr_number = Some(7);
         if merged {
@@ -212,6 +213,7 @@ fn deliveries_skip_a_parked_task_whose_pr_merge_is_recorded_cas_c24e() {
         }
         store.add(&task).unwrap();
     }
-    let polled: Vec<_> = awaiting_merge_deliveries(&cas_dir).into_iter().map(|d| d.task_id).collect();
-    assert_eq!(polled, vec!["cas-open-pr".to_string()], "a landed PR is not polled again");
+    let mut polled: Vec<_> = awaiting_merge_deliveries(&cas_dir).into_iter().map(|d| d.task_id).collect();
+    polled.sort();
+    assert_eq!(polled, vec!["cas-develop-pr".to_string(), "cas-open-pr".to_string()], "a landed PR is not polled again");
 }

@@ -75,8 +75,11 @@ struct Record {
 /// A daemon process: same-PID reexec keeps both fields; a new launch under a
 /// reused session and supervisor name does not.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
-struct Birth { daemon_pid: u32, daemon_pid_starttime: Option<u64> }
+pub(crate) struct Birth { pub(crate) daemon_pid: u32, pub(crate) daemon_pid_starttime: Option<u64> }
 impl Birth {
+    pub(crate) fn of(metadata: &crate::ui::factory::SessionMetadata) -> Self {
+        Birth { daemon_pid: metadata.daemon_pid, daemon_pid_starttime: metadata.daemon_pid_starttime }
+    }
     fn current() -> Self {
         static CURRENT: std::sync::OnceLock<Birth> = std::sync::OnceLock::new();
         *CURRENT.get_or_init(|| {
@@ -85,20 +88,21 @@ impl Birth {
         })
     }
     /// A missing start time cannot tell a reused PID apart, so it never matches.
-    fn is_current(&self) -> bool {
-        let current = Self::current();
-        self.daemon_pid_starttime.is_some() && *self == current
+    pub(crate) fn matches(&self, other: &Birth) -> bool {
+        self.daemon_pid_starttime.is_some() && self == other
     }
+    fn is_current(&self) -> bool { self.matches(&Self::current()) }
 }
 
+/// One stored command receipt. The hub reads the same shape after teardown.
 #[derive(Serialize, Deserialize)]
-struct SavedRecord {
-    receipt: Receipt,
+pub(crate) struct SavedRecord {
+    pub(crate) receipt: Receipt,
     at: DateTime<Utc>,
     before: String,
     before_command: String,
     reload_before: Option<u32>,
-    birth: Birth,
+    pub(crate) birth: Birth,
 }
 impl Record {
     fn saved(&self) -> anyhow::Result<serde_json::Value> {

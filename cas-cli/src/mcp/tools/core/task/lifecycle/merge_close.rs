@@ -377,7 +377,7 @@ impl CasCore {
                 }
                 if admission == cas_types::MergeCiAdmission::Advisory {
                     let note = format!(
-                        "CI unconfirmed at merge {merge_commit}; worktree_merge proceeded under advisory CI policy."
+                        "CI unconfirmed at merge {merge_commit}; the merge was recorded under advisory CI policy (worktree_merge, or a landing Cassy observed on the target)."
                     );
                     if let Err(error) = store.append_trusted_note(task_id, &note) {
                         return CassyMergeClose::Held(format!(

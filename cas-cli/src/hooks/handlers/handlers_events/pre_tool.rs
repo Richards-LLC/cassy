@@ -12555,7 +12555,7 @@ mod worker_commit_guard_tests {
         for remedy in ["git restore --staged --worktree .", "git switch factory/worker"] {
             assert!(remedies.contains(&remedy), "{refused}");
         }
-        assert!(remedies.iter().any(|line| line.starts_with("git diff HEAD > ")), "{refused}");
+        assert!(remedies.iter().any(|line| line.starts_with("git diff --binary HEAD > ")), "{refused}");
         for remedy in remedies {
             assert!(check_worker_git_commit_scope_for_command(cwd, remedy).is_none(), "{remedy}");
         }
@@ -12574,7 +12574,9 @@ mod worker_commit_guard_tests {
         };
         git(&["switch", "-C", "factory/worker", "main"]);
         git(&["switch", "-c", "factory/sibling"]);
-        let (staged, unstaged) = (b"cas-ea31-staged".as_slice(), b"cas-ea31-unstaged".as_slice());
+        // Binary contents (NUL bytes) must survive too: a plain diff drops them.
+        let (staged, unstaged) = (b"cas-ea31\0staged\xff".as_slice(), b"cas-ea31\0unstaged\x01".as_slice());
+        std::fs::write(repo.path().join("untracked.bin"), b"\0untracked").unwrap();
         std::fs::write(repo.path().join("staged.txt"), staged).unwrap();
         git(&["add", "staged.txt"]);
         std::fs::write(repo.path().join("f.txt"), unstaged).unwrap();
@@ -12592,6 +12594,8 @@ mod worker_commit_guard_tests {
         assert_eq!(git(&["branch", "--show-current"]), "factory/worker");
         assert_eq!(std::fs::read(repo.path().join("staged.txt")).unwrap(), staged);
         assert_eq!(std::fs::read(repo.path().join("f.txt")).unwrap(), unstaged);
+        // The printed sequence restores tracked paths only; untracked files stay.
+        assert_eq!(std::fs::read(repo.path().join("untracked.bin")).unwrap(), b"\0untracked");
         let redirected = format!("git --git-dir '{}' --work-tree '{cwd}' merge --abort", outside.path().join(".git").display());
         assert!(check_worker_git_commit_scope_for_command(cwd, &redirected).is_some());
     }

@@ -407,7 +407,7 @@ fn recovery_steps(worker_name: &str, patch: &TakeoverPatch) -> String {
     format!(
         "Keep your edits, clean the tree, then switch back to your own branch:\n  \
          mkdir -p {dir}\n  \
-         git diff HEAD > {file}\n  \
+         git diff --binary HEAD > {file}\n  \
          git restore --staged --worktree .\n  \
          git switch {expected_branch}\n\n\
          To bring the edits along, apply them on your branch:\n  \

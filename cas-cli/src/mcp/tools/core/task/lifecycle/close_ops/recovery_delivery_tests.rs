@@ -2305,7 +2305,7 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
         cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }
 
-/// GH #2270: a parked delivery left an unreviewed proof cycle, then landed by
+/// GH #2270: a parked delivery has no reusable verdict, then it landed by
 /// git, and a later target commit superseded one of its paths. One audited
 /// supervisor close must satisfy both the reviewed drop and the missing
 /// pre-merge approval; unintegrated or unreviewed loss still refuses.
@@ -2319,19 +2319,13 @@ async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_g
     config.set("verification.enabled", "true").unwrap();
     config.save(&cas_dir).unwrap();
     close(&f).await;
-    let pending = cas_store::create_verification_dispatch_bound(
-        &cas_dir,
-        TASK,
-        "recovery-session",
-        "supervisor-session",
-        &cas_types::VerificationProofBoundary::task(),
-        chrono::Utc::now() + chrono::Duration::minutes(10),
-        false,
-    )
-    .unwrap();
     env.set("CAS_AGENT_ROLE", "supervisor");
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
+    // The delivery's earlier verifier errored, so no reusable verdict exists.
+    let mut errored = cas_types::Verification::new("ver-errored".into(), TASK.into());
+    errored.status = VerificationStatus::Error;
+    supervisor.open_verification_store().unwrap().add(&errored).unwrap();
     let close_with = |reason: String| supervisor.cas_task_close(Parameters(TaskCloseRequest {
         no_delivery: None,
         id: TASK.into(),
@@ -2356,8 +2350,8 @@ async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_g
     let task = tasks.get(TASK).unwrap();
     assert_eq!(task.status, TaskStatus::Closed, "{closed}");
     assert!(task.notes.contains(&replacement) && task.notes.contains(&f.final_tip), "{}", task.notes);
-    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().unwrap();
-    assert_eq!(dispatch.id, pending.id, "recovery opens no post-merge review");
+    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().is_none(),
+        "recovery opens no post-merge review");
 }
 
 /// Point the fixture task's recorded start at `base` on the worker lane,

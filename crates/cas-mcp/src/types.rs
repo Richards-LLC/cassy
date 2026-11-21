@@ -498,7 +498,7 @@ pub struct TaskRequest {
 
     /// Operator recovery decision ID for a contained historical delivery.
     #[schemars(
-        description = "close: ID from the operator's `cas task recovery-decision --scope <epic>`. A live registered supervisor cites it with commit_receipt=<containment commit> to close a contained historical delivery of that epic that has no pre-merge verdict; a reviewed-drop: reason is honored. Not combinable with supervisor_override; Tier 2 excluded."
+        description = "close: operator recovery-decision ID, with commit_receipt; not with supervisor_override."
     )]
     #[serde(default)]
     pub operator_decision: Option<String>,

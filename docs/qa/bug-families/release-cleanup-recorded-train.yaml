@@ -1,0 +1,10 @@
+title: Release cleanup preserves the open next train
+statement: >-
+  Post-publication branch cleanup uses the released version's committed cut
+  record. Only its recorded epic branch is eligible; another open train equal
+  to main survives. Missing or ambiguous records and concurrent branch advances
+  cannot authorize deletion. The actual workflow step is replayed against a
+  disposable local bare remote, with no live branch mutation.
+tasks: [cas-e17a1]
+journeys: [CLI-RELEASE]
+invariants: []

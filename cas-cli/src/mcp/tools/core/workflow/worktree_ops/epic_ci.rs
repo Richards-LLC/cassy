@@ -46,11 +46,16 @@ fn required_checks(output: GhApiOutput) -> Result<Vec<RequiredCheck>, String> {
     Ok(checks)
 }
 
-// gate-audit[allow_skipped]: selector Parses target receipts for the exact-tree proof; skipped jobs still require matching successful source checks before G-71 accepts.
+enum SkipPolicy {
+    RejectSkipped,
+    AcceptIntentionalSkips,
+}
+
+// gate-audit[skip_policy]: selector Parses target receipts for the exact-tree proof; skipped jobs still require matching successful source checks before G-71 accepts.
 fn completed_checks(
     output: GhApiOutput,
     sha: &str,
-    allow_skipped: bool,
+    skip_policy: SkipPolicy,
 ) -> Result<Vec<Value>, String> {
     let invalid =
         || format!("CI check-runs on exact SHA {sha} are missing, incomplete or unsuccessful");
@@ -78,7 +83,8 @@ fn completed_checks(
                     .and_then(Value::as_str)
                     .is_some_and(|head| head != sha)
                 || !(conclusion(run) == Some("success")
-                    || (allow_skipped && conclusion(run) == Some("skipped")))
+                    || (matches!(skip_policy, SkipPolicy::AcceptIntentionalSkips)
+                        && conclusion(run) == Some("skipped")))
         })
     {
         return Err(invalid());
@@ -130,7 +136,7 @@ pub(crate) fn epic_tip_ci_proof(sha: &str, default: &str, cwd: &Path) -> Result<
     let target = completed_checks(
         fetch_branch_ci(sha, cwd, &repo.canonical, &binary),
         sha,
-        true,
+        SkipPolicy::AcceptIntentionalSkips,
     )?;
     require_coverage(&target, &required)?;
     if target.iter().all(|run| conclusion(run) == Some("success")) {
@@ -180,7 +186,7 @@ pub(crate) fn epic_tip_ci_proof(sha: &str, default: &str, cwd: &Path) -> Result<
     let proven = completed_checks(
         fetch_branch_ci(source, cwd, &repo.canonical, &binary),
         source,
-        false,
+        SkipPolicy::RejectSkipped,
     )?;
     require_coverage(&proven, &required)?;
     for skipped in target

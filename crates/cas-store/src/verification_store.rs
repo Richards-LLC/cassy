@@ -1879,6 +1879,77 @@ pub fn release_failed_verifier_dispatch(
     Ok(true)
 }
 
+/// Retry an expired review after the caller positively established local child
+/// death. Compare the observed owner and child incarnations under the verdict
+/// lock before revoking authority; a revival, replacement or verdict wins.
+pub fn recover_expired_dead_verifier_dispatch(
+    cas_dir: &Path,
+    dispatch_id: &str,
+    owner: &Agent,
+    dead_child: &Agent,
+    now: DateTime<Utc>,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let machine = Agent::get_or_generate_machine_id();
+    let owner_matches: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE id=?1 AND role='supervisor'
+         AND status IN ('active','idle') AND machine_id=?2 AND registered_at=?3
+         AND pid IS ?4 AND pid_starttime IS ?5 AND factory_session IS ?6
+         AND json_extract(metadata,'$.pid_starttime') IS ?7)",
+        params![owner.id, machine, owner.registered_at.to_rfc3339(), owner.pid,
+            owner.pid_starttime.map(|v| v as i64), owner.factory_session, owner.metadata.get("pid_starttime")],
+        |row| row.get(0),
+    )?;
+    let child_matches: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE id=?1 AND name='task-verifier'
+         AND agent_type='sub_agent' AND role='standard' AND parent_id=?2
+         AND machine_id=?3 AND registered_at=?4 AND status=?5 AND pid IS ?6
+         AND pid_starttime IS ?7 AND factory_session IS ?8
+         AND json_extract(metadata,'$.pid_starttime') IS ?9)",
+        params![dead_child.id, owner.id, machine, dead_child.registered_at.to_rfc3339(),
+            dead_child.status.to_string(), dead_child.pid, dead_child.pid_starttime.map(|v| v as i64),
+            dead_child.factory_session, dead_child.metadata.get("pid_starttime")],
+        |row| row.get(0),
+    )?;
+    let task_active: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND status IN ('in_progress','awaiting_merge','blocked'))",
+        [&dispatch.task_id], |row| row.get(0),
+    )?;
+    if !owner_matches || !child_matches || !task_active
+        || owner.machine_id.as_deref() != Some(machine.as_str())
+        || dead_child.machine_id.as_deref() != Some(machine.as_str())
+        || dispatch.owner_agent_id != owner.id
+        || dispatch.verifier_agent_id.as_deref() != Some(dead_child.id.as_str())
+        || !matches!(dispatch.state, VerificationDispatchState::Claimed | VerificationDispatchState::TimedOut)
+        || dispatch.deadline_at > now
+        || get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?.as_ref().map(|d| d.id.as_str()) != Some(dispatch_id)
+        || latest_dispatch_status(&tx, dispatch_id)?.is_some_and(|s| !matches!(s, VerificationStatus::Error | VerificationStatus::Pending))
+    {
+        tx.commit()?;
+        return Ok(dispatch);
+    }
+    retire_dispatch_claim(&tx, &dispatch)?;
+    tx.execute(
+        "UPDATE verification_dispatches SET state='pending',verifier_agent_id=NULL,
+         capability_id=NULL,resolved_at=NULL,deadline_at=?2 WHERE id=?1",
+        params![dispatch_id, (now + Duration::minutes(10)).to_rfc3339()],
+    )?;
+    record_event_with_conn(&tx, &Event::new(
+        EventType::VerificationStarted, EventEntityType::Task, &dispatch.task_id,
+        "Expired verifier claim released after confirmed local child death",
+    ).with_metadata(serde_json::json!({
+        "code":"expired_verifier_claim_recovered", "dispatch_id":dispatch_id,
+        "owner":owner.id, "previous_verifier":dead_child.id,
+        "previous_capability":dispatch.capability_id, "previous_state":dispatch.state,
+        "previous_deadline":dispatch.deadline_at,
+    })))?;
+    let recovered = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    tx.commit()?;
+    Ok(recovered)
+}
+
 /// Invalidate a reusable resolved proof cycle when task rework begins.
 pub fn invalidate_verification_dispatch_for_new_cycle(
     cas_dir: &Path,

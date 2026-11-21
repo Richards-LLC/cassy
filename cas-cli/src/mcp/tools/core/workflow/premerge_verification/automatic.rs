@@ -329,6 +329,32 @@ fn request_with_retry(
     }
 }
 
+/// An owning supervisor's retry may release only a positively dead local child.
+/// The store fences the liveness observation against registration/claim races.
+pub(super) fn recover_expired_claim(core: &CasCore, dispatch: &VerificationDispatch) -> Result<VerificationDispatch, String> {
+    let now = chrono::Utc::now();
+    if dispatch.deadline_at > now
+        || !matches!(dispatch.state, cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut)
+    { return Ok(dispatch.clone()); }
+    let agents = core.open_agent_store().map_err(|e| e.to_string())?;
+    let owner = agents.get(&core.get_agent_id().map_err(|e| e.to_string())?).map_err(|e| store_refusal(&e))?;
+    if owner.id != dispatch.owner_agent_id || owner.role != cas_types::AgentRole::Supervisor {
+        return Ok(dispatch.clone());
+    }
+    let Some(child) = dispatch.verifier_agent_id.as_deref().and_then(|id| agents.get(id).ok()) else {
+        return Ok(dispatch.clone());
+    };
+    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str())
+        || !(child.status == cas_types::AgentStatus::Shutdown || matches!(
+            crate::mcp::daemon::evaluate_liveness(&child,
+                crate::mcp::daemon::pid_alive, crate::mcp::daemon::pid_matches_fingerprint),
+            crate::mcp::daemon::LivenessOutcome::Dead { .. }
+        ))
+    { return Ok(dispatch.clone()); }
+    cas_store::recover_expired_dead_verifier_dispatch(&core.cas_root, &dispatch.id, &owner, &child, now)
+        .map_err(|e| store_refusal(&e))
+}
+
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> Result<VerificationDispatch, String> {

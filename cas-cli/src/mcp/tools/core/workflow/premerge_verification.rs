@@ -1363,6 +1363,8 @@ impl CasCore {
                         verdict_id: verdict.id,
                     }));
                 }
+                let dispatch = automatic::recover_expired_claim(self, dispatch).map_err(fail)?;
+                let dispatch = &dispatch;
                 if matches!(
                     dispatch.state,
                     cas_types::VerificationDispatchState::Pending
@@ -1966,6 +1968,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path();
             run(repo, &["init", "-q", "-b", "epic/train"]);
+            run(repo, &["config", "user.useConfigOnly", "true"]);
+            run(repo, &["config", "user.name", "Fixture"]);
+            run(repo, &["config", "user.email", "fixture@example.invalid"]);
             let root = crate::store::init_cas_dir(repo).unwrap();
             env.set("CAS_ROOT", &root);
             env.set("CAS_CLONE_PATH", repo);
@@ -2019,20 +2024,44 @@ mod tests {
             if case == "timedout-dead" {
                 cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now()).unwrap().unwrap();
             }
-            if case == "other-owner" {
+            let retry_core = if case == "other-owner" {
                 let peer = cas_types::Agent::new_with_role("peer-owner".into(), "peer".into(), cas_types::AgentRole::Supervisor);
                 agents.register(&peer).unwrap();
-                core.bind_agent_identity(peer.id, crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
-            }
+                let retry = CasCore::with_daemon(root.clone(), None, None);
+                retry.bind_agent_identity(peer.id, crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+                retry
+            } else { core.clone() };
             let before = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-            let held = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train");
+            if matches!(case, "dead" | "timedout-dead") {
+                // A death observation cannot authorize a different registration
+                // or a child whose typed/legacy process fingerprint changed.
+                let mut stale_owner = owner.clone();
+                stale_owner.registered_at -= chrono::Duration::seconds(1);
+                let mut stale_child = child.clone();
+                stale_child.pid_starttime = Some(123);
+                let mut stale_legacy = child.clone();
+                stale_legacy.metadata.insert("pid_starttime".into(), "456".into());
+                for (observed_owner, observed_child) in [(&stale_owner, &child), (&owner, &stale_child), (&owner, &stale_legacy)] {
+                    let fenced = cas_store::recover_expired_dead_verifier_dispatch(&root, &dispatch.id,
+                        observed_owner, observed_child, chrono::Utc::now()).unwrap();
+                    assert_eq!(serde_json::to_value(fenced).unwrap(), serde_json::to_value(&before).unwrap());
+                }
+            }
+            let held = retry_core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train");
             assert!(held.is_err(), "retry must still await an independent verdict");
             let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
             assert_eq!(current.id, dispatch.id, "{case}");
             assert_eq!(current.owner_agent_id, owner.id);
             assert_eq!(current.repository, dispatch.repository);
+            assert_eq!(current.requested_at, dispatch.requested_at);
+            assert_eq!(current.receipt_id, dispatch.receipt_id);
             assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
             let recover = matches!(case, "dead" | "timedout-dead");
+            let audits: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1",
+                [&dispatch.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(audits, i64::from(recover), "{case}");
             if !recover {
                 assert_eq!(serde_json::to_value(&current).unwrap(), serde_json::to_value(&before).unwrap(), "{case}");
                 continue;

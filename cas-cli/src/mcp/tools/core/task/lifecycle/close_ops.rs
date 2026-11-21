@@ -12318,7 +12318,7 @@ impl CasCore {
                 }
                 let message = format!("PARKED {}; awaiting the train owner's review.", task.id);
                 self.park_task_awaiting_merge(
-                    task_store.as_ref(), &parking, &close_snapshot,
+                    task_store.as_ref(), &parking, &task,
                     "TRAIN OWNER REVIEW REQUIRED", &message, None, false, None,
                     req.reason.as_deref(),
                 ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;

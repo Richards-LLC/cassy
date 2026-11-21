@@ -140,6 +140,7 @@ if env "${run_env[@]}" "$queued_script" >"$queued_output" 2>&1; then
     expect_absent "$gh_log" 'actions/runs/107/cancel' 'queued watchdog preserves a fresh rerun of an old run'
     expect_absent "$gh_log" 'actions/runs/108/cancel' 'queued watchdog preserves a rerun with an unknown attempt age'
     expect_absent "$gh_log" 'actions/runs/109/cancel' 'queued watchdog leaves a run queued behind busy online runners'
+    expect_count "$gh_log" 'actions/runs?status=in_progress&per_page=100' 1 'queued watchdog reads busy runners once per sweep'
     expect_text "$gh_log" 'actions/runs/101/cancel' 'queued watchdog cancels a run whose runner labels have no busy runner'
     expect_text "$gh_log" 'actions/runs/101/cancel' 'queued watchdog sends cancel only after status re-read'
     expect_text "$queued_text" 'selected=2 cancel_accepted=2 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0' 'queued watchdog reports accepted requests separately from reclamation'

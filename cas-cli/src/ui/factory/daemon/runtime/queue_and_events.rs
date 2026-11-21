@@ -4449,6 +4449,14 @@ impl FactoryDaemon {
                     }
                     RelayOutput::BouncesRead { context, generation, rows } => self.decide_bounces(context, generation, rows),
                     RelayOutput::ProbeWritten => {}
+                    RelayOutput::ProgressObserved { at, observation: Some(observation) } => {
+                        let (cas_dir, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
+                        self.relay_jobs.submit_write(&mut self.queue_jobs, "progress-watchdog", Some(basis), move || {
+                            super::progress_watchdog::apply(&cas_dir, &session, at, *observation);
+                            RelayOutput::ProbeWritten
+                        });
+                    }
+                    RelayOutput::ProgressObserved { observation: None, .. } => {}
                     RelayOutput::EscalationRead {
                         notice_ids,
                         notice_states,
@@ -4778,6 +4786,18 @@ impl FactoryDaemon {
         }
     }
 
+    /// cas-ddae (GH #1500): open work with no progress wakes the
+    /// supervisor, then the operator. cas-e37f: its task scans and git calls
+    /// run on the External lane; only `apply`'s writes take the store writer.
+    pub(super) fn submit_progress_watchdog(&mut self) {
+        let (watchdog_dir, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
+        self.relay_jobs.submit_progress_watchdog_read(&mut self.queue_jobs, move || {
+            let at = chrono::Utc::now();
+            let observation = super::progress_watchdog::observe(&watchdog_dir, &session, at).map(Box::new);
+            super::relay_jobs::RelayOutput::ProgressObserved { at, observation }
+        });
+    }
+
     /// The complete poison-sweep step; cadence is owned by queue delivery.
     async fn run_prompt_poison_sweep(
         &mut self,
@@ -4795,13 +4815,7 @@ impl FactoryDaemon {
             super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
-        // cas-ddae (GH #1500): open work with no progress wakes the
-        // supervisor, then the operator; store and git reads, off the loop.
-        let (watchdog_dir, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
-        self.relay_jobs.submit_write(&mut self.queue_jobs, "progress-watchdog", None, move || {
-            super::progress_watchdog::sweep(&watchdog_dir, &session, chrono::Utc::now());
-            super::relay_jobs::RelayOutput::ProbeWritten
-        });
+        self.submit_progress_watchdog();
         // cas-786a6 (H3): the two pure-store sweeps run on the store
         // worker, off the loop.
         let cas_dir = self.app.cas_dir().to_path_buf();

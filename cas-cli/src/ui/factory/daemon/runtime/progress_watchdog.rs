@@ -30,10 +30,27 @@ static HELD_REPORTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 type FreezeHeld = BTreeMap<String, (i64, String, Vec<String>)>;
 type CloseHeld = BTreeMap<String, crate::mcp::tools::core::task::close_refusal::Refusal>;
 
+/// cas-e37f: one sample's reads, gathered off the store writer; only
+/// [`apply`] writes.
+pub(crate) struct Observation {
+    fingerprint: String,
+    waiting: Vec<String>,
+    supervisor: crate::supervisor_notices::Recipient,
+    freeze_held: FreezeHeld,
+    close_held: CloseHeld,
+    train_ready: bool,
+    /// Completion edges for parked deliveries a recorded hold explains,
+    /// decided here (store reads and git) and persisted by `apply`.
+    held: Vec<crate::factory_delivery_wake::ArmPlan>,
+    /// Open deliveries with no completion wake: `(task, anchor, supervisor)`.
+    unwatched: Vec<(String, String, cas_types::Agent)>,
+}
+
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
-/// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, crate::supervisor_notices::Recipient, FreezeHeld, CloseHeld, bool)> {
+/// neither progress nor a stall. Reads only: the full task scans and git
+/// calls here must never hold the store writer (cas-e37f).
+pub(crate) fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<Observation> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
@@ -153,13 +170,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             .2.push(task.id.clone());
         false
     });
-    // Recorded holds already explain these deliveries. Preserve their own
-    // notices, and leave durable completion edges ready for the hold's lift.
-    for held in parked.iter().filter(|parked| !tasks.iter().any(|task| task.id == parked.id)) {
-        if let Err(error) = crate::factory_delivery_wake::arm_task(cas_dir, held, "") {
-            tracing::warn!(task_id=%held.id, %error, "held delivery completion wake unavailable");
-        }
-    }
+    // Recorded holds already explain these deliveries. Decide their
+    // completion edges here, git included; `apply` only persists them.
+    let held: Vec<_> = parked.into_iter().filter(|parked| !tasks.iter().any(|task| task.id == parked.id))
+        .filter_map(|held| crate::factory_delivery_wake::plan_task(cas_dir, &held, "")
+            .inspect_err(|error| tracing::warn!(task_id=%held.id, %error, "held delivery completion wake unavailable"))
+            .ok().flatten())
+        .collect();
     // A train belongs to its verification owner, even when no task assignee
     // remains after its last child merges. Older explicitly owned trains have
     // only the release-train branch, without the newer label.
@@ -183,12 +200,12 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         tasks.retain(|task| task.id != train.id);
         tasks.push(train);
     }
-    let unarmed = match report_unwatched(cas_dir, &tasks) {
-        Ok(unarmed) => unarmed,
+    let unwatched = match find_unwatched(cas_dir, &tasks) {
+        Ok(unwatched) => unwatched,
         Err(error) => { tracing::warn!(%error, "delivery wake coverage unavailable"); return None; }
     };
     // An absent completion edge is a plumbing defect, not idle work.
-    tasks.retain(|task| !unarmed.contains(&task.id));
+    tasks.retain(|task| !unwatched.iter().any(|(id, _, _)| id == &task.id));
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
     let mut fingerprint: Vec<String> = tasks.iter()
         .map(|task| format!("{} {} {}", task.id, task.status, task.updated_at.to_rfc3339())).collect();
@@ -227,7 +244,10 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     {
         fingerprint.push(String::from_utf8_lossy(&output.stdout).into_owned());
     }
-    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held, close_held, !ready_trains.is_empty()))
+    Some(Observation {
+        fingerprint: fingerprint.join("\n"), waiting, supervisor, freeze_held, close_held,
+        train_ready: !ready_trains.is_empty(), held, unwatched,
+    })
 }
 
 fn report_close_held(cas_dir: &Path, held: CloseHeld) {
@@ -295,8 +315,27 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 }
 
 /// One watchdog sample for `session` at `now`.
+#[cfg(test)]
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let Some((fingerprint, waiting, supervisor, freeze_held, close_held, train_ready)) = observe(cas_dir, session, now) else { return };
+    if let Some(observation) = observe(cas_dir, session, now) {
+        apply(cas_dir, session, now, observation);
+    }
+}
+
+/// The sample's writes, on the store writer: wake edges, notices and pages.
+pub(crate) fn apply(cas_dir: &Path, session: &str, now: DateTime<Utc>, observation: Observation) {
+    let Observation { fingerprint, waiting, supervisor, freeze_held, close_held, train_ready, held, unwatched } = observation;
+    // Preserve held deliveries' own notices, and leave durable completion
+    // edges ready for the hold's lift.
+    for plan in &held {
+        if let Err(error) = crate::factory_delivery_wake::arm_plan(cas_dir, plan) {
+            tracing::warn!(task_id=%plan.task, %error, "held delivery completion wake unavailable");
+        }
+    }
+    if let Err(error) = report_unwatched(cas_dir, &unwatched) {
+        tracing::warn!(%error, "delivery wake coverage unavailable");
+        return;
+    }
     report_freeze_held(cas_dir, freeze_held);
     report_close_held(cas_dir, close_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -342,23 +381,29 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
     }
 }
 
-fn report_unwatched(cas_dir: &Path, actionable: &[cas_types::Task]) -> anyhow::Result<HashSet<String>> {
-    let mut unarmed = HashSet::new();
+fn find_unwatched(cas_dir: &Path, actionable: &[cas_types::Task]) -> anyhow::Result<Vec<(String, String, cas_types::Agent)>> {
+    let mut unwatched = Vec::new();
     for task in actionable.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge) {
         let Some(sha) = task.deliverables.factory_branch_anchor.as_deref()
             .filter(|sha| crate::factory_delivery_wake::full_sha(sha)) else { continue };
         let Some(supervisor) = crate::factory_delivery_wake::owner(cas_dir, &task, "")? else { continue };
         if crate::factory_delivery_wake::watched(cas_dir, &task, &supervisor)? { continue; }
-        unarmed.insert(task.id.clone());
-        let key = format!("{}:{}:{sha}", crate::factory_delivery_wake::MISSING_WAKE, task.id);
+        unwatched.push((task.id.clone(), sha.to_string(), supervisor));
+    }
+    Ok(unwatched)
+}
+
+fn report_unwatched(cas_dir: &Path, unwatched: &[(String, String, cas_types::Agent)]) -> anyhow::Result<()> {
+    for (task, sha, supervisor) in unwatched {
+        let key = format!("{}:{}:{sha}", crate::factory_delivery_wake::MISSING_WAKE, task);
         crate::store::open_prompt_queue_store(cas_dir)?.enqueue_idempotent(
             &format!("lifecycle-wake:{key}"), &supervisor.name,
-            &format!("{}: open delivery {} at {sha} has no durable supervisor completion wake. Repair its CI/merge event watch; this is a Cassy defect, not a worker stall.", crate::factory_delivery_wake::MISSING_WAKE, task.id),
+            &format!("{}: open delivery {} at {sha} has no durable supervisor completion wake. Repair its CI/merge event watch; this is a Cassy defect, not a worker stall.", crate::factory_delivery_wake::MISSING_WAKE, task),
             supervisor.factory_session.as_deref(), Some("Delivery completion wake missing"),
             Some(cas_store::NotificationPriority::High), &key, Some(&cas_store::QueueOrigin::Daemon),
         )?;
     }
-    Ok(unarmed)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -440,7 +485,7 @@ mod tests {
             "INSERT INTO task_execution_states(task_id,state,updated_at) VALUES (?1,?2,?3)",
             rusqlite::params!["cas-unreadable", serde_json::json!({"close_refusal": {"invalid": true}}).to_string(), chrono::Utc::now().to_rfc3339()],
         ).unwrap();
-        let (_, waiting, _, _, _, _) = super::observe(&root, "refusal-isolation", chrono::Utc::now()).unwrap();
+        let waiting = super::observe(&root, "refusal-isolation", chrono::Utc::now()).unwrap().waiting;
         assert_eq!(waiting.len(), 1);
         assert!(waiting[0].contains("cas-actionable"));
     }

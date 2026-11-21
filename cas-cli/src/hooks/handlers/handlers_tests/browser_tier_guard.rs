@@ -182,6 +182,11 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "scripts/journey-eval.sh /artifacts/cas-fixture --full",
         "npx playwright test",
     ] {
-        assert!(denial(command, "supervisor").is_none(), "{command}");
+        // cas-803f: a supervisor's long run goes in the background (H-49).
+        let mut supervisor = request(command, "supervisor");
+        supervisor.tool_input = Some(serde_json::json!({"command": command, "run_in_background": true}));
+        let out = handle_pre_tool_use(&supervisor, None).unwrap();
+        let value = serde_json::to_value(out.hook_specific_output).unwrap();
+        assert_ne!(value["permissionDecision"], "deny", "{command}");
     }
 }

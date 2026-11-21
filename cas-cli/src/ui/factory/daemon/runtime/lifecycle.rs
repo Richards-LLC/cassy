@@ -5050,6 +5050,9 @@ impl FactoryDaemon {
 
     /// Release daemon-owned resources and end this factory session.
     async fn cleanup(&mut self) -> anyhow::Result<()> {
+        if self.app.mux.supervisor().is_some_and(|pane| pane.has_exited()) {
+            self.abandon_queued_supervisor_commands()?;
+        }
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.
         self.cancel_provisioning();

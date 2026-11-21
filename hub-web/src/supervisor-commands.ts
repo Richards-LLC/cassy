@@ -353,7 +353,7 @@ export class SupervisorCommandSession {
     for (const receipt of this.receipts.values()) {
       if (!this.canSettleEnded(receipt)) continue;
       // A later, unrelated end is not evidence that an old Exit executed.
-      if (receipt.command === "exit") {
+      if (receipt.command === "exit" && receipt.phase !== "queued") {
         const sentAt = this.exitSentAt.get(receipt.client_ref);
         if (sentAt === undefined || Date.now() - sentAt > COMMAND_OUTCOME_WINDOW_MS) continue;
       }
@@ -367,9 +367,10 @@ export class SupervisorCommandSession {
   }
   private settleEnded(receipt: CommandReceipt, reason: string): void {
     if (!this.canSettleEnded(receipt)) return;
-    receipt.phase = receipt.command === "exit" ? "observed" : "unconfirmed";
+    const queued = receipt.phase === "queued";
+    receipt.phase = queued ? "refused" : receipt.command === "exit" ? "observed" : "unconfirmed";
     receipt.interactive = false;
-    receipt.detail = receipt.command === "exit"
+    receipt.detail = queued ? `Command not sent: session ended (${reason}) before /${receipt.command} was typed.` : receipt.command === "exit"
       ? `Session ended after Exit (${reason}). See the session-ended receipt.`
       : `Session ended (${reason}); /${receipt.command} completion was not confirmed.`;
     this.stopPoll(receipt.client_ref);
@@ -386,7 +387,8 @@ export class SupervisorCommandSession {
       this.refuse(receipt, detail.slice(COMMAND_ERROR_PREFIX.length).trim());
       this.stopPoll(ref); this.options.changed(); return true;
     }
-    receipt.phase = "unconfirmed"; receipt.interactive = false; receipt.detail = detail;
+    if (receipt.phase !== "queued") receipt.phase = "unconfirmed";
+    receipt.interactive = false; receipt.detail = detail;
     const ended = this.endedCommands.get(ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
     if (!awaitsCommandOutcome(receipt)) this.stopPoll(ref);

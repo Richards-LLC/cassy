@@ -1435,7 +1435,7 @@ impl CasCore {
                     &task,
                     task_store.get_parent_epic(&task.id).map_err(|error| McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!("Failed to resolve effective task target: {error}")),
+                        message: Cow::from(crate::gates::tag("G-151", format!("Failed to resolve effective task target: {error}"))),
                         data: None,
                     })?.as_ref(),
                 ).as_ref() == corrected_target.as_ref()

@@ -1516,7 +1516,7 @@ impl ProxyEngine {
         let result = if violet_message
             && let Some(request_id) = arguments.as_ref().and_then(|args| args.get("request_id")).and_then(Value::as_str)
         {
-            self.reconcile_violet_message(caller, dispatch_kind, request_id, result).await
+            self.reconcile_violet_message(caller, dispatch_kind, request_id, arguments.as_ref(), result).await
         } else {
             result
         };
@@ -1603,13 +1603,19 @@ impl ProxyEngine {
 
     /// A lost response is never permission to repeat a write. Reconcile only
     /// the locally retained ID, through the same caller and policy boundary.
+    /// `resend` holds the post's arguments while one resend is still allowed.
     async fn reconcile_violet_message(
         &self,
         caller: &ProxyCaller,
         dispatch_kind: ProxyDispatchKind,
         request_id: &str,
+        resend: Option<&serde_json::Map<String, Value>>,
         original: Result<rmcp::model::CallToolResult>,
     ) -> Result<rmcp::model::CallToolResult> {
+        // cas-71bf: a closed or unsendable transport never handed the post over.
+        let never_sent = original.as_ref().err().is_some_and(|error| error.chain()
+            .filter_map(|cause| cause.downcast_ref::<rmcp::service::ServiceError>())
+            .any(|cause| matches!(cause, rmcp::service::ServiceError::TransportSend(_) | rmcp::service::ServiceError::TransportClosed)));
         let prior = original.as_ref().ok().and_then(violet_payload);
         let uncertain = match &original {
             Ok(_) => prior.as_ref().is_some_and(|body| body.pointer("/error/code").and_then(Value::as_str) == Some("outcome_unknown")),
@@ -1631,6 +1637,15 @@ impl ProxyEngine {
             && lookup["request_id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(request_id))
         {
             let state = lookup["state"].as_str().unwrap_or_default();
+            // cas-71bf (GH #2259): Violet holds no row for this ID, so the post
+            // never reached it. Send the same request_id once more; Violet
+            // dedupes by it. Any other outcome keeps its answer.
+            if let Some(arguments) = resend.filter(|_| never_sent && state == "not_posted" && lookup["reason"] == "request_not_found") {
+                let mut params = rmcp::model::CallToolRequestParams::new("violet_post");
+                params.arguments = Some(arguments.clone());
+                let resent = self.call_upstream(config::VIOLET_SERVER, params).await;
+                return Box::pin(self.reconcile_violet_message(caller, dispatch_kind, request_id, None, resent)).await;
+            }
             if matches!(state, "posted" | "not_posted") {
                 if let Some(mut receipt) = lookup.get("receipt").filter(|body| body.is_object()).cloned()
                     && receipt["ok"] == (state == "posted")
@@ -3566,6 +3581,8 @@ for line in sys.stdin:
                         body["error"] = {"code": "outcome_unknown", "retryable": False}
                     if "request_id" in args:
                         body = {"ok": False, "error": {"code": "invalid_params", "retryable": False}}
+            elif name == "violet_reconcile_reply" and not os.path.exists(state_path):
+                body = {"ok": True, "request_id": request_id, "state": "not_posted", "reason": "request_not_found"}
             elif name == "violet_reconcile_reply":
                 with open(state_path) as handle:
                     state = json.load(handle)
@@ -3582,6 +3599,8 @@ for line in sys.stdin:
                 body = {"ok": True}
             result = {"content": [{"type": "text", "text": json.dumps(body)}], "isError": not body["ok"]}
             send({"jsonrpc": "2.0", "id": ident, "result": result})
+            if name == "violet_read" and args.get("channel") == "idle_close":
+                os._exit(0)
             continue
         if name == "drop":
             os._exit(0)
@@ -3745,6 +3764,35 @@ for line in sys.stdin:
                 assert!(engine.call_tool(&caller, "violet", "violet_reconcile_reply",
                     Some(serde_json::json!({"request_id": request_id}).as_object().unwrap().clone())).await.is_err());
             }
+            engine.shutdown().await;
+        }
+    }
+
+    /// cas-71bf (GH #2259): the first managed reply after an idle spell went
+    /// out on a transport the hub had already closed. Violet never saw it
+    /// (request_not_found), so the same request_id is sent once more. A post
+    /// that did reach Violet before the drop is reconciled, never resent.
+    #[tokio::test]
+    async fn violet_post_on_a_closed_transport_is_resent_once_cas_71bf() {
+        for (before, text) in [("idle_close", "posted"), ("open", "transport")] {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = ProxyEngine::from_configs(HashMap::from([(
+                "violet".into(), fake_upstream_mode(dir.path(), true),
+            )])).await.unwrap();
+            let caller = registered_worker_caller();
+            engine.call_tool(&caller, "violet", "violet_read",
+                Some(serde_json::json!({"channel": before}).as_object().unwrap().clone())).await.unwrap();
+            let request_id = "00000071-2222-4222-8222-0000000071bf";
+            let result = engine.call_tool(&caller, "violet", "violet_post", Some(serde_json::json!({
+                "channel": "C123", "kind": "message", "text": text, "request_id": request_id,
+            }).as_object().unwrap().clone())).await.unwrap();
+            let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!((body["state"].as_str(), body["request_id"].as_str()), (Some("posted"), Some(request_id)), "{before}: {body}");
+            let posts: Vec<Value> = std::fs::read_to_string(dir.path().join("calls.log.requests")).unwrap().lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|call| call["name"] == "violet_post").collect();
+            assert_eq!(posts.len(), 1, "{before}: Violet received exactly one post: {posts:?}");
+            assert_eq!(posts[0]["request_id"], request_id);
             engine.shutdown().await;
         }
     }

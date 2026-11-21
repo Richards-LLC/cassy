@@ -49,7 +49,8 @@ pub(crate) fn read(root: &Path, session: &str, supervisor: &str, device_id: &str
     conn.busy_timeout(std::time::Duration::from_millis(250))?;
     let found = conn.query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| row.get::<_, String>(0));
     match found {
-        Ok(value) => Ok(Some(serde_json::from_str(&value)?)),
+        // Unreadable bytes are a missing row, as they are to the daemon.
+        Ok(value) => Ok(serde_json::from_str(&value).ok()),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message.starts_with("no such table") => Ok(None),
         Err(error) => Err(error.into()),

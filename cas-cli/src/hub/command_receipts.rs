@@ -29,10 +29,10 @@ fn cas_root(metadata: &SessionMetadata) -> Option<std::path::PathBuf> {
 /// row of a dead birth was never typed, and no other birth may restore it.
 fn classify(saved: SavedRecord, birth: &SessionMetadata) -> Retained {
     let mut receipt = saved.receipt;
-    let open = matches!(receipt.phase, Phase::Queued | Phase::Submitted) || receipt.interactive;
-    if !open { return Retained::Found(receipt); }
-    if crate::ui::factory::daemon_identity_is_live(birth) { return Retained::Live; }
+    // A reader cannot step a chooser, so no retained receipt is interactive.
     receipt.interactive = false;
+    if !matches!(receipt.phase, Phase::Queued | Phase::Submitted) { return Retained::Found(receipt); }
+    if crate::ui::factory::daemon_identity_is_live(birth) { return Retained::Live; }
     if receipt.phase == Phase::Queued && saved.birth.matches(&Birth::of(birth)) {
         receipt.phase = Phase::Refused;
         receipt.detail = "Command not sent: its factory session ended before it could be typed.".into();
@@ -47,15 +47,14 @@ fn classify(saved: SavedRecord, birth: &SessionMetadata) -> Retained {
 }
 
 fn retained(session: &str, device_id: &str, client_ref: &str) -> anyhow::Result<Retained> {
-    for birth in crate::ui::factory::SessionManager::new().recorded_births(session) {
-        let Some(root) = cas_root(&birth) else { continue };
-        let Some(row) = crate::store::supervisor_commands::read(&root, session, &birth.supervisor.name, device_id, client_ref)? else { continue };
-        // The daemon skips an unreadable row; so does its reader.
-        let Ok(saved) = serde_json::from_value::<SavedRecord>(row) else { return Ok(Retained::Missing) };
-        if saved.receipt.device_id != device_id || saved.receipt.client_ref != client_ref { return Ok(Retained::Missing); }
-        return Ok(classify(saved, &birth));
-    }
-    Ok(Retained::Missing)
+    // One birth owns the name; an older birth's rows are never consulted.
+    let Some(birth) = crate::ui::factory::SessionManager::new().recorded_birth(session) else { return Ok(Retained::Missing) };
+    let Some(root) = cas_root(&birth) else { return Ok(Retained::Missing) };
+    let Some(row) = crate::store::supervisor_commands::read(&root, session, &birth.supervisor.name, device_id, client_ref)? else { return Ok(Retained::Missing) };
+    // The daemon skips an unreadable row; so does its reader.
+    let Ok(saved) = serde_json::from_value::<SavedRecord>(row) else { return Ok(Retained::Missing) };
+    if saved.receipt.device_id != device_id || saved.receipt.client_ref != client_ref { return Ok(Retained::Missing); }
+    Ok(classify(saved, &birth))
 }
 
 pub(super) async fn read<R: SessionReadModel>(

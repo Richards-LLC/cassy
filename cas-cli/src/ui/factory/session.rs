@@ -459,16 +459,24 @@ impl SessionManager {
         write_end_receipt(&self.sessions_dir, &EndedSession { metadata, ended })
     }
 
-    /// Every recorded birth of one name, without creating session state: the
-    /// active metadata (a crashed daemon leaves only this), then the retained
-    /// end receipt.
-    pub(crate) fn recorded_births(&self, name: &str) -> Vec<SessionMetadata> {
-        if !valid_session_name(name) { return Vec::new(); }
-        let active = self.load_metadata(&self.sessions_dir.join(format!("{name}.json"))).ok();
+    /// The one recorded birth that owns a name, without creating session
+    /// state: its end receipt, or the active metadata a crashed daemon leaves.
+    /// A newer active birth owns the name over an older end receipt.
+    pub(crate) fn recorded_birth(&self, name: &str) -> Option<SessionMetadata> {
+        if !valid_session_name(name) { return None; }
+        let active = self.load_metadata(&self.sessions_dir.join(format!("{name}.json"))).ok()
+            .filter(|metadata| metadata.name == name);
         let ended = fs::read(self.sessions_dir.join("ended").join(format!("{name}.json"))).ok()
             .and_then(|bytes| serde_json::from_slice::<EndedSession>(&bytes).ok())
-            .map(|receipt| receipt.metadata);
-        active.into_iter().chain(ended).filter(|metadata| metadata.name == name).collect()
+            .map(|receipt| receipt.metadata)
+            .filter(|metadata| metadata.name == name);
+        match (active, ended) {
+            (Some(active), Some(ended)) => {
+                let born = |metadata: &SessionMetadata| chrono::DateTime::parse_from_rfc3339(&metadata.created_at).ok();
+                Some(if born(&active).zip(born(&ended)).is_some_and(|(active, ended)| active > ended) { active } else { ended })
+            }
+            (active, ended) => ended.or(active),
+        }
     }
 
     pub(crate) fn ended_sessions(&self) -> std::io::Result<Vec<EndedSession>> {

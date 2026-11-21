@@ -34,6 +34,18 @@ fn denied(output: HookOutput) -> Option<String> {
     })
 }
 
+fn focus_epic(env: &mut TestEnvGuard, root: &std::path::Path, epic: &str) {
+    let session = "publication-gate-session";
+    env.set("CAS_FACTORY_SESSION", session);
+    let path = crate::ui::factory::metadata_path(session);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let metadata = crate::ui::factory::create_metadata(
+        session, 1, "supervisor", &[], Some(epic), root.to_str(), None,
+    );
+    std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    assert_eq!(crate::ui::factory::preferred_epic_id_from_session_metadata().as_deref(), Some(epic));
+}
+
 /// An epic with one open verification task and one ordinary closed child.
 fn epic_store(root: &std::path::Path) -> std::sync::Arc<dyn cas_store::TaskStore> {
     let cas = root.join(".cas");
@@ -61,9 +73,13 @@ fn epic_store(root: &std::path::Path) -> std::sync::Arc<dyn cas_store::TaskStore
 
 #[test]
 fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
-    let _env = TestEnvGuard::temp_home();
+    let mut env = TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let _store = epic_store(dir.path());
+    let store = epic_store(dir.path());
+    let mut clear = Task::new("cas-pub-clear".into(), "Verified report".into());
+    clear.task_type = TaskType::Epic;
+    store.add(&clear).unwrap();
+    focus_epic(&mut env, dir.path(), &clear.id);
     let cas = dir.path().join(".cas");
     let file = json!({"channel":"client-internal","kind":"file","epic_id":"cas-pub-epic",
         "file":{"filename":"report.pdf","content":"JVBERi0=","content_encoding":"base64"}});
@@ -72,6 +88,13 @@ fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
         ("violet.violet_post", file.clone()),
         ("mcp__cas__mcp_execute", json!({"code":{"server":"violet","tool":"violet_post","arguments":file.clone()}})),
         ("mcp__cas__mcp_execute", json!({"code":format!("violet.violet_post({file})")})),
+        // Each post retains its own epic: a verified report first must not
+        // hide the pending report later in the same proxy batch (GH #2263).
+        ("mcp__cas__mcp_execute", json!({"code":[
+            {"server":"violet","tool":"violet_post","args":{
+                "kind":"file","epic_id":"cas-pub-clear","file":{"filename":"verified.pdf"}}},
+            {"server":"violet","tool":"violet_post","args":file.clone()},
+        ]})),
         (
             "mcp__violet__violet_post",
             json!({"channel":"client-internal","kind":"message","text":"Report attached","deliverable":true,"task_id":"cas-pub-work"}),
@@ -90,10 +113,34 @@ fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
     ] {
         let reason = denied(handle_pre_tool_use(&input(tool, args.clone(), dir.path()), Some(&cas)).unwrap())
             .unwrap_or_else(|| panic!("{tool} {args} must be denied"));
-        assert!(reason.contains("verification_pending"), "{reason}");
+        assert!(crate::gates::codes_in(&reason).contains("H-07"), "{reason}");
         assert!(reason.contains("cas-pub-verify"), "the denial lists the open task: {reason}");
         assert!(!reason.contains("cas-pub-work ("), "a closed child is not listed: {reason}");
     }
+}
+
+/// GH #2263: focusing a release cannot adopt a standing support loop's PDF.
+#[test]
+fn operational_file_posts_ignore_unrelated_focused_epic_cas_81f8() {
+    let mut env = TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let store = epic_store(dir.path());
+    let ops = Task::new("cas-shift-report".into(), "Support loop".into());
+    store.add(&ops).unwrap();
+    focus_epic(&mut env, dir.path(), "cas-pub-epic");
+    let cas = dir.path().join(".cas");
+    for post in [
+        json!({"channel":"cas-scratch","kind":"file","epic_id":null,
+            "file":{"filename":"shift-report.pdf","content":"JVBERi0="}}),
+        json!({"channel":"cas-scratch","kind":"file_external","file_id":"F1"}),
+        json!({"channel":"cas-scratch","kind":"thread","replies":[{"files":[{"filename":"shift-report.pdf"}]}]}),
+        json!({"channel":"cas-scratch","kind":"file","task_id":ops.id,
+            "file":{"filename":"shift-report.pdf"}}),
+    ] {
+        let result = handle_pre_tool_use(&input("mcp__violet__violet_post", post, dir.path()), Some(&cas)).unwrap();
+        assert!(denied(result).is_none(), "unattributed operational file was denied");
+    }
+    assert_eq!(store.get("cas-pub-verify").unwrap().status, TaskStatus::InProgress);
 }
 
 #[test]

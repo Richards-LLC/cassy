@@ -2995,6 +2995,35 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         );
     }
 
+    /// GH #2207, replaying Playwright 1.65.1's report for the canonical
+    /// pattern: `journeys` depends on a `setup` project. The CLI repeat count
+    /// reaches only the selected project, so setup runs once per run.
+    #[test]
+    fn playwright_setup_dependency_runs_once_beside_five_journey_repeats_gh2207() {
+        let repo = Path::new("/project");
+        let pass = json!({"projectId":"setup","expectedStatus":"passed","results":[{"status":"passed","retry":0}]});
+        let journey = json!({"projectId":"journeys","expectedStatus":"passed","results":[{"status":"passed","retry":0}]});
+        let mut report = json!({"config":{"rootDir":"/project/tests","projects":[
+            {"id":"setup","name":"setup","repeatEach":1}, {"id":"journeys","name":"journeys","repeatEach":5}]},
+            "errors":[],"suites":[
+            {"title":"journeys/auth.setup.ts","file":"journeys/auth.setup.ts","column":0,"line":0,"specs":[
+                {"file":"journeys/auth.setup.ts","title":"seeded session for super-admin","tests":[pass.clone()]},
+                {"file":"journeys/auth.setup.ts","title":"seeded session for owner","tests":[pass]}]},
+            {"title":"token-login.spec.ts","file":"token-login.spec.ts","column":0,"line":0,"specs":[
+                {"file":"token-login.spec.ts","title":"token login lands","tests":vec![journey; 5]}]}]});
+        let changed = [id("tests/token-login.spec.ts", "token login lands")];
+        assert_eq!(validate_report("playwright", repo, &report, &changed, 5).unwrap(), 1);
+        // A changed setup test still owes its own five runs, not one as a dependency.
+        let setup = [id("tests/journeys/auth.setup.ts", "seeded session for owner")];
+        assert!(validate_report("playwright", repo, &report, &setup, 5).is_err());
+        // A failing dependency still fails the run; its dependents never ran.
+        report["suites"][0]["specs"][1]["tests"][0]["results"][0]["status"] = json!("failed");
+        for test in report["suites"][1]["specs"][0]["tests"].as_array_mut().unwrap() {
+            test["results"] = json!([]);
+        }
+        assert!(validate_report("playwright", repo, &report, &changed, 5).is_err());
+    }
+
     #[test]
     fn deletion_beside_legacy_callbacks_only_classifies_surviving_edits_cas_31eb() {
         let repo = tempfile::tempdir().unwrap();

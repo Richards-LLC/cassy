@@ -343,9 +343,13 @@ the same `branch`, `head` and `expected_remote` fields. Empty `expected_remote`
 requires the successor's destination ref to be absent; otherwise supply its
 observed full SHA. The source must belong to the task's recorded worker, whose
 registration or retirement evidence must exist and whose process/heartbeat must
-be dead. Live task leases, moved source tips, unrelated refs, changed remote tips
-and divergent successor branches refuse recovery. A destination already at the
-requested SHA is an idempotent replay.
+be dead. For a retained local lease, the same action verifies the exact source
+worker's recorded process is dead, releases only that lease generation and
+acquires its bounded recovery lease. It does not require `task release` (which
+clears source assignment), same-name spawning, or recycling a worker into a new
+session. A live, foreign or unverifiable lease holder, moved source tip,
+unrelated ref, changed remote tip or divergent successor branch refuses
+recovery. A destination already at the requested SHA is an idempotent replay.
 
 Recovery publishes on `factory/<successor>-<task>` through the ordinary private
 push guard, records intent and result on the task, and rebinds its assignee and

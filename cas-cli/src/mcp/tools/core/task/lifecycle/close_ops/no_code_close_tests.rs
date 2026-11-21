@@ -3336,7 +3336,6 @@ async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
     let mut body = std::fs::read_to_string(&config).unwrap();
     body.push_str("[orchestration.auto_prompt]\nenabled=false\n");
     std::fs::write(&config, body).unwrap();
-    let repo = f.dir.path();
     let checkout = f.cas_dir().join("worktrees").join(WORKER);
     env.set("CAS_FACTORY_SESSION", "queue-session");
     let agents = open_agent_store(&f.cas_dir()).unwrap();

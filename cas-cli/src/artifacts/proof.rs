@@ -484,7 +484,8 @@ pub fn fetch_task(
 const EVIDENCE_SYNC: &str = "EVIDENCE_SYNC: ";
 
 /// cas-8018 (GH #2268): park publication is bounded so a close never waits on
-/// a slow Cloud. Each upload request gets [`PUBLISH_REQUEST_TIMEOUT`], a failed
+/// a slow Cloud. Each upload request gets at most [`PUBLISH_REQUEST_TIMEOUT`]
+/// or the remaining shared budget, whichever is shorter. A failed
 /// upload is retried once while the budget lasts, and past the budget the
 /// remaining files count as failed. Files committed earlier are reused, so a
 /// retried close resumes where the last one stopped.
@@ -601,15 +602,18 @@ pub(crate) fn publish_routed_evidence(
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let required = required_evidence(&dir);
+    // A stalled uncited copy must not spend the budget needed by the ledger.
+    paths.sort_by_key(|(name, _)| !required(name));
+    let deadline = std::time::Instant::now() + PUBLISH_BUDGET;
     let context = super::PublishContext {
         store: &store,
         roots: PublishRoots::new(cas_root, &base, &task.id),
         task_id: task.id.clone(),
-        cloud: super::cloud_client(cas_root).map(|client| client.with_timeout(PUBLISH_REQUEST_TIMEOUT)),
+        cloud: super::cloud_client(cas_root).map(|client| client
+            .with_timeout(PUBLISH_REQUEST_TIMEOUT).with_deadline(deadline)),
     };
     let published = store.list_for_task(&task.id).map_err(|error| fail(error.to_string()))?;
-    let required = required_evidence(&dir);
-    let deadline = std::time::Instant::now() + PUBLISH_BUDGET;
     let upload = |path: &Path| -> Result<String, String> {
         let outcome = super::publish(&context, path).map_err(|error| error.to_string())?;
         if outcome.disposition.storage_disposition() != super::StorageDisposition::Committed {

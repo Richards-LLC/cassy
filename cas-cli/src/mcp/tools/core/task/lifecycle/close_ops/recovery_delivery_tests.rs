@@ -2338,7 +2338,8 @@ async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_g
     let tasks = open_task_store(&cas_dir).unwrap();
     let unintegrated = text(close_with(format!("reviewed-drop: {} -- early", f.final_tip)).await.unwrap());
     assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{unintegrated}");
-    git(repo, &["merge", "--no-ff", BRANCH, "-m", "land delivery by git"]);
+    // The merge fact lands, but a target-side resolution replaces its footer.
+    git(repo, &["merge", "--no-ff", "-s", "ours", BRANCH, "-m", "land delivery by git"]);
     std::fs::write(repo.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
     git(repo, &["add", "footer.css"]);
     git(repo, &["commit", "-qm", "supersede footer spacing"]);

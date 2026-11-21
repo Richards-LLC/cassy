@@ -940,7 +940,7 @@ mod tests {
                     "baseRefName":"main", "mergeStateStatus":"CLEAN", "autoMergeRequest":null,
                     "statusCheckRollup":[check.clone()],
                 })).unwrap()).unwrap();
-                let input = crate::hooks::types::HookInput {
+                let input = crate::hooks::HookInput {
                     session_id: "unprotected-pr-merge".into(),
                     cwd: dir.path().display().to_string(),
                     hook_event_name: "PreToolUse".into(), tool_name: Some("Bash".into()),

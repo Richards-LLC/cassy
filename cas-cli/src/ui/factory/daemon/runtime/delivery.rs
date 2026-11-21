@@ -1033,7 +1033,7 @@ pub(crate) fn recipient_config_dir(spec: &cas_mux::WorkerSpec) -> Option<String>
 /// A send refused only because another thread held the store (cas-bcf50).
 /// Retrying it cannot queue it twice: nothing was written. A reply whose row
 /// is queued but whose ask is unconfirmed is not one.
-fn lost_store_to_contention(error: &anyhow::Error) -> bool {
+pub(super) fn lost_store_to_contention(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<crate::ops::fleet::ReplyQueuedAskUnconfirmed>()
         .is_none()

@@ -80,7 +80,7 @@ impl Queue {
         self.next < self.entries.len()
     }
 
-    fn reclaim_advancement(&mut self) {
+    fn reclaim_advancement(&mut self) -> bool {
         if let Some(reason) = self.advancement.as_ref().and_then(Advancement::stale_reason) {
             let lease = self.advancement.take().expect("stale lease");
             tracing::warn!(train = %self.train, token = %lease.token, pid = lease.pid, reason,
@@ -88,6 +88,9 @@ impl Queue {
             self.advancement_reclaims.push(AdvancementReclaim {
                 lease, reason: reason.into(), reclaimed_at: chrono::Utc::now(),
             });
+            true
+        } else {
+            false
         }
     }
 
@@ -340,11 +343,11 @@ impl CasCore {
         };
         let path = path(&self.cas_root, &repo, &target)?;
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
-            queue.reclaim_advancement();
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
             ensure!(crate::cloud::peer_mailbox::owns_recipient(&self.cas_root, &actor, &queue.supervisor)
                 && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
                 crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
+            if queue.reclaim_advancement() { save(&path, &mut queue)?; }
             queue.supervisor = actor.id.clone();
             queue.owner_generation = generation.clone();
             // GH #1819: entries already merged or closed need no daemon pass.
@@ -721,6 +724,9 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 save(&path, &mut queue)?;
                 break;
             }
+            let Some(current_queue) = driver.current()? else { break };
+            queue = current_queue;
+            if !queue.active() || queue.entries[queue.next].task != entry.task { continue; }
             let expected = crate::factory_ci_retry::Retry {
                 task: entry.task.clone(),
                 worktree: entry.branch.clone(),
@@ -1208,7 +1214,9 @@ mod tests {
                 "status":"approved", "summary":"Review the held train candidate",
             })).unwrap())).await.unwrap();
             assert_ne!(result.is_error, Some(true), "{result:?}");
+            let mut stale_snapshot = read(&queue_path).unwrap().unwrap();
             fixture.start_with(&fixture.ids[2..]).await;
+            assert!(save(&queue_path, &mut stale_snapshot).is_err(), "{holder}: stale driver overwrote append");
             let appended = read(&queue_path).unwrap().unwrap();
             assert_eq!(appended.entries.len(), 3, "{holder}");
             assert_eq!(appended.next, 1, "{holder}");

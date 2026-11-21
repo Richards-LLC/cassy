@@ -283,6 +283,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.getByRole("button", { name: phone ? "More conversation actions" : "Supervisor commands", exact: true })).toBeVisible();
+        // The palette lists commands only for a connected conversation; typing
+        // earlier shows "Commands work once the conversation is connected".
+        await expect(page.getByRole("status").filter({ hasText: /^Live/ })).toBeVisible();
         await input.fill("/us");
         await expect(commandButtons(page)).toHaveCount(1);
         await input.press("ArrowDown");

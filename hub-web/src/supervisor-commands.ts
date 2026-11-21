@@ -300,6 +300,9 @@ export class SupervisorCommandSession {
   supported = false;
   private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly endedCommands = new Map<string, string>();
+  /** A queued receipt can predate typing. Retain that uncertainty through
+   * disconnect errors until a newer per-command submission/outcome arrives. */
+  private readonly queuedCommands = new Set<string>();
   private readonly exitSentAt = new Map<string, number>();
   /** Commands the daemon has answered with a receipt, so a later error can't mean "never ran". */
   private readonly acknowledged = new Set<string>();
@@ -334,6 +337,8 @@ export class SupervisorCommandSession {
     if (!current || current.command !== receipt.command) return;
     if (current.phase === "cancelled") return;
     if (current.phase === "refused" && receipt.phase !== "refused") return;
+    if (receipt.phase === "queued") this.queuedCommands.add(receipt.client_ref);
+    else if (receipt.phase === "submitted" || receipt.phase === "observed") this.queuedCommands.delete(receipt.client_ref);
     this.receipts.set(receipt.client_ref, receipt);
     this.acknowledged.add(receipt.client_ref);
     if (settlesToToast(receipt) && !this.dismissed.has(receipt.client_ref)) {
@@ -353,7 +358,7 @@ export class SupervisorCommandSession {
     for (const receipt of this.receipts.values()) {
       if (!this.canSettleEnded(receipt)) continue;
       // A later, unrelated end is not evidence that an old Exit executed.
-      if (receipt.command === "exit") {
+      if (receipt.command === "exit" && receipt.phase !== "queued") {
         const sentAt = this.exitSentAt.get(receipt.client_ref);
         if (sentAt === undefined || Date.now() - sentAt > COMMAND_OUTCOME_WINDOW_MS) continue;
       }
@@ -367,9 +372,10 @@ export class SupervisorCommandSession {
   }
   private settleEnded(receipt: CommandReceipt, reason: string): void {
     if (!this.canSettleEnded(receipt)) return;
-    receipt.phase = receipt.command === "exit" ? "observed" : "unconfirmed";
+    const queued = receipt.phase === "queued" || this.queuedCommands.has(receipt.client_ref);
+    receipt.phase = !queued && receipt.command === "exit" ? "observed" : "unconfirmed";
     receipt.interactive = false;
-    receipt.detail = receipt.command === "exit"
+    receipt.detail = queued ? `Session ended (${reason}); /${receipt.command} was last reported queued, so submission is unconfirmed.` : receipt.command === "exit"
       ? `Session ended after Exit (${reason}). See the session-ended receipt.`
       : `Session ended (${reason}); /${receipt.command} completion was not confirmed.`;
     this.stopPoll(receipt.client_ref);
@@ -386,7 +392,8 @@ export class SupervisorCommandSession {
       this.refuse(receipt, detail.slice(COMMAND_ERROR_PREFIX.length).trim());
       this.stopPoll(ref); this.options.changed(); return true;
     }
-    receipt.phase = "unconfirmed"; receipt.interactive = false; receipt.detail = detail;
+    if (receipt.phase !== "queued") receipt.phase = "unconfirmed";
+    receipt.interactive = false; receipt.detail = detail;
     const ended = this.endedCommands.get(ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
     if (!awaitsCommandOutcome(receipt)) this.stopPoll(ref);

@@ -5050,6 +5050,11 @@ impl FactoryDaemon {
 
     /// Release daemon-owned resources and end this factory session.
     async fn cleanup(&mut self) -> anyhow::Result<()> {
+        // Teardown ends every queued command. Recording that is best-effort:
+        // a failing receipt store must never skip the teardown below.
+        if let Err(error) = self.abandon_queued_supervisor_commands() {
+            tracing::warn!(%error, "could not record abandoned Commander commands");
+        }
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.
         self.cancel_provisioning();
@@ -6088,6 +6093,19 @@ mod communication_summary_tests {
         daemon.listener.set_nonblocking(true).unwrap();
         let mut client = UnixStream::connect(root.join("test.sock")).unwrap();
         daemon.accept_clients().unwrap();
+        // cas-7d2d: any teardown abandons a queued Commander command, and a
+        // failing receipt store must not skip the teardown that follows.
+        use crate::store::supervisor_commands as commands;
+        let pid = std::process::id();
+        let queued = serde_json::json!({"receipt":{"device_id":"device-a","client_ref":"queued-at-end","command":"compact","phase":"queued","detail":"","output":"","interactive":false},
+            "at":chrono::Utc::now(),"before":"","before_command":"","reload_before":null,
+            "birth":{"daemon_pid":pid,"daemon_pid_starttime":crate::mcp::daemon::read_pid_starttime(pid)}});
+        assert!(commands::write(&root, &session, &supervisor, &queued, commands::Write::Reserve).unwrap());
+        if !owned {
+            rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch("CREATE TRIGGER fail_command_receipts BEFORE UPDATE ON metadata
+                WHEN new.key LIKE 'commander.command.v1.%' BEGIN SELECT RAISE(ABORT, 'forced receipt failure'); END;").unwrap();
+        }
+        let supervisor_name = supervisor.clone();
         daemon.handle_mux_event(cas_mux::MuxEvent::PaneExited {
             pane_id: supervisor, exit_code: Some(0), exit_signal: None,
         }).await;
@@ -6095,6 +6113,8 @@ mod communication_summary_tests {
         daemon.cleanup().await.unwrap();
         let receipt = daemon.session_manager.ended_sessions().unwrap().remove(0);
         drop(daemon);
+        let phase = commands::load(&root, &session, &supervisor_name).unwrap()[0]["receipt"]["phase"].clone();
+        assert_eq!(phase, if owned { "refused" } else { "queued" }, "queued command after teardown (store failing: {})", !owned);
         let mut output = String::new();
         client.read_to_string(&mut output).unwrap();
         let recovered = tasks.get(&task.id).unwrap();

@@ -2,6 +2,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use crate::store::supervisor_commands as durable;
 use crate::ui::factory::{MessageAttribution, DaemonMessage};
 use crate::ui::factory::supervisor_commands::SupervisorCommandRequest as Request;
 use crate::ui::factory::daemon::FactoryDaemon;
@@ -15,6 +17,7 @@ const RECEIPT_CAP: usize = 256;
 const REPLAY_WINDOW: Duration = Duration::from_secs(10 * 60);
 #[derive(Default)]
 pub(crate) struct CommandState {
+    restored: bool,
     records: HashMap<Owner, Record>,
     /// Native turn evidence is read off-loop; footer repaint is not a turn.
     readiness: Option<tokio::task::JoinHandle<Option<bool>>>,
@@ -65,6 +68,43 @@ struct Record {
     output_from: u64,
     /// Only a different live registry PID with a recorded version proves reload.
     reload_before: Option<u32>,
+    /// The daemon process that recorded this command.
+    birth: Birth,
+}
+
+/// A daemon process: same-PID reexec keeps both fields; a new launch under a
+/// reused session and supervisor name does not.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+struct Birth { daemon_pid: u32, daemon_pid_starttime: Option<u64> }
+impl Birth {
+    fn current() -> Self {
+        static CURRENT: std::sync::OnceLock<Birth> = std::sync::OnceLock::new();
+        *CURRENT.get_or_init(|| {
+            let daemon_pid = std::process::id();
+            Birth { daemon_pid, daemon_pid_starttime: crate::mcp::daemon::read_pid_starttime(daemon_pid) }
+        })
+    }
+    /// A missing start time cannot tell a reused PID apart, so it never matches.
+    fn is_current(&self) -> bool {
+        let current = Self::current();
+        self.daemon_pid_starttime.is_some() && *self == current
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedRecord {
+    receipt: Receipt,
+    at: DateTime<Utc>,
+    before: String,
+    before_command: String,
+    reload_before: Option<u32>,
+    birth: Birth,
+}
+impl Record {
+    fn saved(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::to_value(SavedRecord { receipt: self.receipt.clone(), at: self.at,
+            before: self.before.clone(), before_command: self.before_command.clone(), reload_before: self.reload_before, birth: self.birth })?)
+    }
 }
 
 fn registered_cassy_server(root: &std::path::Path, session: &str, supervisor: &str) -> Option<crate::factory_binary_skew::ServerVersion> {
@@ -86,6 +126,57 @@ fn reload_observation(root: &std::path::Path, session: &str, supervisor: &str, b
 }
 
 impl FactoryDaemon {
+    fn restore_supervisor_commands(&mut self) -> anyhow::Result<()> {
+        if self.supervisor_commands.restored { return Ok(()); }
+        let rows = durable::load(self.app.cas_dir(), &self.session_name, self.app.supervisor_name())?;
+        for row in rows {
+            let mut saved: SavedRecord = match serde_json::from_value(row) {
+                Ok(saved) => saved,
+                Err(error) => { tracing::warn!(%error, "skipping unreadable Commander command receipt"); continue; },
+            };
+            // Another daemon's queue ended with it; never type it into this one.
+            if saved.receipt.phase == Phase::Queued && !saved.birth.is_current() {
+                saved.receipt.phase = Phase::Refused;
+                saved.receipt.detail = "Command not sent: its factory session ended before it could be typed.".into();
+                saved.at = Utc::now();
+            }
+            // Only never-typed work is replayable. Claim was committed before
+            // the PTY write; a restarted daemon cannot know whether it completed.
+            if saved.receipt.phase == Phase::Submitted || saved.receipt.interactive {
+                saved.receipt.phase = Phase::Unconfirmed;
+                saved.receipt.interactive = false;
+                saved.receipt.detail = "The daemon restarted after command submission; execution is uncertain. Do not resend automatically.".into();
+            }
+            let elapsed = (Utc::now() - saved.at).to_std().unwrap_or_default();
+            let owner = (saved.receipt.device_id.clone(), saved.receipt.client_ref.clone());
+            self.supervisor_commands.records.insert(owner, Record { receipt: saved.receipt,
+                started: Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now), at: saved.at,
+                before: saved.before, before_command: saved.before_command, reload_before: saved.reload_before, birth: saved.birth,
+                write: Box::new(|| None), hook: None, last_key: None, output_from: 0 });
+        }
+        self.persist_supervisor_commands()?;
+        self.supervisor_commands.restored = true;
+        Ok(())
+    }
+
+    fn persist_supervisor_commands(&self) -> anyhow::Result<()> {
+        for record in self.supervisor_commands.records.values() {
+            durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &record.saved()?, durable::Write::Update)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn abandon_queued_supervisor_commands(&mut self) -> anyhow::Result<()> {
+        self.restore_supervisor_commands()?;
+        for record in self.supervisor_commands.records.values_mut().filter(|record| record.receipt.phase == Phase::Queued) {
+            record.receipt.phase = Phase::Refused;
+            record.receipt.detail = "Command not sent: the supervisor session ended before it could be typed.".into();
+            record.receipt.interactive = false;
+            record.at = Utc::now();
+            record.started = Instant::now();
+        }
+        self.persist_supervisor_commands()
+    }
     /// Apply `factory action=restart_supervisor` (cas-b492): the daemon owns the
     /// supervisor's PTY, so it ends that pane and starts another while the loop
     /// and worker panes keep running. SIGKILL is deliberate. A SessionEnd hook
@@ -125,6 +216,7 @@ impl FactoryDaemon {
     pub(super) async fn advance_supervisor_restart(&mut self) {
         let Some(pending) = &self.supervisor_commands.restart else { return };
         if !pending.exited && pending.killed_at.elapsed() < RESTART_EXIT_DEADLINE { return; }
+        if let Err(error) = self.restore_supervisor_commands() { tracing::warn!(%error, "command restore deferred before supervisor restart"); return; }
         self.supervisor_commands.restart = None;
         if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) { return; }
         let name = self.app.supervisor_name().to_string();
@@ -140,11 +232,16 @@ impl FactoryDaemon {
                 self.forget_probe_pane(&name);
                 for record in self.supervisor_commands.records.values_mut() {
                     if matches!(record.receipt.phase, Phase::Queued | Phase::Submitted) || record.receipt.interactive {
-                        record.receipt.phase = Phase::Unconfirmed;
+                        let queued = record.receipt.phase == Phase::Queued;
+                        record.receipt.phase = if queued { Phase::Refused } else { Phase::Unconfirmed };
                         record.receipt.interactive = false;
-                        record.receipt.detail = "The supervisor restarted before this command was confirmed. Do not resend automatically.".into();
+                        record.receipt.detail = if queued { "Command not sent: the supervisor restarted before it could be typed." }
+                            else { "The supervisor restarted before this command was confirmed. Do not resend automatically." }.into();
+                        record.at = Utc::now();
+                        record.started = Instant::now();
                     }
                 }
+                if let Err(error) = self.persist_supervisor_commands() { tracing::warn!(%error, "could not persist command restart receipts"); }
                 if let Some(job) = self.supervisor_commands.readiness.take() { job.abort(); }
                 self.gui_notify_pane_added(&name, cas_mux::PaneKind::Supervisor);
                 self.send_state_update();
@@ -403,6 +500,11 @@ impl FactoryDaemon {
     /// Keep an authenticated queued command until the current native turn ends.
     /// This runs independently of browser polling and never waits on the daemon loop.
     pub(super) fn advance_queued_command(&mut self) {
+        if let Err(error) = self.restore_supervisor_commands() { tracing::warn!(%error, "command restore deferred"); return; }
+        if self.app.mux.supervisor().is_some_and(|pane| pane.has_exited()) {
+            if let Err(error) = self.abandon_queued_supervisor_commands() { tracing::warn!(%error, "command abandonment deferred"); }
+            return;
+        }
         let Some(owner) = self.supervisor_commands.records.iter()
             .find(|(_, record)| record.receipt.phase == Phase::Queued).map(|(owner, _)| owner.clone()) else { return };
         if self.supervisor_commands.readiness.as_ref().is_none_or(|job| !job.is_finished()) {
@@ -425,6 +527,22 @@ impl FactoryDaemon {
             || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !command_prompt(&screen(pane), true) { return; }
         let before = screen(pane);
         let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
+        // Commit the one-way claim before writing any bytes. Failure to acquire
+        // the store leaves the queue untouched for the next pass.
+        let record = &self.supervisor_commands.records[&owner];
+        let mut claimed = record.saved().expect("serializable command receipt");
+        claimed["receipt"]["phase"] = serde_json::json!(Phase::Submitted);
+        claimed["at"] = serde_json::json!(Utc::now());
+        match durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &claimed, durable::Write::Claim) {
+            Ok(true) => {},
+            Ok(false) => {
+                let record = self.supervisor_commands.records.get_mut(&owner).unwrap();
+                record.receipt.phase = Phase::Unconfirmed;
+                record.receipt.detail = "Command was already claimed; execution is uncertain. Do not resend automatically.".into();
+                return;
+            },
+            Err(error) => { tracing::warn!(%error, "command claim deferred"); return; },
+        }
         let write = pane.inject_prompt_tracked(text);
         let record = self.supervisor_commands.records.get_mut(&owner).expect("queued command remains owned");
         match write {
@@ -441,6 +559,7 @@ impl FactoryDaemon {
                 record.receipt.detail = format!("Command write failed; execution is uncertain: {error}. Do not resend automatically.");
             }
         }
+        if let Err(error) = self.persist_supervisor_commands() { tracing::warn!(%error, "command receipt update deferred"); }
     }
     /// The poll loop's silence clock, plus no bytes it has not yet sampled.
     fn output_settled(&self, pane: &cas_mux::Pane) -> bool {
@@ -475,17 +594,25 @@ impl FactoryDaemon {
         }
     }
     /// Hold an admitted command until the native turn ends; nothing is typed yet.
-    fn queue_command(&mut self, owner: Owner, command: Command, reload_before: Option<u32>) -> DaemonMessage {
+    fn queue_command(&mut self, owner: Owner, command: Command, reload_before: Option<u32>) -> anyhow::Result<DaemonMessage> {
         let name = serde_json::to_value(command).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
         let receipt = Receipt { device_id: owner.0.clone(), client_ref: owner.1.clone(), command, phase: Phase::Queued,
             detail: format!("/{name} is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet."), output: String::new(), interactive: false };
-        self.supervisor_commands.records.insert(owner.clone(), Record { receipt, started: Instant::now(), at: Utc::now(), before: String::new(), before_command: String::new(), write: Box::new(|| None), hook: None, last_key: None, output_from: 0, reload_before });
+        let record = Record { receipt, started: Instant::now(), at: Utc::now(), before: String::new(), before_command: String::new(), write: Box::new(|| None), hook: None, last_key: None, output_from: 0, reload_before, birth: Birth::current() };
+        anyhow::ensure!(durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &record.saved()?, durable::Write::Reserve)?, "Command reference is already recorded; read its receipt before retrying.");
+        self.supervisor_commands.records.insert(owner.clone(), record);
         self.supervisor_commands.readiness_polled = None;
         self.advance_queued_command();
-        DaemonMessage::SupervisorCommandReceipt { receipt: self.supervisor_commands.records[&owner].receipt.clone() }
+        Ok(DaemonMessage::SupervisorCommandReceipt { receipt: self.supervisor_commands.records[&owner].receipt.clone() })
     }
     pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
+        self.restore_supervisor_commands()?;
+        let result = self.dispatch_supervisor_command_inner(request, client_ref, attribution).await;
+        self.persist_supervisor_commands()?;
+        result
+    }
+    async fn dispatch_supervisor_command_inner(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         let device = attribution.device_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("missing command owner"))?;
         anyhow::ensure!(!client_ref.is_empty() && client_ref.len() <= 128 && client_ref.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "Invalid command reference.");
         let owner = (device.to_owned(), client_ref.clone());
@@ -524,7 +651,7 @@ impl FactoryDaemon {
                 let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
                 anyhow::ensure!(!pane.has_exited(), "The supervisor has ended.");
                 anyhow::ensure!(command.mapping(pane.harness()).is_some(), "This harness does not support that command.");
-                return Ok(self.queue_command(owner, *command, None));
+                return self.queue_command(owner, *command, None);
             }
             let reload_before = if *command == Command::ReloadCassy {
                 let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
@@ -539,17 +666,19 @@ impl FactoryDaemon {
             } else { None };
             match tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await
                 .map_err(|_| anyhow::anyhow!("The supervisor is busy: its output did not settle within 3 seconds. Wait until its turn ends."))? {
-                Err(error) if error.is::<TurnOpen>() => return Ok(self.queue_command(owner, *command, reload_before)),
+                Err(error) if error.is::<TurnOpen>() => return self.queue_command(owner, *command, reload_before),
                 ready => ready?,
             }
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
             let text = command.mapping(pane.harness()).ok_or_else(|| anyhow::anyhow!("This harness does not support that command."))?;
             let before = screen(pane);
             let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
-            let write = pane.inject_prompt_tracked(text)?;
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before });
+            let saved = serde_json::to_value(SavedRecord { receipt: receipt.clone(), at: Utc::now(), before: before.clone(), before_command: before.clone(), reload_before, birth: Birth::current() })?;
+            anyhow::ensure!(durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &saved, durable::Write::Reserve)?, "Command reference is already recorded; read its receipt before retrying.");
+            let write = pane.inject_prompt_tracked(text)?;
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before, birth: Birth::current() });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         anyhow::ensure!(self.supervisor_commands.records.contains_key(&owner), "The original command receipt is unavailable. Do not resend an uncertain command.");
@@ -565,6 +694,7 @@ impl FactoryDaemon {
                 record.receipt.phase = Phase::Cancelled;
                 record.receipt.interactive = false;
                 record.started = Instant::now();
+                record.at = Utc::now();
                 if let Some(job) = record.hook.take() { job.abort(); }
                 if let Some(job) = self.supervisor_commands.readiness.take() { job.abort(); }
                 self.supervisor_commands.readiness_polled = None;
@@ -575,6 +705,9 @@ impl FactoryDaemon {
         let record = self.supervisor_commands.records.get_mut(&owner).expect("command owner checked");
         if record.receipt.phase == Phase::Queued {
             anyhow::ensure!(matches!(request, Request::Status), "No native command chooser is open.");
+            return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
+        }
+        if !matches!(record.receipt.phase, Phase::Submitted | Phase::Unconfirmed) && !record.receipt.interactive {
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
         }
         let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor is unavailable; use the session-ended receipt."))?;
@@ -686,6 +819,92 @@ mod tests {
         let bytes = daemon.app.mux.pane_bytes_received(name).unwrap();
         daemon.last_pane_output_bytes.insert(name.into(), bytes);
         daemon.pane_silent_since.insert(name.into(), Instant::now() - quiet);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_command_survives_daemon_restart_and_is_typed_once_cas_7d2d() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::queued_command_survives_daemon_restart_and_is_typed_once_cas_7d2d") { return; }
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        fn restart(mut daemon: FactoryDaemon) -> FactoryDaemon {
+            let root = daemon.app.cas_dir().to_path_buf();
+            let name = daemon.app.supervisor_name().to_owned();
+            let pane = daemon.app.mux.remove_pane(&name);
+            drop(daemon);
+            for socket in ["test.sock", "gui.sock"] { std::fs::remove_file(root.join(socket)).unwrap(); }
+            let mut daemon = super::super::provisioning_tests::daemon(&root);
+            if let Some(pane) = pane { daemon.app.mux.add_pane(pane); }
+            daemon
+        }
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        agent.cc_session_id = Some("command-restart".into()); store.update(&agent).unwrap();
+        let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+        std::fs::create_dir_all(&projects).unwrap();
+        let transcript = projects.join("command-restart.jsonl");
+        let open = serde_json::json!({"type":"user","timestamp":Utc::now(),"message":{"role":"user","content":"work"}});
+        std::fs::write(&transcript, format!("{open}\n")).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        let run = Request::Run { command: Command::Compact, confirmed: false };
+        let queued = daemon.dispatch_supervisor_command(run.clone(), "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(matches!(queued, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        // A same-named earlier birth (reused PID, different start) left a queued
+        // row, and a malformed row exists. Neither may be typed or block restore.
+        let earlier = serde_json::json!({"receipt":{"device_id":"device-a","client_ref":"earlier-birth","command":"compact","phase":"queued","detail":"","output":"","interactive":false},
+            "at":Utc::now(),"before":"","before_command":"","reload_before":null,"birth":{"daemon_pid":std::process::id(),"daemon_pid_starttime":0}});
+        let malformed = serde_json::json!({"receipt":{"device_id":"device-a","client_ref":"malformed"}});
+        for row in [earlier, malformed] {
+            assert!(durable::write(daemon.app.cas_dir(), &daemon.session_name, &name, &row, durable::Write::Reserve).unwrap());
+        }
+        daemon = restart(daemon);
+        let restored = daemon.dispatch_supervisor_command(Request::Status, "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(matches!(restored, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        let earlier = daemon.dispatch_supervisor_command(Request::Status, "earlier-birth".into(), owner.clone()).await.unwrap();
+        assert!(matches!(earlier, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
+        // Stored terminal, so retention can collect it.
+        assert!(durable::load(daemon.app.cas_dir(), &daemon.session_name, &name).unwrap().iter()
+            .any(|row| row["receipt"]["client_ref"] == "earlier-birth" && row["receipt"]["phase"] == "refused"));
+        let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+        assert!(daemon.dispatch_supervisor_command(Request::Status, "restart-queue".into(), foreign).await.is_err());
+        daemon.dispatch_supervisor_command(run.clone(), "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        let end = serde_json::json!({"type":"assistant","timestamp":Utc::now(),"message":{"role":"assistant","stop_reason":"end_turn"}});
+        std::fs::write(&transcript, format!("{open}\n{end}\n")).unwrap();
+        assert_eq!(command_turn_idle(daemon.app.cas_dir(), &daemon.session_name, &name, cas_mux::SupervisorCli::Claude), Some(true));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                // Recovery and delivery must work without browser polling.
+                daemon.advance_queued_command();
+                if std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&input).matches("/compact").count(), 1);
+        daemon = restart(daemon);
+        let replay = daemon.dispatch_supervisor_command(run, "restart-queue".into(), owner.clone()).await.unwrap();
+        assert!(matches!(replay, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Unconfirmed));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯ draft".as_bytes()).unwrap();
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "never-sent".into(), owner.clone()).await.unwrap();
+        // A long-running turn must not expire its fresh terminal refusal.
+        let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "never-sent".into())).unwrap();
+        record.at -= chrono::Duration::minutes(11);
+        record.started -= Duration::from_secs(11 * 60);
+        daemon.app.mux.get_mut(&name).unwrap().mark_exited(Some(0));
+        let abandoned = daemon.dispatch_supervisor_command(Request::Status, "never-sent".into(), owner.clone()).await.unwrap();
+        assert!(matches!(abandoned, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
+        drop(daemon.app.mux.remove_pane(&name));
+        daemon = restart(daemon);
+        let abandoned = daemon.dispatch_supervisor_command(Request::Status, "never-sent".into(), owner).await.unwrap();
+        assert!(matches!(abandoned, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
+        // PTY teardown may write newline/EOT; neither is a command replay.
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&input).matches("/compact").count(), 1);
+        assert!(!input.windows(b"/finish".len()).any(|bytes| bytes == b"/finish"));
     }
     #[tokio::test(flavor = "current_thread")]
     async fn reload_cassy_requires_a_replacement_live_registry_pid_and_version() {

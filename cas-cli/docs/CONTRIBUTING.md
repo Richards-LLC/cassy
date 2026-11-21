@@ -2761,6 +2761,13 @@ With no train open, the existing merge behavior applies.
 Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
 managed `cas` MCP server. It preserves the conversation and confirms a new
 live server PID and its recorded version. A command echo is not success.
+Queued supervisor commands survive daemon restart and reexec in local SQLite
+metadata (`commander.command.v1.*`), keyed by session, supervisor, device and
+command reference. Only never-typed commands resume at a native turn boundary.
+A durable pre-write claim makes a restarted submission uncertain rather than
+replaying it. A daemon receipt confirming that supervisor exit abandoned a
+command before typing is Not sent; a potentially stale Queued card alone
+remains uncertain and reconciles late submission or outcome evidence.
 The exact native `/mcp reconnect cas` interaction was verified against a
 healthy, isolated stdio server on Claude Code **2.1.311, 2.1.316 and 2.1.318**.
 The minimum supported version is **2.1.311**. Older or unknown running Claude

@@ -427,7 +427,9 @@ async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
         git(&checkout, &["add", ".gitignore", "own.md"]);
         git(&checkout, &["commit", "-qm", "docs(cas-dae1): owned delivery"]);
         git(&checkout, &["push", "-q", "origin", &lane]);
-        let capture = checkout.join(".cas/artifacts/capture.txt");
+        let capture = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+            &f.cas_dir(), &f.task(id),
+        ).unwrap().join("capture.txt");
         let log = checkout.join("target/run.log");
         for (index, file) in [&capture, &log].into_iter().enumerate() {
             if state != "missing" {

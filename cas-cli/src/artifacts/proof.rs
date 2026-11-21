@@ -483,6 +483,28 @@ pub fn fetch_task(
 
 const EVIDENCE_SYNC: &str = "EVIDENCE_SYNC: ";
 
+/// cas-8018 (GH #2268): park publication is bounded so a close never waits on
+/// a slow Cloud. Each upload request gets [`PUBLISH_REQUEST_TIMEOUT`], a failed
+/// upload is retried once while the budget lasts, and past the budget the
+/// remaining files count as failed. Files committed earlier are reused, so a
+/// retried close resumes where the last one stopped.
+const PUBLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+const PUBLISH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The evidence a park must publish: with a LEDGER.md, the ledger and the
+/// paths its rows cite, plus cited logs; without one, every file. Other files
+/// (a folder copied from another task, say) are published best effort.
+fn required_evidence(dir: &Path) -> impl Fn(&str) -> bool {
+    let cited = std::fs::read_to_string(dir.join("LEDGER.md")).ok().map(|body| {
+        let mut names: std::collections::BTreeSet<String> = crate::qa_ledger::parse(&body, 0).rows.into_iter()
+            .map(|row| row.evidence_path.trim().trim_start_matches("./").to_string())
+            .collect();
+        names.insert("LEDGER.md".into());
+        names
+    });
+    move |name: &str| name.starts_with("cited/") || cited.as_ref().is_none_or(|cited| cited.contains(name))
+}
+
 /// What a routed build's park published: its evidence directory and the
 /// exact bytes the reviewing machine must hold before review (cas-e571).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -583,9 +605,19 @@ pub(crate) fn publish_routed_evidence(
         store: &store,
         roots: PublishRoots::new(cas_root, &base, &task.id),
         task_id: task.id.clone(),
-        cloud: super::cloud_client(cas_root),
+        cloud: super::cloud_client(cas_root).map(|client| client.with_timeout(PUBLISH_REQUEST_TIMEOUT)),
     };
     let published = store.list_for_task(&task.id).map_err(|error| fail(error.to_string()))?;
+    let required = required_evidence(&dir);
+    let deadline = std::time::Instant::now() + PUBLISH_BUDGET;
+    let upload = |path: &Path| -> Result<String, String> {
+        let outcome = super::publish(&context, path).map_err(|error| error.to_string())?;
+        if outcome.disposition.storage_disposition() != super::StorageDisposition::Committed {
+            return Err(outcome.disposition.summary());
+        }
+        Ok(outcome.artifact.id)
+    };
+    let mut skipped = Vec::new();
     let mut files = Vec::new();
     for (name, path) in paths {
         let (sha256, size) = digest_file(&path).map_err(|error| fail(error.to_string()))?;
@@ -600,12 +632,21 @@ pub(crate) fn publish_routed_evidence(
         let artifact_id = match reused {
             Some(record) => record.id.clone(),
             None => {
-                let outcome = super::publish(&context, &path)
-                    .map_err(|error| fail(format!("{name}: {error}")))?;
-                if outcome.disposition.storage_disposition() != super::StorageDisposition::Committed {
-                    return Err(fail(format!("{name}: {}", outcome.disposition.summary())));
+                let within = || std::time::Instant::now() < deadline;
+                let budget = || format!("not published within the {} s park budget; retry close", PUBLISH_BUDGET.as_secs());
+                let result = if within() {
+                    upload(&path).or_else(|first| if within() { upload(&path) } else { Err(first) })
+                } else {
+                    Err(budget())
+                };
+                match result {
+                    Ok(id) => id,
+                    Err(reason) if required(&name) => return Err(fail(format!("{name}: {reason}"))),
+                    Err(reason) => {
+                        skipped.push(format!("{name} ({reason})"));
+                        continue;
+                    }
                 }
-                outcome.artifact.id
             }
         };
         files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
@@ -615,11 +656,14 @@ pub(crate) fn publish_routed_evidence(
     // the ledger cites (GH #2079). Only a routed build makes it strict.
     let audience = if routed { source.unwrap_or_else(|| "the merge owner".into()) } else { "the merge owner".into() };
     let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files, strict: routed };
-    let note = format!(
+    let mut note = format!(
         "[{}] Evidence synced for review on {audience}\n{EVIDENCE_SYNC}{}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
         serde_json::to_string(&manifest).map_err(|error| fail(error.to_string()))?,
     );
+    if !skipped.is_empty() {
+        note.push_str(&format!("\nNot published (not cited by the ledger): {}", skipped.join("; ")));
+    }
     let tasks = crate::store::open_task_store(cas_root).map_err(|error| fail(error.to_string()))?;
     tasks.append_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;
     Ok(())

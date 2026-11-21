@@ -2734,6 +2734,46 @@ async fn supervisor_direct_verdict_binds_delivery_not_checkout_head_gh2240() {
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
 }
 
+/// cas-6c33 (GH2254, GH2280; cas-ff85's vdispatch-e726ab4b): a peer
+/// machine's lane was never pushed here, the worker's checkout is elsewhere
+/// and the supervisor's checkout sits on a stale `main`. The supervisor's
+/// no-delivery close must bind the target tip, never that checkout HEAD.
+#[tokio::test]
+async fn peer_lane_no_delivery_close_binds_target_not_checkout_head_cas_6c33() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let target = git(repo, &["rev-parse", "main"]);
+    let mut task = start_on_lane(tasks.as_ref(), &target);
+    task.notes = "no changelog: disposable fixture".into();
+    tasks.update(&task).unwrap();
+    git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
+    git(repo, &["branch", "-q", "-D", BRANCH]);
+    git(repo, &["update-ref", "-d", &format!("refs/remotes/origin/{BRANCH}")]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &target]);
+    git(repo, &["reset", "-q", "--hard", "main~1"]);
+    let checkout_head = git(repo, &["rev-parse", "HEAD"]);
+    let config = root.join("config.toml");
+    std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+        .replace("enabled=false", "enabled=true")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(root.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let pending = text(supervisor.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Already fixed on the target".into()),
+        commit_receipt: None, supervisor_override: None,
+        no_delivery: Some(true), stranded_branch_override: None, search_manifest: None,
+    })).await.unwrap());
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
+        .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
+    let proof = dispatch.repository.as_ref().unwrap();
+    assert_ne!(proof.head_commit, checkout_head, "{proof:?}");
+    assert_eq!(proof.head_commit, target, "{proof:?}");
+}
+
 /// cas-7305: request_changes on an in-progress task (a pushed PR, no park) is
 /// refused, and the refusal carries the exact calls that return the findings
 /// to its worker: a decision note and a wake, each a replayable payload.

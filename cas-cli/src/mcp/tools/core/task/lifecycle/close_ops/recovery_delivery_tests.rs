@@ -2791,10 +2791,11 @@ async fn peer_lane_review_binds_the_refreshed_pushed_tip_not_a_stale_cache_cas_6
     let origin = tempfile::tempdir().unwrap();
     git(origin.path(), &["init", "-q", "--bare"]);
     git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    let pushed = commit_file(&f.worker_path, "later.txt", "fix(cas-c6e1-fixture): later pushed commit");
     git(repo, &["push", "-q", "origin", "main", &format!("{BRANCH}:{BRANCH}")]);
     git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
-    git(repo, &["branch", "-q", "-f", BRANCH, &f.predecessor]);
-    git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.predecessor]);
+    git(repo, &["branch", "-q", "-f", BRANCH, &f.final_tip]);
+    git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
     let config = root.join("config.toml");
     std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
         .replace("enabled=false", "enabled=true")
@@ -2810,8 +2811,8 @@ async fn peer_lane_review_binds_the_refreshed_pushed_tip_not_a_stale_cache_cas_6
     let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
         .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
     let proof = dispatch.repository.as_ref().unwrap();
-    assert_eq!(proof.head_commit, f.final_tip, "{proof:?}");
-    assert_eq!(proof.anchor_commits, vec![f.final_tip.clone()]);
+    assert_eq!(proof.head_commit, pushed, "{proof:?}");
+    assert_eq!(proof.anchor_commits, vec![pushed]);
 }
 
 /// cas-6c33 (GH2280): an approved review recorded before the fix bound the

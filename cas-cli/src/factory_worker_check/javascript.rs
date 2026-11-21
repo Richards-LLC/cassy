@@ -1595,10 +1595,6 @@ fn execute_tests(
                     } else { "--runTestsByPath" });
                 }
                 if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
-                else if runner == "vitest" && matches!(widened, Some((super::widened::Scope::Related(_), _, _))) {
-                    // Vitest's related inputs are relative to its config root.
-                    command.arg(file.strip_prefix(&package)?);
-                }
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));

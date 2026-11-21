@@ -1491,21 +1491,30 @@ raise SystemExit(1 if failed else 0)
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
         };
         let package = source.split('/').take(2).collect::<Vec<_>>().join("/");
-        let consumer = format!("{package}/test/consumer.spec.ts");
-        let consumer_source = format!("import {{ value }} from '../{}';\nit('claims', () => {{}});\n", source.strip_prefix(&format!("{package}/")).unwrap());
+        let (test_dir, parent) = if runner == "vitest" { ("app/test", "../../") } else { ("test", "../") };
+        let consumer = format!("{package}/{test_dir}/consumer.spec.ts");
+        let binding = if source.ends_with(".vue") { "value" } else { "{ value }" };
+        let consumer_source = format!("import {binding} from '{parent}{}';\nit('claims', () => {{ void value; }});\n", source.strip_prefix(&format!("{package}/")).unwrap());
         write(".gitignore", "node_modules/\ntarget/\n");
         write(&format!("{package}/package.json"), &format!(r#"{{"devDependencies":{{"{runner}":"3"}}}}"#));
-        write(&format!("{package}/{runner}.config.js"), "module.exports = {};\n");
+        write(&format!("{package}/{runner}.config.js"), if runner == "vitest" {
+            "module.exports = { root: 'app' };\n"
+        } else { "module.exports = {};\n" });
         write(source, if source.ends_with(".vue") { "<template><div>one</div></template>\n" } else { "export const value = 1;\n" });
         // The consuming spec is elsewhere; a sibling-name heuristic cannot find it.
         write(&consumer, &consumer_source);
-        write(&format!("{package}/test/unrelated.spec.ts"), "it('unrelated', () => { throw 0; });\n");
+        write(&format!("{package}/{test_dir}/unrelated.spec.ts"), "it('unrelated', () => { throw 0; });\n");
         // Framework boundary: implement the import-graph selection predicate,
         // report unrelated failures and report an empty selection as empty.
         write(&format!("{package}/node_modules/.bin/{runner}"), r#"#!/usr/bin/env python3
 import json, pathlib, re, sys
 a = sys.argv[1:]
-specs = sorted(pathlib.Path.cwd().rglob('*.spec.ts'))
+test_root = pathlib.Path.cwd()
+if '--config' in a:
+    config = pathlib.Path(a[a.index('--config') + 1])
+    configured_root = re.search(r"\broot:\s*['\"]([^'\"]+)", config.read_text())
+    if configured_root: test_root = config.parent / configured_root[1]
+specs = sorted(test_root.rglob('*.spec.ts'))
 if '--listTests' in a:
     print(json.dumps([str(p) for p in specs]))
     sys.exit(0)
@@ -1523,7 +1532,7 @@ if '--findRelatedTests' in a:
     target = pathlib.Path(a[a.index('--findRelatedTests') + 1]).resolve()
     specs = [p for p in specs if depends(p, target)]
 elif 'related' in a:
-    target = pathlib.Path(a[-1]).resolve()
+    target = (test_root / a[-1]).resolve()
     specs = [p for p in specs if depends(p, target)]
 elif '--runTestsByPath' in a:
     target = pathlib.Path(a[a.index('--runTestsByPath') + 1]).resolve()
@@ -1575,7 +1584,7 @@ sys.exit(0 if ok else 1)
         assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()]), [other]);
         std::fs::remove_file(repo.join(&other_source)).unwrap();
         // A failing related spec must withdraw the old proof at the new tip.
-        write(&consumer, &consumer_source.replace("() => {}", "() => { throw 0; }"));
+        write(&consumer, &consumer_source.replace("void value;", "throw 0;"));
         git(&["commit", "-qam", "related failure"]);
         let failed = git(&["rev-parse", "HEAD"]);
         assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());

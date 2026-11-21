@@ -22,7 +22,11 @@ in focus and every attachment a report PDF for the same version, the CLI selects
 that version's merged release PR and matches its head branch to one stored epic. PDFs named
 `v<version>.pdf` under `release-reports/` are recognized; custom output directories
 also work when the generated Markdown companion remains beside the PDF.
-The released epic's own open verification still blocks its report.
+The released epic's own open verification still blocks its report. If a
+recognizable generated report has mixed attachments, malformed source metadata
+or no unambiguous released epic, the CLI retains the focused release's
+verification hold. Ordinary operational PDFs, including version-looking names
+without generated-report evidence, remain unattributed.
 
 Pass `--epic <released-epic-id>` when automatic inference is unavailable or
 attachments mix report versions, or name `epic_id` on a direct Violet call.

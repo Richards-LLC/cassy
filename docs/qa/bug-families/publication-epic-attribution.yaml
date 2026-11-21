@@ -5,7 +5,9 @@ statement: >-
   An explicitly attributed or artifact-owned deliverable remains held for
   its own epic, including after another epic's verified report in a batch.
   Operator publication overrides remain audited, and release announcements
-  retain their independent post-release checks.
+  retain their independent post-release checks. Generated release-report PDFs
+  prefer the validated released epic, retaining focused release verification
+  for mixed or malformed report evidence; ordinary support PDFs stay unbound.
 tasks: [cas-81f8]
 journeys: []
 invariants: []

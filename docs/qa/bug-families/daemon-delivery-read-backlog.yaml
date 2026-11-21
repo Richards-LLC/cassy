@@ -1,4 +1,0 @@
-title: Factory daemon job lanes stay short and reexec stays possible under a slow job
-statement: While one supervisor delivery read or idle-worker liveness job is running, later requests for it leave at most one waiting behind it. A `cas factory reexec` proceeds when only replaceable reads (refresh jobs and the supervisor delivery read) are queued or running, and still waits for durable jobs.
-found: 2026-11-20
-tasks: [cas-55e9]

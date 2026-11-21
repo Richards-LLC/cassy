@@ -1,6 +1,0 @@
-title: Jest source proof runs related tests without widening to the whole backend
-statement: G-61 advice and worker-check preserve the source dependency bound and close accepts its source-specific receipt.
-tasks: [cas-1587]
-fixed_by: [cas-1587]
-journeys: [FACTORY-CLOSE]
-invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]

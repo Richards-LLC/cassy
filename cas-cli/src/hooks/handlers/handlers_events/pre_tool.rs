@@ -3608,13 +3608,27 @@ fn check_worker_git_commit_scope_at_target(
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
     {
-        match crate::factory_isolation::classify_worker_binding(&registered_name, Some(&branch)) {
+        // cas-ea31: allow/deny is the shared syntactic rule; the checkout's
+        // own registry only names a real owner, never one read off the branch.
+        match crate::factory_isolation::classify_worker_binding_at(
+            &registered_name,
+            Some(&branch),
+            std::path::Path::new(&cwd),
+        ) {
             crate::factory_isolation::WorkerBinding::Own => {}
             crate::factory_isolation::WorkerBinding::Sibling { owner } => {
                 return Some(crate::factory_isolation::sibling_misbinding_message(
                     &registered_name,
                     &owner,
+                    &branch,
                     &cwd,
+                ));
+            }
+            crate::factory_isolation::WorkerBinding::Unowned => {
+                return Some(crate::factory_isolation::branch_not_owned_message(
+                    &registered_name,
+                    &branch,
+                    &takeover_patch_path(&cwd, &registered_name),
                 ));
             }
             crate::factory_isolation::WorkerBinding::Other if !is_isolated => {
@@ -3638,6 +3652,31 @@ fn check_worker_git_commit_scope_at_target(
     }
 
     None
+}
+
+/// Where an unowned-branch refusal tells the worker to save its edits: the
+/// project's artifact root, which the workspace guard admits; else a file in
+/// the checkout, which `git restore` leaves alone.
+fn takeover_patch_path(cwd: &str, worker: &str) -> String {
+    let file = format!("takeover-{worker}.patch");
+    let path = crate::store::find_cas_root_ignoring_env(std::path::Path::new(cwd))
+        .ok()
+        .map(|root| {
+            let configured = crate::config::Config::load(&root)
+                .ok()
+                .and_then(|config| config.factory().artifacts_root.clone());
+            crate::config::resolved_factory_artifact_paths(&root, configured.as_deref())
+                .project_root
+                .join(&file)
+                .display()
+                .to_string()
+        })
+        .unwrap_or(file);
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
+        path
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
 }
 
 /// Filesystem tool families auto-approved for factory agents (supervisor and

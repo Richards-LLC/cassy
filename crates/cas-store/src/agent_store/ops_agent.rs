@@ -128,7 +128,46 @@ fn reconcile_restarted_factory_supervisor(
     Ok(())
 }
 
+/// cas-ea31 (N1): factory names own `factory/<name>` and
+/// `factory/<name>-<task-ref>`. A name that extends another factory name with
+/// a letter-led part would let the shorter name's task grammar claim the
+/// longer one's branches, so registration keeps the namespaces prefix-free.
+/// Digit-led extensions (`kevin-2`) never parse as task refs and are allowed.
+fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() || !matches!(role, "worker" | "supervisor") {
+        return Ok(());
+    }
+    let extends = |longer: &str, shorter: &str| {
+        longer
+            .strip_prefix(shorter)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphabetic()))
+    };
+    let mut statement = conn.prepare(
+        "SELECT name FROM agents WHERE id != ?1 AND role IN ('worker', 'supervisor')",
+    )?;
+    for other in statement.query_map(params![id], |row| row.get::<_, String>(0))? {
+        let other = other?;
+        let other = other.trim();
+        if !other.is_empty() && other != name && (extends(name, other) || extends(other, name)) {
+            return Err(StoreError::Other(format!(
+                "WORKER_NAME_OVERLAPS: '{name}' would share the branch namespace factory/{}-… \
+                 with registered agent '{other}'. Choose a name that does not extend another \
+                 factory name with a hyphen and a letter.",
+                if name.len() < other.len() { name } else { other },
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Result<()> {
+    let effective_role: String = conn
+        .query_row("SELECT role FROM agents WHERE id = ?1", params![agent.id], |row| row.get(0))
+        .optional()?
+        .unwrap_or_else(|| agent.role.to_string());
+    ensure_factory_namespace_free(conn, &agent.id, &agent.name, &effective_role)?;
     let metadata_json = serde_json::to_string(&agent.metadata).unwrap_or_else(|_| "{}".to_string());
     let env_factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let factory_session = agent
@@ -245,6 +284,15 @@ impl SqliteAgentStore {
     pub(crate) fn agent_update(&self, agent: &Agent) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.lock_conn()?;
+            let tx = ImmediateTx::new(&conn)?;
+            let conn = &*tx;
+            // cas-ea31 (N1): a rename gets the registration namespace check.
+            let stored_name: Option<String> = conn
+                .query_row("SELECT name FROM agents WHERE id = ?1", params![agent.id], |row| row.get(0))
+                .optional()?;
+            if stored_name.as_deref().is_some_and(|stored| stored != agent.name) {
+                ensure_factory_namespace_free(conn, &agent.id, &agent.name, &agent.role.to_string())?;
+            }
             let metadata_json =
                 serde_json::to_string(&agent.metadata).unwrap_or_else(|_| "{}".to_string());
 
@@ -283,6 +331,7 @@ impl SqliteAgentStore {
                     agent.id
                 )));
             }
+            tx.commit()?;
             Ok(())
         }) // with_write_retry
     }

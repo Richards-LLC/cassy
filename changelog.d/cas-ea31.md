@@ -1,0 +1,6 @@
+### Fixed — Factory
+
+- **Branch refusals stop naming workers that don't exist** — Was: on a branch like `factory/<you>-staging`, the commit guard said the checkout belonged to a worker called `<you>-staging`. Now: it says the branch isn't yours and that no registered worker owns it. It also prints three commands the guard allows: save your edits to a patch, clean the tree, and switch back to your own branch. Other workers are named only when they are actually registered.
+- **Takeovers adopt the right delivery** — Was: `transfer adopt_branch` refused a receiver sitting on any of the task's branches except the first one found. It also refused a receiver at a newer train tip with no work of its own, and after a review return it could adopt the train base instead of the delivery. Now: those three cases adopt the delivery tip, and never anything past it.
+- **Commit and push hooks read task branches the same way as the guard** — Was: the Git hooks accepted suffixes such as `cas--x` that the in-app guard refused. Now: both apply the same rule.
+- **Worker names can't overlap** — Was: registering `ab` and `ab-cd-12` let `ab` claim the other worker's branches. Now: registration and renames refuse a name that extends another worker or supervisor name with a hyphen and a letter (`WORKER_NAME_OVERLAPS`). Digit suffixes such as `kevin-2` are still allowed.

@@ -179,45 +179,64 @@ pub(super) fn adopt_task_branch(
     if let Some(prior) = task.assignee.as_deref() {
         candidates.push(crate::factory_isolation::expected_worker_branch(prior));
     }
-    let mut source = None;
-    'branches: for branch in candidates {
-        if !branch.starts_with("factory/") {
-            continue;
-        }
+    let mut resolved = Vec::new();
+    for branch in candidates.iter().filter(|branch| branch.starts_with("factory/")) {
         for prefix in ["refs/heads", "refs/remotes/origin"] {
             let reference = format!("{prefix}/{branch}^{{commit}}");
             let output = git.output(&["rev-parse", "--verify", "--end-of-options", &reference])?;
             if output.status.success() {
-                source = Some((
-                    branch,
+                resolved.push((
+                    branch.clone(),
                     String::from_utf8_lossy(&output.stdout).trim().to_string(),
                 ));
-                break 'branches;
+                break;
             }
         }
     }
-    let (source_branch, source_head) =
-        source.ok_or("no factory delivery branch found for this task")?;
-    let tip = if let Some(anchor) = &task.deliverables.factory_branch_anchor {
-        let reference = format!("{anchor}^{{commit}}");
-        let tip = git.run(&["rev-parse", "--verify", "--end-of-options", &reference])?;
-        if !git.ancestor(&tip, &source_head)? {
-            return Err("task delivery anchor is not on the source branch".into());
+    // cas-ea31 (takeover case 3): a review return moves the anchor to
+    // history, and the prior worker's task branch can sit at the train base.
+    // Adopt from the first candidate that holds the delivery, and never past
+    // it: a lane can also carry a later task's commits.
+    let delivery = match task.deliverables.factory_branch_anchor.as_ref()
+        .or(task.deliverables.historical_factory_branch_anchors.last())
+    {
+        Some(anchor) => Some(git.run(&[
+            "rev-parse", "--verify", "--end-of-options", &format!("{anchor}^{{commit}}"),
+        ])?),
+        None => None,
+    };
+    let mut holding = None;
+    if let Some(delivery) = &delivery {
+        for (branch, head) in &resolved {
+            if git.ancestor(delivery, head)? {
+                holding = Some((branch.clone(), head.clone()));
+                break;
+            }
         }
-        tip
-    } else {
-        source_head
+    }
+    let (source_branch, source_head) = holding
+        .or_else(|| resolved.first().cloned())
+        .ok_or("no factory delivery branch found for this task")?;
+    let tip = match delivery {
+        Some(delivery) => {
+            if !git.ancestor(&delivery, &source_head)? {
+                return Err("task delivery anchor is not on the source branch".into());
+            }
+            delivery
+        }
+        None => source_head,
     };
     let current_branch = git.run(&["symbolic-ref", "--short", "HEAD"])?;
-    // cas-a9fe: a supervisor may repair a receiver already checked out on
-    // this task's source branch. Prove the registered path is a real root
-    // and accept only that exact source, never an unrelated foreign branch.
-    let foreign_source = current_branch == source_branch
+    // cas-a9fe, cas-ea31 (takeover case 2): a supervisor may repair a
+    // receiver already checked out on any of this task's branches. Prove the
+    // registered path is a real root and accept only those exact branches,
+    // never an unrelated foreign branch.
+    let foreign_source = candidates.contains(&current_branch)
         && classify_worker_binding(&receiver.name, Some(&current_branch)) != WorkerBinding::Own;
     verify_worker_worktree_binding(
         &receiver.name,
         destination,
-        foreign_source.then_some(source_branch.as_str()),
+        foreign_source.then_some(current_branch.as_str()),
     )
     .map_err(|e| e.to_string())?;
     // Copy the recorded anchor without moving an advanced foreign source.
@@ -234,7 +253,13 @@ pub(super) fn adopt_task_branch(
         tip.clone()
     };
     if !foreign_source && !git.ancestor("HEAD", &receiver_tip)? {
-        return Err("receiver HEAD diverges from the task delivery; reconcile the branches first".into());
+        // cas-ea31 (takeover case 4): a receiver already inside the
+        // integration target holds no work of its own; its task branch is
+        // cut at the delivery and HEAD's work stays on the target.
+        let head = git.run(&["rev-parse", "HEAD"])?;
+        if git.require_integrated(cas_root, &repo_root, task, &head, "receiver HEAD").is_err() {
+            return Err("receiver HEAD diverges from the task delivery; reconcile the branches first".into());
+        }
     }
     let branch = worker_task_branch(&receiver.name, &task.id);
     let reference = format!("refs/heads/{branch}");

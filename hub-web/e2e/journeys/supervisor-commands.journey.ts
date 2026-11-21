@@ -10,8 +10,8 @@ import type { Page } from "@playwright/test";
 const commandPalette = (page: Page) => page.getByRole("region", { name: "Supervisor commands", exact: true });
 const commandButton = (page: Page, id: string) => commandPalette(page).getByRole("button", { name: new RegExp(`^/${id} · `) });
 const commandButtons = (page: Page) => commandPalette(page).getByRole("button", { name: /^\/[a-z]+ · / });
-const composer = (page: Page) => page.getByRole("textbox", { name: /^Talk to / });
-const sendButton = (page: Page) => page.getByRole("button", { name: "Send message", exact: true });
+const composer = (page: Page) => page.getByRole("textbox", { name: "Your message", exact: true });
+const sendButton = (page: Page) => page.getByRole("button", { name: /^Send to the .+ supervisor$/ });
 
 async function captureReload(page: Page, name: string, width: number): Promise<void> {
   const dir = process.env.QA_ARTIFACTS;

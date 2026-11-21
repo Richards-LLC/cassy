@@ -86,6 +86,15 @@ pub(crate) enum Criticality {
     Latest,
 }
 
+impl Criticality {
+    /// Safe to abandon at reexec: the run only reads, and its request lives
+    /// in daemon memory that reexec does not hand off, so the new daemon
+    /// reruns it (cas-55e9).
+    pub(crate) fn replaceable(self) -> bool {
+        matches!(self, Criticality::Refresh | Criticality::Latest)
+    }
+}
+
 /// What to run and how it may be coalesced or dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobSpec {
@@ -213,6 +222,8 @@ pub(crate) struct LaneStats {
     pub(crate) critical_backlog: usize,
     /// Age of the oldest waiting critical job (spec §4.2 watchdog metric).
     pub(crate) oldest_critical_age: Option<Duration>,
+    /// Waiting jobs a reexec must not abandon (not [`Criticality::replaceable`]).
+    pub(crate) durable_backlog: usize,
     pub(crate) dropped_refresh: u64,
     pub(crate) running: Option<RunningJob>,
 }
@@ -699,6 +710,9 @@ impl<T: Send + 'static> JobRuntime<T> {
             let age = now.saturating_duration_since(waiting.enqueued_at);
             stats.queued += 1;
             stats.oldest_queued_age = stats.oldest_queued_age.max(Some(age));
+            if !waiting.spec.criticality.replaceable() {
+                stats.durable_backlog += 1;
+            }
             if waiting.spec.criticality != Criticality::Refresh {
                 stats.critical_backlog += 1;
                 stats.oldest_critical_age = stats.oldest_critical_age.max(Some(age));

@@ -1249,14 +1249,25 @@ async fn reexec_flush_refusal_names_writes_stuck_behind_the_store_writer_gh2227(
     writer.open();
     jobs.flush_for_reexec(&cas_dir, Duration::from_secs(5)).await.unwrap();
 
-    // cas-55e9: refresh jobs, running or queued, rerun after reexec and so
-    // never hold it (prowl gabber refused every reexec behind a 10 min backlog).
+    // cas-55e9: replaceable reads, running or queued, rerun after reexec and
+    // so never hold it. Prowl gabber refused every reexec behind a delivery
+    // read running 103 s with resubmits and refresh probes queued behind it.
     let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Arc::new(Mutex::new(released));
+    let gated = |released: &Arc<Mutex<std::sync::mpsc::Receiver<()>>>| {
+        let released = Arc::clone(released);
+        move || -> Box<dyn std::any::Any + Send> {
+            let _ = released.lock().unwrap().recv_timeout(Duration::from_secs(30));
+            Box::new(())
+        }
+    };
+    let mut read = super::super::factory_jobs::delivery_read_spec(1);
+    read.lane = Lane::External;
+    jobs.submit_external(read.clone(), gated(&released));
+    read.generation = 2;
+    jobs.submit_external(read, || Box::new(()));
     let probe = super::super::factory_jobs::worker_health_spec;
-    jobs.submit_external(probe("slow-worker", "cas-1", 1), move || {
-        let _ = released.recv_timeout(Duration::from_secs(30));
-        Box::new(())
-    });
+    jobs.submit_external(probe("slow-worker", "cas-1", 1), gated(&released));
     jobs.submit_external(probe("next-worker", "cas-2", 1), || Box::new(()));
     jobs.flush_for_reexec(&cas_dir, Duration::from_millis(200)).await.unwrap();
     drop(release);

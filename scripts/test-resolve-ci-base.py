@@ -247,6 +247,18 @@ class LaneBaseTests(unittest.TestCase):
         self.assertIn(f'{advanced}\trefs/heads/{shipped}', refs)
         self.assertIn(f'{released}\trefs/heads/{opened}', refs)
 
+        # Conflicting cut identities cannot authorize either branch's deletion.
+        self.git('commit', '--allow-empty', '-qm', 'release: v9.99.7',
+                 '-m', 'Release-Version: 9.99.7',
+                 '-m', f'Prepared by scripts/release.sh on {opened} from main 9.99.6.')
+        ambiguous = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', f'{ambiguous}:refs/heads/main')
+        result = subprocess.run(['bash', script, ambiguous, 'origin/main'], cwd=self.repo,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.git('ls-remote', '--heads', 'origin'),
+                         refs.replace(f'{advanced}\trefs/heads/main', f'{ambiguous}\trefs/heads/main'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -420,18 +420,43 @@ mod tests {
     #[test]
     fn capped_temporary_fixtures_do_not_discover_the_checkout_cas_2085() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
-        env.remove("CAS_ROOT");
+        for name in ["CAS_ROOT", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"] {
+            env.remove(name);
+        }
         let outer = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git").args(["init", "-q"])
             .arg(outer.path()).status().unwrap();
         assert!(status.success());
         let (cas, worktree) = managed(outer.path(), Some("[factory]\n"));
-        let temporary = prepare_test_tmp(&cas, &worktree).unwrap();
-        let fixture = tempfile::tempdir_in(&temporary).unwrap();
-        assert!(crate::worktree::GitOperations::detect_repo_root(fixture.path()).is_err());
-        assert!(crate::store::find_cas_root_from(fixture.path()).is_err());
-        drop(fixture);
-        reclaim_test_tmp(&cas, &worktree).unwrap();
+        let mut roots = vec![None, Some(outer.path().join("scratch")), Some(cas.join("scratch"))];
+        #[cfg(unix)]
+        {
+            let alias = outer.path().join("checkout-alias");
+            std::os::unix::fs::symlink(outer.path(), &alias).unwrap();
+            roots.push(Some(alias.join("scratch")));
+        }
+        for root in roots {
+            let config = root.map(|root| format!("[factory]\nscratch_root = {:?}\n", root.to_str().unwrap()))
+                .unwrap_or_else(|| "[factory]\n".into());
+            std::fs::write(cas.join("config.toml"), config).unwrap();
+            let temporary = prepare_test_tmp(&cas, &worktree).unwrap();
+            let canonical = temporary.canonicalize().unwrap();
+            // Check physical ancestry too: /tmp aliases /private/tmp on macOS,
+            // and a configured symlink must not conceal the outer checkout.
+            assert!(!canonical.starts_with(outer.path().canonicalize().unwrap()));
+            assert!(canonical.ancestors().all(|ancestor| !ancestor.join(".git").exists()), "{canonical:?}");
+            let fixture = tempfile::tempdir_in(&temporary).unwrap();
+            let discovery = std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .current_dir(fixture.path())
+                .env("GIT_CEILING_DIRECTORIES", &canonical)
+                .output().unwrap();
+            assert!(!discovery.status.success(), "{discovery:?}");
+            assert!(crate::worktree::GitOperations::detect_repo_root(fixture.path()).is_err());
+            assert!(crate::store::find_cas_root_from(fixture.path()).is_err());
+            drop(fixture);
+            reclaim_test_tmp(&cas, &worktree).unwrap();
+        }
     }
 
     #[test]

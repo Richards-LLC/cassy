@@ -1746,3 +1746,111 @@ async fn e1d3_finished_work_event_answer_without_a_client_is_dropped() {
     }
     assert_eq!(daemon.work_events.in_flight(), 0, "no answer waits for a reconnect");
 }
+
+const REQUESTER_CHILD: &str =
+    "ui::factory::daemon::runtime::relay_jobs_tests::verifier_launch_requester_child_cas_5f88";
+
+/// The requester side of the cas-5f88 test, run as its own process: the real
+/// launch entrypoint starts its factory launch retry, then the process waits
+/// to be killed mid-retry.
+#[test]
+#[ignore = "cas-5f88 requester child; run by verifier_launch_survives_its_requester_exiting_cas_5f88"]
+fn verifier_launch_requester_child_cas_5f88() {
+    let var = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from);
+    let (Some(root), Some(task), Some(dispatch), Some(ready)) = (
+        var("CAS_5F88_ROOT"), var("CAS_5F88_TASK"), var("CAS_5F88_DISPATCH"), var("CAS_5F88_READY"),
+    ) else {
+        return;
+    };
+    let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+    let task = core.open_task_store().unwrap().get(task.to_str().unwrap()).unwrap();
+    let dispatch = cas_store::get_verification_dispatch(&root, dispatch.to_str().unwrap()).unwrap();
+    let retry = crate::mcp::tools::core::workflow::premerge_verification::launch_automatic_verifier(
+        &core, &task, &dispatch,
+    )
+    .unwrap()
+    .expect("a factory-owned dispatch is requested on its own retry thread");
+    std::fs::write(&ready, "retrying").unwrap();
+    let _ = retry.join();
+    std::thread::sleep(Duration::from_secs(600));
+}
+
+/// cas-5f88: a worker's close asked for a verifier, and its MCP process was
+/// killed while its launch retry was still waiting for the factory daemon.
+/// The daemon's normal prompt-queue pass starts exactly one verifier for that
+/// dispatch, with no supervisor step.
+#[tokio::test]
+async fn verifier_launch_survives_its_requester_exiting_cas_5f88() {
+    use cas_store::AgentStore;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let (_dir, cas_dir) = project_with_worker();
+    env.set("CAS_ROOT", &cas_dir);
+    // The claim is the launch; no provider account is needed or used.
+    env.set("CAS_TEST_HUB_PATH", env.home().join("no-provider"));
+    let mut owner = cas_types::Agent::new_with_role(
+        "relay-owner".into(), "relay-supervisor".into(), cas_types::AgentRole::Supervisor,
+    );
+    owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+    owner.factory_session = Some("provision-test".into());
+    cas_store::SqliteAgentStore::open(&cas_dir).unwrap().register(&owner).unwrap();
+    let mut task = cas_types::Task::new("cas-5f88-close".into(), "Requester exits".into());
+    task.status = cas_types::TaskStatus::AwaitingMerge;
+    task.pending_verification = true;
+    crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &cas_dir, &task.id, "w-1", &owner.id, &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    // The requester has been retrying for two minutes when it dies.
+    let db = cas_dir.join("cas.db");
+    rusqlite::Connection::open(&db).unwrap().execute(
+        "UPDATE verification_dispatches SET requested_at = ?1 WHERE id = ?2",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339(), dispatch.id],
+    ).unwrap();
+    let ready = cas_dir.join("requester-retrying");
+    let mut requester = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", REQUESTER_CHILD, "--ignored", "--nocapture", "--test-threads=1"])
+        .env("CAS_5F88_ROOT", &cas_dir)
+        .env("CAS_5F88_TASK", &task.id)
+        .env("CAS_5F88_DISPATCH", &dispatch.id)
+        .env("CAS_5F88_READY", &ready)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        assert!(requester.try_wait().unwrap().is_none(), "the requester exited before it retried");
+        assert!(Instant::now() < deadline, "the requester never started its launch retry");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    requester.kill().unwrap();
+    requester.wait().unwrap();
+
+    let launches = || -> i64 {
+        rusqlite::Connection::open(&db).unwrap().query_row(
+            "SELECT COUNT(*) FROM verification_capabilities WHERE dispatch_id = ?1",
+            [&dispatch.id], |row| row.get(0),
+        ).unwrap()
+    };
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    // A minute has passed since the last poison sweep.
+    fn sweep_due(daemon: &mut FactoryDaemon) -> &mut FactoryDaemon {
+        daemon.last_prompt_poison_sweep = Some(Instant::now() - Duration::from_secs(61));
+        daemon
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while launches() == 0 && Instant::now() < deadline {
+        sweep_due(&mut daemon).process_prompt_queue().await.unwrap();
+        daemon.drain_relay_jobs();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Later sweeps find it launched and start nothing more.
+    for _ in 0..3 {
+        settle_relays(&mut daemon).await;
+        sweep_due(&mut daemon).process_prompt_queue().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    settle_relays(&mut daemon).await;
+    assert_eq!(launches(), 1, "one verifier launch for the orphaned dispatch");
+}

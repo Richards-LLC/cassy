@@ -254,6 +254,9 @@ mod automatic;
 mod factory_launch;
 #[cfg(unix)]
 pub(crate) use factory_launch::launch as launch_factory_verifier;
+/// The requester's launch entrypoint, for a test that runs it in a child process.
+#[cfg(test)]
+pub(crate) use automatic::launch as launch_automatic_verifier;
 
 pub(crate) const VERIFIER_FACTORY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) const VERIFIER_FACTORY_STORE_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);

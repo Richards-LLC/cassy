@@ -171,6 +171,11 @@ function supervisorCommandSession(machineId: string, session: string): Superviso
       send: message => connections.get(machineId)?.send(session, message) ?? false,
       changed: () => { updateConversationViews(); renderConversationList(); },
       settled: receipt => toast(receipt.detail, { thread: key }),
+      readRetained: async ref => {
+        if (!hubSupports(machineId, "retained_command_receipts")) return undefined;
+        try { return await connections.get(machineId)?.retainedCommandReceipt(session, ref); }
+        catch (error) { return error instanceof HubRequestError && (error.status === 409 || error.status === 503) ? "retry" : undefined; }
+      },
     });
     supervisorCommands.set(key, commands);
   }
@@ -1098,7 +1103,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
       for (const item of items) {
-        if (item.ended) supervisorCommands.get(sessionKey(machine.id, item.name))?.ended(item.ended.reason);
+        // A crashed daemon leaves stale metadata and no end receipt (cas-b521).
+        if (sessionStopped(item)) supervisorCommands.get(sessionKey(machine.id, item.name))?.ended(item.ended?.reason ?? "daemon_stopped");
       }
       retireEndedSessionNotices(machine.id, items);
       settleSendsForStoppedSessions(machine, items);

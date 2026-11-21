@@ -1114,9 +1114,12 @@ async fn close_retries_a_note_in_the_terminal_write_gap_cas_90ea() {
 
 /// GH #2277: a live pinned owner reviews a worker's artifact-only child;
 /// the worker cannot finalize it and another supervisor cannot take it over.
+/// GH #2284: the same handoff preserves a commitless no_delivery spike
+/// without inventing a worker lane or asking for another verification.
 #[tokio::test]
 async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     let mut env = TestEnvGuard::temp_home();
+    for no_delivery in [false, true] {
     let target = "epic/owner-review";
     let f = fixture(&mut env, target);
     let owner_id = "nocode-supervisor-session";
@@ -1132,17 +1135,54 @@ async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     epic.epic_verification_owner = Some(owner_id.into());
     f.put(&epic);
     let id = "cas-141a-child";
-    let mut child = assigned(id, TaskType::Chore, target);
-    child.execution_note = Some("no-code".into());
+    let mut child = assigned(id, if no_delivery { TaskType::Spike } else { TaskType::Chore }, target);
+    if no_delivery {
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let source = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &source, target]);
+        git(f.dir.path(), &["branch", "-D", LANE]);
+        git(f.dir.path(), &["push", "-q", "origin", "--delete", LANE]);
+        child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: child.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(), branch: source,
+            base_sha: git(f.dir.path(), &["rev-parse", target]),
+        });
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    } else {
+        child.execution_note = Some("no-code".into());
+    }
     f.put(&child);
     open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
         id.into(), epic.id.clone(), DependencyType::ParentChild,
     )).unwrap();
     claim(&f, id);
-    let request = serde_json::json!({
+    let mut request = serde_json::json!({
         "action": "close", "id": id, "reason": "Measurement recorded",
         "external_ref": PROOF,
     });
+    let reviewed = if no_delivery {
+        request.as_object_mut().unwrap().remove("external_ref");
+        request["no_delivery"] = true.into();
+        let pending = call(&f.worker, request.clone()).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
+            .unwrap().unwrap_or_else(|| panic!("{pending}"));
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{pending}");
+        let mut verdict = cas_types::Verification::approved(
+            "ver-2284".into(), id.into(), "Commitless spike reviewed".into(),
+        );
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner_id.into());
+        verdict.issuer_agent_id = verdict.agent_id.clone();
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        use cas_store::VerificationStore;
+        cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, owner_id, None, true).unwrap();
+        Some(dispatch.id)
+    } else { None };
     let response = f.worker.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
         .await.expect("worker close must park for the live train owner");
     assert_ne!(response.is_error, Some(true), "{response:?}");
@@ -1150,12 +1190,13 @@ async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     assert_eq!(parked.status, TaskStatus::AwaitingMerge);
     assert!(parked.closed_at.is_none());
     assert!(parked.terminal_outcome.is_none());
-    assert_eq!(parked.external_ref.as_deref(), Some(PROOF));
-    assert!(parked.deliverables.factory_branch_anchor.is_none());
-    assert!(parked.deliverables.parked_branch.is_none());
+    if !no_delivery { assert_eq!(parked.external_ref.as_deref(), Some(PROOF)); }
     assert!(agents.get_lease(id).unwrap().is_none());
     assert_eq!(agents.get(owner_id).unwrap().cc_session_id, owner.cc_session_id);
 
+    // The owner's ordinary close consumes the same approved proof. It must
+    // not require a methodology edit, a new declaration or another review.
+    if no_delivery { request.as_object_mut().unwrap().remove("no_delivery"); }
     agents.register(&Agent::new_with_role(
         "other-supervisor".into(), "other-supervisor".into(), AgentRole::Supervisor,
     )).unwrap();
@@ -1169,7 +1210,20 @@ async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     let accepted = f.supervisor.task(Parameters(serde_json::from_value(request).unwrap()))
         .await.unwrap();
     assert_ne!(accepted.is_error, Some(true), "{accepted:?}");
-    assert_eq!(f.task(id).status, TaskStatus::Closed);
+    let closed = f.task(id);
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(parked.deliverables.factory_branch_anchor.is_none());
+    assert!(parked.deliverables.historical_factory_branch_anchors.is_empty());
+    assert!(parked.deliverables.parked_branch.is_none());
+    assert!(closed.deliverables.factory_branch_anchor.is_none());
+    assert!(closed.deliverables.parked_branch.is_none());
+    if let Some(dispatch) = reviewed {
+        assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id, dispatch);
+        assert!(closed.execution_note.is_none());
+        assert_eq!(git(f.dir.path(), &["rev-parse", &child.deliverables.factory_branch_start.unwrap().branch]),
+            git(f.dir.path(), &["rev-parse", target]));
+    }
+    }
 }
 
 /// GH #1147: a no-code spike created under a code epic inherits the epic's

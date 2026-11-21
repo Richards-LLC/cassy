@@ -274,6 +274,7 @@ pub use verification_store::{
     has_active_verification_dispatch, import_peer_premerge_verification, verification_dispatch_is_stale, inspect_bound_server_verifier_handoff,
     inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
     invalidate_verification_dispatch_for_new_cycle, release_failed_verifier_dispatch,
+    recover_expired_dead_verifier_dispatch,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_audit_note,

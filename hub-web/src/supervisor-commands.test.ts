@@ -326,6 +326,30 @@ describe("supervisor command receipts", () => {
     } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 
+  it("reads a stopped session's retained outcome without resending, and stays Unconfirmed without one (cas-b521)", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const retained of ["refused", "missing"] as const) {
+        const send = vi.fn().mockReturnValue(true);
+        let answers: (CommandReceipt | "retry" | undefined)[] = [];
+        const readRetained = vi.fn(async () => answers.shift());
+        const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {}, readRetained });
+        await session.run("compact", false);
+        const ref = [...session.receipts.keys()][0];
+        const queued: CommandReceipt = { client_ref: ref, command: "compact", phase: "queued", detail: "Queued", output: "", interactive: false };
+        session.receive(queued);
+        // The daemon may still be tearing down: the hub answers 409 first.
+        answers = ["retry", retained === "refused" ? { ...queued, phase: "refused", detail: "Command not sent." } : undefined];
+        session.ended("daemon_stopped");
+        session.ended("daemon_stopped");
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(session.receipts.get(ref)?.phase, retained).toBe(retained === "refused" ? "refused" : "unconfirmed");
+        expect(readRetained, retained).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
+      }
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
   it("keeps one row for a command's refusals, clears it once accepted, and never hides an uncertain outcome", async () => {
     vi.useFakeTimers();
     try {

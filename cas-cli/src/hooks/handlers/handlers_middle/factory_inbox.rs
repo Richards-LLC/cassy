@@ -250,18 +250,22 @@ fn recipient_aliases(input: &HookInput) -> Vec<String> {
 /// turn. A subagent's id is a bare hex string with no `@`; only the
 /// session's own teammate id counts as the parent.
 pub(crate) fn owns_factory_inbox(input: &HookInput) -> bool {
+    crate::harness_policy::is_factory_agent(input) && !is_child_hook(input)
+}
+
+/// Whether this hook comes from a subagent rather than the session's own
+/// main thread (shared with the supervisor foreground guard, cas-4acdf).
+pub(crate) fn is_child_hook(input: &HookInput) -> bool {
     // A child always arrives with its own `agent_id` (a hex id, alongside its
     // `agent_type`). An `agent_type` on its own is the main thread's type:
     // Claude Code fills it from `--agent-type` (`general-purpose`,
     // `team-lead`, `director`) for every hook of a Teams member.
-    let is_child = input
+    input
         .agent_id
         .as_deref()
-        .is_some_and(|agent_id| !is_own_teammate_id(input, agent_id));
-    crate::harness_policy::is_factory_agent(input)
-        && !is_child
-        && input.subagent_type.is_none()
-        && !input.transcript_path.as_deref().is_some_and(|path| {
+        .is_some_and(|agent_id| !is_own_teammate_id(input, agent_id))
+        || input.subagent_type.is_some()
+        || input.transcript_path.as_deref().is_some_and(|path| {
             Path::new(path).components().any(|part| part.as_os_str() == "subagents")
         })
 }

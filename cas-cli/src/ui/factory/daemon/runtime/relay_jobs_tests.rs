@@ -487,6 +487,61 @@ async fn c4491f_relay_write_is_never_given_up() {
     assert_eq!(reported, 1);
 }
 
+/// cas-e37f: soundwave gabber's writer waits came from the progress-watchdog
+/// sweep holding the store writer up to 8 s with task scans and git. Its reads
+/// now finish while the writer is busy; only its writes queue behind it.
+#[tokio::test]
+async fn cas_e37f_progress_watchdog_reads_without_the_store_writer() {
+    use super::relay_jobs::{Relay, RelayOutput};
+    let (_dir, cas_dir) = project_with_worker();
+    // A parked delivery held for a later train: its completion edges need a
+    // git containment check, which must also run before the writer.
+    let mut supervisor = cas_types::Agent::new("s-1".into(), "relay-supervisor".into());
+    supervisor.role = cas_types::AgentRole::Supervisor;
+    supervisor.factory_session = Some("provision-test".into());
+    crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+    let sha = "a".repeat(40);
+    let mut held = cas_types::Task::new("cas-held".into(), "Held delivery".into());
+    held.status = cas_types::TaskStatus::AwaitingMerge;
+    held.assignee = Some("w-1".into());
+    held.notes = "[2026-11-20 10:00] DECISION HOLD: ships on the next train".into();
+    held.deliverables.factory_branch_anchor = Some(sha.clone());
+    held.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector: "project:relay".into(), target_branch: "main".into(),
+    });
+    crate::store::open_task_store(&cas_dir).unwrap().add(&held).unwrap();
+    // Git traces every command it runs in the project to this file.
+    assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(cas_dir.parent().unwrap())
+        .status().unwrap().success());
+    let trace = tempfile::tempdir().unwrap();
+    let log = trace.path().join("git.log");
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("GIT_TRACE", &log);
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    assert!(daemon.relay_jobs.submit_write(&mut daemon.queue_jobs, "busy-writer", None, move || {
+        let _ = wait.recv();
+        RelayOutput::Written
+    }));
+    daemon.submit_progress_watchdog();
+    assert!(daemon.relay_jobs.reading(Relay::ProgressWatchdog), "the scan is a read");
+    assert!(!daemon.relay_jobs.writing("progress-watchdog"), "nothing waits on the writer yet");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon.relay_jobs.reading(Relay::ProgressWatchdog) {
+        daemon.drain_relay_jobs();
+        assert!(Instant::now() < deadline, "the scan waited on the busy writer");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(daemon.relay_jobs.writing("progress-watchdog"), "only its writes queue behind the writer");
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(calls.lines().any(|call| call.contains(&format!("merge-base --is-ancestor {sha} "))),
+        "the held delivery's containment check ran before the writer was free: {calls:?}");
+    release.send(()).unwrap();
+    settle_relays(&mut daemon).await;
+    let armed = crate::store::open_reminder_store(&cas_dir).unwrap().list_for_task("cas-held").unwrap();
+    assert!(armed.iter().any(|row| row.trigger_event.as_deref() == Some("branch_contained_in")), "{armed:?}");
+}
+
 /// cas-4491f review M3: a batch's writes are applied before its reads, and a
 /// read submitted before a write of the same key landed cannot ask for that
 /// write again (no duplicate notice, no second permission answer).

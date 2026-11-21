@@ -1118,10 +1118,18 @@ impl CasService {
             let recorded = tokio::task::spawn_blocking(move || {
                 // A checked disposition belongs to this request, unlike the row's
                 // current status or the legacy error-shaped MERGE REQUIRED reply.
-                let failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true)
-                    || result.structured_content.as_ref().and_then(|v| v["code"].as_str()) == Some("parked_awaiting_merge"));
                 let retry_peer_park = peer_publication_failed(&joined);
-                let summary = if let (Some(summary), Some(detail)) =
+                // Legacy error-shaped parks carry this request's checked
+                // disposition too. A typed publication failure must still
+                // retain its actual failure and daemon retry ownership.
+                let own_outcome = receipt.outcome.get().filter(|_|
+                    !retry_peer_park && matches!(&joined, Ok(Ok(_))));
+                let failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true)
+                    || own_outcome.is_some()
+                    || result.structured_content.as_ref().and_then(|v| v["code"].as_str()) == Some("parked_awaiting_merge"));
+                let summary = if let Some(outcome) = own_outcome {
+                    outcome.clone()
+                } else if let (Some(summary), Some(detail)) =
                     (receipt.park_refusal_summary.get(), refusal_text(&joined))
                 {
                     let artifacts_root = service.inner.load_config().factory().artifacts_root;

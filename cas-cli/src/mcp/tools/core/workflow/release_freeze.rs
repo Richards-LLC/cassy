@@ -823,7 +823,8 @@ mod tests {
 
     /// GH #1919: G-100 says to retarget parked work to the next train. That
     /// one proof_scope_fix update now moves the parent too, so the re-park
-    /// start is not refused G-06 by the frozen train.
+    /// start is not refused G-06 by the frozen train. cas-cc3a: the move is
+    /// one transaction with the retarget.
     #[tokio::test]
     async fn retarget_to_next_train_moves_parent_so_start_is_not_refused_gh_1919() {
         let _env = TestEnvGuard::temp_home();
@@ -851,12 +852,22 @@ mod tests {
         );
         core.open_agent_store().unwrap().register(&supervisor).unwrap();
         core.set_agent_id_for_testing(supervisor.id);
-        let req = serde_json::from_value(serde_json::json!({"id": "cas-feat"})).unwrap();
-        core.cas_task_update_with_delivery_mode(
-            req, None, Some(next), true, Some("cas-tr froze; next train"), None, None, None, false,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{}", error.message));
+        let retarget = || core.cas_task_update_with_delivery_mode(
+            serde_json::from_value(serde_json::json!({"id": "cas-feat"})).unwrap(),
+            None, Some(next), true, Some("cas-tr froze; next train"), None, None, None, false,
+        );
+        // cas-cc3a: a store failure while the parent moves leaves the old
+        // target and the old parent, so the same retarget can be replayed.
+        let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER cas_cc3a_parent_add BEFORE INSERT ON dependencies
+            WHEN NEW.to_id = 'cas-tr2' BEGIN SELECT RAISE(ABORT, 'injected parent add failure'); END;").unwrap();
+        assert!(retarget().await.is_err(), "the injected failure refuses the retarget");
+        let kept = store.get("cas-feat").unwrap();
+        assert_eq!(kept.deliverables.work_target.map(|target| target.target_branch).as_deref(),
+            Some("epic/release-train-vnext-cas-tr"));
+        assert_eq!(store.get_parent_epic("cas-feat").unwrap().map(|epic| epic.id).as_deref(), Some("cas-tr"));
+        db.execute_batch("DROP TRIGGER cas_cc3a_parent_add").unwrap();
+        retarget().await.unwrap_or_else(|error| panic!("{}", error.message));
 
         assert_eq!(store.get_parent_epic("cas-feat").unwrap().map(|epic| epic.id).as_deref(), Some("cas-tr2"));
         check_staffing(&root, "cas-feat").unwrap();

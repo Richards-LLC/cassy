@@ -1580,12 +1580,15 @@ impl CasCore {
                     reason,
                 )
             } else {
-                cas_store::correct_parked_delivery_proof_scope(
+                // cas-cc3a: the parent move commits in the retarget's own
+                // transaction, so a failure leaves both unchanged.
+                cas_store::correct_parked_delivery_proof_scope_with_parent_move(
                     &self.cas_root,
                     &task,
                     original_updated_at,
                     &supervisor.id,
                     reason,
+                    train_move.as_ref().map(|(old, new)| (old.as_str(), new.as_str())),
                 )
             };
             correction.map_err(|error| McpError {
@@ -1594,15 +1597,10 @@ impl CasCore {
                 data: None,
             })?;
             if let Some((old_parent, new_parent)) = train_move.as_ref() {
-                task_store.remove_dependency(&task.id, old_parent)
-                    .and_then(|()| task_store.add_dependency(&Dependency::new(
-                        task.id.clone(), new_parent.clone(), DependencyType::ParentChild,
-                    )))
-                    .map_err(|error| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!("Failed to move parent to train {new_parent}: {error}")),
-                        data: None,
-                    })?;
+                let moved = |to: &String| Dependency::new(task.id.clone(), to.clone(), DependencyType::ParentChild);
+                if let Err(error) = task_store.publish_dependency_move(&moved(old_parent), &moved(new_parent)) {
+                    tracing::warn!(task_id = %task.id, %error, "cas-cc3a: parent move not queued for cloud sync");
+                }
             }
             let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
             let result_target = if methodology_fix {

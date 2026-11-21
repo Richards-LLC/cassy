@@ -2283,6 +2283,22 @@ pub fn correct_parked_delivery_proof_scope(
     supervisor_agent_id: &str,
     reason: &str,
 ) -> Result<ProofScopeCorrectionOutcome> {
+    correct_parked_delivery_proof_scope_with_parent_move(
+        cas_dir, corrected_task, expected_updated_at, supervisor_agent_id, reason, None,
+    )
+}
+
+/// [`correct_parked_delivery_proof_scope`] that also moves the task's
+/// ParentChild edge from `parent_move.0` to `parent_move.1` in the same
+/// transaction (cas-cc3a): a failure leaves the target and parent unchanged.
+pub fn correct_parked_delivery_proof_scope_with_parent_move(
+    cas_dir: &Path,
+    corrected_task: &Task,
+    expected_updated_at: DateTime<Utc>,
+    supervisor_agent_id: &str,
+    reason: &str,
+    parent_move: Option<(&str, &str)>,
+) -> Result<ProofScopeCorrectionOutcome> {
     correct_parked_delivery_proof_scope_inner(
         cas_dir,
         corrected_task,
@@ -2291,6 +2307,7 @@ pub fn correct_parked_delivery_proof_scope(
         reason,
         false,
         false,
+        parent_move,
     )
 }
 
@@ -2313,6 +2330,7 @@ pub fn correct_parked_delivery_proof_targets(
         reason,
         true,
         true,
+        None,
     )
 }
 
@@ -2327,7 +2345,7 @@ pub fn correct_parked_delivery_execution_note(
     reason: &str,
 ) -> Result<ProofScopeCorrectionOutcome> {
     correct_parked_delivery_proof_scope_inner(
-        cas_dir, corrected_task, expected_updated_at, supervisor_agent_id, reason, true, false,
+        cas_dir, corrected_task, expected_updated_at, supervisor_agent_id, reason, true, false, None,
     )
 }
 
@@ -2340,6 +2358,7 @@ fn correct_parked_delivery_proof_scope_inner(
     reason: &str,
     allow_merged_delivery: bool,
     require_merged_delivery: bool,
+    parent_move: Option<(&str, &str)>,
 ) -> Result<ProofScopeCorrectionOutcome> {
     if reason.trim().is_empty() || supervisor_agent_id.trim().is_empty() {
         return Err(StoreError::Parse(
@@ -2582,6 +2601,19 @@ fn correct_parked_delivery_proof_scope_inner(
         return Err(StoreError::Other(
             "proof-scope correction requires an unchanged active delivery or previously cleared artifact scope".to_string(),
         ));
+    }
+    if let Some((old_parent, new_parent)) = parent_move {
+        // Only the ParentChild edge moves; any other link is left alone.
+        let parent_child = cas_types::DependencyType::ParentChild.to_string();
+        tx.execute(
+            "DELETE FROM dependencies WHERE from_id = ?1 AND to_id = ?2 AND dep_type = ?3",
+            params![corrected_task.id, old_parent, parent_child],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO dependencies (from_id, to_id, dep_type, created_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![corrected_task.id, new_parent, parent_child, now.to_rfc3339(), supervisor_agent_id],
+        )?;
     }
     let event = Event::new(
         EventType::TaskNoteAdded,

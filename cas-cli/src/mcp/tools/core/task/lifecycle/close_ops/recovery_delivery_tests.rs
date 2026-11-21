@@ -557,7 +557,7 @@ async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_
 case "$*" in
   'repo view example/class-audit '*) printf '%s' '{{"nameWithOwner":"example/class-audit"}}' ;;
   *'/actions/runs/91/artifacts'*) cat '{root}/artifacts.json' ;;
-  *'/actions/artifacts/901/zip'*) cat '{root}/receipt.zip' ;;
+  *'/actions/artifacts/'*'/zip'*) cat '{root}/receipt.zip' ;;
   *'/actions/runs/91/jobs'*) printf '%s' '{{"jobs":[{{"name":"Scoped Validation — impact own tests","conclusion":"failure"}}]}}' ;;
   *'/branches/'*) cat '{root}/branch.json' ;;
   *'/actions/runs'*) cat '{root}/runs.json' ;;
@@ -569,7 +569,10 @@ esac
 "#, root=root.display());
     crate::test_paths::warm_stub(&gh, &script);
     env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
-    let write_receipt = |head: &str, caused: bool| {
+    let write_receipt = |head: &str, caused: bool, artifact_id: u64| {
+        std::fs::write(root.join("artifacts.json"), serde_json::to_vec(&serde_json::json!({"artifacts":[{
+            "id":artifact_id,"name":"lane-impact-91-own","size_in_bytes":4096,"expired":false
+        }]})).unwrap()).unwrap();
         let file = std::fs::File::create(root.join("receipt.zip")).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         for (name, data) in [
@@ -596,13 +599,13 @@ esac
     };
     // Inherited-only receipts and stale-head receipts do not trigger, even
     // when log text appears to attribute a named failure to this delivery.
-    for (head, caused) in [(f.final_tip.as_str(), false), (f.predecessor.as_str(), true)] {
-        write_receipt(head, caused);
+    for (head, caused, artifact_id) in [(f.final_tip.as_str(), false, 901), (f.predecessor.as_str(), true, 902)] {
+        write_receipt(head, caused, artifact_id);
         assert_eq!(poll().failures.len(), 1);
         assert!(tasks.get_execution_state(TASK).unwrap().is_none_or(|state|
             state.get("failing_tests").is_none()));
     }
-    write_receipt(&f.final_tip, true);
+    write_receipt(&f.final_tip, true, 903);
     assert_eq!(poll().failures.len(), 1);
     assert_eq!(tasks.get_execution_state(TASK).unwrap().unwrap_or_default()["failing_tests"],
         serde_json::json!(["ui::list::sorts", "ui::list::filters"]));

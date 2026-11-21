@@ -6,6 +6,10 @@ use crate::test_support::TestEnvGuard;
 use cas_core::hooks::types::HookInput;
 
 fn refusal_codes(tool_input: serde_json::Value) -> Option<Vec<&'static str>> {
+    refusal_codes_as(tool_input, None)
+}
+
+fn refusal_codes_as(tool_input: serde_json::Value, agent_id: Option<&str>) -> Option<Vec<&'static str>> {
     let input = HookInput {
         session_id: "supervisor-foreground-fixture".into(),
         cwd: "/test".into(),
@@ -13,6 +17,7 @@ fn refusal_codes(tool_input: serde_json::Value) -> Option<Vec<&'static str>> {
         tool_name: Some("Bash".into()),
         tool_input: Some(tool_input),
         agent_role: Some("supervisor".into()),
+        agent_id: agent_id.map(Into::into),
         ..HookInput::default()
     };
     let output = handle_pre_tool_use(&input, None).unwrap();
@@ -36,10 +41,14 @@ const LONG: &[&str] = &[
 
 #[test]
 fn cas_803f_supervisor_long_foreground_bash_is_refused() {
-    let _env = TestEnvGuard::temp_home();
-    for command in LONG {
-        let codes = refusal_codes(serde_json::json!({"command": command}));
-        assert!(codes.as_deref().is_some_and(|codes| codes.contains(&"H-49")), "{command}: {codes:?}");
+    let mut env = TestEnvGuard::temp_home();
+    env.remove("CAS_FACTORY_SESSION");
+    // cas-4acdf: an Agent Teams supervisor carries its own agent_id on every hook.
+    for agent_id in [None, Some("supervisor@fixture-team")] {
+        for command in LONG {
+            let codes = refusal_codes_as(serde_json::json!({"command": command}), agent_id);
+            assert!(codes.as_deref().is_some_and(|codes| codes.contains(&"H-49")), "{agent_id:?} {command}: {codes:?}");
+        }
     }
     let codes = refusal_codes(serde_json::json!({"command": "git fetch origin", "timeout": 600000}));
     assert!(codes.is_some_and(|codes| codes.contains(&"H-49")), "explicit timeout above 60 s");

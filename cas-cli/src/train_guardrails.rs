@@ -347,6 +347,40 @@ fn tip_verdict(cas_dir: &Path, epic: &Task, train: &str) -> Option<(String, bool
     Some((tip, green))
 }
 
+/// The train's admitted deliveries, oldest first (GH #1826): each task's
+/// newest recorded merge into `train` while that merge is still the task's
+/// delivery. A merged delivery that awaits its verdict or batch QA counts like
+/// a closed one. A delivery a train drop reopened, or one re-parked with a new
+/// anchor, counts again only once it merges again.
+pub(crate) fn admitted_merges(
+    cas_dir: &Path,
+    tasks: &dyn crate::store::TaskStore,
+    train: &str,
+) -> Result<Vec<cas_store::ObservedDeliveryMerge>> {
+    let mut newest = std::collections::BTreeMap::new();
+    for merge in cas_store::observed_delivery_merges_into(cas_dir, train)? {
+        newest.insert(merge.task_id.clone(), merge);
+    }
+    let mut admitted: Vec<_> = newest
+        .into_values()
+        .filter(|merge| match tasks.get(&merge.task_id) {
+            // A merge observed for a task this machine has not synced yet.
+            Err(_) => true,
+            Ok(task) => match task.status {
+                TaskStatus::Open | TaskStatus::InProgress => false,
+                TaskStatus::AwaitingMerge | TaskStatus::Blocked => {
+                    task.deliverables.factory_branch_anchor.as_deref().is_none_or(|anchor| {
+                        merge.source_commit_sha.starts_with(anchor) || anchor.starts_with(&merge.source_commit_sha)
+                    })
+                }
+                _ => true,
+            },
+        })
+        .collect();
+    admitted.sort_by_key(|merge| merge.created_at);
+    Ok(admitted)
+}
+
 /// Send each due "train ready to cut" notice once. `queued` holds branches
 /// whose PR is in the merge queue now; a train in the queue is being cut.
 // gate[W-52 watchdog]: Release-train cut notice
@@ -380,10 +414,7 @@ pub(crate) fn notify_train_cuts(
             Ok(Outcome::Declined(reason)) => crate::gates::tag("G-122", format!("Auto-cut: {reason}.")),
             Err(error) => format!("Auto-cut failed: {error:#}."),
         };
-        let merged: Vec<_> = cas_store::observed_delivery_merges_into(cas_dir, &train)?
-            .into_iter()
-            .filter(|merge| tasks.get(&merge.task_id).is_ok_and(|t| t.status == TaskStatus::Closed))
-            .collect();
+        let merged = admitted_merges(cas_dir, tasks.as_ref(), &train)?;
         let (Some(first), Some(last)) = (merged.first(), merged.last()) else { continue };
         let in_flight = tasks
             .get_subtasks(&epic.id)?
@@ -405,7 +436,7 @@ pub(crate) fn notify_train_cuts(
             (
                 last.merge_commit_sha.clone(),
                 format!(
-                    "Release train {train} ({}) is ready to cut: {} reviewed fixes merged, none in \
+                    "Release train {train} ({}) is ready to cut: {} deliveries merged, none in \
                      progress, no queue run in flight. {cut}. {auto_cut}",
                     epic.id,
                     merged.len()
@@ -415,8 +446,8 @@ pub(crate) fn notify_train_cuts(
             (
                 format!("max-age:{tip}"),
                 format!(
-                    "Release train {train} ({}) reached its {max_age_hours} h max age: {} reviewed \
-                     fixes merged, first {} min ago; {in_flight} still in flight remain assigned to this train. \
+                    "Release train {train} ({}) reached its {max_age_hours} h max age: {} deliveries \
+                     merged, first {} min ago; {in_flight} still in flight remain assigned to this train. \
                      {cut}; retarget unfinished deliveries to the next train before merging them. {auto_cut}",
                     epic.id,
                     merged.len(),

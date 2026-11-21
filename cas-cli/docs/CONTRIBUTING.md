@@ -5246,8 +5246,17 @@ frozen in 24 hours, the last at least `release.auto_cut_min_interval_hours`
 (default 2) ago. A zero daily cap turns auto-cut off. Only the verification
 owner's machine applies its project config; a peer daemon cannot substitute
 its own enabled defaults, and an unknown owner or machine declines with
-G-122. A live successor on the owner's machine can recover the cut. Every
-freeze note, including an operator takeover, records `machine=<label>`.
+G-122, naming the owner as this machine resolves it (name, id and registered
+machine). A live successor on the owner's machine can recover the cut. A live
+supervisor's `train_freeze` takes over release ownership
+(`epic_verification_owner`) from a departed, stale or other-machine owner, so
+after a cross-machine handoff the receiving supervisor's freeze makes its
+machine the train's (GH #1826); a live owner of another factory session on
+this machine keeps the train. Every freeze note, including an operator
+takeover, records `machine=<label>`. The cut notice counts each task's newest
+merge into the train once while it is still that task's delivery, so merged
+deliveries awaiting their verdict or batch QA count and a dropped, reopened one
+does not.
 It freezes the train, then waits for the supervisor's
 `release-notes.md` in the train's artifact directory, waking the supervisor
 once per tip with a deadline. With the draft present it runs the

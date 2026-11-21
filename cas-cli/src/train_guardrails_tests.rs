@@ -241,3 +241,25 @@ fn cut_notice_is_sent_once_per_state_and_names_the_project_release_command_cas_d
         "cut notices wake an idle supervisor: {prompts:?}"
     );
 }
+
+/// GH #1826: the cut notice counted only closed children, so six of eighteen
+/// merged deliveries. A merged delivery awaiting its verdict counts; a
+/// dropped, reopened one does not until it merges again.
+#[test]
+fn admitted_merges_count_merged_deliveries_awaiting_their_verdict_gh_1826() {
+    let _env = TestEnvGuard::temp_home();
+    let (dir, _origin) = repo_with_origin();
+    let repo = dir.path();
+    let children = [("cas-a", TaskStatus::Closed), ("cas-b", TaskStatus::AwaitingMerge), ("cas-c", TaskStatus::Open)];
+    let cas_dir = train(repo, &children);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    for (id, _) in children {
+        merge_child(repo, &cas_dir, id, &[]);
+    }
+    let mut parked = tasks.get("cas-b").unwrap();
+    parked.deliverables.factory_branch_anchor = Some(run(repo, &["rev-parse", "factory/cas-b"]));
+    tasks.update(&parked).unwrap();
+
+    let ids: Vec<_> = admitted_merges(&cas_dir, tasks.as_ref(), TRAIN).unwrap().into_iter().map(|m| m.task_id).collect();
+    assert_eq!(ids, ["cas-a", "cas-b"]);
+}

@@ -1724,8 +1724,17 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
+    for locally_merged in [true, false] {
     let fixture = arm_delivery("driftbefore", "drift-before", &mut env).await;
 
+    // A retry can already contain the delivery locally without having
+    // published it. Reconciliation must not publish unrelated train work.
+    if locally_merged {
+        run_git(&["push", "origin", "main"], &fixture.repo.root);
+        run_git(&["merge", "--no-ff", &fixture.receipt.source_branch, "-m", "local delivery awaiting publication"], &fixture.repo.root);
+    }
+    let origin = fixture.repo.root.join(".git/test-origin.git");
+    let remote_before = git_stdout(&origin, &["rev-parse", "refs/heads/main"]);
     // A concurrent actor commits on the reviewed target after approval.
     std::fs::write(fixture.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();
     run_git(&["add", "concurrent.txt"], &fixture.repo.root);
@@ -1739,6 +1748,14 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
+    if locally_merged {
+        assert!(output.contains("[G-110]"), "{output}");
+        assert!(output.contains(&drifted) && output.contains(&remote_before), "{output}");
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), drifted);
+        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]), remote_before);
+        assert_no_delivery_projection(&fixture, delivery_state(&fixture));
+        continue;
+    }
     let state = delivery_state(&fixture);
     assert_eq!(
         state,
@@ -1755,6 +1772,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
         drifted,
         "a refused delivery must not touch the target ref"
     );
+    }
 }
 
 /// The real cas-0a21 race: drift lands *between* preflight and the merge, via

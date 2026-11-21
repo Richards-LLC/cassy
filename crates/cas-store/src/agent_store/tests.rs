@@ -1760,6 +1760,8 @@ fn factory_names_cannot_share_a_branch_namespace_cas_ea31() {
     assert!(overlap.to_string().contains("WORKER_NAME_OVERLAPS"), "{overlap}");
     store.register(&worker("ab-id", "ab")).expect("re-registering the same name");
     store.register(&worker("ab2-id", "ab-2")).expect("a digit-led extension never parses as a task");
+    let supervisor = Agent::new_with_role("absup-id".into(), "ab-supervisor".into(), AgentRole::Supervisor);
+    store.register(&supervisor).expect("a supervisor owns no factory branches, so it cannot collide");
     let mut renamed = worker("other-id", "other");
     store.register(&renamed).unwrap();
     renamed.name = "ab-cd-12".into();

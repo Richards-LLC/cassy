@@ -3114,6 +3114,9 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // macOS inherits the listener's O_NONBLOCK; the read
+                        // timeout only bounds a blocking stream.
+                        stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
                         return stream;
                     }

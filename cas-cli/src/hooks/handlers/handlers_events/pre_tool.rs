@@ -9600,6 +9600,11 @@ EOF
             format!("n=0; x='{operand}'; let n=x; echo $((n+1))"),
             format!("n=0; for n in '{operand}'; do :; done; echo $((n+1))"),
             format!("n=0; export n='{operand}'; echo $((n+1))"),
+            // Only a standalone assignment statement initialises a counter:
+            // never an argument, a prefix assignment or an inherited value.
+            "echo n=0; echo $((n+1))".to_owned(),
+            "n=0 true; echo $((n+1))".to_owned(),
+            format!("n='{operand}0' bash -c 'echo n=0; echo $((n+1))'"),
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();

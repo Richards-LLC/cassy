@@ -2598,25 +2598,25 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskStartRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.start_task_with_principal(req, None).await
+        self.start_task_and_relaunch_sandbox(req, None).await
     }
 
     pub(crate) async fn task_start_for_queue(
         &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal,
     ) -> Result<CallToolResult, McpError> {
-        self.start_task_with_principal(req, Some(principal)).await
+        self.start_task_and_relaunch_sandbox(req, Some(principal)).await
     }
 
     /// cas-f157: a sandboxed worker's launched profile grants only the tasks
     /// it held at launch. A successful start of any other task relaunches the
     /// worker through the recycle path; the relaunch regenerates the profile
     /// for its current tasks and resumes this one.
-    async fn start_task_with_principal(
+    async fn start_task_and_relaunch_sandbox(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
     ) -> Result<CallToolResult, McpError> {
         let worker = principal.as_ref().map(|principal| principal.agent().clone());
         let task_id = req.id.clone();
-        let mut result = self.start_task_inner(req, principal).await?;
+        let mut result = self.start_task_with_principal(req, principal).await?;
         let worker = match worker {
             Some(worker) => Some(worker),
             None => self.get_agent_id().ok().and_then(|id| self.open_agent_store().ok()?.get(&id).ok()),
@@ -2639,7 +2639,7 @@ impl CasCore {
     }
 
     // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
-    async fn start_task_inner(
+    async fn start_task_with_principal(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
     ) -> Result<CallToolResult, McpError> {
         let mut queued_start = principal.is_some();

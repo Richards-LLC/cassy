@@ -8044,6 +8044,7 @@ impl CasCore {
     // gate-audit[tags_from]: registry_upkeep.rs#finish
     // gate-audit[no_delivery]: selector Chooses the separately measured non-delivery disposition; does not approve a delivered-code bypass.
     // gate-audit[skip_reason]: selector Derived verification disposition; only actual waived gates contribute override codes.
+    // gate-audit[operator_qa_waiver]: bypass G-64 The operator's recorded recovery decision (GH #2270) waives independent QA for its scope's measured non-Tier-2 contained delivery; the waiver is tagged and noted.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,

@@ -2148,18 +2148,22 @@ pub(crate) fn process_parent(pid: u32) -> Option<u32> {
     #[cfg(target_os = "linux")]
     { parent_pid_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?) }
     #[cfg(target_os = "macos")]
-    {
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-        let size = std::mem::size_of::<libc::proc_bsdinfo>();
-        // SAFETY: libproc writes at most the allocated structure and keeps no pointer.
-        let read = unsafe { libc::proc_pidinfo(pid.try_into().ok()?, libc::PROC_PIDTBSDINFO,
-            0, info.as_mut_ptr().cast(), size as libc::c_int) };
-        if read != size as libc::c_int { return None; }
-        // SAFETY: exact-size success initializes all fields.
-        Some(unsafe { info.assume_init() }.pbi_ppid)
-    }
+    { Some(macos_bsd_info(pid)?.pbi_ppid) }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     { let _ = pid; None }
+}
+
+/// libproc's BSD info for `pid`; `None` for a zombie or a reaped process.
+#[cfg(target_os = "macos")]
+fn macos_bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: libproc writes at most the allocated structure and keeps no pointer.
+    let read = unsafe { libc::proc_pidinfo(pid.try_into().ok()?, libc::PROC_PIDTBSDINFO,
+        0, info.as_mut_ptr().cast(), size as libc::c_int) };
+    if read != size as libc::c_int { return None; }
+    // SAFETY: exact-size success initializes all fields.
+    Some(unsafe { info.assume_init() })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2305,37 +2309,30 @@ fn macos_kill_target(w: &ResolvedWorker, kill_pid: Option<u32>) -> Option<(u32, 
 /// same-user descendant until all are stopped and no new one appears (a
 /// stopped process cannot fork), then SIGKILL the descendants; the caller's
 /// `killpg` ends the harness group. Syscalls only, so this works while the
-/// user's process slots are exhausted and fork fails. Returns the count killed.
+/// user's process slots are exhausted and fork fails. Returns the count
+/// killed, or `None` when the tree could not be enumerated or did not settle:
+/// cleanup is then unconfirmed and the caller keeps the lease.
 #[cfg(target_os = "macos")]
-fn kill_descendant_tree(root: u32) -> usize {
-    fn bsd_status(pid: u32) -> Option<(u32, libc::uid_t)> {
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-        // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
-        let written = unsafe {
-            libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size)
-        };
-        (written == size).then_some((info.pbi_status, info.pbi_uid))
-    }
-    fn children(pid: u32) -> Vec<u32> {
-        let mut buffer = vec![0 as libc::pid_t; 4096];
-        let bytes = (buffer.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
-        // SAFETY: the kernel writes at most `bytes` into the buffer.
-        let count = unsafe { libc::proc_listchildpids(pid as libc::pid_t, buffer.as_mut_ptr().cast(), bytes) };
-        buffer.truncate(usize::try_from(count).unwrap_or(0).min(buffer.len()));
-        buffer.into_iter().filter(|child| *child > 0).map(|child| child as u32).collect()
-    }
+fn kill_descendant_tree(root: u32) -> Option<usize> {
     let uid = unsafe { libc::getuid() };
-    let settled = |pid: u32| bsd_status(pid).is_none_or(|(status, _)| status == libc::SSTOP || status == libc::SZOMB);
+    // A zombie or reaped process has no BSD info and no children left.
+    let settled = |pid: u32| macos_bsd_info(pid).is_none_or(|info| info.pbi_status == libc::SSTOP);
     let mut owned = std::collections::BTreeSet::new();
+    let mut confirmed = false;
     // SAFETY: signalling an identity-verified pid has no effect on this process.
     unsafe { libc::kill(root as libc::pid_t, libc::SIGSTOP) };
-    for _ in 0..400 {
+    'rounds: for _ in 0..400 {
         let mut pending = vec![root];
         let mut fresh = false;
         while let Some(parent) = pending.pop() {
-            for child in children(parent) {
-                if bsd_status(child).is_some_and(|(_, owner)| owner == uid) {
+            let Some(children) = macos_descendant_pids(parent) else {
+                if parent == root || macos_bsd_info(parent).is_some() {
+                    break 'rounds;
+                }
+                continue;
+            };
+            for child in children {
+                if macos_bsd_info(child).is_some_and(|info| info.pbi_uid == uid) {
                     if owned.insert(child) {
                         fresh = true;
                         unsafe { libc::kill(child as libc::pid_t, libc::SIGSTOP) };
@@ -2345,6 +2342,7 @@ fn kill_descendant_tree(root: u32) -> usize {
             }
         }
         if !fresh && settled(root) && owned.iter().all(|pid| settled(*pid)) {
+            confirmed = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -2352,7 +2350,7 @@ fn kill_descendant_tree(root: u32) -> usize {
     for pid in &owned {
         unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
     }
-    owned.len()
+    confirmed.then_some(owned.len())
 }
 
 #[cfg(target_os = "macos")]
@@ -2565,17 +2563,25 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         // handle that safely.
                         let group_pid = resolve_group_leader_pid(pid).unwrap_or(pid);
                         #[cfg(target_os = "macos")]
-                        if tracked_identity_verified {
-                            let killed = kill_descendant_tree(pid);
-                            summary.push(format!("SIGKILL delivered to {killed} descendant process(es) of {pid}"));
-                        }
+                        let tree_cleaned = !tracked_identity_verified || match kill_descendant_tree(pid) {
+                            Some(killed) => {
+                                summary.push(format!("SIGKILL delivered to {killed} descendant process(es) of {pid}"));
+                                true
+                            }
+                            None => {
+                                summary.push(format!("descendants of {pid} could not be enumerated or stopped; cleanup unconfirmed"));
+                                false
+                            }
+                        };
+                        #[cfg(not(target_os = "macos"))]
+                        let tree_cleaned = true;
                         match send_sigkill(group_pid) {
                             Ok(()) => {
                                 if fingerprint_override {summary.push(crate::gates::override_tag("G-143",""));}
                                 summary.push(format!(
                                     "SIGKILL delivered to process group {group_pid}"
                                 ));
-                                verify_death(group_pid)
+                                verify_death(group_pid) && tree_cleaned
                             }
                             Err(e) => {
                                 summary.push(format!("SIGKILL failed for pid {group_pid}: {e}"));
@@ -5078,7 +5084,7 @@ mod tests {
         };
         assert!(!tree().is_empty(), "the respawner has forked");
 
-        assert!(kill_descendant_tree(root.id()) > 1);
+        assert!(kill_descendant_tree(root.id()).is_some_and(|killed| killed > 1));
         send_sigkill(root.id()).unwrap();
         root.wait().unwrap();
         std::thread::sleep(Duration::from_millis(300));
@@ -5086,6 +5092,16 @@ mod tests {
         assert!(crate::mcp::daemon::pid_alive(sibling.id()), "an unrelated process survives");
         sibling.kill().unwrap();
         sibling.wait().unwrap();
+
+        // A root whose children cannot be listed (here an unreaped zombie) is
+        // "enumeration unavailable", not "no children": cleanup is unconfirmed,
+        // so execute_kill keeps the lease.
+        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        while crate::mcp::daemon::read_pid_starttime(exited.id()).is_some() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(kill_descendant_tree(exited.id()), None);
+        exited.wait().unwrap();
     }
 
     #[cfg(target_os = "macos")]

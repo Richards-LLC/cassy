@@ -8527,8 +8527,9 @@ impl CasCore {
                             .map(|proof| format!(" Bound head: {}.", proof.head_commit))
                             .unwrap_or_default();
                         return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-34", format!(
-                            "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.{} If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then the supervisor must retry ordinary task close; never ask the worker to re-close.",
-                            req.id, dispatch.id, bound_head, sup_ver, req.id, dispatch.id
+                            "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.{} If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then the supervisor must retry ordinary task close; never ask the worker to re-close. {}",
+                            req.id, dispatch.id, bound_head, sup_ver, req.id, dispatch.id,
+                            crate::cloud::peer_mailbox::verification_answers::RECOVERY
                         )))));
                     }
                 }
@@ -11241,8 +11242,8 @@ impl CasCore {
                             crate::mcp::tools::core::guidance::supervisor_prefix()
                         );
                         let supervisor_recovery_hint = format!(
-                            "If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then the supervisor must retry ordinary task close; never ask the worker to re-close.",
-                            req.id, dispatch.id
+                            "If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then the supervisor must retry ordinary task close; never ask the worker to re-close. {}",
+                            req.id, dispatch.id, crate::cloud::peer_mailbox::verification_answers::RECOVERY
                         );
 
                         // cas-90e8: a factory worker gets only the gate line with

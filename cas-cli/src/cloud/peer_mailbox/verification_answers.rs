@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 const NOTE: &str = "PEER_VERIFICATION_QUESTION: ";
 const TAG: &str = "CAS_PEER_VERIFICATION_ANSWER_V1 ";
+pub(crate) const RECOVERY: &str = "For a peer-machine supervisor_call, the train owner reads PEER_VERIFICATION_QUESTION in task notes and authorizes its exact dispatch with verification action=add status=supervisor_call summary=\"<answer>\". Authenticated peer mail lets only the named builder supervisor record that identical answer; independent review then continues. This grants no merge or close authority.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Question {

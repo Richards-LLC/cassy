@@ -181,7 +181,10 @@ pub(crate) fn queue_answer(
         || question.deadline <= chrono::Utc::now()
         || !answer_only(req)
     {
-        return Err(crate::gates::tag("G-154", "Peer question requires its current train owner and an unexpired exact dispatch. Send only task_id, dispatch_id, status=supervisor_call and summary; final verdicts remain with the independent verifier."));
+        return Err(crate::gates::tag(
+            "G-154",
+            "Peer question requires its current train owner and an unexpired exact dispatch. Send only task_id, dispatch_id, status=supervisor_call and summary; final verdicts remain with the independent verifier.",
+        ));
     }
     let answer = Answer {
         question,
@@ -300,15 +303,81 @@ pub(crate) fn authorized(
     let Some(id) = req.dispatch_id.as_deref() else {
         return Ok(false);
     };
-    let bytes = match std::fs::read(answer_path(root, id)) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.to_string()),
+    let Some(answer) = stored_answer(root, id)? else {
+        return Ok(false);
     };
-    let answer: Answer = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     Ok(answer.question.dispatch == id
         && answer.summary == summary
         && current(root, task, actor, &answer)?)
+}
+
+fn stored_answer(root: &Path, id: &str) -> Result<Option<Answer>, String> {
+    let bytes = match std::fs::read(answer_path(root, id)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Recheck on the already-held writer transaction. Opening a store here can
+/// initialize schema on another connection and deadlock against this writer.
+pub(crate) fn recheck(
+    root: &Path,
+    conn: &rusqlite::Connection,
+    task: &Task,
+    actor: &Agent,
+    req: &VerificationAddRequest,
+    summary: &str,
+) -> Result<bool, String> {
+    if !answer_only(req) {
+        return Ok(false);
+    }
+    let Some(id) = req.dispatch_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(answer) = stored_answer(root, id)? else {
+        return Ok(false);
+    };
+    let q = &answer.question;
+    if q.task != task.id
+        || q.dispatch != id
+        || answer.summary != summary
+        || actor.id != q.responder
+        || actor.role != AgentRole::Supervisor
+        || actor.machine_id.as_deref() != Some(&q.machine)
+        || actor.factory_session.as_deref() != Some(&q.session)
+        || crate::cloud::resolve_canonical_id(root).as_deref() != Some(&q.project)
+    {
+        return Ok(false);
+    }
+    let valid: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks task JOIN tasks train ON train.id=?2
+         WHERE task.id=?1 AND train.epic_verification_owner=?3
+           AND train.status NOT IN ('closed','cancelled') AND task.status NOT IN ('closed','cancelled')
+           AND COALESCE(json_extract(task.deliverables,'$.delivery_cycle'),0)=?4
+           AND train.id=(SELECT parent.id FROM tasks parent JOIN dependencies d ON d.to_id=parent.id
+               WHERE d.from_id=task.id AND d.dep_type='parent-child' AND parent.task_type='epic'
+               ORDER BY (parent.status IN ('closed','cancelled')),d.created_at DESC,parent.id ASC LIMIT 1)
+           AND ?5=(SELECT id FROM verifications WHERE dispatch_id=?6 ORDER BY created_at DESC,id DESC LIMIT 1)
+           AND EXISTS(SELECT 1 FROM verifications WHERE id=?5 AND task_id=?1 AND dispatch_id=?6
+               AND status='supervisor_call' AND provenance='task_verifier' AND agent_id=?7 AND summary=?8))",
+        rusqlite::params![q.task,q.train,q.owner,task.deliverables.delivery_cycle,q.question,q.dispatch,q.verifier,q.summary],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let dispatch =
+        cas_store::get_verification_dispatch_with_conn(conn, id).map_err(|e| e.to_string())?;
+    Ok(valid
+        && boundary(task, &dispatch)? == q.boundary
+        && dispatch.state == cas_types::VerificationDispatchState::Claimed
+        && dispatch.deadline_at == q.deadline
+        && dispatch.deadline_at > chrono::Utc::now()
+        && dispatch.verifier_agent_id.as_deref() == Some(&q.verifier)
+        && cas_store::get_latest_verification_dispatch_with_conn(conn, &task.id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|latest| latest.id == id))
 }
 
 pub(crate) fn ingest(

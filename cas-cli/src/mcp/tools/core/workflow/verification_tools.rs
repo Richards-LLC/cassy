@@ -919,10 +919,8 @@ impl CasCore {
                     data: None,
                 })?;
             if delegated_answer {
-                let current_task = task_store.get(&req.task_id)
-                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-                if !crate::cloud::peer_mailbox::verification_answers::authorized(
-                    &self.cas_root, &current_task, &caller, &req, &submitted_summary,
+                if !crate::cloud::peer_mailbox::verification_answers::recheck(
+                    &self.cas_root, &tx, &task, &caller, &req, &submitted_summary,
                 ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))? {
                     return Err(Self::error(ErrorCode::INVALID_PARAMS,
                         crate::gates::tag("G-154", "Peer answer authorization changed before recording; inspect the current owner and question.")));

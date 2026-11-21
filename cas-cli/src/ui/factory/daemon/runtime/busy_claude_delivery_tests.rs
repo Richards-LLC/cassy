@@ -519,6 +519,7 @@ async fn urgent_send_to_a_worker_mid_tool_call_reports_the_hold_gh2275() {
         "urgent": true,
     }))
     .unwrap();
+    let queue = factory.queue();
     let send = service.coordination(Parameters(request));
     let daemon = &mut factory.daemon;
     let passes = async {
@@ -544,7 +545,7 @@ async fn urgent_send_to_a_worker_mid_tool_call_reports_the_hold_gh2275() {
         .collect();
     assert!(text.starts_with("held #"), "{text}");
     let id: i64 = text["held #".len()..].split(' ').next().unwrap().parse().unwrap();
-    let report = factory.queue().message_delivery_report(id).unwrap().unwrap();
+    let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient), "{report:?}");
     assert!(report.recipient_transport_at.is_none(), "nothing was typed into the call: {report:?}");
 }

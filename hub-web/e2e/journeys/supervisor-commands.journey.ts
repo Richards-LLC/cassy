@@ -146,7 +146,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
       await journey.stage("Reload Cassy once from the idle Claude supervisor", async () => {
         const input = composer(page);
-        await input.fill("/mcp"); await input.press("Enter");
+        await input.fill("/mcp");
+        await expect(commandButton(page, "mcp")).toBeVisible();
+        await input.press("Enter");
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
         expect(frames).toHaveLength(1);
@@ -259,6 +261,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await journey.open();
         await conversationRow(page).click();
         await composer(page).fill("/mcp");
+        // Until the session reports command support the palette says so and
+        // Send runs nothing; wait for the command to be offered, as a user would.
+        await expect(commandButton(page, "mcp")).toBeVisible();
         await sendButton(page).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const request = hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body as { client_ref: string };

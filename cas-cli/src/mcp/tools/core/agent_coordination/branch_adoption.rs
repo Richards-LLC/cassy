@@ -105,6 +105,27 @@ impl Git<'_> {
     }
 }
 
+/// The newest first-parent commit after `anchor` on `head` such that every
+/// commit up to it names `task_id` in its subject (`fix(<task-id>): ...`).
+fn task_rework_tip(git: &Git<'_>, anchor: &str, head: &str, task_id: &str) -> Result<String, String> {
+    let names_task = |subject: &str| subject.match_indices(task_id).any(|(at, _)| {
+        let before = subject[..at].chars().next_back();
+        let after = subject[at + task_id.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !after.is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+    });
+    let mut tip = anchor.to_string();
+    let range = format!("{anchor}..{head}");
+    for line in git.run(&["log", "--reverse", "--first-parent", "--format=%H %s", "--end-of-options", &range])?.lines() {
+        let Some((commit, subject)) = line.split_once(' ') else { break };
+        if !names_task(subject) {
+            break;
+        }
+        tip = commit.to_string();
+    }
+    Ok(tip)
+}
+
 pub(super) fn adopt_task_branch(
     cas_root: &Path,
     task: &Task,
@@ -222,7 +243,14 @@ pub(super) fn adopt_task_branch(
             if !git.ancestor(&delivery, &source_head)? {
                 return Err("task delivery anchor is not on the source branch".into());
             }
-            delivery
+            if task.deliverables.factory_branch_anchor.is_some() {
+                delivery
+            } else {
+                // A retired anchor (review return, conflict rework) can be
+                // followed by this task's own rework. Adopt that rework, and
+                // stop at the first commit that does not name this task.
+                task_rework_tip(&git, &delivery, &source_head, &task.id)?
+            }
         }
         None => source_head,
     };

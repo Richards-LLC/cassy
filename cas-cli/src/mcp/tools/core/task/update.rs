@@ -2078,9 +2078,19 @@ impl CasCore {
             } else {
                 task.deliverables.work_target = branch_only_target;
             }
-            // cas-7305: a supervisor's explicit target is the task's delivery
-            // authority, not an inherited epic default (repo_context pins).
-            task.deliverables.work_target_pinned = task.deliverables.work_target.is_some();
+            // cas-7305: an explicit retarget off the parent epic's lane, such
+            // as to trunk, is the task's own delivery authority, and
+            // worktree_merge accepts it without allow_trunk. A target on the
+            // epic's lane stays inherited, so it follows a lane rename (cas-1cc7).
+            if let Some(target) = task.deliverables.work_target.as_ref()
+                && let Some(epic) = task_store.get_parent_epic(&task.id).ok().flatten()
+                && epic.effective_epic_branch().is_some_and(|lane| lane != target.target_branch)
+                && epic.branch.as_deref() != Some(target.target_branch.as_str())
+                && !(target.target_branch.starts_with("epic/")
+                    && target.target_branch.ends_with(&format!("-{}", epic.id)))
+            {
+                task.deliverables.work_target_pinned = true;
+            }
             refresh_epic_lane_binding(&mut task);
             changes.push("work_target");
         }

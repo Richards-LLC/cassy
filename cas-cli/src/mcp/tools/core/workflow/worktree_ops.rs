@@ -4525,6 +4525,7 @@ impl CasCore {
     // gate-audit[supervisor_override]: bypass G-108 Accepts a measured red/unvalidated lane CI result with an audited reason.
     // gate-audit[ci_override]: selector Derived accepted CI decision; external supervisor_override owns G-108.
     // gate-audit[dirty_override]: selector Derived accepted dirty handling; external force owns G-138.
+    // gate-audit[allow_trunk]: input Passed to the G-140 resolver, which owns the bypass; read here only to name the trunk notice's authorization (cas-7305).
     async fn worktree_merge_attempt(
         &self,
         id: &str,

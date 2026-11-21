@@ -9,7 +9,6 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/worker-run.sh
 . "$repo/scripts/worker-run.sh"
 trap 'worker_run_end "$?"' EXIT
-worker_run_begin "$repo"
 plan="$(python3 "$repo/scripts/journey-receipt.py" plan --repo "$repo" "$@")"
 mapfile -t fields < <(python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["artifacts"]); print(p["head_sha"]); print(p["workers"]); print(p["scope"]); print(p["grep"] or "")' <<<"$plan")
 artifacts="${fields[0]}"

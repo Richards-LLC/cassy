@@ -9661,7 +9661,11 @@ mod cas_6b42_peer_delivery_tests {
                 "open" => receiver.status = cas_types::TaskStatus::Open,
                 _ => {}
             }
-            tasks.update(&receiver).unwrap();
+            // Each row is an independent fixture. A stale unguarded reset
+            // correctly unions prior notes (cas-3045), which would leak the
+            // preceding rework decision into the next case.
+            let current = tasks.get(&receiver.id).unwrap();
+            tasks.update_if_current(&receiver, &current).unwrap();
             server.reset().await;
             Mock::given(method("GET")).and(path(endpoint))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

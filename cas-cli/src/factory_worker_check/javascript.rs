@@ -1456,7 +1456,15 @@ fn execute_tests(
     }
     let mut count = 0;
     let mut attribution_notes = Vec::new();
-    let reports = tempfile::tempdir()?;
+    // GH #2172: a Playwright run writes its reports under the task's artifact
+    // directory; a failure keeps them so the traces it printed stay readable.
+    let reports = if runner == "playwright" {
+        let parent = playwright_reports_parent(cas_root, repo);
+        std::fs::create_dir_all(&parent)?;
+        tempfile::Builder::new().prefix(&format!("playwright-{}-", head.get(..12).unwrap_or(head))).tempdir_in(parent)?
+    } else {
+        tempfile::tempdir()?
+    };
     let outcome = (|| -> Result<()> {
     for (path, selected) in by_file {
         // One config path: the caller's own `--config` wins over the
@@ -1624,18 +1632,12 @@ fn execute_tests(
         if runner != "playwright" {
             return Err(error);
         }
-        // GH #2172: the temporary reports directory is removed on return,
-        // taking the traces and error contexts Playwright just printed.
-        // The failure stays first; the durable path follows it.
-        return Err(match retain_playwright_failure(cas_root, repo, head, reports.path()) {
-            Ok(Some(kept)) => anyhow::anyhow!(
-                "{error:#}\nFailed Playwright evidence (traces, error contexts, JSON reports) kept at {}; \
-                 the temporary paths printed above are removed when worker-check returns.",
-                kept.display()
-            ),
-            Ok(None) => error,
-            Err(copy) => anyhow::anyhow!("{error:#}\nFailed Playwright evidence could not be kept: {copy:#}"),
-        });
+        // The failure stays first; the kept directory follows it.
+        let kept = reports.keep();
+        return Err(anyhow::anyhow!(
+            "{error:#}\nFailed Playwright evidence (traces, error contexts, JSON reports) is kept at {}.",
+            kept.display()
+        ));
     }
     if super::clean_head(repo)? != head {
         bail!("repository changed during JavaScript stability run");
@@ -1653,49 +1655,16 @@ fn execute_tests(
     Ok(proof)
 }
 
-/// Copy a failed Playwright run's output directory and JSON reports from the
-/// temporary `reports` directory into the task's artifact directory, keeping
-/// their layout. Passing runs never call this, so they leave no traces.
-fn retain_playwright_failure(cas_root: &Path, repo: &Path, head: &str, reports: &Path) -> Result<Option<PathBuf>> {
-    let mut sources: Vec<PathBuf> = std::fs::read_dir(reports)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-            name == "playwright-output" || (name.starts_with("report-") && name.ends_with(".json")) || name == "discovery.json"
-        })
-        .collect();
-    if sources.is_empty() {
-        return Ok(None);
-    }
-    sources.sort();
+/// Where a Playwright run's reports directory lives: the task's artifact
+/// directory, or a shared worker-check one when no task owns the checkout.
+fn playwright_reports_parent(cas_root: &Path, repo: &Path) -> PathBuf {
     let configured = crate::config::Config::load(cas_root).ok().and_then(|config| config.factory().artifacts_root.clone());
     let base = crate::config::project_factory_artifacts_root(
         cas_root,
         &crate::config::resolved_factory_artifacts_root(configured.as_deref()),
     );
     let owner = crate::factory_capacity_wait::bound_task(cas_root, repo).unwrap_or_else(|| "worker-check".into());
-    let kept = base.join(owner).join("worker-check").join(format!(
-        "playwright-{}-{}",
-        head.get(..12).unwrap_or(head),
-        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
-    ));
-    fn copy(source: &Path, destination: &Path) -> Result<()> {
-        if source.is_dir() {
-            std::fs::create_dir_all(destination)?;
-            for entry in std::fs::read_dir(source)? {
-                let entry = entry?;
-                copy(&entry.path(), &destination.join(entry.file_name()))?;
-            }
-        } else if source.is_file() {
-            std::fs::copy(source, destination)?;
-        }
-        Ok(())
-    }
-    std::fs::create_dir_all(&kept)?;
-    for source in sources {
-        copy(&source, &kept.join(source.file_name().context("report entry name")?))?;
-    }
-    Ok(Some(kept))
+    base.join(owner).join("worker-check")
 }
 
 fn validate_declared_discovery(

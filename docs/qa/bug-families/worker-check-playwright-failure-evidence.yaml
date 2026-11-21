@@ -1,4 +1,4 @@
 title: Failed capped Playwright runs keep their traces after worker-check returns
-statement: A failing capped Playwright run copies its traces, error contexts and JSON reports into the task's artifact directory and names that path in the failure, instead of pointing at a temporary directory that is removed when worker-check exits.
+statement: A failing capped Playwright run keeps its traces, error contexts and JSON reports in a directory under the task artifacts and names that path in the failure, instead of writing them to a temporary directory that is removed when worker-check exits.
 found: 2026-11-21
 tasks: [cas-a582]

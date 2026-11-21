@@ -1018,6 +1018,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         });
       }
       render();
+      // The open conversation's command palette reads this connection too.
+      if (machine.id === selectedMachineId && wasLive !== (state.phase === "live")) slashCommands?.palette.sync();
     },
     onAttachState: (session, state) => {
       const key = sessionKey(machine.id, session);
@@ -1052,7 +1054,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         if (recovered.length) void acknowledgeAttentionGroup(recovered);
       }
       else restateAttachmentNotes(document, machine.id);
-      if (selectedMachineId === machine.id && selectedSession === session) render();
+      if (selectedMachineId === machine.id && selectedSession === session) {
+        render();
+        // A slash command typed before the socket was live lists its commands
+        // the moment it connects, without the operator changing the text.
+        if (attachWasLive !== (state.phase === "live")) slashCommands?.palette.sync();
+      }
       // The list row and the footer read the session's connection too.
       else renderConversationList();
     },

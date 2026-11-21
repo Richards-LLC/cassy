@@ -330,6 +330,88 @@ fn minified_drop_requires_audited_superseding_commit_cas_5f0b() {
 }
 
 #[test]
+fn frozen_epic_review_uses_shipped_integration_cas_161f() {
+    const SOURCE: &str = "src/footer.rs";
+    const EPIC: &str = "epic/frozen";
+    for (integration, dropped) in [("staging", true), ("main", true), ("unrelated", true), ("staging", false)] {
+        let (dir, task, frozen) = fixture_with_subjects(dropped, None, true, SOURCE, false);
+        let repo = dir.path();
+        let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
+        git(repo, &["branch", EPIC]);
+        git(
+            repo,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{EPIC}"),
+                &frozen,
+            ],
+        );
+        let identity = task_commit_identity(&task, None);
+        let judge = |reason: Option<&str>| {
+            anchored_delivery_content_gate(&task, repo, anchor, EPIC, None, &identity, None, reason)
+        };
+        // The merge discarded this source and no subsequent edit replaces it.
+        if dropped {
+            assert!(matches!(judge(None), Some(MergeStateGateOutcome::Reject(_))));
+        } else {
+            assert!(judge(None).is_none());
+        }
+        if integration != "main" {
+            git(repo, &["checkout", "-qb", integration]);
+        }
+        let replacement = commit(
+            repo,
+            SOURCE,
+            "fn footer() { render_status(); }\n",
+            "fix: reviewed footer rewrite",
+        );
+        // Simulate a refreshed remote with a stale local integration branch.
+        git(
+            repo,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{integration}"),
+                &replacement,
+            ],
+        );
+        git(repo, &["checkout", "-q", EPIC]);
+        git(repo, &["branch", "-f", integration, &frozen]);
+        assert_eq!(git(repo, &["rev-parse", EPIC]), frozen);
+        let reason =
+            format!("reviewed-drop: {replacement} -- footer rewritten after the epic shipped");
+        let review =
+            validated_delivery_drop_review(repo, anchor, EPIC, &[SOURCE.into()], Some(&reason));
+        let outcome = judge(Some(&reason));
+        if integration == "unrelated" {
+            assert!(
+                review.is_err(),
+                "an arbitrary side branch cannot prove shipment"
+            );
+            assert!(
+                matches!(outcome, Some(MergeStateGateOutcome::Reject(_))),
+                "{outcome:?}"
+            );
+        } else {
+            assert!(review.is_ok(), "{integration}: {review:?}");
+            if dropped {
+                assert!(matches!(outcome, Some(MergeStateGateOutcome::ProceedWithNote(_))), "{integration}: {outcome:?}");
+                // Epic accounting consumes the persisted protocol receipt too.
+                let mut reviewed = task.clone();
+                reviewed.notes = format!("DECISION: reviewed delivery content supersession accepted for task {}; {}", task.id, review.unwrap().unwrap());
+                let (presence, _) = epic_anchor_content_presence(&reviewed, &[], repo, anchor, EPIC);
+                assert!(matches!(presence, DeliveryContentPresence::Superseded { .. }), "{presence:?}");
+            } else {
+                assert!(judge(None).is_none(), "ordinary evolution needs no review");
+                let (presence, _) = epic_anchor_content_presence(&task, &[], repo, anchor, EPIC);
+                assert!(matches!(presence, DeliveryContentPresence::Superseded { .. }), "{presence:?}");
+            }
+            // A persisted review snapshot remains immutable despite new refs.
+            assert!(validated_delivery_drop_review(repo, anchor, &frozen, &[SOURCE.into()], Some(&reason)).is_err());
+        }
+    }
+}
+
+#[test]
 fn later_lane_task_cannot_supply_old_minified_snapshot_cas_5f0b() {
     let (dir, task, _) = fixture(true, false);
     let repo = dir.path();

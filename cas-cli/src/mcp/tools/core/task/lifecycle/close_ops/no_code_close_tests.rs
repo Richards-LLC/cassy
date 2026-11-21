@@ -1114,9 +1114,12 @@ async fn close_retries_a_note_in_the_terminal_write_gap_cas_90ea() {
 
 /// GH #2277: a live pinned owner reviews a worker's artifact-only child;
 /// the worker cannot finalize it and another supervisor cannot take it over.
+/// GH #2284: the same handoff preserves a commitless no_delivery spike
+/// without inventing a worker lane or asking for another verification.
 #[tokio::test]
 async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     let mut env = TestEnvGuard::temp_home();
+    for no_delivery in [false, true] {
     let target = "epic/owner-review";
     let f = fixture(&mut env, target);
     let owner_id = "nocode-supervisor-session";
@@ -1132,17 +1135,54 @@ async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     epic.epic_verification_owner = Some(owner_id.into());
     f.put(&epic);
     let id = "cas-141a-child";
-    let mut child = assigned(id, TaskType::Chore, target);
-    child.execution_note = Some("no-code".into());
+    let mut child = assigned(id, if no_delivery { TaskType::Spike } else { TaskType::Chore }, target);
+    if no_delivery {
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let source = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &source, target]);
+        git(f.dir.path(), &["branch", "-D", LANE]);
+        git(f.dir.path(), &["push", "-q", "origin", "--delete", LANE]);
+        child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: child.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(), branch: source,
+            base_sha: git(f.dir.path(), &["rev-parse", target]),
+        });
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    } else {
+        child.execution_note = Some("no-code".into());
+    }
     f.put(&child);
     open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
         id.into(), epic.id.clone(), DependencyType::ParentChild,
     )).unwrap();
     claim(&f, id);
-    let request = serde_json::json!({
+    let mut request = serde_json::json!({
         "action": "close", "id": id, "reason": "Measurement recorded",
         "external_ref": PROOF,
     });
+    let reviewed = if no_delivery {
+        request.as_object_mut().unwrap().remove("external_ref");
+        request["no_delivery"] = true.into();
+        let pending = call(&f.worker, request.clone()).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
+            .unwrap().unwrap_or_else(|| panic!("{pending}"));
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{pending}");
+        let mut verdict = cas_types::Verification::approved(
+            "ver-2284".into(), id.into(), "Commitless spike reviewed".into(),
+        );
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner_id.into());
+        verdict.issuer_agent_id = verdict.agent_id.clone();
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        use cas_store::VerificationStore;
+        cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, owner_id, None, true).unwrap();
+        Some(dispatch.id)
+    } else { None };
     let response = f.worker.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
         .await.expect("worker close must park for the live train owner");
     assert_ne!(response.is_error, Some(true), "{response:?}");
@@ -1150,12 +1190,13 @@ async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     assert_eq!(parked.status, TaskStatus::AwaitingMerge);
     assert!(parked.closed_at.is_none());
     assert!(parked.terminal_outcome.is_none());
-    assert_eq!(parked.external_ref.as_deref(), Some(PROOF));
-    assert!(parked.deliverables.factory_branch_anchor.is_none());
-    assert!(parked.deliverables.parked_branch.is_none());
+    if !no_delivery { assert_eq!(parked.external_ref.as_deref(), Some(PROOF)); }
     assert!(agents.get_lease(id).unwrap().is_none());
     assert_eq!(agents.get(owner_id).unwrap().cc_session_id, owner.cc_session_id);
 
+    // The owner's ordinary close consumes the same approved proof. It must
+    // not require a methodology edit, a new declaration or another review.
+    if no_delivery { request.as_object_mut().unwrap().remove("no_delivery"); }
     agents.register(&Agent::new_with_role(
         "other-supervisor".into(), "other-supervisor".into(), AgentRole::Supervisor,
     )).unwrap();
@@ -1169,7 +1210,20 @@ async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
     let accepted = f.supervisor.task(Parameters(serde_json::from_value(request).unwrap()))
         .await.unwrap();
     assert_ne!(accepted.is_error, Some(true), "{accepted:?}");
-    assert_eq!(f.task(id).status, TaskStatus::Closed);
+    let closed = f.task(id);
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(parked.deliverables.factory_branch_anchor.is_none());
+    assert!(parked.deliverables.historical_factory_branch_anchors.is_empty());
+    assert!(parked.deliverables.parked_branch.is_none());
+    assert!(closed.deliverables.factory_branch_anchor.is_none());
+    assert!(closed.deliverables.parked_branch.is_none());
+    if let Some(dispatch) = reviewed {
+        assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id, dispatch);
+        assert!(closed.execution_note.is_none());
+        assert_eq!(git(f.dir.path(), &["rev-parse", &child.deliverables.factory_branch_start.unwrap().branch]),
+            git(f.dir.path(), &["rev-parse", target]));
+    }
+    }
 }
 
 /// GH #1147: a no-code spike created under a code epic inherits the epic's
@@ -3920,5 +3974,107 @@ fn shared_queue_checkout_rebinds_only_executable_work_gh2022() {
             assert_eq!(crate::factory_isolation::classify_worker_binding(&worker.name,
                 crate::factory_isolation::branch_at(f.dir.path()).as_deref()), crate::factory_isolation::WorkerBinding::Own);
         }
+    }
+}
+
+/// GH #2250/#2274: the worker may already have parked B, or only started
+/// B without a commit, when a relayed review correction is pushed on A's
+/// recorded source branch. B's lease must not acquire A's identified repair.
+#[tokio::test]
+async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
+    let mut env = TestEnvGuard::temp_home();
+    for b_parked in [true, false] {
+        let f = fixture(&mut env, "epic/next");
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-a0a0";
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["switch", "-c", &lane, "origin/epic/next"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let mut a = assigned(id, TaskType::Bug, "epic/next");
+        a.status = TaskStatus::Open;
+        f.put(&a);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        std::fs::write(checkout.join("repair.md"), "initial delivery\n").unwrap();
+        git(&checkout, &["add", "repair.md"]);
+        git(&checkout, &["commit", "-qm", "fix(cas-a0a0): initial delivery"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        let close = serde_json::json!({"action":"close", "id":id, "reason":"Delivery ready"});
+        let first = call(&f.worker, close.clone()).await;
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{first}");
+        let recorded = f.task(id).deliverables.factory_branch_anchor.unwrap();
+
+        let mut b = assigned("cas-b0b0", TaskType::Bug, "epic/next");
+        b.status = TaskStatus::Open;
+        f.put(&b);
+        call(&f.worker, serde_json::json!({"action":"start", "id":b.id})).await;
+        // Separate the lease clocks explicitly; Git timestamps must not depend
+        // on whether two starts happen to fall in the same host clock tick.
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        for (task, time) in [(id, "2025-01-01T00:00:00Z"), (b.id.as_str(), "2025-01-02T00:00:00Z")] {
+            conn.execute("UPDATE task_lease_history SET timestamp=?1 WHERE task_id=?2", rusqlite::params![time, task]).unwrap();
+        }
+        if b_parked {
+            std::fs::write(checkout.join("b.md"), "task B\n").unwrap();
+            git(&checkout, &["add", "b.md"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-b0b0): delivery B"]);
+            let branch = git(&checkout, &["branch", "--show-current"]);
+            git(&checkout, &["push", "-q", "origin", &branch]);
+            let response = call(&f.worker, serde_json::json!({"action":"close", "id":b.id, "reason":"Delivery B ready"})).await;
+            assert_eq!(f.task(&b.id).status, TaskStatus::AwaitingMerge, "{response}");
+        }
+        let b_before = f.task(&b.id);
+        git(&checkout, &["switch", &lane]);
+        for subject in ["fix(cas-b0b0): foreign repair\n\nContext: cas-a0a0", "fix: unnamed repair", "fix(cas-a0a0): restore review correction"] {
+            git(&checkout, &["reset", "--hard", &recorded]);
+            std::fs::write(checkout.join("repair.md"), format!("{subject}\n")).unwrap();
+            git(&checkout, &["add", "repair.md"]);
+            git(&checkout, &["commit", "-qm", subject]);
+            let own = subject.starts_with("fix(cas-a0a0)");
+            if own {
+                // GH #2274: an epic sync after the repair imports a sibling's
+                // delivery without changing which task owns the repair.
+                git(repo, &["switch", "epic/next"]);
+                std::fs::write(repo.join("target.md"), "integrated sibling\n").unwrap();
+                git(repo, &["add", "target.md"]);
+                git(repo, &["commit", "-qm", "fix(cas-c0c0): target progress"]);
+                git(repo, &["push", "-q", "origin", "epic/next"]);
+                git(&checkout, &["merge", "--no-ff", "-qm", "sync declared target", "origin/epic/next"]);
+            }
+            git(&checkout, &["push", "-q", "--force", "origin", &lane]);
+            let tip = git(&checkout, &["rev-parse", "HEAD"]);
+            let response = call(&f.worker, close.clone()).await;
+            assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+            assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(),
+                Some(if own { tip.as_str() } else { recorded.as_str() }),
+                "b_parked={b_parked}, subject={subject}: {response}");
+            assert_eq!(crate::gates::codes_in(&response).contains(&"G-60"), !own, "{response}");
+            let b_after = f.task(&b.id);
+            assert_eq!(b_after.status, b_before.status);
+            assert_eq!(b_after.deliverables.factory_branch_anchor, b_before.deliverables.factory_branch_anchor);
+        }
+        // Attribution does not grant worker review authority. The supervisor
+        // returns A through request_changes; hold unfinished B before restart.
+        let start = serde_json::json!({"action":"start", "id":id});
+        let error = f.worker.task(Parameters(serde_json::from_value(start.clone()).unwrap())).await.unwrap_err();
+        assert!(crate::gates::codes_in(&error.message).contains(&"G-05"));
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let returned = call(&f.supervisor, serde_json::json!({"action":"request_changes", "id":id, "reason":"Correct the reviewed delivery"})).await;
+        assert_eq!(f.task(id).status, TaskStatus::Open, "{returned}");
+        env.set("CAS_AGENT_ROLE", "worker");
+        if !b_parked {
+            call(&f.worker, serde_json::json!({"action":"update", "id":b.id, "status":"blocked"})).await;
+        }
+        // First start delivers the unread correction decision without mutation.
+        let _ = f.worker.task(Parameters(serde_json::from_value(start.clone()).unwrap())).await;
+        let resumed = call(&f.worker, start).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{resumed}");
+        assert_eq!(git(&checkout, &["branch", "--show-current"]), lane);
+        assert!(agents.list_active_leases().unwrap().iter()
+            .filter(|lease| lease.agent_id == "nocode-worker-session")
+            .all(|lease| lease.task_id == id));
     }
 }

@@ -1141,8 +1141,8 @@ impl QueueJobs {
         if self.select_in_flight {
             return;
         }
-        // cas-9594c: selection never waits for outstanding stamps. It runs
-        // ahead of them on the writer, and delivery holds every row whose
+        // cas-9594c: selection never waits for outstanding stamps. Its writes
+        // run ahead of them on the writer, and delivery holds every row whose
         // stamp has not landed (`row_settling`) or landed after this submit
         // (`stamped_since`), so a slow writer cannot hold delivery.
         let now = Instant::now();
@@ -1152,7 +1152,8 @@ impl QueueJobs {
         let spec = JobSpec {
             kind: "QueueSelect",
             key: QUEUE_SELECT_KEY.to_string(),
-            lane: Lane::Write,
+            // cas-b355: reads on the select lane; writes hop to the writer.
+            lane: Lane::Select,
             criticality: Criticality::Delivery,
             generation,
             budget: QUEUE_JOB_BUDGET,
@@ -1919,7 +1920,7 @@ impl QueueJobs {
     pub(crate) async fn flush_for_reexec(&mut self, cas_dir: &Path, timeout: Duration) -> anyhow::Result<()> {
         self.settle_injects(cas_dir);
         let started = Instant::now();
-        let lanes = [Lane::Read, Lane::Write, Lane::Blocking, Lane::External];
+        let lanes = Lane::ALL;
         loop {
             self.apply_completions();
             // Idle is decided per lane from one snapshot of its running job
@@ -1964,7 +1965,7 @@ impl QueueJobs {
                     shared.close();
                     let deadline = Instant::now() + timeout;
                     while Instant::now() < deadline
-                        && [Lane::Read, Lane::Write, Lane::Blocking, Lane::External]
+                        && Lane::ALL
                             .into_iter()
                             .any(|lane| {
                                 let stats = shared.lane_stats(lane);

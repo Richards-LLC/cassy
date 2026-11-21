@@ -745,6 +745,97 @@ Release previews can migrate a private snapshot of a lagging store while retaini
 
 Capped worker checks validate physical TMPDIR ancestry before creating temporary output or starting Cargo. A `.git` file, directory or symlink in that ancestry refuses admission with H-50, independently of Git discovery ceilings. Existing safe scratch selection and per-worktree ownership checks remain in force.
 
+The repair class-audit gate also consumes delivery-caused test failures from structured lane-CI attribution receipts. The receipt's plan and delivery must name the same head; inherited or stale failures do not create a class requirement. Lane and merge-queue names accumulate without duplicates, retaining the first twenty distinct names and logging truncation. Requesting changes then requires a selector covering the failing tests' class, with matching capped proof before re-park. Verifier findings require a separately reviewed schema extension.
+
+Delivery integrity follows an epic into staging and main once both its recorded tip and delivery anchor are integrated. Content and reviewed supersession use that later history without changing the task's recorded work target. Arbitrary branches and immutable review snapshots cannot supply newer proof.
+
+A parked delivery that lands on its recorded target outside `worktree_merge`
+(through a PR, a manual merge or a promotion, into any branch) is reconciled by
+the factory daemon. Cassy records the target tip that contains the delivery,
+then runs the ordinary close. An existing approval closes the task. With no
+verdict, the close starts the post-merge verifier on the contained delivery
+(at most four at once), and its approval closes the task. A gate that holds the
+close goes to the supervisor once. Deliveries not yet on their target keep the
+pre-merge approval requirement.
+
+A successor supervisor can recover crash-retained committed work with one
+`recover_branch` action, even when the old factory's dead worker still holds a
+lease. Recovery preserves the source checkout and publishes under the successor's
+own task branch before normal reassignment. It retires only the exact proven-dead
+local lease; live, foreign and unverifiable holders remain protected. Releasing
+the task first is unnecessary and would clear its source assignment.
+
+A raw `gh pr merge` checks the PR's current head rollup before publication.
+Known pending or failed checks hold the command with `PR_CI_PENDING` or
+`PR_CI_FAILED`, including when independent QA is disabled or the target has no
+required GitHub checks. Once those checks succeed, the same command can proceed
+through the existing QA gates. Missing or unavailable CI evidence retains the
+existing admission policy.
+
+Merge-ready guidance asks for the repository's configured PR gate or gate-backed
+queue evidence on the reviewed head and uses `--match-head-commit` when merging.
+A default branch name does not establish hosted protection, and `--auto` alone
+does not guarantee waiting for CI.
+
+Parked review corrections retain their task identity across later worker
+assignments when the pushed recorded source, task-identified authored subjects,
+first-parent continuation and target imports agree. Another open delivery's
+anchor cannot be acquired. Foreign or unnamed work retains the existing lease
+fence. Attribution does not authorize a worker to restart a clean parked task:
+the supervisor first requests changes, and any unfinished successor is held
+before the worker starts the returned task on its recorded source branch.
+
+Evidence restoration compares published artifact times before replacing a local
+file. A newer published local ledger survives an older park manifest. A sealed
+train park requires re-parking when that newer ledger differs from its manifest,
+and its refusal identifies the newer artifact. Newer manifests continue to
+restore older local evidence.
+
+Commander keeps queued supervisor commands and their receipts in the local store across daemon restarts and reexec. Pending commands wait for the next native turn boundary and retain their original device and command reference. A command already claimed for typing is never replayed automatically after a restart. A daemon receipt confirming abandonment before typing shows Not sent. Session end with a potentially stale Queued status stays uncertain and reconciles late submission or outcome evidence. Receipts are bound to the daemon process that recorded them: a later launch reusing the session and supervisor names marks an earlier queue Not sent instead of typing it. Session teardown always completes, even when the receipt store cannot record abandoned commands.
+
+A commitless spike closed with `no_delivery=true` waits for its pinned train
+owner without acquiring a factory delivery branch. Its approved proof remains
+usable when the owner finishes the close. The declaration still requires
+positive absence measurements; tasks with delivered code retain their normal
+branch, review and merge checks.
+
+- **Publication ownership.** Was: session focus could make an operational file
+  wait for an unrelated release. Now: file publication uses its explicit epic,
+  owning task or artifact record, and checks each attributed report in a batch.
+  A standing support report can post while a different epic is under review.
+
+A parked delivery merges through an isolated merge that consumes its exact
+anchor and leaves the worker's checkout untouched. Its source proof depends on
+the delivery mode. A `push_branch` delivery needs a freshly fetched origin ref
+that matches the anchor. A `local_merge` delivery is proven by its local branch
+at the anchor alone, so it merges even when origin is unavailable.
+
+After a supervisor session ends or its daemon stops, Commander asks the hub for each still-open command card's retained receipt. The hub answers from the project's local store without contacting the daemon, only for the device that sent the command. A stored final outcome is always shown; a queued command is shown as Not sent once the daemon that recorded it is gone, because nothing was typed before its claim. When no receipt remains, the card stays Unconfirmed.
+
+### Parked close ownership during worker shutdown
+
+A committed park can answer before evidence, owner publication and its outcome note finish. Worker shutdown, forced shutdown and recycle refuse while that close still owns its process. Queued shutdown rechecks at the actual teardown boundary and preserves task bindings and live mail on refusal.
+
+If owner publication fails after the park, the outcome records that failure and alerts the supervisor. A durable close journal retries only owner publication during daemon recovery, using the existing outbox deduplication key. Recovery stops when that delivery has been superseded; it never repeats task close.
+
+- **Review recovery.** Was: an expired claimed review could keep a merge blocked
+  after its verifier died, requiring a manually recorded error. Now: the owning
+  supervisor's merge retry can confirm local verifier death and release that exact
+  claim for replacement. The candidate and review history stay intact; live or
+  unverifiable children remain protected.
+
+- **Explicit child delivery targets.** Was: a child explicitly aimed at its
+  epic's base could silently inherit the epic lane. Now: the requested branch
+  stays authoritative through display, start and merge. Supervisor scope repair
+  can correct historical effective-target mismatches using the same stored
+  branch; omitted branch defaults still follow epic lane renames.
+
+- **Epic CI evidence.** Was: an intentionally skipped post-merge job blocked
+  epic close even when the PR had tested the identical tree. Now: required
+  check identities and an exact merge-source tree receipt can establish that
+  proof. Missing metadata, untested changes and unsuccessful checks still
+  block close; project-specific CI names are supported.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -890,6 +981,8 @@ Release marker pushes can reuse recorded fast-row proof for a committed tip even
 Every delivery park publishes its cited local evidence for the reviewing machine. Missing files or failed required uploads refuse the park with the unpublished paths so the worker can repair them before a peer review starts. Existing committed evidence is reused on retry.
 
 On ordinary deliveries, local QA artifacts that the close reason does not cite remain optional for publication, preserving log-only and evidence-waiver parks. Routed deliveries retain their required ledger evidence.
+
+Train owners can answer a peer-machine verifier's `supervisor_call` without moving train ownership. Read the public question in task notes, then use `verification action=add` with its task, dispatch, `status=supervisor_call` and answer in `summary`. Cassy queues an authenticated authorization to the dispatch's builder supervisor; that supervisor records the identical payload and the independent verifier continues. The authorization does not grant a final verdict, merge or close permission. Changed questions, deliveries, responders and train owners require fresh authorization.
 
 ## Authoritative Sources
 

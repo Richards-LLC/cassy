@@ -1,0 +1,41 @@
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:36.5292018Z ^[[32;1m        PASS^[[0m [   0.020s] ( 218/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::additive_only_tests^[[0m^[[36m::^[[0m^[[34;1muncommitted_unstaged_modification_is_caught^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:36.5478353Z ^[[32;1m        PASS^[[0m [   0.019s] ( 219/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::additive_only_tests^[[0m^[[36m::^[[0m^[[34;1muncommitted_untracked_file_is_ignored^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:36.5589542Z ^[[32;1m        PASS^[[0m [   0.011s] ( 220/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::additive_only_tests^[[0m^[[36m::^[[0m^[[34;1mvalue_only_parser_allows_modifications_but_rejects_new_surface^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:36.5695736Z ^[[32;1m        PASS^[[0m [   0.011s] ( 221/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::awaiting_merge_anchor_tests^[[0m^[[36m::^[[0m^[[34;1manchor_advance_ignores_non_awaiting_merge_tasks^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:36.5813018Z ^[[32;1m        PASS^[[0m [   0.012s] ( 222/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::awaiting_merge_anchor_tests^[[0m^[[36m::^[[0m^[[34;1mparked_task_does_not_claim_branch_tip_owned_by_next_task^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:36.5897349Z ^[[32;1m        PASS^[[0m [   0.008s] ( 223/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::awaiting_merge_anchor_tests^[[0m^[[36m::^[[0m^[[34;1mretried_awaiting_merge_close_advances_anchor_and_keeps_audit_history^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7741477Z ^[[31;1m        FAIL^[[0m [  26.806s] ( 224/2079) ^[[35;1mcas^[[0m ^[[36mgates::registry_tests^[[0m^[[36m::^[[0m^[[34;1mevery_registered_refusal_site_emits_its_code^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7760155Z ^[[31;1m ^[[0m ^[[31;1mstdout^[[0m ^[[31;1m───^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7760393Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7760476Z     running 1 test
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7760804Z     test gates::registry_tests::every_registered_refusal_site_emits_its_code ... FAILED
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7761189Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7761259Z     failures:
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7761364Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7761429Z     failures:
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7761725Z         gates::registry_tests::every_registered_refusal_site_emits_its_code
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7761977Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7762237Z     test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9446 filtered out; finished in 26.79s
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7762706Z     ^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7762950Z ^[[31;1m ^[[0m ^[[31;1mstderr^[[0m ^[[31;1m───^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:04:38.7763124Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:48.8032691Z ^[[32;1m        PASS^[[0m [   0.108s] ( 583/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests^[[0m^[[36m::^[[0m^[[34;1mreported_count_excludes_commits_already_on_the_remote_target^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:48.9316638Z ^[[32;1m        PASS^[[0m [   0.128s] ( 584/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests^[[0m^[[36m::^[[0m^[[34;1mrequest_changes_fresh_cycle_still_rejects_prior_unmerged_delivery_gh_849^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:49.7679896Z ^[[32;1m        PASS^[[0m [   0.836s] ( 585/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests^[[0m^[[36m::^[[0m^[[34;1mrequest_changes_measures_current_delivery_and_reviewed_drop_is_explicit_cas_d1ee^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:49.8878466Z ^[[32;1m        PASS^[[0m [   0.120s] ( 586/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests^[[0m^[[36m::^[[0m^[[34;1mrestarted_task_with_known_unmerged_delivery_receipt_still_requires_merge_gh_473^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3605878Z ^[[31;1m        FAIL^[[0m [   0.473s] ( 587/2079) ^[[35;1mcas^[[0m ^[[36mmcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests^[[0m^[[36m::^[[0m^[[34;1mretargeted_remote_only_epic_parks_unmerged_delivery_cas_1cc7^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3606419Z ^[[31;1m ^[[0m ^[[31;1mstdout^[[0m ^[[31;1m───^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3606546Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3606619Z     running 1 test
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3606963Z     test mcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests::retargeted_remote_only_epic_parks_unmerged_delivery_cas_1cc7 ... FAILED
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3607271Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3607337Z     failures:
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3607416Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3607472Z     failures:
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3607731Z         mcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests::retargeted_remote_only_epic_parks_unmerged_delivery_cas_1cc7
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3607969Z 
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3608227Z     test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9446 filtered out; finished in 0.46s
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3608476Z     ^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3608620Z ^[[31;1m ^[[0m ^[[31;1mstderr^[[0m ^[[31;1m───^[[0m
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:05:50.3608815Z     fatal: Not a valid object name epic/current-cas-new-parent
+Scoped Validation — impact own tests	UNKNOWN STEP	2026-11-21T08:08:25.9737652Z FAIL: the test run exited 100.

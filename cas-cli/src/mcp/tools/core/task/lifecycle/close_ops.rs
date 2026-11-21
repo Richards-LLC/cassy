@@ -6924,6 +6924,12 @@ impl CasCore {
         } else {
             freshest_target_ref(repo_path, parent_branch)
         };
+        // A later assignment does not own a review correction pushed on this
+        // delivery's recorded source. Require positive subjects and graph/ref
+        // evidence before replacing the lease-time fallback with task identity.
+        if self.recorded_source_review_advance(task_store, task, repo_path, &candidate, &target) {
+            return Some(candidate);
+        }
         let unchanged_rebase = !git_commit_is_ancestor(repo_path, recorded, &candidate)
             && rebased_delivery_has_same_patches(
                 repo_path, recorded, &candidate, &rebase_target, &task.id,
@@ -7024,6 +7030,37 @@ impl CasCore {
             &target,
         )
         .then_some(candidate)
+    }
+
+    /// A relayed review fix may arrive after another task starts or parks.
+    /// The source ref, authored subjects and delivery graph outrank that later
+    /// lease; a shared lane with foreign/unnamed work still uses the old fence.
+    fn recorded_source_review_advance(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo: &std::path::Path,
+        candidate: &str,
+        target: &str,
+    ) -> bool {
+        if task.status != TaskStatus::AwaitingMerge { return false; }
+        let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else { return false; };
+        let Some(branch) = task.deliverables.parked_branch.as_deref()
+            .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
+        else { return false; };
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        if !is_safe_git_refname(branch) { return false; }
+        let source = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            branch.to_string()
+        } else {
+            format!("refs/remotes/origin/{branch}")
+        };
+        resolve_branch_sha(repo, &source).as_deref() == Some(candidate)
+            && no_other_open_anchor_between(task_store, task, repo, recorded, candidate)
+            && own_lane_subjects(repo, task, recorded, candidate).is_ok_and(|subjects| {
+                !subjects.is_empty() && subjects.iter().all(|subject| message_references_task(subject, &task.id))
+            })
+            && parked_anchor_advance_for_task_is_attributable(repo, recorded, candidate, task, None, target)
     }
 
     /// cas-44e93: a recorded anchor origin never had is no delivery (the merge
@@ -7172,6 +7209,11 @@ impl CasCore {
         if !owners.is_empty() {
             return None;
         }
+        // Positive task identity cannot be reassigned by a later lease when
+        // another structural fence rejected the continuation.
+        if git_stdout_lines(repo_path, &["show", "-s", "--format=%s", offending]).ok()?
+            .first().is_some_and(|subject| message_references_task(subject, &task.id))
+        { return None; }
         let since = foreign_since?;
         let epoch = git_stdout_lines(repo_path, &["show", "-s", "--format=%ct", offending]).ok()?
             .first()?.parse::<i64>().ok()?;
@@ -9959,9 +10001,10 @@ impl CasCore {
                             task_store.as_ref(), &task, &close_project_root, &offending, foreign_since,
                         ).map(|sibling| format!(
                             "The advance belongs to task {sibling}. Deliver that task on its own branch; this task's recorded boundary remains unchanged."
-                        )).unwrap_or_else(||
-                            "Ask the supervisor to request changes and review the replacement delivery.".to_string()
-                        );
+                        )).unwrap_or_else(|| format!(
+                            "Ask the supervisor to request changes with `{}task action=request_changes id={} reason=\"review the replacement delivery\"`, then follow `task action=start id={}` to resume the recorded branch.",
+                            crate::mcp::tools::core::guidance::caller_prefix(), task.id, task.id,
+                        ));
                         if merge_conflicted && !task.deliverables.merge_conflicted {
                             self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                         }

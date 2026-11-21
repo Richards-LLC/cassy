@@ -256,12 +256,7 @@ pub(crate) trait JobLanes: Send + Sync {
     fn over_budget_running(&self) -> Vec<super::jobs::RunningJob>;
 }
 
-const JOB_LANES: [super::jobs::Lane; 4] = [
-    super::jobs::Lane::Read,
-    super::jobs::Lane::Write,
-    super::jobs::Lane::Blocking,
-    super::jobs::Lane::External,
-];
+const JOB_LANES: [super::jobs::Lane; 5] = super::jobs::Lane::ALL;
 
 impl<T: Send + 'static> JobLanes for super::jobs::JobRuntime<T> {
     fn lane_stats(&self) -> Vec<super::jobs::LaneStats> {
@@ -283,6 +278,7 @@ fn job_lane_name(lane: super::jobs::Lane) -> &'static str {
         super::jobs::Lane::Write => "write",
         super::jobs::Lane::Blocking => "blocking",
         super::jobs::Lane::External => "external",
+        super::jobs::Lane::Select => "select",
     }
 }
 
@@ -1589,7 +1585,7 @@ mod tests {
             (running.kind.as_str(), running.age_ms),
             ("QueueStamp", 1_500)
         );
-        assert_eq!(status.job_lanes.len(), 4, "{:?}", status.job_lanes);
+        assert_eq!(status.job_lanes.len(), JOB_LANES.len(), "{:?}", status.job_lanes);
         let wedge = status.wedge.expect("wedge in loop.json");
         assert_eq!(
             (wedge.lane.as_str(), wedge.step.as_str()),
@@ -1620,7 +1616,7 @@ mod tests {
         assert!(status.job_lanes["write"].running.is_none());
     }
 
-    /// The job lanes as a test drives them: four lanes in `JOB_LANES` order,
+    /// The job lanes as a test drives them: every lane in `JOB_LANES` order,
     /// with a settable running job on the write lane.
     #[derive(Default)]
     struct FakeJobLanes {

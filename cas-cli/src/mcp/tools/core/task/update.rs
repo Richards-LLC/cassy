@@ -1436,16 +1436,26 @@ impl CasCore {
             };
             if !proof_targets_fix && !risk_fix && !methodology_fix
                 && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
+                // A legacy unpinned base can resolve to its epic's lane.
+                // Pinning that same raw branch repairs the effective target.
+                && super::repo_context::effective_task_work_target(
+                    &task,
+                    task_store.get_parent_epic(&task.id).map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to resolve effective task target: {error}")),
+                        data: None,
+                    })?.as_ref(),
+                ).as_ref() == corrected_target.as_ref()
                 && !artifact_scope_repair
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
+                    message: Cow::from(crate::gates::tag("G-151", format!(
                         "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated. {} Retry task action=close id={} to report the current blocking gate before requesting another scope correction.",
                         last_recorded_close_blocker(&self.cas_root, &task.id)
                             .unwrap_or_else(|| "No close rejection is recorded for this task.".into()),
                         task.id,
-                    )),
+                    ))),
                     data: None,
                 });
             }

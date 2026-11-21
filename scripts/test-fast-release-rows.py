@@ -465,6 +465,20 @@ esac
         owned = self.fast_from(self.base, **env)
         self.assertIn("PASS journey-catalog", owned.stdout, owned.stdout + owned.stderr)
 
+    def test_bash_3_without_a_bash_4_refuses_clearly_cas_eae6(self):
+        # macOS /bin/bash is 3.2. With the re-exec already spent (or no bash 4
+        # anywhere), the gate refuses in one line instead of dying on `declare -A`.
+        old = command(self.repo, "/bin/bash", "-c", "(( BASH_VERSINFO[0] < 4 ))")
+        if old.returncode != 0:
+            self.skipTest("/bin/bash is 4+ on this host")
+        env = dict(os.environ, CAS_RELEASE_GATE_BASH_REEXEC="1")
+        result = command(self.repo, "/bin/bash", "scripts/release-gate.sh", "--fast-rows", "--base", self.base, env=env)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        # Refused before any gate work: no receipt, and one stderr line rather
+        # than the parser error plus its usage text.
+        self.assertEqual(result.stdout, "", result.stdout)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1, result.stderr)
+
     def test_validator_recovery_names_the_installer_failure_and_uses_a_cas_on_path_cas_d4ed(self):
         installer = self.repo / ".git" / "failing-install.sh"
         installer.write_text('#!/usr/bin/env bash\necho "INSTALLER-CAUSE-8c1f http 403" >&2\ntouch "$(dirname "$0")/installer-ran"\nexit 1\n')
@@ -920,6 +934,59 @@ esac
         self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
         self.assertEqual((self.repo / ".git/npm-calls").read_bytes(), npm_calls)
         self.assertEqual([path.stat().st_mtime_ns for path in receipts], modified)
+
+    def test_lane_repush_after_a_train_merge_excludes_the_trains_dist_change_cas_10de(self):
+        # GH #2285: a lane pushes source-only Commander work, merges a train
+        # whose release prep rebuilt hub-web/dist, then pushes again. Only the
+        # lane's own range decides whether committed dist must match a build.
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        hook = self.repo / ".git/hooks/pre-push"
+        hook.write_text('#!/bin/sh\nexec bash scripts/fast-rows-pre-push.sh "$@"\n')
+        hook.chmod(0o755)
+        self.write("hub-web/package.json", '{"name":"fixture","private":true}\n')
+        self.write("hub-web/package-lock.json", '{}\n')
+        self.write("hub-web/dist/app.js", "signup\n")
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        command(self.repo, "git", "checkout", "-qb", "factory/lane")
+        root = self.repo / ".cas"
+        root.mkdir()
+        with (self.repo / ".git/info/exclude").open("a") as exclude:
+            exclude.write("\n/.cas/\n")
+        with sqlite3.connect(root / "cas.db") as db:
+            db.execute("CREATE TABLE tasks (status TEXT, deliverables TEXT)")
+            db.execute("INSERT INTO tasks VALUES (?, ?)", ("in_progress", json.dumps({
+                "work_target": {"target_branch": "epic/train"},
+                "factory_branch_start": {"branch": "factory/lane"},
+            })))
+        validator = self.repo / ".git/receipt-validator"
+        validator.write_text('#!/bin/sh\ncase "$*" in\n'
+                             "'qa journeys --help') echo --base;;\n"
+                             "'qa journeys --check'*) exit 0;;\n*) exit 1;;\nesac\n")
+        validator.chmod(0o755)
+        # Any build attempt is recorded and fails: none is owed here.
+        npm = self.repo / ".git/npm-fixture"
+        npm.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {self.repo}/.git/npm-calls\nexit 1\n')
+        npm.chmod(0o755)
+        env = {"CAS_BIN": str(validator), "NPM": str(npm)}
+        self.write("hub-web/src/signup.ts", "lane signup\n")
+        self.commit()
+        first = self.push(**env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        command(self.repo, "git", "checkout", "-qb", "epic/train", "origin/epic/train")
+        self.write("hub-web/dist/app.js", "release prep rebuilt\n")
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        command(self.repo, "git", "checkout", "-q", "factory/lane")
+        merged = command(self.repo, "git", "merge", "-q", "--no-ff", "epic/train", "-m", "merge train")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        again = self.push(**env)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertFalse((self.repo / ".git/npm-calls").exists(), "a source-only lane owes no dist build")
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()[0],
+                         command(self.repo, "git", "rev-parse", "HEAD").stdout.strip())
 
     def non_head_push_fixture(self, web_change=False):
         remote = Path(self.scratch.name) / "remote.git"

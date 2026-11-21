@@ -7,7 +7,7 @@ use std::path::Path;
 
 use super::ci_watch::{AwaitingMergeDelivery, CiTransport, SupervisorPr};
 
-/// Parked deliveries to `main` whose PR GitHub has not yet been seen merging.
+/// Parked deliveries whose PR GitHub has not yet been seen merging.
 /// cas-c24e: a recorded merge is final, and in batch QA a merged delivery
 /// stays AwaitingMerge until the release verdict; polling its PR every tick
 /// was the factory's largest GitHub GraphQL cost.
@@ -23,10 +23,8 @@ pub(crate) fn awaiting_merge_deliveries(cas_dir: &Path) -> Vec<AwaitingMergeDeli
         })
         .filter_map(|task| {
             let worker = task.assignee?;
-            let work_target = task.deliverables.work_target.as_ref()?;
-            if work_target.target_branch != "main" {
-                return None;
-            }
+            // GH #2282: every configured target, not only main.
+            task.deliverables.work_target.as_ref()?;
             let branch = task
                 .deliverables
                 .parked_branch

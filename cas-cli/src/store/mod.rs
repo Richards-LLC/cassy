@@ -142,6 +142,7 @@ mod cached_task;
 pub mod detect;
 pub mod foreign_project_guard;
 pub mod known_repos;
+pub(crate) mod supervisor_commands;
 mod quarantine_task;
 // `cli/memory.rs` (T5 cas-07d7) and the syncing-store wrappers all
 // call the predicate directly — keeping it in one `pub(crate)` module

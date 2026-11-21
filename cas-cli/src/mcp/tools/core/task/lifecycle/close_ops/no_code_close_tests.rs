@@ -407,6 +407,77 @@ fn issue_delivery(f: &Fixture, id: &str, target: &str) -> (PathBuf, String) {
     (checkout, lane)
 }
 
+/// Ordinary parks must make all close-reason proof portable before handing
+/// the delivery to a verifier on another machine (cas-dae1).
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{body_partial_json, method, path};
+    let mut env = TestEnvGuard::temp_home();
+    for state in ["upload-failed", "missing", "published"] {
+        let f = fixture(&mut env, "main");
+        let server = MockServer::start().await;
+        std::fs::write(f.cas_dir().join("cloud.json"), serde_json::json!({
+            "endpoint": server.uri(), "token": "fixture-token"
+        }).to_string()).unwrap();
+        let id = "cas-dae1";
+        let (checkout, lane) = issue_delivery(&f, id, "main");
+        std::fs::write(checkout.join(".gitignore"), ".cas/\ndurable-artifacts/\ntarget/\n").unwrap();
+        std::fs::write(checkout.join("own.md"), "delivery\n").unwrap();
+        git(&checkout, &["add", ".gitignore", "own.md"]);
+        git(&checkout, &["commit", "-qm", "docs(cas-dae1): owned delivery"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        let capture = checkout.join(".cas/artifacts/capture.txt");
+        let log = checkout.join("target/run.log");
+        for (index, file) in [&capture, &log].into_iter().enumerate() {
+            if state != "missing" {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, format!("proof {index}\n")).unwrap();
+            }
+            let name = file.file_name().unwrap().to_str().unwrap();
+            let response = if state == "upload-failed" {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"),
+                    "upload_url": format!("{}/blob/{index}", server.uri()), "required_headers": {}
+                }))
+            };
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(body_partial_json(serde_json::json!({"name": name})))
+                .respond_with(response).mount(&server).await;
+            Mock::given(method("PUT")).and(path(format!("/blob/{index}")))
+                .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("/api/artifacts/cloud-{index}/complete")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+                .mount(&server).await;
+        }
+        let reply = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id,
+            "reason": format!("PASS proof=`{}` log=target/run.log", capture.display()),
+        })).await;
+        let task = f.task(id);
+        if state == "published" {
+            assert_eq!(task.status, TaskStatus::AwaitingMerge, "{reply}");
+            let records = crate::artifacts::store::SqliteArtifactStore::open(&f.cas_dir())
+                .unwrap().list_for_task(id).unwrap();
+            assert_eq!(records.len(), 2);
+            assert!(records.iter().all(|artifact| artifact.status == "committed"));
+            let manifest: serde_json::Value = task.notes.lines().find_map(|line| {
+                serde_json::from_str(line.strip_prefix("EVIDENCE_SYNC: ")?).ok()
+            }).expect("portable paths recorded for the peer");
+            assert_eq!(manifest["files"].as_array().unwrap().len(), 2);
+        } else {
+            assert_eq!(task.status, TaskStatus::InProgress, "{state}: {reply}");
+            assert!(reply.contains("EVIDENCE PUBLICATION INCOMPLETE"), "{reply}");
+            for name in ["capture.txt", "run.log"] {
+                assert!(reply.contains(name), "unpublished {name}: {reply}");
+            }
+            assert!(task.deliverables.parked_branch.is_none());
+        }
+    }
+}
+
 #[tokio::test]
 async fn own_contextual_task_mention_can_park_gh1496() {
     let mut env = TestEnvGuard::temp_home();

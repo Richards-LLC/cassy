@@ -3,4 +3,4 @@ statement: Factory CI filters merged epic refs, bounds live-parent comparisons, 
 tasks: [cas-066a3]
 fixed_by: [cas-066a3]
 journeys: [FACTORY-MERGE, CLI-RELEASE]
-invariants: [FACTORY-CI-BASE-BOUNDED, RELEASE-EPIC-CLEANUP-LEASE]
+invariants: []

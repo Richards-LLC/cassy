@@ -17,6 +17,21 @@ pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
 fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
+    // No-code close reviews bypass candidate preparation. Resolve committed
+    // proof here, on the common launch path, before constructing the verifier
+    // command. fetch_task checks task scope, revocation, size and SHA-256 and
+    // derives this receiver's project namespace instead of a publisher path.
+    let published = crate::artifacts::proof::list_task_metadata(&core.cas_root, &task.id)
+        .map_err(|error| error.to_string())?;
+    let mut artifacts = Vec::new();
+    for artifact in published.artifacts.into_iter().filter(|artifact|
+        artifact.status == "committed" && artifact.cloud_artifact_id.is_some()) {
+        let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &artifact.id)
+            .map_err(|error| format!("Verifier artifact {} unavailable: {error:#}", artifact.id))?;
+        artifacts.push(serde_json::json!({
+            "artifact_id":record.id, "path":path, "sha256":record.sha256,
+        }));
+    }
     let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
         .and_then(|candidate| candidate.inherited_supervisor_call);
     let supervisor_calls = core.open_verification_store().map_err(|e| e.to_string())?
@@ -29,6 +44,7 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         "inherited_supervisor_call": inherited,
         "qa": {"mode": core.load_config().qa().mode},
         "supervisor_calls": supervisor_calls,
+        "artifacts": artifacts,
     });
     let mut input = serde_json::to_string(&inputs).map_err(|e| e.to_string())?;
     // GH #2047: history grows on every repair round. Keep every source byte,

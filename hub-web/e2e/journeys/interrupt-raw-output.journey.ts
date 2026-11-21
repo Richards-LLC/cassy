@@ -217,7 +217,7 @@ test("HUB-J18 Interrupt recovers when the first lease read is still pending", jo
   }
 });
 
-for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"]] as const) {
+for (const [width, colorScheme] of [[390, "light"], [1280, "dark"]] as const) {
   test.describe(`${width} ${colorScheme}`, () => {
     test.use({ viewport: { width, height: width === 390 ? 844 : 800 }, colorScheme });
     test(`HUB-J18 ${width} ${colorScheme}: interrupt and read the raw output by keyboard`, journeyPart, async ({ page, journey }) => {

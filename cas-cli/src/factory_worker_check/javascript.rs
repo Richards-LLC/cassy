@@ -2469,6 +2469,80 @@ process.exit(ok ? 0 : 1);
         assert_eq!(passing().receipts().len(), 1);
     }
 
+    /// GH #2195: tests/e2e specs belong to playwright.hermetic.config.js, but
+    /// the capped run and its prescribed command used the default config,
+    /// which lists no such spec, so no stability proof could be earned.
+    #[test]
+    fn playwright_spec_runs_under_the_config_that_lists_it_gh2195() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let write = |path: &str, text: &str| {
+            let path = repo.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(&["init", "--quiet"]);
+        write("package.json", "{}");
+        write("playwright.config.js", "module.exports = { testDir: 'e2e' };");
+        write("playwright.hermetic.config.js", "module.exports = { testDir: 'tests/e2e' };");
+        // A stand-in Playwright: lists or runs the `.spec.ts` files under its
+        // config's testDir that the positional pattern names ("No tests found" otherwise).
+        write("node_modules/.bin/playwright", r#"#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
+const config = path.resolve(at('--config')), dir = path.join(path.dirname(config), require(config).testDir);
+const pattern = new RegExp(a[a.length - 1]), repeats = a.includes('--list') ? 0 : Number(at('--repeat-each'));
+const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(dir, f)) : [];
+const listed = files.filter((file) => pattern.test(file)), root = path.dirname(config);
+const result = { status: 'passed', retry: 0 }, test = { expectedStatus: 'passed', projectName: 'chromium', results: [result] };
+const report = { config: { rootDir: root }, errors: listed.length ? [] : [{ message: 'No tests found' }], suites: listed.map((file) => ({
+  title: path.relative(root, file), column: 0, suites: [],
+  specs: [{ file: path.relative(root, file), title: 'hermetic sign in', tests: Array(repeats).fill(test) }] })) };
+if (a.includes('--list')) console.log(JSON.stringify(report));
+else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
+process.exit(listed.length ? 0 : 1);
+"#);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = "tests/e2e/sign-in.spec.ts";
+        let source = |body: &str| format!("import {{ test }} from '@playwright/test';\ntest('hermetic sign in', async () => {{ {body} }});\n");
+        write(spec, &source("throw 0;"));
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        write(spec, &source(""));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
+        assert_eq!(tests, [id(spec, "hermetic sign in")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        // Worker-check discovers the owning config and records five capped passes.
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &tests, None, &[]).unwrap();
+        assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
+        assert!(super::super::stability::missing(&passing(), &tests).is_empty());
+        // The prescribed command names that config, and runs as printed.
+        let config = "playwright.hermetic.config.js";
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        assert_eq!(prescribed.len(), 1);
+        assert!(prescribed[0].contains(&format!("-- playwright --config {config} {spec}`")), "{prescribed:?}");
+        let args: Vec<String> = ["playwright", "--config", config, spec].map(String::from).into();
+        let explicit = repo.path().join(invocation(&args).unwrap().config.unwrap());
+        execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&explicit), &tests, None, &[]).unwrap();
+        // An explicit caller config stays authoritative: the default lists no
+        // test, and a zero-test run is no proof.
+        let default = repo.path().join("playwright.config.js");
+        assert!(execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&default), &tests, None, &[]).is_err());
+    }
+
     /// A config-free global test resolves its runner from package metadata;
     /// with no evidence the refusal offers each valid form, never a shell
     /// metacharacter alternative.

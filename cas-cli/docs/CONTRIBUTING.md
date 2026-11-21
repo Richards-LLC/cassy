@@ -2261,6 +2261,17 @@ an unknown outcome and wakes the supervisor; daemon startup and heartbeats
 recover unlocked journals after process loss. Recovery retries note/notice
 persistence with the same continuation identity, never the close mutation.
 
+Worker close execution holds a process-shared lock before the handler starts,
+through post-park publication and its outcome writer. Shutdown and recycle
+acquire the exclusive side at admission and again at actual teardown; force
+cannot discard a pending close. A refusal leaves the worker's bindings and
+live mail intact. A post-park owner-publication error carries
+`code=park_publication_failed`; its journal retains a retry of `publish_ready`
+for daemon recovery, bound to that delivery cycle, branch and tip. Superseded
+deliveries retire that retry without publishing a newer delivery or closing
+again. The original failure and any recovery outcome each have a stable
+continuation identity.
+
 Optional resource notifications and factory recall have bounded response waits.
 Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;

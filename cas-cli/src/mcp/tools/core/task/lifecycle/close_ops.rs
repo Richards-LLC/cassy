@@ -3273,7 +3273,7 @@ fn same_except_close_audit(before: &Task, after: &Task) -> bool {
 pub(crate) mod lifecycle_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
     #[derive(PartialEq)]
-    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark }
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark, AfterPark }
     static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3294,6 +3294,14 @@ pub(crate) mod lifecycle_race_hook {
 
     pub(crate) fn before_park(task_id: &str, hook: impl FnOnce() + Send + 'static) {
         HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforePark, Box::new(hook)));
+    }
+
+    pub(crate) fn after_park(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::AfterPark, Box::new(hook)));
+    }
+
+    pub(super) fn fire_after_park(task_id: &str) {
+        fire_at(task_id, Phase::AfterPark);
     }
 
     pub(super) fn fire_before_park(task_id: &str) {
@@ -6803,6 +6811,8 @@ impl CasCore {
                         parked.deliverables.parked_branch.as_deref().unwrap_or("recorded delivery branch"),
                         parked.deliverables.factory_branch_anchor.as_deref().unwrap_or("recorded delivery tip")),
                 );
+                #[cfg(test)]
+                lifecycle_race_hook::fire_after_park(&task.id);
                 self.retire_delivered_worker_cache(&parked);
                 // cas-3a82 / P1.5: a successful park produces one AwaitingMerge
                 // relay. A refused close stays a tool error for the worker.
@@ -10098,7 +10108,12 @@ impl CasCore {
                     if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {
                         if self.get_agent_id()? != worker.id { return Err(Self::error(ErrorCode::INVALID_REQUEST,crate::gates::tag("G-113","Only the registered host worker may publish its park"))); }
                         if let Err(error) = crate::cloud::peer_mailbox::train_parks::publish_ready(&self.cas_root,&task,&worker) {
-                            return Ok(Self::tool_error(format!("Delivery is parked, but its owner notification is not durable: {error}. Retry close for {}.",task.id)));
+                            let mut reply = Self::tool_error(format!("Delivery is parked, but its owner notification is not durable: {error}. The close journal retains publication for daemon recovery; do not close again. code=park_publication_failed"));
+                            reply.structured_content = Some(serde_json::json!({
+                                "code": "park_publication_failed", "task_id": task.id,
+                                "mutation_outcome": "COMMITTED",
+                            }));
+                            return Ok(reply);
                         }
                     }
                     // cas-619f: a user-facing delivery needs an independent
@@ -10155,7 +10170,14 @@ impl CasCore {
                         artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
                     let msg = accepted_override_codes.iter().fold(msg, |message, code|
                         crate::gates::override_tag(code, message));
-                    return Ok(Self::tool_error(msg));
+                    // Preserve the legacy error-shaped reply while naming
+                    // this successful committed park for outcome consumers.
+                    let mut reply = Self::tool_error(msg);
+                    reply.structured_content = Some(serde_json::json!({
+                        "code": "parked_awaiting_merge", "mutation_outcome": "COMMITTED",
+                        "task_id": task.id,
+                    }));
+                    return Ok(reply);
                 }
             }
             if !gate_refusals.is_empty() {

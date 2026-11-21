@@ -12716,7 +12716,24 @@ impl FactoryDaemon {
                     .iter()
                     .map(|name| (name.clone(), releasable_task_ids(self.app.cas_dir(), name)))
                     .collect();
-                for name in &workers_to_stop {
+                let mut report = self.app.shutdown_workers(count, &names, force).await;
+                let mut retired: Vec<String> = report.stopped.iter().map(|(name, _)| name.clone()).collect();
+                // A cancelled boot can already have no pane or registration.
+                // Its intentional stop still retires the boot watch. Refused
+                // live teardowns retain their roster, bindings and live mail.
+                if let Ok(agents) = open_agent_store(self.app.cas_dir())
+                    .and_then(|store| store.list(None).map_err(Into::into))
+                {
+                    for name in &workers_to_stop {
+                        if !retired.contains(name) && !self.app.worker_names().contains(name)
+                            && self.app.mux.get(name).is_none()
+                            && !crate::mcp::tools::service::agent_liveness::has_live_agent_named(&agents, name)
+                        {
+                            retired.push(name.clone());
+                        }
+                    }
+                }
+                for name in &retired {
                     self.dead_workers.insert(name.clone());
                     // GH #1592: an intentional stop ends the boot watch. The
                     // exit is this request taking effect, never a boot failure.
@@ -12733,15 +12750,13 @@ impl FactoryDaemon {
                             "Stopped by a shutdown request before registration.",
                         );
                     }
-                    // Also release bindings for workers that never made it into
-                    // worker_names (early pre-assign only) — shutdown_worker
-                    // only runs for live workers.
+                    // A refused teardown must retain bindings and live mail.
+                    // Settle only workers that actually stopped.
                     crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
                         self.app.cas_dir(),
                         name,
                     );
                 }
-                let mut report = self.app.shutdown_workers(count, &names, force).await;
                 for (name, released) in &mut report.stopped {
                     let still_held = releasable_task_ids(self.app.cas_dir(), name);
                     for id in held_before.get(name).into_iter().flatten() {

@@ -4070,6 +4070,11 @@ impl CasService {
                 snapshot
             })
             .collect();
+        // Hold through adopted-worker teardown; queued workers acquire again
+        // in the daemon immediately before their actual PTY teardown.
+        let _close_guards = super::close_continuation::shutdown_guards(
+            &self.inner.cas_root, selected.iter().map(|worker| worker.id.as_str()),
+        ).map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
         let force = req.force.unwrap_or(false);
         let unsafe_snapshots: Vec<&ShutdownWorkerSnapshot> = snapshots
             .iter()

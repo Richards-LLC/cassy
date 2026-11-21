@@ -3038,3 +3038,155 @@ async fn request_changes_on_in_progress_work_names_the_replayable_alternative_ca
     assert_eq!((wake["action"].as_str(), wake["target"].as_str()), (Some("message"), Some("worker-a")));
     assert!(wake["message"].as_str().unwrap().contains(reason));
 }
+
+/// GH #2193: a real close owns its process until post-park publication and
+/// the late outcome writer finish. Shutdown/recycle must preserve that owner.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parked_close_survives_worker_shutdown_cas_d893() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::Duration;
+    use crate::mcp::CasService;
+    const NAME: &str = "mcp::tools::core::task::lifecycle::close_ops::recovery_delivery_tests::parked_close_survives_worker_shutdown_cas_d893";
+    if let Some(root) = std::env::var_os("CAS_D893_CHILD") {
+        let fail_sync = std::env::var_os("CAS_D893_FAIL_SYNC").is_some();
+        let inline = std::env::var_os("CAS_D893_INLINE").is_some();
+        let _env = TestEnvGuard::new();
+        let root = std::path::PathBuf::from(root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("recovery-session".into());
+        let hook_root = root.clone();
+        lifecycle_race_hook::after_park(TASK, move || {
+            let mut control = UnixStream::connect(hook_root.join("close.sock")).unwrap();
+            control.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+            control.write_all(b"P").unwrap();
+            control.read_exact(&mut [0]).unwrap();
+            if fail_sync {
+                // The real peer publisher now sees a missing host binding.
+                // This occurs after the durable park, beyond close preflight.
+                let agents = open_agent_store(&hook_root).unwrap();
+                let mut worker = agents.get("recovery-session").unwrap();
+                worker.metadata.insert("train_owner".into(), "missing-owner".into());
+                agents.register(&worker).unwrap();
+            }
+        });
+        let tip = git(root.parent().unwrap(), &["rev-parse", BRANCH]);
+        let handler = core.clone();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let args = serde_json::json!({"action":"close", "id":TASK});
+        service.call_with_deadline_and_grace("task", args.as_object(), Duration::from_secs(45),
+            if inline { Duration::from_secs(45) } else { Duration::ZERO },
+            async move { handler.cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None, id: TASK.into(), reason: Some("Recovered final pushed tip".into()),
+                commit_receipt: Some(tip), supervisor_override: None, stranded_branch_override: None,
+                search_manifest: None,
+            })).await }).await.unwrap();
+        let mut outcome = UnixStream::connect(root.join("close.sock")).unwrap();
+        outcome.write_all(b"A").unwrap();
+        service.tool_work.wait_idle().await;
+        outcome.write_all(b"D").unwrap();
+        // The supervisor kills the same process only after its outcome is safe.
+        std::future::pending::<()>().await;
+        return;
+    }
+    let mut env = TestEnvGuard::temp_home();
+    for (fail_sync, inline) in [(false, false), (true, false), (true, true)] {
+        let f = fixture(&mut env);
+        let root = f.dir.path().join(".cas");
+        let listener = UnixListener::bind(root.join("close.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut app = crate::ui::factory::FactoryApp::for_test_at(root.clone());
+        let mut child_env = vec![("CAS_D893_CHILD".into(), root.to_string_lossy().into_owned()),
+            ("CAS_ROOT".into(), root.to_string_lossy().into_owned())];
+        if fail_sync { child_env.push(("CAS_D893_FAIL_SYNC".into(), "1".into())); }
+        if inline { child_env.push(("CAS_D893_INLINE".into(), "1".into())); }
+        let pty = cas_mux::Pty::spawn(WORKER, cas_mux::PtyConfig {
+            command: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+            args: vec![NAME.into(), "--exact".into(), "--nocapture".into()],
+            cwd: Some(f.worker_path.clone()), env: child_env, env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let pid = pty.process_group_id().unwrap();
+        app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(WORKER, cas_mux::PaneKind::Worker,
+            pty, 24, 80, cas_mux::SupervisorCli::Codex).unwrap());
+        let accept = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+                        return stream;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "child handshake timed out");
+                        std::thread::park_timeout(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        };
+        let mut parked = accept();
+        parked.read_exact(&mut [0]).unwrap();
+        assert_eq!(open_task_store(&root).unwrap().get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+        let answered = || {
+            let mut stream = accept();
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"A");
+            stream
+        };
+        // The inline row stops before a late journal exists, proving that
+        // shutdown admission cannot race the handler's first durable park.
+        let outcome = if inline { None } else { Some(answered()) };
+        let stop = app.shutdown_worker(WORKER, false).await;
+        if stop.is_ok() {
+            crate::mcp::tools::service::close_continuation::recover(&root);
+            panic!("shutdown discarded a live close: {}", open_task_store(&root).unwrap().get(TASK).unwrap().notes);
+        }
+        assert!(stop.unwrap_err().to_string().contains("code=worker_close_pending"));
+        assert!(app.shutdown_worker(WORKER, true).await.unwrap_err().to_string().contains("code=worker_close_pending"));
+        assert!(app.shutdown_worker_for_recycle(WORKER).await.unwrap_err().to_string().contains("code=worker_close_pending"));
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+        parked.write_all(b"R").unwrap();
+        let mut outcome = outcome.unwrap_or_else(answered);
+        let mut byte = [0];
+        outcome.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"D");
+        app.shutdown_worker(WORKER, true).await.unwrap();
+        // Recovery can replay safely, without another close or duplicate notes.
+        for _ in 0..2 { crate::mcp::tools::service::close_continuation::recover(&root); }
+        let task = open_task_store(&root).unwrap().get(TASK).unwrap();
+        assert_eq!(task.status, TaskStatus::AwaitingMerge);
+        assert_eq!(task.notes.matches("CLOSE_OUTCOME:").count(), 1, "{}", task.notes);
+        assert!(!task.notes.contains("code=continuation_lost"), "{}", task.notes);
+        if fail_sync {
+            assert!(task.notes.contains("code=park_publication_failed"), "{}", task.notes);
+            let journals = std::fs::read_dir(root.join("close-continuations")).unwrap()
+                .map(|entry| entry.unwrap().path()).filter(|path| path.extension().is_some_and(|s| s == "json"))
+                .collect::<Vec<_>>();
+            assert_eq!(journals.len(), 1);
+            let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(&journals[0]).unwrap()).unwrap();
+            assert_eq!(journal["retry_peer_park"], true);
+            assert_eq!(journal["failed"], true);
+            let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
+            let notices = queue.list_pending("supervisor-session").unwrap();
+            assert_eq!(notices.iter().filter(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed").count(), 1);
+            // A later delivery never inherits this old publication promise.
+            let mut next = task.clone();
+            next.status = TaskStatus::InProgress;
+            next.deliverables.delivery_cycle += 1;
+            open_task_store(&root).unwrap().update(&next).unwrap();
+            for _ in 0..2 { crate::mcp::tools::service::close_continuation::recover(&root); }
+            let next = open_task_store(&root).unwrap().get(TASK).unwrap();
+            assert_eq!(next.status, TaskStatus::InProgress);
+            assert_eq!(next.notes.matches("CLOSE_RECOVERY_OUTCOME:").count(), 1);
+            assert!(next.notes.contains("code=park_publication_superseded"));
+            assert!(!journals[0].exists());
+        } else {
+            assert_eq!(cas_store::list_qa_passes(&root, TASK).unwrap().len(), 1);
+            let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
+                .list_pending("supervisor-session").unwrap();
+            assert!(!notices.iter().any(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed"));
+        }
+    }
+}

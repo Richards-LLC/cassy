@@ -90,10 +90,21 @@ impl PreviewStore {
         fs::write(snapshot.path().join(".git"), "release preview snapshot: not a repository\n")?;
         let root = snapshot.path().join(".cas");
         fs::create_dir(&root)?;
-        // Other store files stay the live ones; only the database is private.
+        // Relocation loses unpinned Git/folder identity. Keep the live settings
+        // verbatim and pin only this private document, before migrations run.
+        let mut snapshot_config = match fs::read_to_string(live.join("config.toml")) {
+            Ok(contents) => contents.parse::<toml_edit::DocumentMut>()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(identity) = crate::cloud::resolve_canonical_id(live) {
+            snapshot_config["project"]["canonical_id"] = toml_edit::value(identity);
+        }
+        fs::write(root.join("config.toml"), snapshot_config.to_string())?;
+        // Other store files stay the live ones; database and config are private.
         for entry in fs::read_dir(live)? {
             let name = entry?.file_name();
-            if ["cas.db", "cas.db-wal", "cas.db-shm", "cas.db-journal"].iter().any(|db| name == *db) { continue; }
+            if ["config.toml", "cas.db", "cas.db-wal", "cas.db-shm", "cas.db-journal"].iter().any(|private| name == *private) { continue; }
             if name == "verification-candidates" {
                 relocate_candidates(&live.join(&name), &root.join(&name), live, &root)?;
             } else {

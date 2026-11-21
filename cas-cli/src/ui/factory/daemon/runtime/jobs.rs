@@ -52,10 +52,16 @@ pub(crate) enum Lane {
     /// [`Lane::Blocking`] so a 5 s fetch or a 10 s CI poll never stalls
     /// worker health probes (review round 1, item 5).
     External,
+    /// Queue intake (cas-b355): prompt-queue selection and the spawn-queue
+    /// poll. Their reads and git run here; only their writes take the single
+    /// writer, through [`on_writer`]. Its own thread, so a delivery never
+    /// waits behind a snapshot or a CI poll.
+    Select,
 }
 
 impl Lane {
-    const ALL: [Lane; 4] = [Lane::Read, Lane::Write, Lane::Blocking, Lane::External];
+    pub(crate) const ALL: [Lane; 5] =
+        [Lane::Read, Lane::Write, Lane::Blocking, Lane::External, Lane::Select];
 
     fn thread_name(self) -> &'static str {
         match self {
@@ -63,6 +69,7 @@ impl Lane {
             Lane::Write => "factory-jobs-write",
             Lane::Blocking => "factory-jobs-blocking",
             Lane::External => "factory-jobs-external",
+            Lane::Select => "factory-jobs-select",
         }
     }
 }
@@ -385,6 +392,59 @@ impl WriteExecutor for GlobalStoreWorker {
     }
 }
 
+struct WriterHop {
+    writer: Arc<dyn WriteExecutor>,
+    /// The running job is [`Criticality::Delivery`]: its writes go first.
+    first: bool,
+}
+
+thread_local! {
+    /// Set on every lane thread except the write lane, whose jobs already run
+    /// on the writer (cas-b355).
+    static WRITER_HOP: std::cell::RefCell<Option<WriterHop>> = const { std::cell::RefCell::new(None) };
+}
+
+impl WriterHop {
+    fn install(writer: Arc<dyn WriteExecutor>) -> impl Drop {
+        struct Installed;
+        impl Drop for Installed {
+            fn drop(&mut self) {
+                WRITER_HOP.with(|hop| hop.borrow_mut().take());
+            }
+        }
+        WRITER_HOP.with(|hop| *hop.borrow_mut() = Some(WriterHop { writer, first: false }));
+        Installed
+    }
+}
+
+/// Run `work` on the single writer and wait for it (cas-b355). A job on a
+/// non-write lane does its reads on its own thread and holds the writer only
+/// for these calls. Anywhere else (the writer itself, inline execution) it
+/// runs `work` here.
+pub(crate) fn on_writer<R: Send + 'static>(
+    label: &'static str,
+    work: impl FnOnce() -> R + Send + 'static,
+) -> anyhow::Result<R> {
+    let hop = WRITER_HOP.with(|hop| {
+        hop.borrow().as_ref().map(|hop| (Arc::clone(&hop.writer), hop.first))
+    });
+    let Some((writer, first)) = hop else {
+        return Ok(work());
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let job: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
+        let _operation = cas_store::shared_db::connection_operation(label);
+        let _ = sender.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)));
+    });
+    let queued = if first { writer.execute_first(label, job) } else { writer.execute(label, job) };
+    anyhow::ensure!(queued, "the store writer is unavailable");
+    match receiver.recv() {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(panic)) => anyhow::bail!("{label} panicked on the store writer: {}", panic_message(panic.as_ref())),
+        Err(_) => anyhow::bail!("the store writer dropped {label}"),
+    }
+}
+
 type ReadWork<T> = Box<dyn FnOnce(Option<&dyn std::any::Any>) -> T + Send + 'static>;
 
 enum Work<T> {
@@ -542,9 +602,11 @@ impl<T: Send + 'static> JobRuntime<T> {
                     None
                 };
                 let lane_writer = (lane == Lane::Write).then(|| Arc::clone(&writer));
+                let hop = Arc::clone(&writer);
                 match std::thread::Builder::new()
                     .name(lane.thread_name().into())
                     .spawn(move || {
+                        let _hop = WriterHop::install(hop);
                         run_lane(&thread_shared, lane, &sender, lane_reader, lane_writer)
                     }) {
                     Ok(handle) => Some(handle),
@@ -977,6 +1039,11 @@ fn run_lane<T: Send + 'static>(
             return;
         };
         let taken_at = Instant::now();
+        WRITER_HOP.with(|hop| {
+            if let Some(hop) = hop.borrow_mut().as_mut() {
+                hop.first = spec.criticality == Criticality::Delivery;
+            }
+        });
         let outcome = run_work(
             work,
             spec.kind,

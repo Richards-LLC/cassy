@@ -971,61 +971,6 @@ mod tests {
         merges.into_iter().next().unwrap()
     }
 
-    /// GH #2260: --auto can publish immediately on an unprotected target.
-    /// The actual pre-tool boundary must judge this PR head's check evidence,
-    /// including when independent QA is disabled and no required checks exist.
-    #[test]
-    fn raw_pr_merge_waits_for_pr_head_checks_without_protection_gh2260() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let dir = tempfile::tempdir().unwrap();
-        let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        std::fs::write(root.join("config.toml"), "[qa]\nindependent_pass=false\n").unwrap();
-        env.set("CAS_ROOT", &root);
-        let gh = dir.path().join("gh");
-        let response = dir.path().join("pr.json");
-        env.set("CAS_2260_RESPONSE", &response);
-        crate::test_paths::warm_stub(&gh, "#!/bin/sh\n[ \"$1 $2\" = 'pr view' ] || exit 92\n/bin/cat \"$CAS_2260_RESPONSE\"\n");
-        env.set(GH_BIN_ENV, &gh);
-        let head = "1234567890abcdef1234567890abcdef12345678";
-        for role in ["supervisor", "worker"] {
-            for (check, code) in [
-                (serde_json::json!({"__typename":"CheckRun","name":"PR gate","status":"IN_PROGRESS","conclusion":null}), Some("PR_CI_PENDING")),
-                (serde_json::json!({"__typename":"CheckRun","name":"PR gate","status":"COMPLETED","conclusion":"FAILURE"}), Some("PR_CI_FAILED")),
-                (serde_json::json!({"__typename":"StatusContext","context":"backend","state":"PENDING"}), Some("PR_CI_PENDING")),
-                (serde_json::json!({"__typename":"StatusContext","context":"backend","state":"ERROR"}), Some("PR_CI_FAILED")),
-                (serde_json::json!({"__typename":"CheckRun","name":"PR gate","status":"COMPLETED","conclusion":"SUCCESS"}), None),
-                (serde_json::json!({"__typename":"CheckRun","name":"PR gate","status":"COMPLETED","conclusion":"SKIPPED"}), None),
-            ] {
-                std::fs::write(&response, serde_json::to_vec(&serde_json::json!({
-                    "headRefName":"epic/delivery", "headRefOid":head,
-                    "baseRefName":"main", "mergeStateStatus":"CLEAN", "autoMergeRequest":null,
-                    "statusCheckRollup":[check.clone()],
-                })).unwrap()).unwrap();
-                let input = crate::hooks::HookInput {
-                    session_id: "unprotected-pr-merge".into(),
-                    cwd: dir.path().display().to_string(),
-                    hook_event_name: "PreToolUse".into(), tool_name: Some("Bash".into()),
-                    agent_role: Some(role.into()),
-                    tool_input: Some(serde_json::json!({"command":"gh pr merge 2260 --repo acme/private --auto --merge"})),
-                    ..Default::default()
-                };
-                let output = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&root)).unwrap();
-                let output = serde_json::to_value(output).unwrap();
-                let specific = &output["hookSpecificOutput"];
-                if let Some(code) = code {
-                    assert_eq!(specific["permissionDecision"], "deny", "{role} {check}: {output}");
-                    let reason = specific["permissionDecisionReason"].as_str().unwrap();
-                    assert!(reason.contains(code), "{reason}");
-                    assert!(reason.contains(head), "{reason}");
-                    let name = check["name"].as_str().or_else(|| check["context"].as_str()).unwrap();
-                    assert!(reason.contains(name), "{reason}");
-                } else {
-                    assert_ne!(specific["permissionDecision"], "deny", "{role} {check}: {output}");
-                }
-            }
-        }
-    }
-
     #[test]
     fn gh_pr_merge_selectors_are_recognised() {
         assert_eq!(

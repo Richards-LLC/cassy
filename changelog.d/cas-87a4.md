@@ -6,4 +6,8 @@
   is no longer refused as an unresolved arithmetic operand. Cassy proves the
   counter numeric first: it must start as a literal integer, every later
   assignment must be an integer or `$((...))`, and no command in the script may
-  assign it another way. Any other arithmetic over variables is still refused.
+  assign it another way. Every reassignment, including one inside arithmetic,
+  must draw only on other proven counters. Quoted, escaped or heredoc text never
+  counts as arithmetic, and a script with comments, `$'...'` quoting or
+  backslash-newline continuations proves no counter. Any other arithmetic over
+  variables is still refused.

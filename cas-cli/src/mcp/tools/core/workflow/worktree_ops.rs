@@ -9631,33 +9631,63 @@ mod cas_6b42_peer_delivery_tests {
         builder_tasks.add(&parked).unwrap();
         let parked = builder_tasks.get(&parked.id).unwrap();
         let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        task.title = "Newer owner bookkeeping".into();
         tasks.add(&task).unwrap();
         let owner_note = "[2026-11-21 22:00] Train owner bookkeeping after peer park";
         tasks.append_note(&task.id, owner_note).unwrap();
-        assert!(tasks.get(&task.id).unwrap().updated_at > parked.updated_at);
+        let baseline = tasks.get(&task.id).unwrap();
+        assert!(baseline.updated_at > parked.updated_at);
         let server = MockServer::start().await;
         let endpoint = if team { "/api/teams/park-team/sync/pull" } else { "/api/sync/pull" };
-        Mock::given(method("GET")).and(path(endpoint))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "tasks":[parked], "team_id":"park-team", "pulled_at":chrono::Utc::now().to_rfc3339(), "status":"ok"
-            }))).mount(&server).await;
         let queue = std::sync::Arc::new(SyncQueue::open(&cas_dir).unwrap());
         queue.init().unwrap();
-        let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
-            endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
-        }, CloudSyncerConfig::default(), "cas-src".into(), &cas_dir);
         let entries = crate::store::open_store_local(&cas_dir).unwrap();
         let rules = crate::store::open_rule_store_local(&cas_dir).unwrap();
         let skills = crate::store::open_skill_store_local(&cas_dir).unwrap();
-        let result = if team {
-            syncer.pull_team("park-team", "cas-src", &*entries, &*tasks, &*rules, &*skills)
-        } else {
-            syncer.pull(&*entries, &*tasks, &*rules, &*skills,
-                &*crate::store::open_spec_store(&cas_dir).unwrap(), &*crate::store::open_event_store(&cas_dir).unwrap(),
-                &*crate::store::open_prompt_store(&cas_dir).unwrap(), &*crate::store::open_file_change_store(&cas_dir).unwrap(),
-                &*crate::store::open_commit_link_store(&cas_dir).unwrap())
-        }.unwrap();
-        assert!(result.errors.is_empty(), "{result:?}");
+        for case in ["cycle", "foreign", "branch", "assignee", "target", "start", "declined", "no-audit", "rework", "open", "local-wins", "valid"] {
+            let mut receiver = baseline.clone();
+            let mut incoming = parked.clone();
+            match case {
+                "cycle" => receiver.deliverables.delivery_cycle += 1,
+                "foreign" => incoming.origin_project = Some("another-project".into()),
+                "branch" => incoming.deliverables.parked_branch = Some("factory/another-worker".into()),
+                "assignee" => incoming.assignee = Some("another-worker".into()),
+                "target" => incoming.deliverables.work_target.as_mut().unwrap().target_branch = "epic/other".into(),
+                "start" => incoming.deliverables.factory_branch_start.as_mut().unwrap().base_sha = "c".repeat(40),
+                "declined" => receiver.deliverables.declined_factory_branch_anchors = Some(vec![anchor.clone()]),
+                "no-audit" => incoming.notes.clear(),
+                "rework" => receiver.notes.push_str(&format!("\n\n[{}] {} actor=owner reason=rework",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"), crate::mcp::tools::core::task::audit::REOPENED)),
+                "open" => receiver.status = cas_types::TaskStatus::Open,
+                _ => {}
+            }
+            tasks.update(&receiver).unwrap();
+            server.reset().await;
+            Mock::given(method("GET")).and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tasks":[incoming], "team_id":"park-team", "pulled_at":chrono::Utc::now().to_rfc3339(), "status":"ok"
+                }))).mount(&server).await;
+            let syncer = CloudSyncer::new_for_project(queue.clone(), CloudConfig {
+                endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
+            }, CloudSyncerConfig {
+                team_conflict_resolution: if case == "local-wins" { crate::cloud::ConflictResolution::LocalWins }
+                    else { crate::cloud::ConflictResolution::KeepRecent }, ..Default::default()
+            }, "cas-src".into(), &cas_dir);
+            let result = if team {
+                syncer.pull_team("park-team", "cas-src", &*entries, &*tasks, &*rules, &*skills)
+            } else {
+                syncer.pull(&*entries, &*tasks, &*rules, &*skills,
+                    &*crate::store::open_spec_store(&cas_dir).unwrap(), &*crate::store::open_event_store(&cas_dir).unwrap(),
+                    &*crate::store::open_prompt_store(&cas_dir).unwrap(), &*crate::store::open_file_change_store(&cas_dir).unwrap(),
+                    &*crate::store::open_commit_link_store(&cas_dir).unwrap())
+            }.unwrap();
+            assert!(result.errors.is_empty(), "{case}: {result:?}");
+            let resolves = case == "valid" || (case == "local-wins" && !team);
+            assert_eq!(core.parked_delivery_for_worker("lively-eagle-82").is_ok(), resolves, "team={team} {case}");
+            let received = tasks.get(&task.id).unwrap();
+            assert_eq!(received.title, receiver.title);
+            if !resolves { assert!(received.lifecycle_matches(&receiver), "team={team} {case}"); }
+        }
         task = tasks.get(&task.id).unwrap();
         // Drive the same G-96 resolver which rejects the incident's unsynced
         // InProgress row, then consume the exact pushed branch/anchor below.

@@ -20,13 +20,8 @@ pub(crate) fn record_failing_tests(root: &Path, task_id: &str, names: &[String])
     if let Err(error) = crate::store::open_task_store(root)
         .and_then(|_store| {
             let connection = cas_store::shared_db::shared_connection(&root.join("cas.db"))?;
-            cas_store::shared_db::with_write_retry(|| {
-                let mut connection = cas_store::shared_db::lock_connection(&connection)?;
-                let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                record_failing_tests_with_conn(&tx, task_id, names)?;
-                tx.commit()?;
-                Ok(())
-            }).map_err(Into::into)
+            cas_store::shared_db::with_immediate_write_txn_pooled(&connection, |conn|
+                record_failing_tests_with_conn(conn, task_id, names)).map_err(Into::into)
         })
     {
         tracing::warn!(%task_id, %error, "could not record failing tests for the repair class audit");

@@ -396,6 +396,10 @@ if [[ "$*" == *'actions/runs?status=queued&per_page=100'* ]]; then
   {"id":104,"created_at":"1970-01-01T00:00:00Z","event":"workflow_dispatch","head_branch":"main"}
 ]}
 JSON
+elif [[ "$*" == *'actions/runs?status=in_progress&per_page=100'* ]]; then
+    printf '%s\n' '{"workflow_runs":[]}'
+elif [[ "$*" == *'actions/runs/101/jobs?filter=latest&per_page=100'* ]]; then
+    printf '%s\n' '{"jobs":[{"status":"queued","runner_name":null,"labels":["ubuntu-latest"]}]}'
 elif [[ "$*" == *'actions/runs/101'*'--jq .status'* ]]; then
     printf '%s\n' queued
 elif [[ "$*" == *'actions/runs/104'*'--jq .status'* ]]; then

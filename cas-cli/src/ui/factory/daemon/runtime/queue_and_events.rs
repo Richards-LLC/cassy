@@ -2653,8 +2653,8 @@ pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
 /// cas-73f7: how long an urgent row waits for the recipient's in-flight tool
 /// call to end before it interrupts anyway, and what the hold and the late
 /// interrupt say.
-pub(super) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
-pub(super) const URGENT_TOOL_CALL_DETAIL: &str =
+pub(crate) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const URGENT_TOOL_CALL_DETAIL: &str =
     "urgent held: recipient has a tool call in flight; surfaces when the call ends";
 pub(super) const URGENT_TOOL_CALL_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 

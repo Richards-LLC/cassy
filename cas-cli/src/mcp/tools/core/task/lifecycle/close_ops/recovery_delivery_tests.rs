@@ -569,14 +569,31 @@ esac
 "#, root=root.display());
     crate::test_paths::warm_stub(&gh, &script);
     env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+    // Consume the producer's output so this seam cannot invent a lane schema.
+    let producer = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/ci-test-impact.py");
+    let lane_path = root.join("lane.json");
+    let output = std::process::Command::new("python3")
+        .arg(producer)
+        .args(["lane", "--phase", "plan", "--base-sha", &f.predecessor, "--out"])
+        .arg(&lane_path)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "lane plan: {}", String::from_utf8_lossy(&output.stderr));
+    let lane: serde_json::Value = serde_json::from_slice(&std::fs::read(lane_path).unwrap()).unwrap();
+    assert_eq!(lane["plan"]["head"], f.final_tip);
     let write_receipt = |head: &str, caused: bool, artifact_id: u64| {
         std::fs::write(root.join("artifacts.json"), serde_json::to_vec(&serde_json::json!({"artifacts":[{
             "id":artifact_id,"name":"lane-impact-91-own","size_in_bytes":4096,"expired":false
         }]})).unwrap()).unwrap();
         let file = std::fs::File::create(root.join("receipt.zip")).unwrap();
         let mut zip = zip::ZipWriter::new(file);
+        let mut lane = lane.clone();
+        if head != f.final_tip {
+            lane["plan"]["head"] = head.into();
+        }
         for (name, data) in [
-            ("lane.json", serde_json::json!({"head":head,"base":"base"})),
+            ("lane.json", lane),
             ("own-attribution.json", serde_json::json!({
                 "base":"base","status":if caused {"caused"} else {"inherited"},
                 "caused":if caused {serde_json::json!([

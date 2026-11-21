@@ -459,6 +459,8 @@ esac
     assert_eq!(closed.status, TaskStatus::Closed);
     assert_eq!(closed.deliverables.factory_branch_anchor, before.deliverables.factory_branch_anchor);
     assert_eq!(closed.deliverables.green_merge_commit, before.deliverables.green_merge_commit);
+    let replay = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    assert!(matches!(replay.get(&late_id), Some(CassyMergeClose::AlreadyClosed)));
 }
 
 #[test]

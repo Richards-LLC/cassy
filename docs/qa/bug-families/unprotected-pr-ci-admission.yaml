@@ -1,0 +1,11 @@
+title: PR merge admission follows current-head CI without assumed protection
+statement: >-
+  On a repository with no required GitHub checks and independent QA disabled,
+  a raw gh pr merge is refused while its current PR head's check runs or status
+  contexts are pending or failed. The refusal identifies that head and the
+  exact checks using stable codes. Eligible green PRs retain one merge command.
+  Merge-ready guidance names configured PR-check or queue evidence rather than
+  inferring hosted protection or a CI waiting guarantee from --auto.
+tasks: [cas-3874]
+journeys: []
+invariants: []

@@ -1911,37 +1911,83 @@ mod tests {
         }
     }
 
-    /// cas-24d8: a close that committed only an intermediate write (a gate
-    /// note, a parked anchor) before the deadline has not closed anything.
-    /// It must not be reported as COMMITTED.
+    /// Whole-close response budget spans preflight, evidence sync and follow-up.
+    /// A retained execution has a durable identity, not a transport failure.
     #[tokio::test]
     async fn close_deadline_after_an_intermediate_write_reports_in_progress_cas_24d8() {
         use crate::mcp::server::CasCore;
-        use crate::mcp::tools::service::CasService;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let service = CasService::new(
-            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            CasCore::with_daemon(temp.path().join(".cas"), None, None),
             #[cfg(feature = "mcp-proxy")]
             None,
         );
-        let arguments = serde_json::json!({"action":"close", "id":"cas-park"});
-        let close = async {
-            super::super::mutation_receipt::task_committed("cas-park");
-            std::future::pending().await
-        };
-        let error = service
-            .call_with_deadline(
-                "task",
-                arguments.as_object(),
-                std::time::Duration::from_millis(20),
-                close,
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
-
         let tasks = service.inner.open_task_store().unwrap();
+        for (id, intermediate, committed) in [
+            ("cas-preflight", false, false),
+            ("cas-evidence", true, false),
+            ("cas-followup", true, true),
+        ] {
+            tasks.add(&crate::types::Task::new(id.into(), "slow close".into())).unwrap();
+            let arguments = serde_json::json!({"action":"close", "id":id});
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let started = calls.clone();
+            let store = tasks.clone();
+            let (release, held) = tokio::sync::oneshot::channel();
+            let outcome = serde_json::json!({"task_id":id, "status":"awaiting_merge"}).to_string();
+            let supplied_outcome = outcome.clone();
+            let refusal = serde_json::json!({"code":"MERGE_REQUIRED", "task_id":id}).to_string();
+            let supplied_refusal = refusal.clone();
+            let answer = service.call_with_deadline(
+                "task", arguments.as_object(), std::time::Duration::from_millis(20), async move {
+                    started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _phase = mutation_receipt::phase(if intermediate { "close_gates" } else { "preflight" });
+                    if intermediate { mutation_receipt::task_committed(id); }
+                    if committed {
+                        let mut task = store.get(id).unwrap();
+                        task.status = crate::types::TaskStatus::AwaitingMerge;
+                        store.update(&task).unwrap();
+                        mutation_receipt::task_disposition_committed(id, &supplied_outcome);
+                    }
+                    held.await.unwrap();
+                    if !committed {
+                        let mut task = store.get(id).unwrap();
+                        task.status = crate::types::TaskStatus::AwaitingMerge;
+                        store.update(&task).unwrap();
+                        mutation_receipt::task_disposition_committed(id, &supplied_outcome);
+                    }
+                    // Older parks returned this error even after committing.
+                    Ok(CasCore::tool_error(supplied_refusal))
+                },
+            ).await.expect("retained close must return a normal tool result");
+            assert_eq!(answer.is_error, Some(false));
+            let data = answer.structured_content.unwrap();
+            assert_eq!(data["mutation_outcome"], if committed { "COMMITTED" } else { "IN_PROGRESS" });
+            assert_eq!(data["task_id"], id);
+            let continuation = data["continuation_id"].as_str().unwrap();
+            uuid::Uuid::parse_str(continuation).unwrap();
+            let journal = service.inner.cas_root.join("close-continuations").join(format!("{continuation}.json"));
+            let pending: serde_json::Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(pending["id"], continuation);
+            assert_eq!(pending["task_id"], id);
+            assert!(pending["note"].is_null());
+            assert_eq!(tasks.get(id).unwrap().status, if committed {
+                crate::types::TaskStatus::AwaitingMerge
+            } else { crate::types::TaskStatus::Open });
+            release.send(()).unwrap();
+            service.tool_work.wait_idle().await;
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, crate::types::TaskStatus::AwaitingMerge);
+            assert_eq!(task.notes.matches(&format!("CLOSE_OUTCOME: continuation={continuation}")).count(), 1);
+            // Exact caller payloads identify the original committed disposition.
+            assert!(task.notes.contains(&outcome), "{}", task.notes);
+            assert!(!task.notes.contains(&refusal), "{}", task.notes);
+            assert!(!journal.exists());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
         for (id, status, disposition) in [
             ("cas-closed", crate::types::TaskStatus::Closed, "closed"),
             ("cas-parked", crate::types::TaskStatus::AwaitingMerge, "parked awaiting_merge"),

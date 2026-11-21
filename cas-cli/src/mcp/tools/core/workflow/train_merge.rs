@@ -210,7 +210,7 @@ pub(crate) fn admit(
             .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-113", format!("train owner authority unavailable: {error:?}"))))?;
         let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
         ensure!(crate::cloud::peer_mailbox::owns_recipient(root, &actor, &queue.supervisor)
-            && crate::train_owner::generation_matches(root, &epic, &queue.owner_generation, &generation)?,
+            && crate::train_owner::generation_matches(root, &epic, &queue.owner_generation, &generation).map_err(anyhow::Error::msg)?,
             crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
         ensure!(
             permit == Some(queue.id.as_str())
@@ -345,7 +345,7 @@ impl CasCore {
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
             ensure!(crate::cloud::peer_mailbox::owns_recipient(&self.cas_root, &actor, &queue.supervisor)
-                && crate::train_owner::generation_matches(&self.cas_root, &epic, &queue.owner_generation, &generation)?,
+                && crate::train_owner::generation_matches(&self.cas_root, &epic, &queue.owner_generation, &generation).map_err(anyhow::Error::msg)?,
                 crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
             if queue.reclaim_advancement() { save(&path, &mut queue)?; }
             queue.supervisor = actor.id.clone();
@@ -679,7 +679,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         let epic = tasks.get(&queue.train)?;
         let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor)
             .map_err(anyhow::Error::msg)?;
-        ensure!(crate::train_owner::generation_matches(root, &epic, &queue.owner_generation, &generation)?,
+        ensure!(crate::train_owner::generation_matches(root, &epic, &queue.owner_generation, &generation).map_err(anyhow::Error::msg)?,
             crate::gates::tag("G-113", "train merge owner generation changed"));
         loop {
             let Some(current) = driver.current()? else { break };

@@ -483,6 +483,29 @@ pub fn fetch_task(
 
 const EVIDENCE_SYNC: &str = "EVIDENCE_SYNC: ";
 
+/// cas-8018 (GH #2268): park publication is bounded so a close never waits on
+/// a slow Cloud. Each upload request gets at most [`PUBLISH_REQUEST_TIMEOUT`]
+/// or the remaining shared budget, whichever is shorter. A failed
+/// upload is retried once while the budget lasts, and past the budget the
+/// remaining files count as failed. Files committed earlier are reused, so a
+/// retried close resumes where the last one stopped.
+const PUBLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+const PUBLISH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The evidence a park must publish: with a LEDGER.md, the ledger and the
+/// paths its rows cite, plus cited logs; without one, every file. Other files
+/// (a folder copied from another task, say) are published best effort.
+fn required_evidence(dir: &Path) -> impl Fn(&str) -> bool {
+    let cited = std::fs::read_to_string(dir.join("LEDGER.md")).ok().map(|body| {
+        let mut names: std::collections::BTreeSet<String> = crate::qa_ledger::parse(&body, 0).rows.into_iter()
+            .map(|row| row.evidence_path.trim().trim_start_matches("./").to_string())
+            .collect();
+        names.insert("LEDGER.md".into());
+        names
+    });
+    move |name: &str| name.starts_with("cited/") || cited.as_ref().is_none_or(|cited| cited.contains(name))
+}
+
 /// What a routed build's park published: its evidence directory and the
 /// exact bytes the reviewing machine must hold before review (cas-e571).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -579,13 +602,26 @@ pub(crate) fn publish_routed_evidence(
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let required = required_evidence(&dir);
+    // A stalled uncited copy must not spend the budget needed by the ledger.
+    paths.sort_by_key(|(name, _)| !required(name));
+    let deadline = std::time::Instant::now() + PUBLISH_BUDGET;
     let context = super::PublishContext {
         store: &store,
         roots: PublishRoots::new(cas_root, &base, &task.id),
         task_id: task.id.clone(),
-        cloud: super::cloud_client(cas_root),
+        cloud: super::cloud_client(cas_root).map(|client| client
+            .with_timeout(PUBLISH_REQUEST_TIMEOUT).with_deadline(deadline)),
     };
     let published = store.list_for_task(&task.id).map_err(|error| fail(error.to_string()))?;
+    let upload = |path: &Path| -> Result<String, String> {
+        let outcome = super::publish(&context, path).map_err(|error| error.to_string())?;
+        if outcome.disposition.storage_disposition() != super::StorageDisposition::Committed {
+            return Err(outcome.disposition.summary());
+        }
+        Ok(outcome.artifact.id)
+    };
+    let mut skipped = Vec::new();
     let mut files = Vec::new();
     for (name, path) in paths {
         let (sha256, size) = digest_file(&path).map_err(|error| fail(error.to_string()))?;
@@ -600,12 +636,21 @@ pub(crate) fn publish_routed_evidence(
         let artifact_id = match reused {
             Some(record) => record.id.clone(),
             None => {
-                let outcome = super::publish(&context, &path)
-                    .map_err(|error| fail(format!("{name}: {error}")))?;
-                if outcome.disposition.storage_disposition() != super::StorageDisposition::Committed {
-                    return Err(fail(format!("{name}: {}", outcome.disposition.summary())));
+                let within = || std::time::Instant::now() < deadline;
+                let budget = || format!("not published within the {} s park budget; retry close", PUBLISH_BUDGET.as_secs());
+                let result = if within() {
+                    upload(&path).or_else(|first| if within() { upload(&path) } else { Err(first) })
+                } else {
+                    Err(budget())
+                };
+                match result {
+                    Ok(id) => id,
+                    Err(reason) if required(&name) => return Err(fail(format!("{name}: {reason}"))),
+                    Err(reason) => {
+                        skipped.push(format!("{name} ({reason})"));
+                        continue;
+                    }
                 }
-                outcome.artifact.id
             }
         };
         files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
@@ -615,11 +660,14 @@ pub(crate) fn publish_routed_evidence(
     // the ledger cites (GH #2079). Only a routed build makes it strict.
     let audience = if routed { source.unwrap_or_else(|| "the merge owner".into()) } else { "the merge owner".into() };
     let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files, strict: routed };
-    let note = format!(
+    let mut note = format!(
         "[{}] Evidence synced for review on {audience}\n{EVIDENCE_SYNC}{}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
         serde_json::to_string(&manifest).map_err(|error| fail(error.to_string()))?,
     );
+    if !skipped.is_empty() {
+        note.push_str(&format!("\nNot published (not cited by the ledger): {}", skipped.join("; ")));
+    }
     let tasks = crate::store::open_task_store(cas_root).map_err(|error| fail(error.to_string()))?;
     tasks.append_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;
     Ok(())
@@ -892,6 +940,89 @@ mod tests {
             }).expect("an ordinary park records its evidence manifest");
             assert!(!manifest.strict);
         }).await.unwrap();
+    }
+
+    /// cas-8018 (GH #2268): a routed park whose evidence directory also holds
+    /// a folder copied from another task parks when that folder's upload fails;
+    /// the ledger and the files it cites are published, the copy is listed as
+    /// unpublished, and the failing upload is retried once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routed_park_publishes_cited_evidence_when_an_uncited_copy_fails_gh2268() {
+        use wiremock::matchers::body_partial_json;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // Delayed begin/PUT and a stalled complete reproduce an operation
+        // chain that previously received a fresh timeout at every stage.
+        for stalled in [true, false] {
+            let server = MockServer::start().await;
+            let ledger = "schema: 2\ncovers: cas-2268-fixture\n\n\
+                | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+                | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+                | M01 | probe | ok [source: a.rs:1] | terminal: ok | PASS | fixture | green.log | - |\n";
+            let evidence: [(&str, &[u8]); 3] = [
+                ("LEDGER.md", ledger.as_bytes()), ("green.log", b"test: PASS\n"),
+                ("c7fa-src/shots/brand-default-develop-light-desktop.png", b"\x89PNG old capture"),
+            ];
+            for (index, (name, _)) in evidence.iter().enumerate() {
+                let leaf = Path::new(name).file_name().unwrap().to_str().unwrap();
+                let optional = leaf.ends_with(".png");
+                if optional && !stalled {
+                    Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                        .and(body_partial_json(serde_json::json!({"name": leaf})))
+                        .respond_with(ResponseTemplate::new(503)).expect(2).mount(&server).await;
+                    continue;
+                }
+                let delay = if optional { std::time::Duration::from_secs(3) } else { std::time::Duration::ZERO };
+                Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                    .and(body_partial_json(serde_json::json!({"name": leaf})))
+                    .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                        "artifact_id": format!("cloud-{index}"),
+                        "upload_url": format!("{}/blob/{index}", server.uri()), "required_headers": {}}))
+                        .set_delay(delay))
+                    .mount(&server).await;
+                Mock::given(method("PUT")).and(path(format!("/blob/{index}")))
+                    .respond_with(ResponseTemplate::new(200).set_delay(delay)).mount(&server).await;
+                Mock::given(method("POST")).and(path(format!("/api/artifacts/cloud-{index}/complete")))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null}))
+                        .set_delay(if optional { std::time::Duration::from_secs(30) } else { std::time::Duration::ZERO }))
+                    .mount(&server).await;
+            }
+            let mut task = cas_types::Task::new("cas-2268-fixture".into(), "approved routed delivery".into());
+            task.notes = format!("BUILD_ROUTE: {}", serde_json::json!({
+                "key": "route-1", "source_machine_id": "prowl-fixture", "sender_agent_id": "sup",
+                "recipient_agent_id": "worker", "recipient": "worker", "free_slots": 1, "load_per_cpu": null}));
+            let parking = PeerReviewer::new(&server.uri(), task);
+            env.set("CAS_ROOT", &parking.root);
+            for (name, bytes) in &evidence {
+                let file = parking.evidence_dir().join(name);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, bytes).unwrap();
+            }
+            tokio::task::spawn_blocking(move || {
+                let started = std::time::Instant::now();
+                publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
+                let elapsed = started.elapsed();
+                eprintln!("GH2268 stalled={stalled}: publication completed in {elapsed:?}");
+                assert!(elapsed <= PUBLISH_BUDGET + std::time::Duration::from_secs(5), "publication took {elapsed:?}");
+                let task = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
+                let manifest = task.notes.lines().find_map(|line| {
+                    serde_json::from_str::<EvidenceSync>(line.strip_prefix(EVIDENCE_SYNC)?).ok()
+                }).expect("the park records its manifest");
+                assert!(manifest.strict);
+                let names: Vec<&str> = manifest.files.iter().map(|file| file.name.as_str()).collect();
+                assert_eq!(names, ["LEDGER.md", "green.log"]);
+                assert!(task.notes.contains("c7fa-src/shots/brand-default-develop-light-desktop.png"), "{}", task.notes);
+            }).await.unwrap();
+            let requests = server.received_requests().await.unwrap();
+            let begins: Vec<serde_json::Value> = requests.iter()
+                .filter(|request| request.url.path() == "/api/artifacts/begin")
+                .map(|request| serde_json::from_slice(&request.body).unwrap()).collect();
+            assert_eq!(begins[0]["name"], "LEDGER.md");
+            assert_eq!(begins[1]["name"], "green.log");
+            assert_eq!(begins.len(), 4, "one retry for the optional file");
+            if stalled {
+                assert_eq!(requests.iter().filter(|request| request.url.path() == "/api/artifacts/cloud-2/complete").count(), 1);
+            }
+        }
     }
 
     /// GH #2079: a delivery parked on one machine leaves nested captures

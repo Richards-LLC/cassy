@@ -333,6 +333,7 @@ pub struct ArtifactUploadClient {
     token: String,
     timeout: Duration,
     upload_timeout: Duration,
+    deadline: Option<Instant>,
     team_id: Option<String>,
     project_id: Option<String>,
 }
@@ -522,6 +523,7 @@ impl ArtifactUploadClient {
             token: token.to_string(),
             timeout: DEFAULT_TIMEOUT,
             upload_timeout: UPLOAD_TIMEOUT,
+            deadline: None,
             team_id: None,
             project_id: None,
         }
@@ -542,6 +544,22 @@ impl ArtifactUploadClient {
         self
     }
 
+    /// Share one publication budget across begin, PUT, complete and retries.
+    pub(crate) fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    fn remaining_timeout(&self, timeout: Duration, step: UploadStep) -> Result<Duration, UploadFailure> {
+        match self.deadline {
+            Some(deadline) => deadline.checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .map(|remaining| timeout.min(remaining))
+                .ok_or_else(|| UploadFailure::failed(step, "publication deadline expired", "artifact publication")),
+            None => Ok(timeout),
+        }
+    }
+
     /// Reserve an artifact id and get a place to put the bytes.
     pub fn begin(&self, request: &BeginRequest) -> Result<BeginResponse, UploadFailure> {
         let mime = validate_upload_mime(&request.mime)?;
@@ -557,7 +575,7 @@ impl ArtifactUploadClient {
         let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
-            .timeout(self.timeout)
+            .timeout(self.remaining_timeout(self.timeout, UploadStep::Begin)?)
             .cloud_send_json(&body);
 
         let (status, body) = match classify(response) {
@@ -618,7 +636,7 @@ impl ArtifactUploadClient {
             // ureq streams chunked unless the length is declared; object
             // stores reject a chunked pre-signed PUT.
             .set("Content-Length", &size_bytes.to_string())
-            .timeout(self.upload_timeout);
+            .timeout(self.remaining_timeout(self.upload_timeout, UploadStep::Upload)?);
         // ureq replaces headers case-sensitively. Do not first add an
         // inferred Content-Type alongside Cloud's differently-cased signed
         // header; the object store must receive exactly the signed value.
@@ -671,7 +689,7 @@ impl ArtifactUploadClient {
         let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
-            .timeout(self.timeout)
+            .timeout(self.remaining_timeout(self.timeout, UploadStep::Complete)?)
             .cloud_send_json(declared);
 
         let (status, body) = match classify(response) {

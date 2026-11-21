@@ -49,6 +49,20 @@ pub(crate) struct Snapshot {
     pub record: Record,
 }
 
+pub(super) struct AtomicUpdate {
+    pub reference: String,
+    pub expected: String,
+    pub next: String,
+}
+
+fn target_tip(repo: &Path, target: &str) -> Result<String, String> {
+    let reference = format!("refs/heads/{target}");
+    command(repo, &["check-ref-format", &reference], None)?;
+    let remote = command(repo, &["ls-remote", "--refs", "origin", &reference], None)?;
+    remote.split_whitespace().next().map(str::to_string)
+        .ok_or_else(|| "TRAIN_TRANSFER_FENCE_UNAVAILABLE: target missing".into())
+}
+
 fn command(repo: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(repo).env("GIT_TERMINAL_PROMPT", "0")
@@ -99,10 +113,40 @@ impl Snapshot {
         Ok(Self { reference, tip, record })
     }
 
-    pub(crate) fn publish(&self, git: &GitOperations, _actor: &Identity, head: &str) -> Result<TargetPushOutcome, String> {
-        // Initial public seam preserves the existing real publication path;
-        // the regression demonstrates the missing atomic authority update.
-        Ok(git.publish_pinned_source_to_origin(&self.record.target, head, TIMEOUT))
+    pub(crate) fn publish(&self, git: &GitOperations, actor: &Identity, head: &str) -> Result<TargetPushOutcome, String> {
+        let live = Self::read(&git.repo_root, &self.record.train)?;
+        if live.record.generation != self.record.generation || live.record.identity != *actor {
+            return Err("TRAIN_OWNER_GENERATION_CHANGED: owner/incarnation/generation changed".into());
+        }
+        if live.record.phase != Phase::Active {
+            return Err("TRAIN_OWNER_DRAINING: train publications are held".into());
+        }
+        if target_tip(&git.repo_root, &live.record.target)? != live.record.target_sha {
+            return Err("TRAIN_TRANSFER_TARGET_DIVERGED: adopt the exact remote SHA through operator recovery".into());
+        }
+        if live.tip != self.tip {
+            return Err("TRAIN_TRANSFER_CONFLICT: admitted authority snapshot moved".into());
+        }
+        let head = git.resolve_commit(head).ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: source missing")?;
+        if !git.is_ancestor(&live.record.target_sha, &head) {
+            return Err("TRAIN_TRANSFER_CONFLICT: candidate does not preserve the recorded target".into());
+        }
+        let mut next = live.record.clone();
+        next.target_sha = head.clone();
+        next.operation = format!("publish:{}", uuid::Uuid::new_v4());
+        let next_tip = record_commit(&git.repo_root, Some(&self.tip), &next)?;
+        let update = AtomicUpdate { reference: self.reference.clone(), expected: self.tip.clone(), next: next_tip.clone() };
+        let outcome = git.publish_pinned_source_with_lease(
+            &next.target, &head, Some(&live.record.target_sha), false, Some(&update), TIMEOUT,
+        );
+        if outcome.is_published() {
+            let confirmed = Self::read(&git.repo_root, &next.train)?;
+            if !git.is_ancestor(&next_tip, &confirmed.tip)
+                || target_tip(&git.repo_root, &next.target)? != confirmed.record.target_sha {
+                return Err("TRAIN_TRANSFER_TARGET_DIVERGED: publication readback disagrees with authority history".into());
+            }
+        }
+        Ok(outcome)
     }
 }
 

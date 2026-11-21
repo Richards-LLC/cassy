@@ -49,6 +49,30 @@ impl Fixture {
 
 #[test]
 fn train_authority_atomic_publication_cas_6456() {
+    // A rejected authority update or missing server capability must never
+    // leave the product target advanced on its own.
+    for rejection in ["authority-update", "atomic-capability"] {
+        let fixture = Fixture::new();
+        let admitted = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+        let candidate = fixture.candidate(&fixture.left, "refused-pair");
+        if rejection == "atomic-capability" {
+            command(&fixture.origin, &["config", "receive.advertiseAtomic", "false"], None).unwrap();
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let hook = fixture.origin.join("hooks/update");
+                std::fs::write(&hook, "#!/bin/sh\ncase \"$1\" in refs/cas/train-owner/*) exit 1;; esac\n").unwrap();
+                std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            #[cfg(not(unix))]
+            panic!("authority-update rejection needs an executable Git hook");
+        }
+        let outcome = admitted.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &candidate);
+        assert!(!outcome.as_ref().is_ok_and(|p| p.is_published()), "{rejection}: {outcome:?}");
+        assert_eq!(fixture.target(), fixture.base);
+        assert_eq!(Snapshot::read(&fixture.left, "cas-6456").unwrap().tip, admitted.tip);
+    }
     let fixture = Fixture::new();
     let left = Snapshot::read(&fixture.left, "cas-6456").unwrap();
     let right = Snapshot::read(&fixture.right, "cas-6456").unwrap();

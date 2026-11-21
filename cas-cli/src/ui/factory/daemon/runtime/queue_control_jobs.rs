@@ -249,9 +249,6 @@ fn account_cancelled_spawn_batch(
     super::delivery::wake_daemon_after_enqueue(&request.cas_dir);
 }
 
-/// Rows the off-writer read sees; a full window may hide this session's rows.
-const SPAWN_PEEK_LIMIT: usize = 50;
-
 /// `None`: cancelled while waiting for the writer, before any row was taken.
 fn poll_spawn_queue(
     request: &SpawnPollRequest,
@@ -273,15 +270,11 @@ fn poll_spawn_queue(
             return Some(Err(detail));
         }
     };
-    // cas-b355: read first, off the writer. Only a queue that may hold this
-    // session's rows takes the writer, and only for the dequeue itself.
-    let pending = queue.peek(SPAWN_PEEK_LIMIT).ok();
-    let ours = pending.as_ref().is_none_or(|pending| {
-        pending.len() == SPAWN_PEEK_LIMIT
-            || pending.iter().any(|row| {
-                row.factory_session.as_deref().is_none_or(|session| session == request.session)
-            })
-    });
+    // cas-b355: read first, off the writer. Only a queue holding this
+    // session's rows takes the writer, and only for the dequeue itself; an
+    // unreadable queue takes it as before.
+    let ours = queue.has_pending_for_session(&request.session).unwrap_or(true);
+    let pending = if request.scan_stalls { queue.peek(50).ok() } else { None };
     let requests = if ours {
         let (cas_dir, session, state) =
             (request.cas_dir.clone(), request.session.clone(), std::sync::Arc::clone(state));
@@ -330,7 +323,7 @@ fn poll_spawn_queue(
         );
     }
     // gate[W-18 watchdog]: Spawn queue stall scan
-    let stalled = match pending.filter(|_| request.scan_stalls) {
+    let stalled = match pending {
         Some(mut pending) => {
             // Rows this poll just took are not stalled.
             pending.retain(|row| !requests.iter().any(|taken| taken.id == row.id));

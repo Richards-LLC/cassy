@@ -9378,12 +9378,29 @@ impl CasCore {
             && has_delivery_to_measure(&task)
             && (close_repo_verified || worker_worktree_path.is_some())
         {
-            let reviewed = match verified_delivery::current(&self.cas_root, &task) {
+            let mut reviewed = match verified_delivery::current(&self.cas_root, &task) {
                 Ok(reviewed) => reviewed,
                 Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, error))),
             };
+            let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
+            // cas-6c33: retire a review of an unrelated head; this close
+            // then answers as a delivery with no reusable verdict.
+            if let Some(foreign) = reviewed.as_ref()
+                .filter(|reviewed| reviewed.bound_foreign_head(repo, &task, &resolved_parent_branch))
+            {
+                if let Err(error) = cas_store::invalidate_verification_dispatch_for_repository_drift(&self.cas_root, &foreign.dispatch) {
+                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                        "Cannot retire review dispatch {} bound to unrelated head {}: {error}",
+                        foreign.dispatch, foreign.repository.head_commit,
+                    ))));
+                }
+                close_notes.record(&mut task, &format!(
+                    "Retired review dispatch {}: its bound head {} carries none of this task's commits and is not on {}.",
+                    foreign.dispatch, foreign.repository.head_commit, resolved_parent_branch,
+                ));
+                reviewed = None;
+            }
             if let Some(reviewed) = reviewed.as_ref() {
-                let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
                 match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed) {
                     Ok(Some(current)) => task = current,
                     Ok(None) => {}
@@ -10791,16 +10808,31 @@ impl CasCore {
                         // own checkout HEAD is not this delivery. A recorded
                         // lane whose tip is already on the target binds as a
                         // post-merge delivery instead.
+                        // cas-6c33 (GH2254, GH2280): a peer machine's lane
+                        // is here only as its pushed ref, or not at all.
+                        // Bind that pushed tip, else the target tip.
+                        let mut peer_lane_proof: Option<(String, Vec<String>)> = None;
                         if worker_proof_worktree.is_none() && post_merge_target.is_none()
                             && merged_receipt.is_none() && !is_epic
                             && task.deliverables.factory_branch_start.is_some()
                         {
-                            merged_receipt = task.assignee.as_deref()
+                            // The merged check and a target binding read the
+                            // target too; refresh it like the lane.
+                            if task.delivery_mode != cas_types::DeliveryMode::LocalMerge {
+                                fetch_parent_branch_best_effort(&close_project_root, remote_branch_name(&resolved_parent_branch));
+                            }
+                            let lane_tip = task.assignee.as_deref()
                                 .map(|assignee| close_measured_factory_branch(&close_project_root, &task, assignee))
                                 .or_else(|| task_delivery_branch(&close_project_root, &task))
-                                .and_then(|branch| resolve_branch_sha(&close_project_root, &branch)
-                                    .or_else(|| resolve_branch_sha(&close_project_root, &format!("origin/{branch}"))))
+                                .and_then(|branch| peer_lane_tip(&close_project_root, &branch, task.delivery_mode));
+                            merged_receipt = lane_tip.clone()
                                 .filter(|tip| commit_is_merged_into_parent(&close_project_root, tip, &resolved_parent_branch));
+                            if merged_receipt.is_none() {
+                                peer_lane_proof = Some(match lane_tip {
+                                    Some(tip) => (tip.clone(), vec![tip]),
+                                    None => (resolved_parent_branch.clone(), Vec::new()),
+                                });
+                            }
                         }
                         let post_merge_target = post_merge_target.or_else(|| {
                             merged_receipt.as_ref().map(|_| close_project_root.clone())
@@ -10870,6 +10902,8 @@ impl CasCore {
                                     // The whole epic tree is reviewed. Checkout HEAD
                                     // and worker delivery anchors are not its boundary.
                                     Vec::new()
+                                } else if let Some((_, anchors)) = peer_lane_proof.as_ref() {
+                                    anchors.clone()
                                 } else {
                                     crate::mcp::tools::core::task::lifecycle::repository_proof::delivered_anchor_commits(
                                     &proof_worktree,
@@ -10884,7 +10918,11 @@ impl CasCore {
                                     task.deliverables.factory_branch_anchor.as_deref(),
                                 )
                                 };
-                                let repository_proof = if let Some(reference) = epic_proof_ref.as_deref() {
+                                // A target-bound peer proof never reads this checkout's files.
+                                let proof_checkout_clean = || peer_lane_proof.is_some() || checkout_is_clean(&proof_worktree);
+                                let repository_proof = if let Some(reference) = epic_proof_ref.as_deref()
+                                    .or(peer_lane_proof.as_ref().map(|(reference, _)| reference.as_str()))
+                                {
                                     crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
                                         &close_project_root, reference, anchor_commits,
                                     )
@@ -10928,12 +10966,12 @@ impl CasCore {
                                     // no lane start keeps the strict boundary.
                                     if epic_proof_ref.is_none()
                                         && (task.execution_note.as_deref() == Some("no-code")
-                                            || (empty_delivery && checkout_is_clean(&proof_worktree))
+                                            || (empty_delivery && proof_checkout_clean())
                                             || (task.deliverables.factory_branch_start.is_some() && measure_no_delivery(
                                                 worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                                                 no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch,
                                                 delivery_receipt, commit_receipt_window.as_ref(), false,
-                                            ).is_ok() && checkout_is_clean(&proof_worktree)))
+                                            ).is_ok() && proof_checkout_clean()))
                                     {
                                         crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
                                     } else {
@@ -17143,6 +17181,34 @@ fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
         }
     }
     unique
+}
+
+/// cas-6c33: a branch spelled as its remote-tracking ref (`origin/<name>`) is
+/// still the branch `<name>`. Fetching it, or building `origin/` around it,
+/// as spelled names refs that do not exist.
+pub(crate) fn remote_branch_name(branch: &str) -> &str {
+    branch.strip_prefix("origin/").unwrap_or(branch)
+}
+
+/// cas-6c33: the tip a peer machine's lane delivers. For a pushed delivery
+/// that is origin's branch, refreshed now: the closer's cached local branch
+/// and `origin/` ref can be older than what the peer pushed, so neither is
+/// ever the review boundary, and a failed refresh binds no lane at all. A
+/// `local_merge` lane, or a project with no origin, is authoritative locally.
+fn peer_lane_tip(
+    repo: &std::path::Path,
+    branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> Option<String> {
+    // A remote-only lane is measured as `origin/<lane>`; fetch and read it as `<lane>`.
+    let branch = remote_branch_name(branch);
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge || !origin_remote_configured(repo) {
+        return resolve_branch_sha(repo, branch)
+            .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}")));
+    }
+    (crate::git_evidence::fetch_parent_branch_result(repo, branch) == crate::git_evidence::BoundedFetch::Succeeded)
+        .then(|| resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}^{{commit}}")))
+        .flatten()
 }
 
 /// cas-e33f: the branch every close-time git probe for `task` should name —

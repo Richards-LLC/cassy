@@ -2734,6 +2734,160 @@ async fn supervisor_direct_verdict_binds_delivery_not_checkout_head_gh2240() {
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
 }
 
+/// cas-6c33 (GH2254, GH2280; cas-ff85's vdispatch-e726ab4b): a peer
+/// machine's lane was never pushed here, the worker's checkout is elsewhere
+/// and the supervisor's checkout sits on a stale `main`. The supervisor's
+/// no-delivery close must bind the target tip, never that checkout HEAD.
+#[tokio::test]
+async fn peer_lane_no_delivery_close_binds_target_not_checkout_head_cas_6c33() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let target = git(repo, &["rev-parse", "main"]);
+    let mut task = start_on_lane(tasks.as_ref(), &target);
+    task.notes = "no changelog: disposable fixture".into();
+    tasks.update(&task).unwrap();
+    git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
+    git(repo, &["branch", "-q", "-D", BRANCH, OLD_BRANCH]);
+    git(repo, &["update-ref", "-d", &format!("refs/remotes/origin/{BRANCH}")]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &target]);
+    git(repo, &["reset", "-q", "--hard", "main~1"]);
+    let checkout_head = git(repo, &["rev-parse", "HEAD"]);
+    let config = root.join("config.toml");
+    std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+        .replace("enabled=false", "enabled=true")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(root.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let pending = text(supervisor.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Already fixed on the target".into()),
+        commit_receipt: None, supervisor_override: None,
+        no_delivery: Some(true), stranded_branch_override: None, search_manifest: None,
+    })).await.unwrap());
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
+        .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
+    let proof = dispatch.repository.as_ref().unwrap();
+    assert_ne!(proof.head_commit, checkout_head, "{proof:?}");
+    assert_eq!(proof.head_commit, target, "{proof:?}");
+}
+
+/// cas-6c33 review: the peer pushed a later commit and it landed, but the
+/// closer's cached view of the lane (its local branch and `origin/` ref) is
+/// older. The review binds the refreshed pushed tip, never the stale cache.
+#[tokio::test]
+async fn peer_lane_review_binds_the_refreshed_pushed_tip_not_a_stale_cache_cas_6c33() {
+    // A remote-only lane reaches the lane lookup already spelled `origin/<lane>`.
+    for remote_only in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture_with_surface(&mut env, "note.txt", false);
+        let repo = f.dir.path();
+        let root = repo.join(".cas");
+        let tasks = open_task_store(&root).unwrap();
+        let base = git(repo, &["rev-parse", "main"]);
+        let mut task = start_on_lane(tasks.as_ref(), &base);
+        task.notes = "no changelog: disposable fixture".into();
+        tasks.update(&task).unwrap();
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        let pushed = commit_file(&f.worker_path, "later.txt", "fix(cas-c6e1-fixture): later pushed commit");
+        git(repo, &["merge", "-q", "--ff-only", &pushed]);
+        git(repo, &["push", "-q", "origin", "main", &format!("{BRANCH}:{BRANCH}")]);
+        git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
+        if remote_only {
+            git(repo, &["branch", "-q", "-D", BRANCH]);
+            assert_eq!(
+                super::peer_lane_tip(repo, &format!("origin/{BRANCH}"), cas_types::DeliveryMode::PushBranch),
+                Some(pushed.clone()),
+            );
+        } else {
+            git(repo, &["branch", "-q", "-f", BRANCH, &f.final_tip]);
+        }
+        git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
+        let config = root.join("config.toml");
+        std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+            .replace("enabled=false", "enabled=true")
+            .replace("independent_pass=true", "independent_pass=false")).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let supervisor = CasCore::with_daemon(root.clone(), None, None);
+        supervisor.set_agent_id_for_testing("supervisor-session".into());
+        let pending = text(supervisor.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(), reason: Some("Reviewed the peer delivery".into()),
+            commit_receipt: None, supervisor_override: None,
+            no_delivery: None, stranded_branch_override: None, search_manifest: None,
+        })).await.unwrap());
+        let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
+            .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
+        let proof = dispatch.repository.as_ref().unwrap();
+        assert_eq!(proof.anchor_commits, vec![pushed], "remote_only={remote_only}: {proof:?}");
+    }
+}
+
+/// cas-6c33 (GH2280): an approved review recorded before the fix bound the
+/// supervisor's unrelated checkout commit, while the peer's delivery merged.
+/// The supervisor's recovery close with the merged receipt must retire that
+/// review and close, never ask for the unrelated commit to be merged.
+#[tokio::test]
+async fn foreign_head_review_is_retired_not_merged_gh2280_cas_6c33() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let base = git(repo, &["rev-parse", "main"]);
+    let mut task = start_on_lane(tasks.as_ref(), &base);
+    task.notes = "no changelog: disposable fixture".into();
+    tasks.update(&task).unwrap();
+    git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
+    git(repo, &["merge", "-q", "--ff-only", &f.final_tip]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &f.final_tip]);
+    git(repo, &["checkout", "-q", "-b", "supervisor/startup"]);
+    let foreign = commit_file(repo, "settings.json", "chore: sync managed files");
+    let bound = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
+        repo, repo, vec![foreign.clone()],
+    ).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &root, TASK, "supervisor-session", "supervisor-session",
+        &cas_types::VerificationProofBoundary::task_at(bound),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    let mut verdict = cas_types::Verification::approved(
+        "ver-foreign-head".into(), TASK.into(), "Reviewed the delivery note".into(),
+    );
+    verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+    verdict.agent_id = Some("supervisor-session".into());
+    verdict.issuer_agent_id = verdict.agent_id.clone();
+    verdict.dispatch_id = Some(dispatch.id.clone());
+    use cas_store::VerificationStore;
+    cas_store::SqliteVerificationStore::open(&root).unwrap().add(&verdict).unwrap();
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn, &dispatch.id, "supervisor-session", None, true,
+    ).unwrap();
+    let config = root.join("config.toml");
+    std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+        .replace("enabled=false", "enabled=true")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(root.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let closed = text(supervisor.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Reviewed the merged peer delivery".into()),
+        commit_receipt: Some(f.final_tip.clone()), supervisor_override: Some(true),
+        no_delivery: None, stranded_branch_override: None, search_manifest: None,
+    })).await.unwrap());
+    assert!(!crate::gates::codes_in(&closed).contains(&"G-65"), "{closed}");
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
+    assert_eq!(git(repo, &["rev-parse", "main"]), f.final_tip);
+    assert_eq!(
+        cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
+        cas_types::VerificationDispatchState::Invalidated,
+    );
+}
+
 /// cas-7305: request_changes on an in-progress task (a pushed PR, no park) is
 /// refused, and the refusal carries the exact calls that return the findings
 /// to its worker: a decision note and a wake, each a replayable payload.

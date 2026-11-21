@@ -345,6 +345,17 @@ fn take_ownership(root: &Path, task: &mut Task, taker: &cas_types::Agent) -> Res
     if owner.as_deref().is_some_and(|owner| owner == taker.id || owner == taker.name) {
         return Ok(None);
     }
+    // Preserve ordinary-epic promotion semantics outside the transfer protocol.
+    if let Some(owner) = owner.as_deref() {
+        let machine = cas_types::Agent::get_or_generate_machine_id();
+        let agents = crate::store::open_agent_store(root)?.list(None)?;
+        if agents.iter().any(|agent| (agent.id == owner || agent.name == owner)
+            && crate::supervisor_notices::is_live(agent)
+            && agent.factory_session != taker.factory_session
+            && agent.machine_id.as_deref().is_none_or(|id| id == machine)) {
+            return Ok(None);
+        }
+    }
     task.epic_verification_owner = Some(taker.id.clone());
     Ok(Some(format!("supervisor {} ({}) assigned release ownership of {} from {}",
         taker.name, taker.id, task.id, owner.as_deref().unwrap_or("no recorded owner"))))
@@ -1024,6 +1035,14 @@ mod tests {
         train.epic_verification_owner = Some("sup-id".into());
         store.update(&train).unwrap();
         let request = serde_json::json!({"action": "train_freeze", "id": "cas-tr", "reason": "release-freeze: other session"});
+        // The generic task-update path must also refuse before mutating the
+        // owner or removing the train label in the same request.
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
+        let error = other.inner.cas_task_update(Parameters(serde_json::from_value(serde_json::json!({
+            "id": "cas-tr", "epic_verification_owner": "other-sup", "labels": "ordinary"
+        })).unwrap())).await.unwrap_err();
+        assert_eq!(error.message.split(':').next(), Some("TRAIN_OWNER_TRANSFER_REQUIRED"));
+        assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
         let agents = crate::store::open_agent_store(&root).unwrap();
         for state in ["live", "peer-machine", "stale", "shutdown"] {
             let mut owner = agents.get("sup-id").unwrap();
@@ -1035,7 +1054,7 @@ mod tests {
             }
             agents.update(&owner).unwrap();
             let error = other.factory(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
-            assert!(error.message.starts_with("TRAIN_OWNER_TRANSFER_REQUIRED:"), "{state}: {error}");
+            assert_eq!(error.message.split(':').next(), Some("TRAIN_OWNER_TRANSFER_REQUIRED"), "{state}: {error}");
             let train = store.get("cas-tr").unwrap();
             assert!(freeze_of(&train).is_none());
             assert_eq!(train.epic_verification_owner.as_deref(), Some("sup-id"));

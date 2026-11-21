@@ -2248,6 +2248,9 @@ mod tests {
             ("empty", vec![], false),
             ("unavailable", vec![simplicity.clone()], false),
             ("blocked", vec![simplicity.clone()], false),
+            // cas-fd7b: recorded failing tests with no class audit hold for the
+            // supervisor even on an otherwise eligible paperwork finding.
+            ("failing_tests", vec![simplicity.clone()], false),
         ];
         // Only explicit proof, paperwork, documentation and simplicity
         // categories qualify. Runtime validation and duplication are ambiguous.
@@ -2295,6 +2298,9 @@ mod tests {
                 task.deliverables.work_target = task.deliverables.factory_branch_start.as_ref().map(|start| start.work_target.clone());
             }
             core.open_task_store().unwrap().add(&task).unwrap();
+            if name == "failing_tests" {
+                crate::mcp::tools::core::task::repair_class::record_failing_tests(&root, &task.id, &["ui::list::sorts".into()]);
+            }
             let candidate = core.build_verification_candidate_sync(&task, repo, "factory/w", "main",
                 context_digest(&root, &task).unwrap(), None).unwrap();
             let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
@@ -2391,6 +2397,7 @@ mod tests {
             assert_eq!(notices.len(), 1, "{name}");
             let payload: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
             assert_eq!(payload["context"]["rejection_action"], "hold_escalate", "{name}");
+            assert_eq!(notices[0].payload.contains("CLASS_AUDIT_REQUIRED"), name == "failing_tests", "{name}");
         }
     }
 

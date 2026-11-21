@@ -414,7 +414,7 @@ async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use wiremock::matchers::{body_partial_json, method, path};
     let mut env = TestEnvGuard::temp_home();
-    for state in ["upload-failed", "missing", "published"] {
+    for state in ["upload-failed", "missing", "published", "cited-copy"] {
         let f = fixture(&mut env, "main");
         let server = MockServer::start().await;
         std::fs::write(f.cas_dir().join("cloud.json"), serde_json::json!({
@@ -431,13 +431,23 @@ async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
             &f.cas_dir(), &f.task(id),
         ).unwrap().join("capture.txt");
         let log = checkout.join("target/run.log");
-        for (index, file) in [&capture, &log].into_iter().enumerate() {
+        let mut files = vec![capture.clone(), log.clone()];
+        if state == "cited-copy" {
+            // The capture is not in the ledger, but the close reason cites it.
+            // Its presence in the directory scan must not leave it optional.
+            let root = capture.parent().unwrap();
+            files.extend([root.join("LEDGER.md"), root.join("base.txt")]);
+        }
+        for (index, file) in files.iter().enumerate() {
             if state != "missing" {
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-                std::fs::write(file, format!("proof {index}\n")).unwrap();
+                let body = if file.file_name().unwrap() == "LEDGER.md" {
+                    "schema: 2\ncovers: cas-dae1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| M01 | probe | ok [source: own.md:1] | terminal: ok | PASS | fixture | base.txt | - |\n".to_string()
+                } else { format!("proof {index}\n") };
+                std::fs::write(file, body).unwrap();
             }
             let name = file.file_name().unwrap().to_str().unwrap();
-            let response = if state == "upload-failed" {
+            let response = if index < 2 && matches!(state, "upload-failed" | "cited-copy") {
                 ResponseTemplate::new(503)
             } else {
                 ResponseTemplate::new(201).set_body_json(serde_json::json!({

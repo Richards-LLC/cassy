@@ -5,6 +5,14 @@ import { journeyStamp } from "./clock";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 
+// Located by role and accessible name (cas-81e3): the command palette is the
+// "Supervisor commands" region, and each command button is named "/<id> · <label>".
+const commandPalette = (page: Page) => page.getByRole("region", { name: "Supervisor commands", exact: true });
+const commandButton = (page: Page, id: string) => commandPalette(page).getByRole("button", { name: new RegExp(`^/${id} · `) });
+const commandButtons = (page: Page) => commandPalette(page).getByRole("button", { name: /^\/[a-z]+ · / });
+const composer = (page: Page) => page.getByRole("textbox", { name: /^Talk to / });
+const sendButton = (page: Page) => page.getByRole("button", { name: "Send message", exact: true });
+
 async function captureReload(page: Page, name: string, width: number): Promise<void> {
   const dir = process.env.QA_ARTIFACTS;
   if (!dir) return;
@@ -39,13 +47,13 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     test("HUB-J27 autocomplete Finish clears the composer like the Commands menu", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
-      const input = page.locator("#message-text");
+      const input = composer(page);
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       await journey.stage("Run Finish from the header menu", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await openCommands(page);
-        await page.locator('[data-supervisor-command="finish"]').click();
+        await commandButton(page, "finish").click();
         await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
         await expect.poll(() => mutations().length).toBe(1);
         const request = mutations()[0].body as { client_ref: string; command: string };
@@ -62,7 +70,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
       await journey.stage("Pick Finish from /fin autocomplete and settle its outcome", async () => {
         await input.fill("/fin");
-        await page.locator('[data-supervisor-command="finish"]').click();
+        await commandButton(page, "finish").click();
         await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
         await expect.poll(() => mutations().length).toBe(2);
         const request = mutations()[1].body as { client_ref: string; command: string; confirmed: boolean };
@@ -70,7 +78,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(hub.sends).toHaveLength(0);
         await captureReload(page, "finish-autocomplete-requested", viewport.width);
         await expect(input).toHaveValue("");
-        await expect(page.locator("#supervisor-command-palette")).toBeHidden();
+        await expect(commandPalette(page)).toBeHidden();
         const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
         // Replay the daemon's short timeout before the incident's 103-second completion.
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "unconfirmed", detail: "Outcome not observed yet", output: "", interactive: false } } });
@@ -95,7 +103,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.locator(".conversation-standby")).toHaveCount(0);
         await openCommands(page);
-        await page.locator('[data-supervisor-command="standby"]').click();
+        await commandButton(page, "standby").click();
         await page.getByRole("alertdialog").getByRole("button", { name: "Standby", exact: true }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         expect(hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body).toMatchObject({ command: "standby", confirmed: true });
@@ -129,7 +137,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(receipt).not.toHaveClass(/bub/);
       });
       await journey.stage("Reload Cassy once from the idle Claude supervisor", async () => {
-        const input = page.locator("#message-text");
+        const input = composer(page);
         await input.fill("/mcp"); await input.press("Enter");
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
@@ -144,7 +152,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(hub.sends).toHaveLength(0);
       });
       await journey.stage("Dismiss a stuck queued Finish through the daemon before Exit (cas-f1a2)", async () => {
-        const input = page.locator("#message-text");
+        const input = composer(page);
         await input.fill("/finish"); await input.press("Enter");
         await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
@@ -162,7 +170,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(hub.sends).toHaveLength(0);
       });
       await journey.stage("Exit once after the native turn has completed", async () => {
-        const input = page.locator("#message-text");
+        const input = composer(page);
         await input.fill("/exit"); await input.press("Enter");
         await page.getByRole("alertdialog").getByRole("button", { name: "Exit", exact: true }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(3);
@@ -205,9 +213,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         // On a phone the palette opens under the overflow toggle it was chosen from.
         const toggle = page.locator(phone ? "#conversation-more" : "#conversation-commands");
         await openCommands(page);
-        const palette = page.locator("#supervisor-command-palette");
-        await expect(palette.locator('[data-supervisor-command="mcp"]')).toContainText(/\S/);
-        await expect(palette.locator('[data-supervisor-command="mcp"]')).toBeVisible();
+        const palette = commandPalette(page);
+        await expect(commandButton(page, "mcp")).toContainText(/\S/);
+        await expect(commandButton(page, "mcp")).toBeVisible();
         const [buttonBox, paletteBox] = await Promise.all([toggle.boundingBox(), palette.boundingBox()]);
         if (!buttonBox || !paletteBox) throw new Error("Supervisor command dropdown is not laid out");
         expect(paletteBox.y).toBeGreaterThanOrEqual(buttonBox.y + buttonBox.height);
@@ -217,9 +225,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await captureReload(page, "dropdown", viewport.width);
         await page.keyboard.press("Escape");
         await expect(toggle).toBeFocused();
-        const input = page.locator("#message-text");
+        const input = composer(page);
         await input.fill("/mcp");
-        await expect(page.locator('[data-supervisor-command="mcp"]')).toContainText(/\S/);
+        await expect(commandButton(page, "mcp")).toContainText(/\S/);
         await input.press("Enter");
         await expect.poll(() => mutations().length).toBe(2);
         const request = mutations()[1].body as { client_ref: string; command: string };
@@ -239,8 +247,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("Dismiss a refused busy reload without sending chat or retrying it", async () => {
         await journey.open();
         await page.locator(".conversation-row").click();
-        await page.locator("#message-text").fill("/mcp");
-        await page.locator("#message-send").click();
+        await composer(page).fill("/mcp");
+        await sendButton(page).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const request = hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body as { client_ref: string };
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "refused", detail: "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.", output: "", interactive: false } } });
@@ -252,8 +260,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(1);
       });
       await journey.stage("A later queued reload resolves and leaves no stale busy panel", async () => {
-        await page.locator("#message-text").fill("/mcp");
-        await page.locator("#message-send").click();
+        await composer(page).fill("/mcp");
+        await sendButton(page).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
         const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1].body as { client_ref: string };
         const receipt = page.locator(".supervisor-command-receipt");
@@ -268,7 +276,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     test("HUB-J27 run a supervisor command and read its actual outcome", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "codex" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
-      const input = page.locator("#message-text");
+      const input = composer(page);
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       let ref = "";
       await journey.stage("Choose Usage from the slash palette with the keyboard", async () => {
@@ -276,9 +284,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.getByRole("button", { name: phone ? "More conversation actions" : "Supervisor commands", exact: true })).toBeVisible();
         await input.fill("/us");
-        await expect(page.locator("[data-supervisor-command]")).toHaveCount(1);
+        await expect(commandButtons(page)).toHaveCount(1);
         await input.press("ArrowDown");
-        await expect(page.locator('[data-supervisor-command="usage"]')).toBeFocused();
+        await expect(commandButton(page, "usage")).toBeFocused();
         await page.keyboard.press("Enter");
         await expect.poll(() => mutations().length).toBe(1);
         const request = mutations()[0].body as { client_ref: string; command: string; confirmed: boolean };
@@ -304,9 +312,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const messages = ["/home/pippenz/notes.md", "/mnt/notes.md review this", "/shell whoami", "//usage"];
         for (const [index, text] of messages.entries()) {
           await input.fill(text);
-          await expect(page.locator("#supervisor-command-palette")).toBeHidden();
+          await expect(commandPalette(page)).toBeHidden();
           if (index % 2 === 0) await input.press("Enter");
-          else await page.locator("#message-send").click();
+          else await sendButton(page).click();
           await expect.poll(() => hub.sends.length).toBe(index + 1);
           expect(hub.sends[index].text).toBe(text);
           await expect(input).toHaveValue("");
@@ -315,7 +323,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
       await journey.stage("Submit an exact Usage token from the composer (cas-62ea)", async () => {
         await input.fill("/usage");
-        await page.locator("#message-send").click();
+        await sendButton(page).click();
         await expect.poll(() => mutations().length).toBe(2);
         const request = mutations()[1].body as { client_ref: string; command: string };
         expect(request.command).toBe("usage");
@@ -384,7 +392,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
       await journey.stage("Cancel Clear, then confirm Exit for the named supervisor", async () => {
         await openCommands(page);
-        await page.locator('[data-supervisor-command="clear"]').click();
+        await commandButton(page, "clear").click();
         const dialog = page.getByRole("alertdialog");
         await expect(dialog).toContainText("cas-src");
         const clearConsequence = await page.locator("#supervisor-command-palette-consequence").innerText();
@@ -419,7 +427,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         session.liveness = "stale_metadata"; session.workers = [];
         await hub.announceCatalog(machine.id);
         await expect(page.locator("#conversation-list .conversation-row")).toHaveCount(0);
-        await expect(page.locator("#message-text")).toBeHidden();
+        await expect(composer(page)).toBeHidden();
         await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
         // The catalog's stop removes navigation, without inferring harness
         // execution from a missing row or displaying an endless command retry.
@@ -436,9 +444,9 @@ test("HUB-J27 explain commands without control rights and keep Raw output usable
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
     // Without command control the palette explains why and offers no command to run.
-    const palette = page.locator("#supervisor-command-palette");
+    const palette = commandPalette(page);
     await expect(palette.getByRole("status")).toHaveText(/\S/);
-    await expect(palette.locator("[data-supervisor-command]")).toHaveCount(0);
+    await expect(commandButtons(page)).toHaveCount(0);
     expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(0);
     await page.keyboard.press("Escape");
   });

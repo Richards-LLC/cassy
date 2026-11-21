@@ -560,7 +560,7 @@ mod tests {
                 let cwd = std::env::current_dir().unwrap();
                 let cargo = root.join("fake-cargo");
                 let result = monitor(&root, &id, || {
-                    crate::factory_worker_check::execute_with_cargo_for_test(&root, &args, &cwd, &cargo)
+                    crate::factory_worker_check::execute_at(&root, &args, &cwd, &cargo)
                 });
                 std::process::exit(i32::from(result.is_err()));
             }

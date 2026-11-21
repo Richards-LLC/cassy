@@ -2348,7 +2348,7 @@ pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_tes
 }
 
 #[cfg(test)]
-fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
+pub(crate) fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
     execute_at_with_scope(cas_root, args, cwd, cargo, None, None)
 }
 
@@ -2424,12 +2424,6 @@ pub(crate) fn diff_base(repo: &Path, target: Option<&str>) -> Result<String> {
     git(repo, &["merge-base", "refs/remotes/origin/HEAD", "HEAD"])
         .or_else(|_| git(repo, &["rev-parse", "HEAD^"]))
         .or_else(|_| git(repo, &["rev-parse", "HEAD"]))
-}
-
-/// The capped producer with a stand-in cargo and no systemd scope (tests).
-#[cfg(test)]
-pub(crate) fn execute_with_cargo_for_test(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
-    execute_at_with_scope(cas_root, args, cwd, cargo, None, None)
 }
 
 fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>) -> Result<()> {

@@ -1,5 +1,5 @@
 title: Merge retry recovers an expired claim after confirmed verifier death
-statement: Only the recorded supervisor can recover a current expired review with a positively dead local child; recovery preserves the exact candidate, retires old authority atomically and leaves live or unverifiable claims intact.
+statement: Only the recorded supervisor can recover a current expired review after registered shutdown, confirmed PID absence or a readable fingerprint mismatch; recovery preserves the exact candidate, retires old authority atomically and retains live, unreadable or unverifiable claims.
 tasks: [cas-de6d]
 fixed_by: [cas-de6d]
 journeys: [FACTORY-MERGE]

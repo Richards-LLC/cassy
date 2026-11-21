@@ -352,14 +352,19 @@ pub(super) fn recover_expired_claim_with_probes(
     let Some(child) = dispatch.verifier_agent_id.as_deref().and_then(|id| agents.get(id).ok()) else {
         return Ok(dispatch.clone());
     };
-    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str())
-        || !(child.status == cas_types::AgentStatus::Shutdown || matches!(
-            crate::mcp::daemon::evaluate_liveness(&child,
-                &pid_alive, |pid, expected| pid_alive(pid)
-                    && read_starttime(pid).is_some_and(|actual| actual == expected)),
-            crate::mcp::daemon::LivenessOutcome::Dead { .. }
-        ))
-    { return Ok(dispatch.clone()); }
+    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str()) {
+        return Ok(dispatch.clone());
+    }
+    // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
+    // review authority needs positive death evidence, not that ambiguity.
+    let confirmed_dead = child.status == cas_types::AgentStatus::Shutdown
+        || child.pid.is_some_and(|pid| {
+            if !pid_alive(pid) { return true; }
+            child.pid_starttime.or_else(|| child.metadata
+                .get(crate::mcp::daemon::PID_STARTTIME_KEY).and_then(|value| value.parse::<u64>().ok()))
+                .is_some_and(|expected| read_starttime(pid).is_some_and(|actual| actual != expected))
+        });
+    if !confirmed_dead { return Ok(dispatch.clone()); }
     cas_store::recover_expired_dead_verifier_dispatch(&core.cas_root, &dispatch.id, &owner, &child, now)
         .map_err(|e| store_refusal(&e))
 }

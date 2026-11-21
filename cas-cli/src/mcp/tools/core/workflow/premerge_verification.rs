@@ -2010,7 +2010,7 @@ mod tests {
             if matches!(case, "live" | "unreadable" | "mismatch" | "shutdown") {
                 child.pid = Some(std::process::id());
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
-                if case == "mismatch" { child.pid_starttime = Some(child.pid_starttime.unwrap_or(0) + 1); }
+                if case == "mismatch" { child.pid_starttime = Some(child.pid_starttime.expect("readable fixture fingerprint") + 1); }
             }
             if case == "unknown" { child.pid = None; }
             if case == "foreign" { child.machine_id = Some("peer-machine".into()); }

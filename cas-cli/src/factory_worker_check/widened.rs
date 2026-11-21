@@ -4,6 +4,9 @@ use super::*;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
     File(String),
+    /// Jest's dependency graph, rooted at this source file, rather than a
+    /// package pass that may execute thousands of unrelated tests.
+    Related(String),
     Package(String),
     Crate(String),
 }
@@ -23,12 +26,16 @@ pub(super) fn valid(proof: &Proof) -> bool {
         && match &proof.scope {
             Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
+            Scope::Related(path) => proof.runner == "jest" && !path.is_empty() && relative(path),
             Scope::Package(path) => proof.runner != "nextest" && relative(path),
         }
 }
 
 pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) && javascript::test_match(path) { return Scope::File(path.into()); }
+    if javascript::javascript(path) && javascript::runner_hint(repo, path) == Some("jest") {
+        return Scope::Related(path.into());
+    }
     let rust = path.ends_with(".rs");
     let manifest = if rust { "Cargo.toml" } else { "package.json" };
     let mut directory = repo.join(path);
@@ -56,6 +63,9 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
     scopes.iter().flat_map(|scope| {
         if let Scope::Crate(package) = scope {
             return vec![format!("cas factory worker-check --cas-root {} -- nextest run -p {package} --lib -E 'test({package})'", cas_root.display())];
+        }
+        if let Scope::Related(path) = scope {
+            return vec![format!("cas factory worker-check --cas-root {} -- jest --findRelatedTests {path}", cas_root.display())];
         }
         let path = paths.iter().find(|path| &self::scope(repo, path) == scope).map(String::as_str)
             .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None }).unwrap_or(".");

@@ -46,7 +46,7 @@
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` — exact-SHA prechecks and dispatch recovery.
 - `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters; shared default-train election in `cas-cli/src/mcp/tools/core/task/release_train.rs` uses origin history and cut admission markers.
 - `cas-cli/src/cli/release_notice_failure.rs`, `cas-cli/src/issue_reconcile.rs` — exhausted release notices and issue reconciliation.
-- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch and shared schemas; pre-tool admission in `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs`.
+- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch and shared schemas; pre-tool admission in `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs`; long foreground supervisor Bash refusal in `handlers_events/supervisor_foreground.rs`.
 - `cas-cli/src/config/`, `cas-cli/src/harness_policy.rs` — runtime settings and harness policy projections.
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/knowledge/`, `cas-cli/src/extraction/` — composed retrieval, distillation and extraction.
 - `cas-cli/src/retrieval_parity/`, `cas-cli/src/daemon/` — retrieval capture/replay and idle maintenance/indexing.

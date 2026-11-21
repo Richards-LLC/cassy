@@ -64,13 +64,15 @@ pub(crate) fn director_snapshot_spec(generation: u64) -> JobSpec {
     }
 }
 
-/// The delivery read carries detected events, so it is never dropped.
+/// The delivery read carries detected events, so it is never dropped. A
+/// resubmit after a timeout carries those events too, so it replaces any read
+/// still waiting.
 pub(crate) fn delivery_read_spec(generation: u64) -> JobSpec {
     JobSpec {
         kind: REVALIDATE_FRESH,
         key: DELIVERY_READ_KEY.to_string(),
         lane: Lane::Read,
-        criticality: Criticality::Critical,
+        criticality: Criticality::Latest,
         generation,
         budget: REVALIDATE_FRESH_BUDGET,
     }
@@ -115,7 +117,7 @@ pub(crate) fn idle_liveness_spec(generation: u64) -> JobSpec {
         kind: WORKER_HEALTH_PROBE,
         key: IDLE_LIVENESS_KEY.to_string(),
         lane: Lane::Blocking,
-        criticality: Criticality::Critical,
+        criticality: Criticality::Latest,
         generation,
         budget: WORKER_HEALTH_PROBE_BUDGET,
     }

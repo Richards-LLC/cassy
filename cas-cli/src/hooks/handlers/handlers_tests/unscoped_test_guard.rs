@@ -388,7 +388,10 @@ fn worker_suites_run_unwrapped_without_memory_admission_cas_38e7() {
 
 #[test]
 fn supervisor_retains_full_suite_authority() {
-    let out = handle_pre_tool_use(&input("cargo nextest run -p cas", "supervisor"), None)
+    // cas-803f: a supervisor's long run goes in the background (H-49).
+    let mut request = input("cargo nextest run -p cas", "supervisor");
+    request.tool_input = Some(serde_json::json!({"command": "cargo nextest run -p cas", "run_in_background": true}));
+    let out = handle_pre_tool_use(&request, None)
         .expect("handler ok");
     assert!(deny_reason(&out).is_none());
 }

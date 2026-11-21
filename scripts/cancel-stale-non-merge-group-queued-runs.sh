@@ -20,6 +20,24 @@ watchdog_policy_init
 repository="$WATCHDOG_REPOSITORY"
 queue_seconds="$WATCHDOG_THRESHOLD_SECONDS"
 now_epoch="$WATCHDOG_NOW_EPOCH"
+# cas-a49f: a stale run waiting behind busy runners is backlog, not dead.
+# GITHUB_TOKEN cannot list runners, so an in-progress job whose labels cover
+# a queued job's labels proves an eligible runner is online and busy. The
+# label sets of running jobs are read once, on the first stale candidate.
+busy_labels=""
+load_busy_labels() {
+    [[ -z "$busy_labels" ]] || return 0
+    local runs run_id jobs sets="[]"
+    runs="$(watchdog_api_read "repos/$repository/actions/runs?status=in_progress&per_page=100")" || return 1
+    for run_id in $(jq -r '.workflow_runs[].id' <<<"$runs"); do
+        jobs="$(watchdog_api_read "repos/$repository/actions/runs/$run_id/jobs?filter=latest&per_page=100")" || return 1
+        sets="$(jq -c --argjson sets "$sets" '$sets + [.jobs[]
+            | select(.status == "in_progress" and .runner_name != null)
+            | [.labels[] | ascii_downcase]]' <<<"$jobs")"
+    done
+    busy_labels="$sets"
+}
+
 selected=0 cancel_accepted=0 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0 unverified=0
 
 list_call="repos/$repository/actions/runs?status=queued&per_page=100"
@@ -52,6 +70,19 @@ while IFS=$'\t' read -r run_id attempt_started_at event head_branch; do
     fi
     if [[ "$current_status" != queued ]]; then
         printf 'skipping no-longer-queued run=%s current_status=%s\n' "$run_id" "$current_status"
+        continue
+    fi
+
+    jobs_call="repos/$repository/actions/runs/$run_id/jobs?filter=latest&per_page=100"
+    if ! load_busy_labels || ! run_jobs="$(watchdog_api_read "$jobs_call")"; then
+        printf 'warning: runner backlog read failed run=%s; skipping run\n' "$run_id" >&2
+        status_failed=$((status_failed + 1))
+        continue
+    fi
+    if jq -e --argjson busy "$busy_labels" 'any(.jobs[] | select(.status == "queued");
+            [.labels[] | ascii_downcase] as $want | any($busy[]; ($want - .) == []))' \
+            <<<"$run_jobs" >/dev/null; then
+        printf 'skipping backlogged run=%s age_seconds=%s: a runner for its labels is online and busy\n' "$run_id" "$age_seconds"
         continue
     fi
 

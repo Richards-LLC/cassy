@@ -400,6 +400,10 @@ pub trait SpawnQueueStore: Send + Sync {
     /// Peek at pending requests without marking as processed
     fn peek(&self, limit: usize) -> Result<Vec<SpawnRequest>>;
 
+    /// Whether [`Self::poll`] would dequeue anything for this session, read
+    /// without dequeuing (cas-b355: lets the daemon skip the store writer).
+    fn has_pending_for_session(&self, factory_session: &str) -> Result<bool>;
+
     /// Mark a request as processed
     fn mark_processed(&self, request_id: i64) -> Result<()>;
 
@@ -872,6 +876,17 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         }
 
         Ok(requests)
+    }
+
+    fn has_pending_for_session(&self, factory_session: &str) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM spawn_queue
+             WHERE processed_at IS NULL
+               AND (factory_session = ? OR factory_session IS NULL))",
+            params![factory_session],
+            |row| row.get(0),
+        )?)
     }
 
     fn peek(&self, limit: usize) -> Result<Vec<SpawnRequest>> {

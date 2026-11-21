@@ -142,7 +142,9 @@ impl SpawnIngress {
             JobSpec {
                 kind: SPAWN_QUEUE_POLL,
                 key: format!("SpawnQueuePoll:{}", request.session),
-                lane: Lane::Write,
+                // cas-b355: the poll reads on the select lane and takes the
+                // writer only to dequeue.
+                lane: Lane::Select,
                 criticality: Criticality::Critical,
                 generation,
                 budget: Duration::from_millis(100),
@@ -153,7 +155,9 @@ impl SpawnIngress {
                 if state.lock().unwrap().cancelled.is_some() {
                     return Box::new(());
                 }
-                let result = poll_spawn_queue(&request);
+                let Some(result) = poll_spawn_queue(&request, &state) else {
+                    return Box::new(());
+                };
                 if let Err(error) = &result {
                     tracing::error!(%error, "cas-2702: spawn queue poll failed");
                 }
@@ -245,9 +249,14 @@ fn account_cancelled_spawn_batch(
     super::delivery::wake_daemon_after_enqueue(&request.cas_dir);
 }
 
-fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
-    let queue =
-        super::prompt_queue_jobs::job_thread_spawn_queue(&request.cas_dir).map_err(|error| {
+/// `None`: cancelled while waiting for the writer, before any row was taken.
+fn poll_spawn_queue(
+    request: &SpawnPollRequest,
+    state: &std::sync::Arc<std::sync::Mutex<SpawnHandoff>>,
+) -> Option<Result<SpawnBatch, String>> {
+    let queue = match super::prompt_queue_jobs::job_thread_spawn_queue(&request.cas_dir) {
+        Ok(queue) => queue,
+        Err(error) => {
             let detail = format!("Could not open the spawn queue store: {error}");
             append_spawn_audit(
                 &request.cas_dir,
@@ -258,22 +267,50 @@ fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
                 "failed",
                 &detail,
             );
-            detail
-        })?;
-    let requests = queue.poll(&request.session, 10).map_err(|error| {
-        let detail = format!("Spawn queue poll failed: {error}");
-        append_spawn_audit(
-            &request.cas_dir,
-            &request.session,
-            None,
-            None,
-            "dequeue",
-            "failed",
-            &detail,
-        );
-        super::prompt_queue_jobs::forget_job_thread_stores(&request.cas_dir);
-        detail
-    })?;
+            return Some(Err(detail));
+        }
+    };
+    // cas-b355: read first, off the writer. Only a queue holding this
+    // session's rows takes the writer, and only for the dequeue itself; an
+    // unreadable queue takes it as before.
+    let ours = queue.has_pending_for_session(&request.session).unwrap_or(true);
+    let pending = if request.scan_stalls { queue.peek(50).ok() } else { None };
+    let requests = if ours {
+        let (cas_dir, session, state) =
+            (request.cas_dir.clone(), request.session.clone(), std::sync::Arc::clone(state));
+        let claimed = super::jobs::on_writer(SPAWN_QUEUE_POLL, move || {
+            // A poll cancelled while it waited for the writer leaves durable
+            // rows queued.
+            if state.lock().unwrap().cancelled.is_some() {
+                return None;
+            }
+            Some(super::prompt_queue_jobs::job_thread_spawn_queue(&cas_dir)
+                .and_then(|queue| Ok(queue.poll(&session, 10)?))
+                .map_err(|error| {
+                    super::prompt_queue_jobs::forget_job_thread_stores(&cas_dir);
+                    error.to_string()
+                }))
+        })
+        .unwrap_or_else(|error| Some(Err(error.to_string())))?;
+        match claimed {
+            Ok(requests) => requests,
+            Err(error) => {
+                let detail = format!("Spawn queue poll failed: {error}");
+                append_spawn_audit(
+                    &request.cas_dir,
+                    &request.session,
+                    None,
+                    None,
+                    "dequeue",
+                    "failed",
+                    &detail,
+                );
+                return Some(Err(detail));
+            }
+        }
+    } else {
+        Vec::new()
+    };
     for row in &requests {
         append_spawn_audit(
             &request.cas_dir,
@@ -286,8 +323,10 @@ fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
         );
     }
     // gate[W-18 watchdog]: Spawn queue stall scan
-    let stalled = if request.scan_stalls {
-        queue.peek(50).ok().map(|pending| {
+    let stalled = match pending {
+        Some(mut pending) => {
+            // Rows this poll just took are not stalled.
+            pending.retain(|row| !requests.iter().any(|taken| taken.id == row.id));
             super::queue_and_events::stalled_spawn_requests(&pending, chrono::Utc::now(),
                 chrono::Duration::seconds(super::queue_and_events::SPAWN_QUEUE_STALL_AGE_SECS), &request.reported)
                 .into_iter().map(|row| {
@@ -297,11 +336,10 @@ fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
                     append_spawn_audit(&request.cas_dir, &request.session, Some(row.id), None, "dequeue", "stalled", &detail);
                     (row.id, detail)
                 }).collect()
-        }).unwrap_or_default()
-    } else {
-        Vec::new()
+        }
+        None => Vec::new(),
     };
-    Ok(SpawnBatch { requests, stalled })
+    Some(Ok(SpawnBatch { requests, stalled }))
 }
 
 pub(crate) const WAKE_GATE_READ: &str = "WakeGateRead";

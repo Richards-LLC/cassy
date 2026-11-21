@@ -20,6 +20,8 @@ type WriterJob = Box<dyn FnOnce() + Send + 'static>;
 pub(in super::super) struct TestWriter {
     sender: Mutex<mpsc::Sender<(&'static str, WriterJob)>>,
     ran: Arc<Mutex<Vec<(&'static str, String)>>>,
+    /// How long each job held the writer (cas-b355).
+    held: Arc<Mutex<Vec<(&'static str, Duration)>>>,
     gate: Arc<(Mutex<bool>, Condvar)>,
 }
 
@@ -29,6 +31,8 @@ impl TestWriter {
         let ran = Arc::new(Mutex::new(Vec::new()));
         let gate = Arc::new((Mutex::new(!gated), Condvar::new()));
         let thread_ran = Arc::clone(&ran);
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let thread_held = Arc::clone(&held);
         let thread_gate = Arc::clone(&gate);
         std::thread::Builder::new()
             .name("test-store-writer".into())
@@ -43,13 +47,16 @@ impl TestWriter {
                     }
                     let thread = std::thread::current().name().unwrap_or("").to_string();
                     thread_ran.lock().unwrap().push((label, thread));
+                    let started = Instant::now();
                     job();
+                    thread_held.lock().unwrap().push((label, started.elapsed()));
                 }
             })
             .unwrap();
         Arc::new(Self {
             sender: Mutex::new(sender),
             ran,
+            held,
             gate,
         })
     }
@@ -62,6 +69,12 @@ impl TestWriter {
 
     pub(in super::super) fn ran(&self) -> Vec<(&'static str, String)> {
         self.ran.lock().unwrap().clone()
+    }
+
+    /// The longest any `label` job held the writer.
+    pub(in super::super) fn max_held(&self, label: &str) -> Duration {
+        self.held.lock().unwrap().iter().filter(|(ran, _)| *ran == label)
+            .map(|(_, held)| *held).max().unwrap_or_default()
     }
 }
 
@@ -222,7 +235,8 @@ fn flv2_queue_stamps_on_writer() {
     let writer = TestWriter::start(false);
     let mut jobs = jobs_on(&writer);
 
-    // QueueSelect runs its store work on the writer and returns the batch.
+    // QueueSelect reads on the select lane, writes on the writer, and
+    // returns the batch (cas-b355).
     let select_threads = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&select_threads);
     jobs.submit_select(request(&cas_dir), move |request, generation| {
@@ -237,8 +251,8 @@ fn flv2_queue_stamps_on_writer() {
     let selection = jobs.take_selection().expect("the selection lands as a completion");
     assert_eq!(
         select_threads.lock().unwrap().as_slice(),
-        ["test-store-writer"],
-        "the selection's store work ran on the writer, not the caller"
+        ["factory-jobs-select"],
+        "the selection ran on the select lane, not the caller or the writer"
     );
     let ids: Vec<i64> = selection.rows.iter().map(|row| row.id).collect();
     assert_eq!(ids, vec![delivered, released]);
@@ -274,12 +288,12 @@ fn flv2_queue_stamps_on_writer() {
     jobs.settle_injects(&cas_dir);
     settle(&mut jobs, |jobs| jobs.in_flight().len() == 0);
 
-    // Every selection and stamp ran on the writer thread, none on the caller.
+    // Every selection write and stamp ran on the writer thread, none on the caller.
     let ran = writer.ran();
     assert_eq!(
         ran.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
-        vec!["QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueSettle", "QueueSettle"],
-        "the selection, then receipt, delivered, release and two settles: {ran:?}"
+        vec!["QueueSelect", "QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueSettle", "QueueSettle"],
+        "the selection's two writes, then receipt, delivered, release and two settles: {ran:?}"
     );
     assert!(ran.iter().all(|(_, thread)| thread == "test-store-writer"), "{ran:?}");
 
@@ -1088,6 +1102,57 @@ fn a_drop_after_a_finished_uncollected_job_is_attributed_by_generation() {
     assert!(probe_results.contains(&(10, false)), "g10's Done is delivered: {probe_results:?}");
     assert!(probe_results.contains(&(11, true)), "g11's drop is reported as g11: {probe_results:?}");
     assert!(jobs.job_owners.get(probe).is_none(), "nothing is left outstanding for the key");
+}
+
+/// cas-b355 (soundwave gabber, Nov 20): QueueSelect held the store writer up
+/// to 4.1 s while it read its rows' facts. With a 500-row queue and a facts
+/// read stuck (git, held at its trace FIFO), the writer stays free and no
+/// QueueSelect write holds it for 1 s.
+#[test]
+fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
+    let (root, cas_dir) = project();
+    assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(root.path())
+        .status().unwrap().success());
+    let sha = "a".repeat(40);
+    enqueue(&cas_dir, "lead", &format!("<cas-merge-request>{{\"task_id\":\"cas-held\",\"branch_tip\":\"{sha}\",\"target_branch\":\"main\",\"target_branch_tip\":\"{sha}\"}}</cas-merge-request>"));
+    for n in 1..500 {
+        enqueue(&cas_dir, "lead", &format!("queued message {n}"));
+    }
+    // Git opens its trace before it does anything; a FIFO nobody reads holds it there.
+    let trace = tempfile::tempdir().unwrap();
+    let fifo = trace.path().join("git.trace");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("GIT_TRACE", &fifo);
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    jobs.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !writer.ran().iter().any(|(label, _)| *label == "QueueSelect") {
+        assert!(Instant::now() < deadline, "the selection never wrote");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (ran, probe) = mpsc::channel();
+    assert!(SharedWriter(Arc::clone(&writer)).execute("probe", Box::new(move || {
+        let _ = ran.send(());
+    })));
+    let free = probe.recv_timeout(Duration::from_secs(1)).is_ok();
+    // Release every git for the rest of the test.
+    let drain = fifo.clone();
+    std::thread::spawn(move || {
+        while let Ok(mut trace) = std::fs::File::open(&drain) {
+            let _ = std::io::copy(&mut trace, &mut std::io::sink());
+        }
+    });
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    let held = writer.max_held("QueueSelect");
+    // The measurement, for the replay receipt (nextest hides passing output).
+    let line = format!("cas-b355 QueueSelect max writer hold: {} ms (500 rows)\n", held.as_millis());
+    eprint!("{line}");
+    let _ = std::io::Write::write_all(&mut std::fs::OpenOptions::new().create(true).append(true)
+        .open(std::env::temp_dir().join("cas-b355-writer-holds.log")).unwrap(), line.as_bytes());
+    assert!(free, "a selection reading its rows' facts held the store writer");
+    assert!(held < Duration::from_secs(1), "QueueSelect held the writer {held:?}");
 }
 
 /// cas-4272 review L3, cas-9594c: a queued Retry stamp holds its row out of

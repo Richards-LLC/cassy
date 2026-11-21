@@ -947,31 +947,14 @@ pub(crate) struct WorkerDeathCoalesceReport {
     pub duplicates: usize,
 }
 
-/// Collapse pending no-action deaths for duplicate registrations of one
-/// logical factory worker before any of them reaches the supervisor turn.
-///
-/// A death holding or parking even one task is never eligible: those failures
-/// remain separate, critical, actionable relays. Task-free deaths group by
-/// target, factory session and logical worker name. The canonical prompt lists
-/// every registration UUID and durable notification ID for forensics; sibling
-/// prompt rows are suppressed and sibling durable rows are processed so both
-/// `message_*` and `queue_*` views expose one batch.
-pub(crate) fn coalesce_pending_worker_deaths(
-    prompt_queue: &dyn PromptQueueStore,
-    supervisor_queue: Option<&dyn SupervisorQueueStore>,
-    rows: &[cas_store::QueuedPrompt],
-) -> Result<WorkerDeathCoalesceReport, cas_store::StoreError> {
-    use std::collections::BTreeMap;
+type WorkerDeathFamilies = std::collections::BTreeMap<
+    (String, Option<String>, String),
+    Vec<(cas_store::QueuedPrompt, crate::prompt_revalidation::WorkerDiedEnvelope)>,
+>;
 
-    type FamilyKey = (String, Option<String>, String);
-    let mut families: BTreeMap<
-        FamilyKey,
-        Vec<(
-            cas_store::QueuedPrompt,
-            crate::prompt_revalidation::WorkerDiedEnvelope,
-        )>,
-    > = BTreeMap::new();
-
+/// Task-free worker-death rows grouped by recipient, session and worker.
+fn worker_death_families(rows: &[cas_store::QueuedPrompt]) -> WorkerDeathFamilies {
+    let mut families = WorkerDeathFamilies::new();
     for row in rows {
         let Some(envelope) = crate::prompt_revalidation::parse_worker_died_envelope(&row.prompt)
         else {
@@ -989,9 +972,31 @@ pub(crate) fn coalesce_pending_worker_deaths(
             .or_default()
             .push((row.clone(), envelope));
     }
+    families
+}
 
+/// Whether [`coalesce_pending_worker_deaths`] would collapse anything in
+/// `rows`, read without writing (cas-b355: decides off the store writer).
+pub(crate) fn has_coalescible_worker_deaths(rows: &[cas_store::QueuedPrompt]) -> bool {
+    worker_death_families(rows).values().any(|family| family.len() >= 2)
+}
+
+/// Collapse pending no-action deaths for duplicate registrations of one
+/// logical factory worker before any of them reaches the supervisor turn.
+///
+/// A death holding or parking even one task is never eligible: those failures
+/// remain separate, critical, actionable relays. Task-free deaths group by
+/// target, factory session and logical worker name. The canonical prompt lists
+/// every registration UUID and durable notification ID for forensics; sibling
+/// prompt rows are suppressed and sibling durable rows are processed so both
+/// `message_*` and `queue_*` views expose one batch.
+pub(crate) fn coalesce_pending_worker_deaths(
+    prompt_queue: &dyn PromptQueueStore,
+    supervisor_queue: Option<&dyn SupervisorQueueStore>,
+    rows: &[cas_store::QueuedPrompt],
+) -> Result<WorkerDeathCoalesceReport, cas_store::StoreError> {
     let mut report = WorkerDeathCoalesceReport::default();
-    for ((_target, _session, worker_name), mut family) in families {
+    for ((_target, _session, worker_name), mut family) in worker_death_families(rows) {
         if family.len() < 2 {
             continue;
         }

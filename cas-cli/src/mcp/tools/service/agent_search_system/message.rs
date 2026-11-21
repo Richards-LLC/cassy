@@ -920,6 +920,16 @@ fn interrupt_delivery_is_observed(report: &cas_store::MessageDeliveryReport) -> 
         && report.recipient_transport_at.is_some()
 }
 
+/// cas-5463 (GH #2275): the daemon holds an urgent row while the recipient
+/// has a tool call in flight (cas-73f7). Not a failed interrupt: it surfaces
+/// when the call ends, or Cassy interrupts once the hold runs out.
+fn interrupt_held_for_tool_call(report: &cas_store::MessageDeliveryReport) -> bool {
+    use crate::ui::factory::daemon::runtime::queue_and_events::URGENT_TOOL_CALL_DETAIL;
+    report.urgent
+        && report.pending_reason == Some(cas_store::PendingReason::AwaitingBusyRecipient)
+        && report.pending_detail.as_deref() == Some(URGENT_TOOL_CALL_DETAIL)
+}
+
 fn interrupt_delivery_failure(report: &cas_store::MessageDeliveryReport) -> Option<String> {
     report.stage.is_terminal_non_delivery().then(|| {
         format!(
@@ -968,7 +978,7 @@ async fn wait_for_claude_interrupt_delivery(
     loop {
         match queue.message_delivery_report(notification_id) {
             Ok(Some(report)) => {
-                if interrupt_delivery_is_observed(&report) {
+                if interrupt_delivery_is_observed(&report) || interrupt_held_for_tool_call(&report) {
                     return Ok(());
                 }
                 if let Some(failure) = interrupt_delivery_failure(&report) {
@@ -3674,6 +3684,15 @@ impl CasService {
                  Target is not registered yet; the row will deliver when it registers. \
                  Check message_status notification_id={message_id} for its latest stage. \
                  {supervisor_copy_suffix}"
+            )
+        } else if urgent && let Some(report) = send_report.as_ref().filter(|report| interrupt_held_for_tool_call(report)) {
+            let interrupt_at = report.enqueued_at
+                + chrono::Duration::from_std(crate::ui::factory::daemon::runtime::queue_and_events::URGENT_TOOL_CALL_HOLD)
+                    .unwrap_or_default();
+            format!(
+                "held #{message_id} → {resolved_target}: recipient has a tool call in flight; \
+                 surfaces when the call ends, or Cassy interrupts at {}{supervisor_copy_suffix}",
+                operator_clock_at(interrupt_at)
             )
         } else if urgent {
             format!(

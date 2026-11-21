@@ -2743,7 +2743,7 @@ fn epic_build_proof_basis(
                     "its tip {short} is already contained in {target}; the supervisor's {line} proves exact default-branch SHA {sha}"
                 ));
             }
-            let ci = crate::mcp::tools::core::workflow::epic_tip_ci_proof(&sha, repo)?;
+            let ci = crate::mcp::tools::core::workflow::epic_tip_ci_proof(&sha, &default, repo)?;
             Ok(format!(
                 "its tip {short} is already contained in {target}; {ci}"
             ))
@@ -34111,9 +34111,13 @@ case "$1 $2" in
 'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
 'api graphql') printf '%s\n' '{queue}' ;;
 'api --method')
-  expected="repos/acme/epic/commits/$(git rev-parse origin/main)/check-runs"
-  [ "$4" = "$expected" ] || exit 97
-  printf '%s\n' '{checks}' ;;
+  case "$4" in
+  repos/acme/epic/branches/main/protection/required_status_checks)
+    printf '%s\n' '{{"checks":[{{"context":"Tests","app_id":null}}]}}' ;;
+  repos/acme/epic/commits/$(git rev-parse origin/main)/check-runs)
+    printf '%s\n' '{checks}' ;;
+  *) exit 97 ;;
+  esac ;;
 *) exit 97 ;;
 esac
 "#
@@ -34171,6 +34175,84 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn epic_close_green_main_and_queue_controls_cas_7e91e() {
+        // GH #2269 / #2150: the actual epic-close path, with authenticated
+        // API boundaries and real merge trees. Required check identities are
+        // protocol data; no job-name vocabulary grants CI authority.
+        for case in [
+            "equivalent", "arbitrary-green", "different-tree", "different-config",
+            "source-failed", "source-cancelled", "source-budget-blocked", "source-missing",
+            "source-wrong-head", "different-app", "target-failed", "target-pending",
+            "required-missing", "metadata-unavailable",
+        ] {
+            let check = |name: &str, conclusion: &str| serde_json::json!({
+                "name":name, "app":{"id":15368}, "status":"completed", "conclusion":conclusion,
+            });
+            let mut source = vec![check("frontend checks", "success"), check("backend checks", "success")];
+            let mut target = vec![check("frontend checks", "skipped"), check("backend checks", "skipped"), check("Post-merge receipt", "success")];
+            match case {
+                "arbitrary-green" => target = vec![check("frontend checks", "success"), check("backend checks", "success"), check("deploy", "success")],
+                "source-failed" => source[0]["conclusion"] = serde_json::json!("failure"),
+                "source-cancelled" => source[0]["conclusion"] = serde_json::json!("cancelled"),
+                "source-budget-blocked" => source[0]["conclusion"] = serde_json::json!("startup_failure"),
+                "source-missing" => { source.pop(); },
+                "source-wrong-head" => source[0]["head_sha"] = serde_json::json!("wrong"),
+                "different-app" => source[0]["app"]["id"] = serde_json::json!(999),
+                "target-failed" => target[2]["conclusion"] = serde_json::json!("failure"),
+                "target-pending" => target[2]["status"] = serde_json::json!("in_progress"),
+                _ => {},
+            }
+            let mut required = vec![serde_json::json!({"context":"frontend checks", "app_id":15368}), serde_json::json!({"context":"backend checks", "app_id":15368})];
+            if case == "required-missing" {
+                required.push(serde_json::json!({"context":"necessary security job", "app_id":15368}));
+            }
+            let metadata = serde_json::json!({"checks":required});
+            let metadata_status = if case == "metadata-unavailable" { "exit 1" } else { "exit 0" };
+            let gh = format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> gh-requests.log
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api graphql') printf '%s\n' '{{"data":{{"repository":{{"mergeQueue":null}}}}}}' ;;
+'api --method')
+  case "$4" in
+  repos/acme/epic/branches/main/protection/required_status_checks)
+    printf '%s\n' '{metadata}'; {metadata_status} ;;
+  repos/acme/epic/commits/$(git rev-parse origin/main)/check-runs)
+    printf '%s\n' '{{"check_runs":{target}}}' ;;
+  repos/acme/epic/commits/$(git rev-parse epic/landed)/check-runs)
+    printf '%s\n' '{{"check_runs":{source}}}' ;;
+  *) exit 97 ;;
+  esac ;;
+*) exit 97 ;;
+esac
+"#, target=serde_json::to_string(&target).unwrap(), source=serde_json::to_string(&source).unwrap());
+            let run = run_epic_close_fixture_cas_7e91e(0, "#!/bin/sh\ncat >/dev/null\n", |p| {
+                git(p, &["checkout", "-q", "-b", "epic/landed", "main"]);
+                std::fs::create_dir_all(p.join(".github/workflows")).unwrap();
+                std::fs::write(p.join(".github/workflows/ci.yml"), "name: CI\non: [pull_request, push]\njobs: {}\n").unwrap();
+                std::fs::write(p.join("delivery.js"), "export const delivered = true;\n").unwrap();
+                git(p, &["add", ".github", "delivery.js"]);
+                git(p, &["commit", "-q", "-m", "tested delivery and workflow"]);
+                git(p, &["checkout", "-q", "main"]);
+                if case == "different-tree" {
+                    std::fs::write(p.join("unrelated.js"), "export const untested = true;\n").unwrap();
+                    git(p, &["add", "unrelated.js"]);
+                    git(p, &["commit", "-q", "-m", "untested target change"]);
+                }
+                git(p, &["merge", "-q", "--no-ff", "epic/landed", "-m", "integrate epic"]);
+                if case == "different-config" {
+                    std::fs::write(p.join(".github/workflows/ci.yml"), "name: changed CI\n").unwrap();
+                    git(p, &["add", ".github"]);
+                    git(p, &["commit", "-q", "--amend", "--no-edit"]);
+                    assert_eq!(git_commit_parent_count(p, "HEAD"), 2);
+                }
+                git(p, &["push", "-q", "origin", "main"]);
+                ("epic/landed".into(), String::new())
+            }, Some((&gh, false)), false).await;
+            let closes = matches!(case, "equivalent" | "arbitrary-green");
+            assert_eq!(run.task.status == TaskStatus::Closed, closes, "{case}: {}", run.text);
+            assert_eq!(run.is_error, !closes, "{case}: {}", run.text);
+        }
+
         let green = landed_epic_ci_close_cas_7e91e(
             r#"{"data":{"repository":{"mergeQueue":null}}}"#,
             r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"success"}]}"#,

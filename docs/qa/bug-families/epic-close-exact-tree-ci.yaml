@@ -1,0 +1,12 @@
+title: Epic close binds intentional CI skips to exact-tree required-check evidence
+statement: >-
+  Without a merge queue, exact-default CI is authorized by GitHub required
+  check contexts and app IDs. Post-merge skips require a successful target
+  check, an identical second-parent Git tree including workflow/config, fully
+  green source checks and stable identity coverage for every skipped job.
+  Unavailable requirements, changed trees, missing tests and unsuccessful
+  checks refuse. Generic project check names remain valid protocol identities.
+tasks: [cas-fb45]
+fixed_by: [cas-fb45]
+journeys: [CLI-RELEASE]
+invariants: []

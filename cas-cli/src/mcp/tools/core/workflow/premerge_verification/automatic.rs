@@ -365,7 +365,7 @@ pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> R
     Err("verification_owner_handoff_scope: missing owner's claimed local successor is unavailable".into())
 }
 
-pub(super) fn launch(
+pub(crate) fn launch(
     core: &CasCore, task: &Task, dispatch: &VerificationDispatch,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let dispatch = launch_dispatch(&core.cas_root, &dispatch.id, None)?;

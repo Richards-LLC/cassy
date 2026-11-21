@@ -921,6 +921,59 @@ esac
         self.assertEqual((self.repo / ".git/npm-calls").read_bytes(), npm_calls)
         self.assertEqual([path.stat().st_mtime_ns for path in receipts], modified)
 
+    def test_lane_repush_after_a_train_merge_excludes_the_trains_dist_change_cas_10de(self):
+        # GH #2285: a lane pushes source-only Commander work, merges a train
+        # whose release prep rebuilt hub-web/dist, then pushes again. Only the
+        # lane's own range decides whether committed dist must match a build.
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        hook = self.repo / ".git/hooks/pre-push"
+        hook.write_text('#!/bin/sh\nexec bash scripts/fast-rows-pre-push.sh "$@"\n')
+        hook.chmod(0o755)
+        self.write("hub-web/package.json", '{"name":"fixture","private":true}\n')
+        self.write("hub-web/package-lock.json", '{}\n')
+        self.write("hub-web/dist/app.js", "signup\n")
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        command(self.repo, "git", "checkout", "-qb", "factory/lane")
+        root = self.repo / ".cas"
+        root.mkdir()
+        with (self.repo / ".git/info/exclude").open("a") as exclude:
+            exclude.write("\n/.cas/\n")
+        with sqlite3.connect(root / "cas.db") as db:
+            db.execute("CREATE TABLE tasks (status TEXT, deliverables TEXT)")
+            db.execute("INSERT INTO tasks VALUES (?, ?)", ("in_progress", json.dumps({
+                "work_target": {"target_branch": "epic/train"},
+                "factory_branch_start": {"branch": "factory/lane"},
+            })))
+        validator = self.repo / ".git/receipt-validator"
+        validator.write_text('#!/bin/sh\ncase "$*" in\n'
+                             "'qa journeys --help') echo --base;;\n"
+                             "'qa journeys --check'*) exit 0;;\n*) exit 1;;\nesac\n")
+        validator.chmod(0o755)
+        # Any build attempt is recorded and fails: none is owed here.
+        npm = self.repo / ".git/npm-fixture"
+        npm.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {self.repo}/.git/npm-calls\nexit 1\n')
+        npm.chmod(0o755)
+        env = {"CAS_BIN": str(validator), "NPM": str(npm)}
+        self.write("hub-web/src/signup.ts", "lane signup\n")
+        self.commit()
+        first = self.push(**env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        command(self.repo, "git", "checkout", "-qb", "epic/train", "origin/epic/train")
+        self.write("hub-web/dist/app.js", "release prep rebuilt\n")
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        command(self.repo, "git", "checkout", "-q", "factory/lane")
+        merged = command(self.repo, "git", "merge", "-q", "--no-ff", "epic/train", "-m", "merge train")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        again = self.push(**env)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertFalse((self.repo / ".git/npm-calls").exists(), "a source-only lane owes no dist build")
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()[0],
+                         command(self.repo, "git", "rev-parse", "HEAD").stdout.strip())
+
     def non_head_push_fixture(self, web_change=False):
         remote = Path(self.scratch.name) / "remote.git"
         self.assertEqual(command(self.repo, "git", "init", "-q", "--bare", str(remote)).returncode, 0)

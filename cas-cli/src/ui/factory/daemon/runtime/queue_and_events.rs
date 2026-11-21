@@ -4863,6 +4863,15 @@ impl FactoryDaemon {
             super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
+        // cas-5f88: launches whose requesting MCP exited; off the writer.
+        let (launch_dir, launch_session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
+        self.relay_jobs.submit_blocking_write(&mut self.queue_jobs, "verifier-launch-retry", move || {
+            let _budget = cas_store::wait_budget::bound_waits_for(
+                crate::mcp::tools::core::workflow::premerge_verification::VERIFIER_FACTORY_STORE_BUDGET,
+            );
+            super::lifecycle::launch_unlaunched_verification_dispatches(&launch_dir, &launch_session, chrono::Utc::now());
+            super::relay_jobs::RelayOutput::ProbeWritten
+        });
         self.submit_progress_watchdog();
         // cas-786a6 (H3): the two pure-store sweeps run on the store
         // worker, off the loop.

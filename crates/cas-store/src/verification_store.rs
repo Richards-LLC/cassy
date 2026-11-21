@@ -1548,6 +1548,41 @@ pub fn expired_verification_dispatches(
         .collect()
 }
 
+/// cas-5f88: the latest unexpired Pending dispatch per task that no verifier
+/// was ever launched for (no capability row), requested at or before
+/// `requested_before`. The factory daemon launches these, so a launch whose
+/// requesting process exited is still started.
+pub fn unlaunched_pending_verification_dispatches(
+    cas_dir: &Path,
+    requested_before: DateTime<Utc>,
+    now: DateTime<Utc>,
+    limit: usize,
+) -> Result<Vec<VerificationDispatch>> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
+    let ids = {
+        let mut statement = conn.prepare(
+            "SELECT d.id FROM verification_dispatches d
+             WHERE d.state = 'pending' AND d.deadline_at > ?2 AND d.requested_at <= ?1
+                   AND NOT EXISTS (SELECT 1 FROM verification_capabilities c WHERE c.dispatch_id = d.id)
+                   AND d.id = (SELECT latest.id FROM verification_dispatches latest
+                               WHERE latest.task_id = d.task_id
+                               ORDER BY latest.requested_at DESC, latest.id DESC LIMIT 1)
+             ORDER BY d.requested_at ASC, d.id ASC
+             LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                params![requested_before.to_rfc3339(), now.to_rfc3339(), limit as i64],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    ids.iter()
+        .map(|id| get_verification_dispatch_with_conn(&conn, id))
+        .collect()
+}
+
 /// Adopt only the latest unresolved proof for an orphaned owner. The caller
 /// supplies positively dead process snapshots; status/PID/fingerprint are
 /// compared again under the write lock so a revived owner is never displaced.

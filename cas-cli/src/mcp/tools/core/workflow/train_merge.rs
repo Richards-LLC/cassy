@@ -1040,6 +1040,80 @@ mod tests {
         assert_eq!(tasks.get(&fixture.ids[0]).unwrap().status, TaskStatus::AwaitingMerge);
     }
 
+    /// A stalled later review must not reserve the entire train indefinitely.
+    /// Replay publication, a held dispatch, its approval, an append and resume
+    /// while the retired driver's OS handle still exists.
+    #[tokio::test]
+    async fn stalled_advancement_recovers_approved_head_and_appends_cas_deb2() {
+        for holder in ["expired", "orphaned", "live"] {
+            let mut fixture = Fixture::build(false);
+            fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+            fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+            std::fs::write(fixture.root.join("config.toml"),
+                "[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+            let tasks = fixture.core.open_task_store().unwrap();
+            let mut held = tasks.get(&fixture.ids[1]).unwrap();
+            held.depth = TaskDepth::Deep;
+            tasks.update(&held).unwrap();
+            fixture.start_with(&fixture.ids[..2]).await;
+            resume_pending(&fixture.root, "queue-session").await.unwrap();
+            let queue_path = path(&fixture.root, fixture._repo.path(), "epic/train").unwrap();
+            let before = read(&queue_path).unwrap().unwrap();
+            assert_eq!(before.next, 1);
+            let dispatch = cas_store::get_latest_verification_dispatch(&fixture.root, &held.id)
+                .unwrap().unwrap();
+            assert!(matches!(dispatch.state,
+                VerificationDispatchState::Pending | VerificationDispatchState::Claimed));
+            // Retain the historical long-lived flock, just as the incident's
+            // blocked daemon does. New queue metadata operations must not wait
+            // for this unrelated, unbounded legacy operation to return.
+            let legacy = driver_lock(&fixture.root, fixture._repo.path(), "epic/train")
+                .unwrap().unwrap();
+            let mut exited = std::process::Command::new("true").spawn().unwrap();
+            let dead_pid = exited.id();
+            exited.wait().unwrap();
+            let now = chrono::Utc::now();
+            let mut persisted: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&queue_path).unwrap()).unwrap();
+            persisted["advancement"] = serde_json::json!({
+                "token": "retired-advance", "pid": if holder == "orphaned" { dead_pid } else { std::process::id() },
+                "expires_at": now + chrono::Duration::seconds(if holder == "expired" { -1 } else { 120 }),
+            });
+            std::fs::write(&queue_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+            let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+            let result = service.verification(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"add", "task_id":held.id, "dispatch_id":dispatch.id,
+                "status":"approved", "summary":"Review the held train candidate",
+            })).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+            fixture.start_with(&fixture.ids[2..]).await;
+            let appended = read(&queue_path).unwrap().unwrap();
+            assert_eq!(appended.entries.len(), 3, "{holder}");
+            assert_eq!(appended.next, 1, "{holder}");
+            let persisted: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&queue_path).unwrap()).unwrap();
+            if holder == "live" {
+                assert_eq!(persisted["advancement"]["token"], "retired-advance");
+                // Completion by that live owner releases its lease; appending
+                // above must neither steal it nor discard the added entry.
+                let mut persisted = persisted;
+                persisted["advancement"] = serde_json::Value::Null;
+                std::fs::write(&queue_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+            } else {
+                assert!(persisted["advancement"].is_null(), "{holder}");
+                assert_eq!(persisted["advancement_reclaims"].as_array().unwrap().len(), 1, "{holder}");
+            }
+            drop(legacy);
+            resume_pending(&fixture.root, "queue-session").await.unwrap();
+            let complete = read(&queue_path).unwrap().unwrap();
+            assert!(!complete.active(), "{holder}: {}", complete.render());
+            let git = GitOperations::new(fixture._repo.path().to_path_buf());
+            for sha in &fixture.shas {
+                assert!(git.is_ancestor(sha, "origin/epic/train"), "{holder}: {sha}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn train_merge_returns_conflict_and_preserves_order_across_resume() {
         let fixture = Fixture::new();

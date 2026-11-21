@@ -10175,12 +10175,15 @@ impl CasCore {
             // its reason waives the pass for the delivered commit, exactly as
             // it waives the implementer's evidence gate.
             // cas-5ea7: a passed fast-lane receipt is this delivery's QA walk.
+            // GH #2270: the operator's recovery decision for this epic is the
+            // same waiver for a contained historical delivery (D1: no per-task
+            // review), recorded against the cited commit.
             match if fast_lane_receipt_passed { super::qa_dispatch::QaCloseGate::Clear } else { self.independent_qa_close_gate(
                 &task,
                 &close_project_root,
                 &resolved_parent_branch,
                 req.commit_receipt.as_deref(),
-                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+                (supervisor_override || operator_recovery.is_some()).then(|| req.reason.as_deref().unwrap_or("")),
             ) } {
                 super::qa_dispatch::QaCloseGate::Clear => {}
                 super::qa_dispatch::QaCloseGate::Refuse(refusal) => {

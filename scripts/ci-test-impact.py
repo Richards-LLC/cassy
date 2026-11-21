@@ -580,7 +580,10 @@ def web_results(root, report):
         for suite in suites:
             names = ancestry + (suite["title"],) if ancestry or suite.get("column", 0) else ancestry
             for spec in suite.get("specs", []):
-                path = str((report_root / spec["file"]).resolve().relative_to(root.resolve()))
+                # Playwright writes spec paths with Node's lexical path.relative
+                # from an unresolved rootDir to the real file. Join them lexically
+                # too; resolving `..` through a symlink (macOS /var) doubles /private.
+                path = str(Path(os.path.normpath(report_root / spec["file"])).resolve().relative_to(root))
                 for test in spec["tests"]:
                     attempts = test["results"]
                     if test.get("expectedStatus") != "passed" or len(attempts) != 1 or attempts[0].get("retry", 0):

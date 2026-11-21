@@ -212,6 +212,49 @@ fn extend_progressing_verification_dispatches(
         .count()
 }
 
+/// cas-5f88: the requesting MCP process retries a verifier launch on its own
+/// thread, so a requester that exits leaves its dispatch Pending. The daemon
+/// is the durable owner: each sweep launches this session's dispatches that
+/// were never launched and are past the requester's own first attempt. The
+/// claim inside the launch admits one verifier per dispatch, so a requester
+/// still retrying cannot double it. Returns how many reviews were started.
+pub(super) fn launch_unlaunched_verification_dispatches(
+    cas_dir: &std::path::Path,
+    session: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    /// Leaves the requester's first attempt to land before the daemon steps in.
+    const REQUESTER_GRACE_SECS: i64 = 30;
+    let since = now - chrono::Duration::seconds(REQUESTER_GRACE_SECS);
+    let dispatches = match cas_store::unlaunched_pending_verification_dispatches(cas_dir, since, now, 20) {
+        Ok(dispatches) => dispatches,
+        Err(error) => {
+            tracing::warn!(%error, "cas-5f88: unlaunched verification dispatches unavailable");
+            return 0;
+        }
+    };
+    let Ok(agents) = crate::store::open_agent_store(cas_dir) else { return 0; };
+    let mut launched = 0;
+    for dispatch in dispatches {
+        // Another daemon owns another session's reviews.
+        let ours = agents.get(&dispatch.owner_agent_id)
+            .is_ok_and(|owner| owner.factory_session.as_deref() == Some(session));
+        if !ours {
+            continue;
+        }
+        match crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+            cas_dir, session, &dispatch.id,
+        ) {
+            Ok(started) => launched += usize::from(started.is_some()),
+            Err(error) => tracing::warn!(
+                dispatch_id = %dispatch.id, %error,
+                "cas-5f88: verifier launch for an unlaunched dispatch refused; the next sweep retries"
+            ),
+        }
+    }
+    launched
+}
+
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
 /// no verdict wakes the supervisor through a durable worker-attention relay,
 /// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
@@ -4424,6 +4467,12 @@ impl FactoryDaemon {
                         ) {
                             tracing::warn!(%error, "CI merge retry scan failed");
                         }
+                        // GH #2282: parked deliveries already on their target close here.
+                        if let Err(error) = retry_runtime.block_on(
+                            crate::factory_delivery_wake::reconcile_contained(&watch_cas_dir, &session_name)
+                        ) {
+                            tracing::warn!(%error, "contained delivery reconcile deferred");
+                        }
                         // cas-f823: open trains take main's new commits. Before the
                         // GitHub reads below, so an API error cannot skip the sync.
                         if let Err(error) = crate::train_main_sync::sync_open_trains(&watch_cas_dir) {
@@ -5050,6 +5099,11 @@ impl FactoryDaemon {
 
     /// Release daemon-owned resources and end this factory session.
     async fn cleanup(&mut self) -> anyhow::Result<()> {
+        // Teardown ends every queued command. Recording that is best-effort:
+        // a failing receipt store must never skip the teardown below.
+        if let Err(error) = self.abandon_queued_supervisor_commands() {
+            tracing::warn!(%error, "could not record abandoned Commander commands");
+        }
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.
         self.cancel_provisioning();
@@ -6088,6 +6142,19 @@ mod communication_summary_tests {
         daemon.listener.set_nonblocking(true).unwrap();
         let mut client = UnixStream::connect(root.join("test.sock")).unwrap();
         daemon.accept_clients().unwrap();
+        // cas-7d2d: any teardown abandons a queued Commander command, and a
+        // failing receipt store must not skip the teardown that follows.
+        use crate::store::supervisor_commands as commands;
+        let pid = std::process::id();
+        let queued = serde_json::json!({"receipt":{"device_id":"device-a","client_ref":"queued-at-end","command":"compact","phase":"queued","detail":"","output":"","interactive":false},
+            "at":chrono::Utc::now(),"before":"","before_command":"","reload_before":null,
+            "birth":{"daemon_pid":pid,"daemon_pid_starttime":crate::mcp::daemon::read_pid_starttime(pid)}});
+        assert!(commands::write(&root, &session, &supervisor, &queued, commands::Write::Reserve).unwrap());
+        if !owned {
+            rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch("CREATE TRIGGER fail_command_receipts BEFORE UPDATE ON metadata
+                WHEN new.key LIKE 'commander.command.v1.%' BEGIN SELECT RAISE(ABORT, 'forced receipt failure'); END;").unwrap();
+        }
+        let supervisor_name = supervisor.clone();
         daemon.handle_mux_event(cas_mux::MuxEvent::PaneExited {
             pane_id: supervisor, exit_code: Some(0), exit_signal: None,
         }).await;
@@ -6095,6 +6162,8 @@ mod communication_summary_tests {
         daemon.cleanup().await.unwrap();
         let receipt = daemon.session_manager.ended_sessions().unwrap().remove(0);
         drop(daemon);
+        let phase = commands::load(&root, &session, &supervisor_name).unwrap()[0]["receipt"]["phase"].clone();
+        assert_eq!(phase, if owned { "refused" } else { "queued" }, "queued command after teardown (store failing: {})", !owned);
         let mut output = String::new();
         client.read_to_string(&mut output).unwrap();
         let recovered = tasks.get(&task.id).unwrap();

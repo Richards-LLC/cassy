@@ -2203,6 +2203,149 @@ bug_families:
     statement: When another factory component holds the shared database for a few milliseconds as a worker recycle or clear_context starts, the request stays queued, the old worker keeps running, and a later factory pass completes the recycle without a manual retry.
     found: 2026-11-21
     tasks: [cas-aea9]
+  commander-durable-command-queue:
+    title: Commander queued commands survive daemon restart
+    statement: A queued supervisor command survives restart or reexec under the same session, supervisor, device and command reference, is typed once at the next native turn boundary, and is never replayed after an uncertain submission. Only an authoritative per-command abandonment receipt shows Not sent. A stale Queued status at session end remains uncertain and accepts late Submitted or Observed evidence. Restore replays only the recording daemon's own queue, skips unreadable receipts, and teardown completes even when receipts cannot be written.
+    found: 2026-11-21
+    tasks: [cas-7d2d]
+  crash-retained-worker-recovery:
+    title: Successor recovery preserves retained work and exact lease ownership
+    statement: >-
+      A successor supervisor recovers a crashed local worker's committed, unpushed
+      branch across factory sessions without task release clearing source ownership.
+      Only a source-matched, locally provable dead registration's exact lease epoch
+      is retired. Live, foreign, remote and unverifiable holders remain unchanged.
+      The original checkout and commits survive publication and normal reassignment.
+    tasks: [cas-2086]
+    journeys: []
+    invariants: []
+  epic-close-exact-tree-ci:
+    title: Epic close binds intentional CI skips to exact-tree required-check evidence
+    statement: >-
+      Without a merge queue, exact-default CI is authorized by GitHub required
+      check contexts and app IDs. Post-merge skips require a successful target
+      check, an identical second-parent Git tree including workflow/config, fully
+      green source checks and stable identity coverage for every skipped job.
+      Unavailable requirements, changed trees, missing tests and unsuccessful
+      checks refuse. Generic project check names remain valid protocol identities.
+    tasks: [cas-fb45]
+    fixed_by: [cas-fb45]
+    journeys: [CLI-RELEASE]
+    invariants: []
+  expired-dead-verifier-claim:
+    title: Merge retry recovers an expired claim after confirmed verifier death
+    statement: Only the recorded supervisor can recover a current expired review after registered shutdown, confirmed PID absence or a readable fingerprint mismatch; recovery preserves the exact candidate, retires old authority atomically and retains live, unreadable or unverifiable claims.
+    tasks: [cas-de6d]
+    fixed_by: [cas-de6d]
+    journeys: [FACTORY-MERGE]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+  explicit-epic-child-target:
+    title: Explicit epic-child target branches survive the delivery lifecycle
+    statement: >-
+      An explicit off-lane branch at child creation or update stays authoritative
+      for display, start and merge, even when it equals the epic base. A supervisor
+      can repair a historical unpinned target using the same stored branch when
+      its effective target differs. Repository-only defaults and the epic lane
+      continue to follow lane renames.
+    tasks: [cas-e721]
+    fixed_by: [cas-e721]
+    journeys: []
+    invariants: []
+  frozen-epic-content-target:
+    title: Shipped epic delivery content follows integration history
+    statement: >-
+      Content checks and reviewed supersession follow staging/main descendants
+      containing the delivery anchor and the recorded epic tip. Remote integration
+      refs take precedence over unpublished local work. Frozen epic records remain
+      unchanged; true drops, arbitrary side branches and immutable review snapshots
+      cannot borrow later replacement proof.
+    tasks: [cas-161f]
+    journeys: []
+    invariants: []
+  local-merge-parked-delivery-origin-proof:
+    title: Local-merge parked deliveries merge without origin proof
+    statement: An approved local_merge parked delivery merges its exact local commit through worktree_merge, including from a retained or reused worker checkout with uncommitted work, and does not fetch or require an origin source ref. A push_branch delivery still requires a freshly fetched origin ref that matches its anchor. Both modes require the local branch at the exact anchor and leave the worker checkout untouched.
+    found: 2026-11-21
+    tasks: [cas-978ed]
+  no-delivery-train-owner-close:
+    title: No-delivery train handoffs preserve the absence of a code source
+    statement: >-
+      A commitless spike with no execution methodology can declare no_delivery,
+      pass verification and park for its pinned train owner without recording a
+      factory branch or commit anchor. The owner closes it using the same approved
+      dispatch, without proof_scope_fix or another verification. Artifact-only
+      methodology closes keep the same owner boundary, while measured code
+      deliveries retain their ordinary source and merge checks.
+    tasks: [cas-7f71]
+    journeys: []
+    invariants: []
+  parked-close-worker-shutdown:
+    title: Parked close retains publication through worker shutdown
+    statement: >-
+      A clean pushed worker can answer COMMITTED after AwaitingMerge is stored
+      while its close publication and outcome writer still run. Shutdown,
+      forced shutdown and recycle preserve that process until its final outcome
+      is durable. Failed owner publication remains actionable and daemon-owned
+      without another task close, and recovery does not duplicate outcomes.
+    tasks: [cas-d893]
+    journeys: []
+    invariants: []
+  parked-review-source-attribution:
+    title: Parked review correction retains recorded source task
+    statement: >-
+      An identified pushed review correction on parked task A's recorded source
+      branch remains A's delivery after task B has parked or started without a
+      commit, including a declared-target sync. Foreign and unnamed continuations
+      cannot move A's anchor; B's state and anchor remain unchanged. Clean parked
+      restart still requires supervisor request_changes and a hold on unfinished B.
+    tasks: [cas-4d50]
+    journeys: []
+    invariants: []
+  peer-machine-verifier-question:
+    title: Train owner answers an exact peer-machine verifier question
+    statement: >-
+      Separate builder and owner stores exchange public question context through
+      Cloud task reconciliation. The owner authorizes one exact answer through
+      authenticated peer mail. Only the named builder supervisor can record it;
+      the independent verifier continues, with no publisher or capability transfer.
+      Altered questions, boundaries, answers, responders and owner generations fail
+      closed. Plain task notes grant no answer authority.
+    tasks: [cas-9e52]
+    journeys: []
+    invariants: []
+  publication-epic-attribution:
+    title: Publication verification follows each post's attributed epic
+    statement: >-
+      A session focused on a release with open verification can publish an
+      unattributed operational report or a standalone support task's file.
+      An explicitly attributed or artifact-owned deliverable remains held for
+      its own epic, including after another epic's verified report in a batch.
+      Operator publication overrides remain audited, and release announcements
+      retain their independent post-release checks. Generated release-report PDFs
+      prefer the validated released epic, retaining focused release verification
+      for mixed or malformed report evidence; ordinary support PDFs stay unbound.
+    tasks: [cas-81f8]
+    journeys: []
+    invariants: []
+  stale-manifest-newer-published-evidence:
+    title: Older evidence manifests preserve newer published local ledgers
+    statement: Publication time orders conflicting evidence revisions; ordinary sync preserves newer published local bytes, while sealed train parks refuse the stale manifest and identify the newer artifact without overwriting it.
+    tasks: [cas-5f96]
+    fixed_by: [cas-5f96]
+    journeys: [FACTORY-QA-RECEIPT]
+    invariants: [FACTORY-QA-EVIDENCE-IDENTITY, FACTORY-ARTIFACT-METADATA]
+  unprotected-pr-ci-admission:
+    title: PR merge admission follows current-head CI without assumed protection
+    statement: >-
+      On a repository with no required GitHub checks and independent QA disabled,
+      a raw gh pr merge is refused while its current PR head's check runs or status
+      contexts are pending or failed. The refusal identifies that head and the
+      exact checks using stable codes. Eligible green PRs retain one merge command.
+      Merge-ready guidance names configured PR-check or queue evidence rather than
+      inferring hosted protection or a CI waiting guarantee from --auto.
+    tasks: [cas-3874]
+    journeys: []
+    invariants: []
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

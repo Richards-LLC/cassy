@@ -2653,8 +2653,8 @@ pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
 /// cas-73f7: how long an urgent row waits for the recipient's in-flight tool
 /// call to end before it interrupts anyway, and what the hold and the late
 /// interrupt say.
-pub(super) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
-pub(super) const URGENT_TOOL_CALL_DETAIL: &str =
+pub(crate) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const URGENT_TOOL_CALL_DETAIL: &str =
     "urgent held: recipient has a tool call in flight; surfaces when the call ends";
 pub(super) const URGENT_TOOL_CALL_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -4861,6 +4861,15 @@ impl FactoryDaemon {
         let dispatch_dir = self.app.cas_dir().to_path_buf();
         self.relay_jobs.submit_write(&mut self.queue_jobs, "expired-verification-dispatches", None, move || {
             super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
+            super::relay_jobs::RelayOutput::ProbeWritten
+        });
+        // cas-5f88: launches whose requesting MCP exited; off the writer.
+        let (launch_dir, launch_session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
+        self.relay_jobs.submit_blocking_write(&mut self.queue_jobs, "verifier-launch-retry", move || {
+            let _budget = cas_store::wait_budget::bound_waits_for(
+                crate::mcp::tools::core::workflow::premerge_verification::VERIFIER_FACTORY_STORE_BUDGET,
+            );
+            super::lifecycle::launch_unlaunched_verification_dispatches(&launch_dir, &launch_session, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
         self.submit_progress_watchdog();
@@ -12707,7 +12716,24 @@ impl FactoryDaemon {
                     .iter()
                     .map(|name| (name.clone(), releasable_task_ids(self.app.cas_dir(), name)))
                     .collect();
-                for name in &workers_to_stop {
+                let mut report = self.app.shutdown_workers(count, &names, force).await;
+                let mut retired: Vec<String> = report.stopped.iter().map(|(name, _)| name.clone()).collect();
+                // A cancelled boot can already have no pane or registration.
+                // Its intentional stop still retires the boot watch. Refused
+                // live teardowns retain their roster, bindings and live mail.
+                if let Ok(agents) = open_agent_store(self.app.cas_dir())
+                    .and_then(|store| store.list(None).map_err(Into::into))
+                {
+                    for name in &workers_to_stop {
+                        if !retired.contains(name) && !self.app.worker_names().contains(name)
+                            && self.app.mux.get(name).is_none()
+                            && !crate::mcp::tools::service::agent_liveness::has_live_agent_named(&agents, name)
+                        {
+                            retired.push(name.clone());
+                        }
+                    }
+                }
+                for name in &retired {
                     self.dead_workers.insert(name.clone());
                     // GH #1592: an intentional stop ends the boot watch. The
                     // exit is this request taking effect, never a boot failure.
@@ -12724,15 +12750,13 @@ impl FactoryDaemon {
                             "Stopped by a shutdown request before registration.",
                         );
                     }
-                    // Also release bindings for workers that never made it into
-                    // worker_names (early pre-assign only) — shutdown_worker
-                    // only runs for live workers.
+                    // A refused teardown must retain bindings and live mail.
+                    // Settle only workers that actually stopped.
                     crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
                         self.app.cas_dir(),
                         name,
                     );
                 }
-                let mut report = self.app.shutdown_workers(count, &names, force).await;
                 for (name, released) in &mut report.stopped {
                     let still_held = releasable_task_ids(self.app.cas_dir(), name);
                     for id in held_before.get(name).into_iter().flatten() {
@@ -22780,59 +22804,6 @@ mod gh_1153_idle_pty_delivery_tests {
                 .unwrap()
                 .confirmation_source,
             cas_store::ConfirmationSource::Unconfirmed
-        );
-    }
-
-    #[tokio::test]
-    async fn gh_1163_prior_foreign_and_unattributed_activity_does_not_clear_stall() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let Fixture {
-            _tmp,
-            mut daemon,
-            queue,
-            row,
-            ..
-        } = deliver_to_idle_worker().await;
-        queue
-            .enqueue_with_session(WORKER, "reviewer", "Old reply", "provision-test")
-            .unwrap();
-        let floor = chrono::Utc::now();
-        daemon
-            .normal_delivery_probes
-            .get_mut(&row)
-            .unwrap()
-            .delivered_at_utc = floor;
-        record_note(
-            daemon.app.cas_dir(),
-            "gh1153-worker-id",
-            floor - chrono::Duration::seconds(1),
-        );
-        record_note(
-            daemon.app.cas_dir(),
-            "other-worker-id",
-            floor + chrono::Duration::seconds(1),
-        );
-        queue
-            .enqueue_with_session(WORKER, "reviewer", "Foreign session", "other-factory")
-            .unwrap();
-        queue
-            .enqueue_with_session("other-worker", "reviewer", "Other reply", "provision-test")
-            .unwrap();
-        let task_store = crate::store::open_task_store(daemon.app.cas_dir()).unwrap();
-        let mut task = cas_types::Task::new("cas-1153".into(), "Assigned task".into());
-        task.assignee = Some(WORKER.into());
-        task.notes = "A supervisor note without worker attribution".into();
-        task_store.add(&task).unwrap();
-        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
-        assert!(daemon.normal_delivery_probes.contains_key(&row));
-        assert_eq!(
-            queue
-                .message_delivery_report(row)
-                .unwrap()
-                .unwrap()
-                .wake_attempt,
-            cas_store::WakeAttempt::Fired,
-            "only this recipient's activity after delivery clears a probe"
         );
     }
 

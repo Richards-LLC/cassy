@@ -313,7 +313,10 @@ impl CasCore {
                 let delegated = crate::cloud::peer_mailbox::verification_answers::authorized(
                     &self.cas_root, &task, &caller, &req, &authored_content.summary,
                 ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
-                if !delegated { return Err(Self::error(ErrorCode::INVALID_REQUEST, error)); }
+                if !delegated {
+                    return Err(Self::error(ErrorCode::INVALID_REQUEST,
+                        crate::gates::tag("G-113", error.trim_end_matches("\n\n[G-113]"))));
+                }
                 delegated_answer = true;
             }
         }
@@ -1857,7 +1860,7 @@ mod lifecycle_friction_tests {
             let mut altered = mail.clone();
             let mut content = encoded.clone();
             content["question"][field] = value.into();
-            altered.body = format!("{tag}{}", content);
+            altered.body = format!("{tag} {content}");
             let outcome = crate::cloud::peer_mailbox::verification_answers::ingest(&builder.cas_root, &delegate, &altered);
             assert!(!matches!(outcome, Ok(None)), "accepted altered {field}");
         }

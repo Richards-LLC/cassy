@@ -181,7 +181,7 @@ pub(crate) fn queue_answer(
         || question.deadline <= chrono::Utc::now()
         || !answer_only(req)
     {
-        return Err("Peer question requires its current train owner and an unexpired exact dispatch. Send only task_id, dispatch_id, status=supervisor_call and summary; final verdicts remain with the independent verifier.".into());
+        return Err(crate::gates::tag("G-154", "Peer question requires its current train owner and an unexpired exact dispatch. Send only task_id, dispatch_id, status=supervisor_call and summary; final verdicts remain with the independent verifier."));
     }
     let answer = Answer {
         question,

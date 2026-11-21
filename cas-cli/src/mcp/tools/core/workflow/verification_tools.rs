@@ -1836,12 +1836,13 @@ mod lifecycle_friction_tests {
         let count: i64 = conn.query_row("SELECT count(*) FROM peer_message_outbox", [], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
         let sent: crate::cloud::peer_mailbox::PeerSend = serde_json::from_str(&payload).unwrap();
-        let mail: crate::cloud::peer_mailbox::ClaimedPeerMessage = serde_json::from_value(serde_json::json!({
+        let mail_json = serde_json::json!({
             "id":"owner-answer", "project_id":project, "recipient_agent_id":delegate.id,
             "sender_agent_id":owner_agent.id, "sender_name":owner_agent.name,
             "sender_machine_id":"owner-machine", "sender_session":"owner-session",
             "created_at":chrono::Utc::now().to_rfc3339(), "body":sent.body,
-        })).unwrap();
+        });
+        let mail: crate::cloud::peer_mailbox::ClaimedPeerMessage = serde_json::from_value(mail_json.clone()).unwrap();
         let (_, body) = crate::cloud::peer_mailbox::split_message_intent(&mail.body);
         let (tag, encoded) = body.lines().next().unwrap().split_once(' ').unwrap();
         let encoded: serde_json::Value = serde_json::from_str(encoded).unwrap();
@@ -1870,12 +1871,17 @@ mod lifecycle_friction_tests {
         assert!(matches!(crate::cloud::peer_mailbox::verification_answers::ingest(&builder.cas_root, &delegate, &mail).unwrap(),
             Some(crate::cloud::peer_mailbox::PeerAckOutcome::Rejected)));
         tasks.update(&train).unwrap();
+        let builder_conn = rusqlite::Connection::open(builder.cas_root.join("cas.db")).unwrap();
+        builder_conn.execute("UPDATE verification_dispatches SET state='invalidated' WHERE id=?1", [&dispatch.id]).unwrap();
+        assert!(matches!(crate::cloud::peer_mailbox::verification_answers::ingest(&builder.cas_root, &delegate, &mail).unwrap(),
+            Some(crate::cloud::peer_mailbox::PeerAckOutcome::Rejected)));
+        builder_conn.execute("UPDATE verification_dispatches SET state='claimed' WHERE id=?1", [&dispatch.id]).unwrap();
         assert!(builder.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await.is_err());
 
         // Exercise the production polling duty and HTTP mailbox contract, not
         // a hand-copied dispatch or a direct call that skips mailbox admission.
         Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":[mail],"status":"ok"}))).mount(&server).await;
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":[mail_json],"status":"ok"}))).mount(&server).await;
         Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[{"id":"owner-answer","status":200}]}))).mount(&server).await;
         Mock::given(method("GET")).and(path("/api/agents"))

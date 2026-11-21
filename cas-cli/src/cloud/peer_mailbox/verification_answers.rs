@@ -236,9 +236,27 @@ fn current(root: &Path, task: &Task, actor: &Agent, answer: &Answer) -> Result<b
         cas_store::get_verification_dispatch(root, &q.dispatch).map_err(|e| e.to_string())?;
     if dispatch.task_id != task.id
         || boundary(task, &dispatch)? != q.boundary
+        || !matches!(
+            dispatch.state,
+            cas_types::VerificationDispatchState::Pending
+                | cas_types::VerificationDispatchState::Claimed
+        )
         || cas_store::get_latest_verification_dispatch(root, &task.id)
             .map_err(|e| e.to_string())?
             .is_none_or(|d| d.id != q.dispatch)
+    {
+        return Ok(false);
+    }
+    let original = crate::store::open_verification_store(root)
+        .map_err(|e| e.to_string())?
+        .get(&q.question)
+        .map_err(|e| e.to_string())?;
+    if original.task_id != task.id
+        || original.dispatch_id.as_deref() != Some(&q.dispatch)
+        || original.status != VerificationStatus::SupervisorCall
+        || original.provenance != VerificationProvenance::TaskVerifier
+        || original.agent_id.as_deref() != Some(&q.verifier)
+        || original.summary != q.summary
     {
         return Ok(false);
     }

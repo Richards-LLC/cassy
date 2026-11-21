@@ -1610,6 +1610,43 @@ fn rejects_delivery_regression(local: &Task, remote: &Task) -> bool {
     regresses && !has_explicit_remote_reopen(local, remote)
 }
 
+/// A later receiver note is not a new delivery. Import only the completion
+/// of its exact approved, merged cycle; body LWW and explicit rework remain
+/// independent. The caller still applies this through the store's atomic
+/// mutation/live-delivery guard, never a forced status write.
+fn receipted_terminal_projection(local: &Task, remote: &Task) -> Option<Task> {
+    if !matches!(local.status, TaskStatus::Blocked | TaskStatus::AwaitingMerge)
+        || remote.status != TaskStatus::Closed || remote.updated_at > local.updated_at
+        || remote.closed_at.is_none() || remote.close_reason.as_deref()?.trim().is_empty()
+        || remote.pending_verification || remote.pending_worktree_merge
+        || has_explicit_remote_reopen(remote, local)
+        || local.deliverables.delivery_cycle != remote.deliverables.delivery_cycle
+        || local.deliverables.work_target.is_none()
+        || local.deliverables.work_target != remote.deliverables.work_target
+    { return None; }
+    let anchor = local.deliverables.factory_branch_anchor.as_deref()?;
+    let merged = remote.deliverables.green_merge_commit.as_deref()?;
+    let full_sha = |sha: &str| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    let approval = remote.deliverables.premerge_approval.as_ref()?;
+    if !full_sha(anchor) || !full_sha(merged)
+        || remote.deliverables.factory_branch_anchor.as_deref() != Some(anchor)
+        || local.deliverables.declined_factory_anchors().iter().any(|sha| sha.eq_ignore_ascii_case(anchor))
+        || approval.approved_anchor != anchor
+        || approval.delivery_cycle != remote.deliverables.delivery_cycle
+        || approval.verdict_id.trim().is_empty() || approval.dispatch_id.trim().is_empty()
+    { return None; }
+    let mut projected = local.clone();
+    projected.status = remote.status;
+    projected.closed_at = remote.closed_at;
+    projected.close_reason = remote.close_reason.clone();
+    projected.terminal_outcome = remote.terminal_outcome.clone();
+    projected.pending_verification = remote.pending_verification;
+    projected.pending_worktree_merge = remote.pending_worktree_merge;
+    projected.deliverables = remote.deliverables.clone();
+    projected.notes = merge_task_notes(&local.notes, &remote.notes);
+    Some(projected)
+}
+
 fn lifecycle_audit_note(note: &str) -> Option<(chrono::DateTime<chrono::Utc>, &str)> {
     let (timestamp, event) = note.trim().strip_prefix('[')?.split_once(']')?;
     let timestamp = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M").ok()?;
@@ -1960,6 +1997,14 @@ impl CloudSyncer {
                 (None, None) => false,
                 _ => true,
             };
+            if incoming_is_owner && !origins_differ
+                && strategy != Some(ConflictResolution::LocalWins)
+                && let Some(mut projected) = receipted_terminal_projection(&local, &task)
+            {
+                append_sync_status_provenance(&mut projected, &local, sync_id, source);
+                return self.apply_task_from_sync(store, &projected, &local,
+                    "merged", "receipted_terminal");
+            }
             if incoming_is_owner && origins_differ {
                 return self.upsert_owner_task(store, task, sync_id, source);
             }

@@ -2040,8 +2040,11 @@ fn validate_report_with_inherited(
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
     let path = Path::new(path);
+    // A runner may report the resolved path: macOS `/var` is `/private/var`.
+    let canonical = repo.canonicalize().ok();
     let path = if path.is_absolute() {
         path.strip_prefix(repo)
+            .or_else(|error| canonical.as_deref().map_or(Err(error), |repo| path.strip_prefix(repo)))
             .context("reported test is outside the repository")?
     } else {
         path

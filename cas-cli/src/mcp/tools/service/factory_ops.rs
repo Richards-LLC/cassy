@@ -14155,7 +14155,8 @@ mod spawn_lifecycle_tests {
         if std::env::var_os("CODEX_SPAWN_FIXTURE_CHILD").is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "mcp::tools::service::factory_ops::spawn_lifecycle_tests::back_to_back_codex_spawns_resolve_the_same_account_cas_9ab7", "--nocapture"])
-                .env("PATH", &bin)
+                // `sleep` for the contended probe; the fake codex stays first.
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .env("CODEX_SPAWN_FIXTURE_CHILD", "1")
                 .output().unwrap();
             assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));

@@ -1,0 +1,11 @@
+title: Train owner answers an exact peer-machine verifier question
+statement: >-
+  Separate builder and owner stores exchange public question context through
+  Cloud task reconciliation. The owner authorizes one exact answer through
+  authenticated peer mail. Only the named builder supervisor can record it;
+  the independent verifier continues, with no publisher or capability transfer.
+  Altered questions, boundaries, answers, responders and owner generations fail
+  closed. Plain task notes grant no answer authority.
+tasks: [cas-9e52]
+journeys: []
+invariants: []

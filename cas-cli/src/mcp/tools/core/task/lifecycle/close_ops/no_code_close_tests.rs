@@ -3304,9 +3304,10 @@ async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
     let first = assigned("cas-22c6a", TaskType::Task, "main");
     f.put(&first);
     claim(&f, &first.id);
+    // Preassigned to the worker, as an auto-start that got as far as its
+    // assignment leaves it.
     let mut next = assigned("cas-22c6b", TaskType::Task, "main");
     next.status = TaskStatus::Open;
-    next.assignee = None;
     f.put(&next);
     let queued = call(&f.supervisor, serde_json::json!({
         "action":"update", "id":next.id, "assignee":WORKER, "task_ids":[next.id],

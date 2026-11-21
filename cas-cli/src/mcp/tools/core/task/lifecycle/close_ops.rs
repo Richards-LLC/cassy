@@ -10533,7 +10533,29 @@ impl CasCore {
                     ))));
                 }
 
+                // GH #2270, GH #2244: a historical factory delivery whose commit is
+                // already on its target can never gain a pre-merge verdict. A live
+                // supervisor's audited override citing that containment commit is
+                // the recovery decision; the content gate above has already proven
+                // (or reviewed the drop of) its tree effect, so one close carries
+                // both authorizations. Tier 2 keeps its retained adversarial review.
+                let contained_recovery = (supervisor_override && !tier_two && !is_epic
+                    && !in_cassy_merge_close()
+                    && task.deliverables.factory_branch_anchor.is_some()
+                    && self.resolve_live_supervisor_authority().is_ok())
+                .then_some(req.commit_receipt.as_deref())
+                .flatten()
+                .and_then(|receipt| resolve_task_commit_receipt_sha(&close_project_root, receipt).ok())
+                .filter(|sha| commit_is_merged_into_parent(&close_project_root, sha, &resolved_parent_branch));
+
                 match latest {
+                    Ok(None) | Ok(Some(_)) if contained_recovery.is_some() => {
+                        accepted_override_codes.push("G-70");
+                        close_notes.record(&mut task, &format!(
+                            "DECISION: supervisor recovered integrated historical delivery {}, contained in {resolved_parent_branch}; no pre-merge approval existed and none was created.",
+                            contained_recovery.as_deref().unwrap_or_default()
+                        ));
+                    }
                     Ok(Some(v))
                         if (v.status == VerificationStatus::Approved
                             || v.status == VerificationStatus::Skipped)

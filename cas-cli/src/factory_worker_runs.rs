@@ -545,9 +545,7 @@ mod tests {
         worker.metadata.insert("clone_path".into(), lane.display().to_string());
         agents.update(&worker).unwrap();
         let now = Utc::now();
-        let package = register(&root, &lane.join("hub-web"), &log, now).unwrap()
-            .expect("a run inside the worker's checkout is tracked");
-        assert_eq!(load(&root, &package).unwrap().worker, "run-worker");
+        let package = register(&root, &lane.join("hub-web"), &log, now).unwrap();
 
         let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&repo)
             .status().unwrap().success(), "git {args:?}");
@@ -562,8 +560,11 @@ mod tests {
         task.assignee = Some("run-worker".into());
         crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
         let checkout = crate::factory_review_scratch::create(&root, &repo, "cas-scratch", None, &head).unwrap();
-        let scratch = register(&root, &checkout.path, &log, now).unwrap()
-            .expect("a run in the task's scratch checkout is tracked");
+        let scratch = register(&root, &checkout.path, &log, now).unwrap();
+        // Both shapes are judged together, so a red run reports each one.
+        assert_eq!((package.is_some(), scratch.is_some()), (true, true), "package run, scratch run tracked");
+        let (package, scratch) = (package.unwrap(), scratch.unwrap());
+        assert_eq!(load(&root, &package).unwrap().worker, "run-worker");
         let run = load(&root, &scratch).unwrap();
         assert_eq!((run.worker.as_str(), run.task.as_deref()), ("run-worker", Some("cas-scratch")));
         finish(&root, &package, 0, now).unwrap();

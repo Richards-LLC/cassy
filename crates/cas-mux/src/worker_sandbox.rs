@@ -78,6 +78,9 @@ pub struct LaunchInputs {
 impl LaunchInputs {
     /// The checkout's own scratch directories: its private temporary
     /// directory and a relocated Cargo target. Never a scratch root itself.
+    /// Their parents are created first, as the capped runner would: inside
+    /// the sandbox only the directory itself is writable, so a missing parent
+    /// could never be created.
     pub fn checkout_scratch(&self, worktree: &Path) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         if let Some(root) = &self.tmp_root {
@@ -86,6 +89,11 @@ impl LaunchInputs {
         let target = worker_target_dir(self.scratch_root.as_deref(), worktree);
         if !target.starts_with(worktree) {
             dirs.push(target);
+        }
+        for parent in dirs.iter().filter_map(|dir| dir.parent()) {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                tracing::warn!(path = %parent.display(), %error, "worker sandbox: could not pre-create a scratch parent");
+            }
         }
         dirs.iter().map(|dir| canonical_spelling(dir)).collect()
     }

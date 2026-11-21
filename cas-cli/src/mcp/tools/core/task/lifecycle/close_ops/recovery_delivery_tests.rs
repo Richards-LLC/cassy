@@ -2715,7 +2715,7 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         let root = f.dir.path().join(".cas");
         let listener = UnixListener::bind(root.join("close.sock")).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let mut app = crate::ui::factory::app::FactoryApp::for_test_at(root.clone());
+        let mut app = crate::ui::factory::FactoryApp::for_test_at(root.clone());
         let mut child_env = vec![("CAS_D893_CHILD".into(), root.to_string_lossy().into_owned()),
             ("CAS_ROOT".into(), root.to_string_lossy().into_owned())];
         if fail_sync { child_env.push(("CAS_D893_FAIL_SYNC".into(), "1".into())); }

@@ -520,3 +520,53 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     }
     assert!(facts::summarize(&store, Utc::now() + chrono::Duration::seconds(5)).unwrap().is_empty());
 }
+
+/// Selection probe for capped worker checks (scripts/worker-proof-guards.py):
+/// writes 1 when the commits after CAS_GATE_AUDIT_SELECT_BASE touch anything
+/// the scan audits, else 0. Without both variables there is nothing to select.
+#[test]
+fn delivery_touches_audited_site() {
+    let (Ok(base), Ok(out)) = (std::env::var("CAS_GATE_AUDIT_SELECT_BASE"), std::env::var("CAS_GATE_AUDIT_SELECT_OUT")) else {
+        return;
+    };
+    let registry = REGISTRY.iter().map(|r| (r.code.into(), r.stage.into(), r.title.into(), r.source.into())).collect::<Vec<_>>();
+    let root = crate::test_paths::crate_root().join("..");
+    let touched = gate_audit::touches_audited(&root, &base, &registry).unwrap_or_else(|error| {
+        eprintln!("gate-audit select: {error}; selecting the registry tests");
+        true
+    });
+    std::fs::write(out, if touched { "1" } else { "0" }).unwrap();
+}
+
+/// cas-19792: worker checks select this module from the scan's own inventory,
+/// so forms a line pattern misses are selected and test-only or ordinary
+/// error code is not.
+#[test]
+fn delivery_selection_follows_the_scan_inventory_cas_19792() {
+    let fixture = tempfile::tempdir().unwrap();
+    let repo = fixture.path();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").current_dir(repo)
+        .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]).args(args)
+        .status().unwrap().success(), "{args:?}");
+    let src = repo.join("cas-cli/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("guard.rs"), "pub fn guard() {\n    tag(\"G-01\", \"denied\");\n}\n").unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    for (file, source, selected) in [
+        ("deny.rs", "pub fn deny() -> CallToolResult { CallToolResult::error(Vec::new()) }\n", true),
+        ("merge.rs", "pub fn merge(pushed_proof: bool) -> Result<(), String> { if pushed_proof { return Err(\"x\".into()); } Ok(()) }\n", true),
+        // Deleting a tag is read against the base revision.
+        ("guard.rs", "pub fn guard() {\n}\n", true),
+        ("parse.rs", "pub fn parse(s: &str) -> Result<u32, String> { if s.is_empty() { return Err(\"empty\".into()); } s.parse().map_err(|_| \"bad\".into()) }\n", false),
+        ("probe.rs", "pub fn ok() {}\n#[cfg(test)]\nmod probe { fn refuse(force: bool) -> Result<(), String> { if force { return Err(\"x\".into()); } Ok(()) } }\n", false),
+        ("flags.rs", "pub const ENABLED: bool = true;\npub struct Options { pub force: bool }\n", false),
+    ] {
+        std::fs::write(src.join(file), source).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", file]);
+        assert_eq!(gate_audit::touches_audited(repo, "HEAD~1", &[]).unwrap(), selected, "{file}");
+        git(&["reset", "-q", "--hard", "HEAD~1"]);
+    }
+}

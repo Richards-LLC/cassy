@@ -50,6 +50,8 @@ impl Audit {
 #[derive(Default, Clone)]
 struct Function {
     site: String,
+    /// First leading-comment line through the item's last line, 1-based.
+    lines: (usize, usize),
     name: String,
     calls: BTreeSet<String>,
     methods: BTreeSet<String>,
@@ -318,8 +320,8 @@ struct Functions<'a> {
     output: &'a mut Vec<Function>,
 }
 impl Functions<'_> {
-    fn annotations(&self, start: usize, end: usize) -> BTreeMap<String, String> {
-        let mut annotations = BTreeMap::new();
+    /// 0-based index of the leading comment block above 1-based line `start`.
+    fn comment_start(&self, start: usize) -> usize {
         let mut annotation_start = start.saturating_sub(1);
         while annotation_start > 0
             && (self.lines[annotation_start - 1]
@@ -329,7 +331,22 @@ impl Functions<'_> {
         {
             annotation_start -= 1;
         }
-        for line in &self.lines[annotation_start..end.min(self.lines.len())] {
+        annotation_start
+    }
+    fn item(&self, name: String, start: usize, end: usize) -> Function {
+        let annotations = self.annotations(start, end);
+        Function {
+            name,
+            site: format!("{}:{start}", self.path),
+            lines: (self.comment_start(start) + 1, end),
+            policy: annotations.contains_key("declared_check"),
+            annotations,
+            ..Default::default()
+        }
+    }
+    fn annotations(&self, start: usize, end: usize) -> BTreeMap<String, String> {
+        let mut annotations = BTreeMap::new();
+        for line in &self.lines[self.comment_start(start)..end.min(self.lines.len())] {
             // gate[] is a machine registry declaration. Human message wording
             // cannot turn a status update into a policy check.
             if line.trim_start().strip_prefix("//").map(str::trim_start).is_some_and(|line| (line.starts_with("gate[G-") || line.starts_with("gate[H-")) && !line.starts_with("gate[G-57 ")) {
@@ -352,15 +369,7 @@ impl Functions<'_> {
         block: &syn::Block,
         span: proc_macro2::Span,
     ) {
-        let start = span.start().line;
-        let end = block.span().end().line;
-        let mut f = Function {
-            name,
-            site: format!("{}:{start}", self.path),
-            ..Default::default()
-        };
-        f.annotations = self.annotations(start, end);
-        f.policy = f.annotations.contains_key("declared_check");
+        let mut f = self.item(name, span.start().line, block.span().end().line);
         let output = &signature.output;
         // The actual type paths, rather than spelling in comments, identify producers.
         struct Types(BTreeSet<String>);
@@ -405,13 +414,7 @@ impl<'ast> Visit<'ast> for Functions<'_> {
         if test_only(&item.attrs) {
             return;
         }
-        let mut f = Function {
-            name: item.ident.to_string(),
-            site: format!("{}:{}", self.path, item.span().start().line),
-            ..Default::default()
-        };
-        f.annotations = self.annotations(item.span().start().line, item.span().end().line);
-        f.policy = f.annotations.contains_key("declared_check");
+        let mut f = self.item(item.ident.to_string(), item.span().start().line, item.span().end().line);
         Body { function: &mut f }.visit_expr(&item.expr);
         self.output.push(f);
     }
@@ -429,13 +432,7 @@ impl<'ast> Visit<'ast> for Functions<'_> {
         if test_only(&item.attrs) {
             return;
         }
-        let mut f = Function {
-            name: item.ident.to_string(),
-            site: format!("{}:{}", self.path, item.span().start().line),
-            ..Default::default()
-        };
-        f.annotations = self.annotations(item.span().start().line, item.span().end().line);
-        f.policy = f.annotations.contains_key("declared_check");
+        let mut f = self.item(item.ident.to_string(), item.span().start().line, item.span().end().line);
         Body { function: &mut f }.visit_expr(&item.expr);
         self.output.push(f);
     }
@@ -874,4 +871,111 @@ pub fn scan_against(root: &Path, registry: &[(String, String, String, String)], 
     audit.gaps.sort();
     audit.gaps.dedup();
     audit
+}
+
+/// Inputs of the registry tests themselves: any change can move their verdict.
+const AUDIT_INPUTS: &[&str] = &[
+    "cas-cli/gate_audit.rs", "cas-cli/gate_audit_refusals.rs", "cas-cli/gate-audit-authority-baseline.json",
+    "cas-cli/build.rs", "scripts/check-test-shape.py", "scripts/release.sh", "scripts/fast-rows-pre-push.sh",
+];
+
+/// Whether `scan_against` reads this repository-relative path (see `files`).
+fn scanned(path: &str) -> bool {
+    let (directories, name) = path.rsplit_once('/').unwrap_or(("", path));
+    ["cas-cli/src/", "crates/", "scripts/"].iter().any(|root| path.starts_with(root))
+        && !directories.split('/').any(|d| matches!(d, "target" | "node_modules" | "tests" | "fixtures" | ".git"))
+        && !name.ends_with("_tests.rs") && name != "tests.rs"
+        && name.rsplit_once('.').is_some_and(|(_, extension)| matches!(extension, "rs" | "sh" | "py" | "registry"))
+}
+
+/// 1-based inclusive line ranges of `source` that the scan inventories:
+/// items with codes, tags, declarations, result producers, bypass candidates
+/// or authority refusals. Scripts have no item structure, so an audited
+/// script counts whole. A source the scan cannot parse is a gap: all of it.
+fn audited_lines(path: &str, source: &str, policy_files: &BTreeSet<String>) -> Vec<(usize, usize)> {
+    let whole = vec![(1, usize::MAX)];
+    if !path.ends_with(".rs") {
+        let mut sites = Vec::new();
+        refusals::script(path, source, policy_files, &mut sites);
+        let audited = !sites.is_empty() || source.contains("gates record-") || source.contains("CAS_SKIP_")
+            || source.lines().filter(|line| !line.trim_start().starts_with('#')).any(|line| !bracket_codes(line, "").is_empty());
+        return if audited { whole } else { Vec::new() };
+    }
+    let Ok(file) = syn::parse_file(source) else { return whole };
+    let mut functions = Vec::new();
+    Functions { path, lines: source.lines().collect(), output: &mut functions }.visit_file(&file);
+    let mut sites = Vec::new();
+    if refusals::policy_module(path, policy_files) {
+        refusals::rust(path, source, &file, &mut sites);
+    }
+    let authority = refusals::authority_lines(&sites, &functions);
+    functions.iter().filter(|f| {
+        f.policy || f.script_sink || f.producer.is_some() || !f.annotations.is_empty() || !f.emissions.is_empty()
+            || !f.refused.is_empty() || !f.overridden.is_empty() || !f.conditional.is_empty()
+            || f.flags.iter().any(|flag| candidate(flag))
+            || authority.iter().any(|line| (f.lines.0..=f.lines.1).contains(line))
+    }).map(|f| f.lines).collect()
+}
+
+/// Whether the commits after `base` change anything `scan_against` audits, so
+/// a capped worker check runs the registry tests only when their verdict can
+/// move. Each hunk side is read against its own revision's AST, so deleted
+/// tags count as well as added ones.
+pub fn touches_audited(root: &Path, base: &str, registry: &[(String, String, String, String)]) -> Result<bool, String> {
+    let git = |args: &[&str]| -> Result<String, String> {
+        let output = std::process::Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let policy_files = registry.iter().filter(|(code, _, _, _)|
+        code.starts_with('G') || code.starts_with('H') || code.starts_with('C'))
+        .filter_map(|(_, _, _, site)| site.rsplit_once(':').map(|(path, _)| path.to_owned()))
+        .collect::<BTreeSet<_>>();
+    let diff = git(&["diff", "--unified=0", "--no-color", "--no-renames", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", base, "HEAD", "--", "cas-cli", "crates", "scripts"])?;
+    let mut changed = BTreeMap::<String, [Vec<usize>; 2]>::new();
+    let mut path = None::<String>;
+    for line in diff.lines() {
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            path = header.rsplit_once(" b/").map(|(_, path)| path.to_owned());
+        } else if let (Some(path), Some(hunk)) = (&path, line.strip_prefix("@@ -")) {
+            let mut ranges = hunk.split(' ');
+            let sides = [ranges.next(), ranges.next().and_then(|range| range.strip_prefix('+'))];
+            let entry = changed.entry(path.clone()).or_default();
+            for (side, range) in sides.into_iter().enumerate() {
+                let range = range.unwrap_or_default();
+                let (start, count) = range.split_once(',').unwrap_or((range, "1"));
+                let (Ok(start), Ok(count)) = (start.parse::<usize>(), count.parse::<usize>()) else {
+                    return Err(format!("unreadable hunk header: {line}"));
+                };
+                entry[side].extend(start..start + count);
+            }
+        } else if line.starts_with(['+', '-']) && !line.starts_with("+++") && !line.starts_with("---") {
+            // gate[...] and gate-audit[...] comments are registry declarations wherever they sit.
+            let text = line[1..].trim_start();
+            if (text.starts_with("//") || text.starts_with('#')) && (text.contains("gate[") || text.contains("gate-audit[")) {
+                return Ok(true);
+            }
+        }
+    }
+    for (path, [old, new]) in &changed {
+        if AUDIT_INPUTS.contains(&path.as_str()) || path.starts_with("cas-cli/src/gates/") {
+            return Ok(true);
+        }
+        if !scanned(path) {
+            continue;
+        }
+        for (revision, lines) in [(base, old), ("HEAD", new)] {
+            if lines.is_empty() {
+                continue;
+            }
+            let object = format!("{revision}:{path}");
+            let source = git(&["show", object.as_str()])?;
+            if audited_lines(path, &source, &policy_files).iter().any(|(first, last)| lines.iter().any(|line| first <= line && line <= last)) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }

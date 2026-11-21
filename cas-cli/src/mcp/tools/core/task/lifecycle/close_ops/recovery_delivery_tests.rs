@@ -2671,10 +2671,10 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
     use crate::mcp::CasService;
     const NAME: &str = "mcp::tools::core::task::lifecycle::close_ops::recovery_delivery_tests::parked_close_survives_worker_shutdown_cas_d893";
     if let Some(root) = std::env::var_os("CAS_D893_CHILD") {
-        let _env = TestEnvGuard::new();
-        let root = std::path::PathBuf::from(root);
         let fail_sync = std::env::var_os("CAS_D893_FAIL_SYNC").is_some();
         let inline = std::env::var_os("CAS_D893_INLINE").is_some();
+        let _env = TestEnvGuard::new();
+        let root = std::path::PathBuf::from(root);
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("recovery-session".into());
         let hook_root = root.clone();
@@ -2805,6 +2805,9 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
             assert!(!journals[0].exists());
         } else {
             assert_eq!(cas_store::list_qa_passes(&root, TASK).unwrap().len(), 1);
+            let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
+                .list_pending("supervisor-session").unwrap();
+            assert!(!notices.iter().any(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed"));
         }
     }
 }

@@ -1118,7 +1118,8 @@ impl CasService {
             let recorded = tokio::task::spawn_blocking(move || {
                 // A checked disposition belongs to this request, unlike the row's
                 // current status or the legacy error-shaped MERGE REQUIRED reply.
-                let failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true));
+                let failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true)
+                    || result.structured_content.as_ref().and_then(|v| v["code"].as_str()) == Some("parked_awaiting_merge"));
                 let retry_peer_park = peer_publication_failed(&joined);
                 let summary = if let (Some(summary), Some(detail)) =
                     (receipt.park_refusal_summary.get(), refusal_text(&joined))

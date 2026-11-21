@@ -10126,7 +10126,14 @@ impl CasCore {
                         artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
                     let msg = accepted_override_codes.iter().fold(msg, |message, code|
                         crate::gates::override_tag(code, message));
-                    return Ok(Self::tool_error(msg));
+                    // Preserve the legacy error-shaped reply while naming
+                    // this successful committed park for outcome consumers.
+                    let mut reply = Self::tool_error(msg);
+                    reply.structured_content = Some(serde_json::json!({
+                        "code": "parked_awaiting_merge", "mutation_outcome": "COMMITTED",
+                        "task_id": task.id,
+                    }));
+                    return Ok(reply);
                 }
             }
             if !gate_refusals.is_empty() {

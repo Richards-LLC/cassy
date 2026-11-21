@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -113,8 +114,43 @@ class LaneBaseTests(unittest.TestCase):
 
     def test_equal_aliases_and_older_ancestor_epics_keep_the_newest_fork(self):
         self.git('update-ref', 'refs/remotes/origin/epic/alias', self.epic)
-        self.git('update-ref', 'refs/remotes/origin/epic/older', self.main)
-        self.assertEqual(self.classify()['class'], 'hub-web-only')
+        for i in range(128):
+            self.git('update-ref', f'refs/remotes/origin/epic/merged-{i}', self.main)
+        result, calls = self.resolve_traced()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.epic)
+        forks = [c for c in calls if c[:1] == ['merge-base'] and '--is-ancestor' not in c]
+        # Two live aliases plus the final comparison; merged refs cost no forks.
+        self.assertEqual(len(forks), 3, forks)
+
+    def resolve_traced(self):
+        trace = self.repo / '.git' / 'resolver.trace'
+        trace.write_text('')
+        result = subprocess.run(['bash', str(ROOT / 'scripts/resolve-ci-base.sh'),
+                                 self.main, 'origin/main'], cwd=self.repo,
+                                env=dict(os.environ, GITHUB_EVENT_NAME='push',
+                                         GITHUB_REF='refs/heads/factory/worker', GIT_TRACE=str(trace)),
+                                capture_output=True, text=True)
+        calls = [shlex.split(line.split('built-in: git ', 1)[1])
+                 for line in trace.read_text().splitlines() if 'built-in: git ' in line]
+        return result, calls
+
+    def test_live_epic_comparisons_are_linear_and_overflow_fails_closed(self):
+        for i in range(63):
+            # Distinct nested forks put the old pairwise algorithm in its worst order.
+            self.write('docs/progress.md', f'{i}\n')
+            self.commit(f'progress {i}')
+            self.git('update-ref', f'refs/remotes/origin/epic/z-{i:02}', 'HEAD')
+        result, calls = self.resolve_traced()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.git('rev-parse', 'HEAD'))
+        self.assertLessEqual(sum(c[:2] == ['merge-base', '--is-ancestor'] for c in calls), 128)
+        self.git('update-ref', 'refs/remotes/origin/epic/overflow', self.epic)
+        result, calls = self.resolve_traced()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
+        self.assertFalse(any(c[:1] == ['merge-base'] for c in calls), calls)
+        self.assertEqual(self.classify()['rust-unaffected'], 'false')
 
     def test_epic_advancing_after_spawn_preserves_task_fork(self):
         lane = self.git('rev-parse', 'HEAD')
@@ -143,6 +179,40 @@ class LaneBaseTests(unittest.TestCase):
         self.other_epic('other')
         self.git('merge', '--no-edit', 'other')
         self.assertEqual(self.classify()['rust-unaffected'], 'false')
+        # A later ref containing both parents removes the ambiguity.
+        self.git('update-ref', 'refs/remotes/origin/epic/z-joined', 'HEAD')
+        self.assertEqual(self.classify()['comparison-base'], self.git('rev-parse', 'HEAD'))
+
+    def test_published_release_deletes_only_merged_remote_epics_idempotently(self):
+        remote = self.repo / '.git' / 'origin.git'
+        self.git('init', '--bare', '-q', str(remote))
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('push', '-q', 'origin', f'{self.main}:refs/heads/main',
+                 f'{self.main}:refs/heads/epic/merged', f'{self.epic}:refs/heads/epic/live')
+        workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
+        step = next((s for s in workflow['jobs']['release']['steps']
+                     if s.get('id') == 'cleanup-epics'), None)
+        self.assertIsNotNone(step)
+        # Execute the workflow's actual cleanup, against a disposable origin.
+        shutil.copy2(ROOT / 'scripts/cleanup-merged-epics.sh', self.repo / 'scripts')
+        for _ in range(2):
+            result = subprocess.run(['bash', '-e', '-c', step['run']], cwd=self.repo,
+                                    env=dict(os.environ, GITHUB_SHA=self.main, DEFAULT_BRANCH='main',
+                                             GITHUB_STEP_SUMMARY=str(self.repo / '.git' / 'summary')),
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            refs = self.git('ls-remote', '--heads', 'origin')
+            self.assertNotIn('refs/heads/epic/merged', refs)
+            self.assertIn(f'{self.epic}\trefs/heads/epic/live', refs)
+        summary = (self.repo / '.git' / 'summary').read_text()
+        self.assertIn('refs/heads/epic/merged', summary)
+
+        # A publication SHA outside the default branch cannot authorize deletion.
+        result = subprocess.run(['bash', str(ROOT / 'scripts/cleanup-merged-epics.sh'),
+                                 self.epic, 'origin/main'], cwd=self.repo,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'{self.epic}\trefs/heads/epic/live', self.git('ls-remote', '--heads', 'origin'))
 
 
 if __name__ == '__main__':

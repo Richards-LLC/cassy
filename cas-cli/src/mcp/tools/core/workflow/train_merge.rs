@@ -18,7 +18,7 @@ struct Entry {
     sha: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Queue {
     id: String,
     train: String,
@@ -44,7 +44,7 @@ struct Queue {
 
 const ADVANCEMENT_SECONDS: i64 = 120;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Advancement {
     token: String,
     pid: u32,
@@ -68,7 +68,7 @@ impl Advancement {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct AdvancementReclaim {
     lease: Advancement,
     reason: String,

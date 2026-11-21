@@ -248,9 +248,11 @@ impl CasCore {
                 .as_ref()
                 .is_none_or(|owner| owner.agent_id != supervisor.id)
         {
-            return Err(error(
+            // gate[G-162 assign]: Worker task queue owned by another factory supervisor
+            return Err(error(crate::gates::tag(
+                "G-162",
                 "Worker task queue belongs to another factory supervisor",
-            ));
+            )));
         }
         Ok(worker)
     }
@@ -353,9 +355,11 @@ impl CasCore {
                 queue.current_started = true;
             }
             if queue.current_started && ids.iter().any(|id| Some(id) == queue.current_task.as_ref()) {
-                return Err(error(
+                // gate[G-163 assign]: Queue replacement names the task already running
+                return Err(error(crate::gates::tag(
+                    "G-163",
                     "The current task is already running; supply only pending task IDs",
-                ));
+                )));
             }
             ids.retain(|id| Some(id) != queue.current_task.as_ref());
             queue.pending = ids;

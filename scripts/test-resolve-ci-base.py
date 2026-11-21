@@ -217,13 +217,20 @@ class LaneBaseTests(unittest.TestCase):
         # Later main progress does not authorize pruning beyond the released SHA.
         self.git('push', '-q', 'origin', f'{self.epic}:refs/heads/main',
                  f'{self.main}:refs/heads/epic/raced')
-        # Advance an eligible remote branch after fetch, just before deletion.
-        hook = self.repo / '.git' / 'hooks' / 'pre-push'
-        hook.write_text(f'#!/bin/sh\ngit --git-dir={shlex.quote(str(remote))} update-ref '
-                        f'refs/heads/epic/raced {self.epic} {self.main}\n')
-        hook.chmod(0o755)
+        # Advance after fetch but before push advertises refs. A pre-push hook
+        # would race too late and test the server's ordinary CAS, not our lease.
+        race_bin = self.repo / '.git' / 'race-bin'
+        race_bin.mkdir()
+        real_git = shlex.quote(shutil.which('git'))
+        wrapper = race_bin / 'git'
+        wrapper.write_text(f'#!/bin/sh\nif [ "$1" = push ]; then\n'
+                           f'  {real_git} --git-dir={shlex.quote(str(remote))} update-ref '
+                           f'refs/heads/epic/raced {self.epic} {self.main} || exit 1\n'
+                           f'fi\nexec {real_git} "$@"\n')
+        wrapper.chmod(0o755)
         result = subprocess.run(['bash', str(ROOT / 'scripts/cleanup-merged-epics.sh'),
                                  self.main, 'origin/main'], cwd=self.repo,
+                                env=dict(os.environ, PATH=f'{race_bin}{os.pathsep}{os.environ["PATH"]}'),
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         refs = self.git('ls-remote', '--heads', 'origin')

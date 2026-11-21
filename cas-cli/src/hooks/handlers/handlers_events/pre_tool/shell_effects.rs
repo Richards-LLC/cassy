@@ -296,12 +296,15 @@ fn numeric_locals(source: &str) -> HashSet<String> {
                 && chars.iter().filter(|ch| **ch == b';').count() <= 1,
         }
     };
+    // Only the separator operators that end one statement or begin the next:
+    // a `)` or `(` beyond them belongs to a neighbouring construct.
+    let separating = |at: usize| word(at).is_none() && matches!(operator_char(at), b';' | b'\n' | b'\r' | b'&' | b'|');
     let run_before = |index: usize| {
-        let start = (0..index).rev().take_while(|&at| word(at).is_none()).last().unwrap_or(index);
+        let start = (0..index).rev().take_while(|&at| separating(at)).last().unwrap_or(index);
         start..index
     };
     let run_after = |index: usize| {
-        let end = (index + 1..tokens.len()).take_while(|&at| word(at).is_none()).last().map_or(index + 1, |at| at + 1);
+        let end = (index + 1..tokens.len()).take_while(|&at| separating(at)).last().map_or(index + 1, |at| at + 1);
         index + 1..end
     };
     let statement_start = |index: usize| index == 0 || {

@@ -10807,7 +10807,7 @@ impl CasCore {
                             // The merged check and a target binding read the
                             // target too; refresh it like the lane.
                             if task.delivery_mode != cas_types::DeliveryMode::LocalMerge {
-                                fetch_parent_branch_best_effort(&close_project_root, &resolved_parent_branch);
+                                fetch_parent_branch_best_effort(&close_project_root, remote_branch_name(&resolved_parent_branch));
                             }
                             let lane_tip = task.assignee.as_deref()
                                 .map(|assignee| close_measured_factory_branch(&close_project_root, &task, assignee))
@@ -17162,6 +17162,13 @@ fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
     unique
 }
 
+/// cas-6c33: a branch spelled as its remote-tracking ref (`origin/<name>`) is
+/// still the branch `<name>`. Fetching it, or building `origin/` around it,
+/// as spelled names refs that do not exist.
+pub(crate) fn remote_branch_name(branch: &str) -> &str {
+    branch.strip_prefix("origin/").unwrap_or(branch)
+}
+
 /// cas-6c33: the tip a peer machine's lane delivers. For a pushed delivery
 /// that is origin's branch, refreshed now: the closer's cached local branch
 /// and `origin/` ref can be older than what the peer pushed, so neither is
@@ -17172,6 +17179,8 @@ fn peer_lane_tip(
     branch: &str,
     delivery_mode: cas_types::DeliveryMode,
 ) -> Option<String> {
+    // A remote-only lane is measured as `origin/<lane>`; fetch and read it as `<lane>`.
+    let branch = remote_branch_name(branch);
     if delivery_mode == cas_types::DeliveryMode::LocalMerge || !origin_remote_configured(repo) {
         return resolve_branch_sha(repo, branch)
             .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}")));

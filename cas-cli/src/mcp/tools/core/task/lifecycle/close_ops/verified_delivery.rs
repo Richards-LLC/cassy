@@ -289,7 +289,7 @@ impl ReviewedDelivery {
             return false;
         }
         if task.delivery_mode != cas_types::DeliveryMode::LocalMerge && origin_remote_configured(repo) {
-            fetch_parent_branch_best_effort(repo, target);
+            fetch_parent_branch_best_effort(repo, remote_branch_name(target));
         }
         let reference = live_target();
         if git_commit_is_ancestor(repo, head, &reference) {

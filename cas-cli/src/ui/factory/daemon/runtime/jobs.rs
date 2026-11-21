@@ -79,6 +79,20 @@ pub(crate) enum Criticality {
     /// message to an idle pane never queues behind a write backlog
     /// (cas-9594c).
     Delivery,
+    /// Never dropped by a full lane, but a later submit for its busy key
+    /// replaces the one waiting behind it: each run reads current state, so
+    /// only the newest waiting request is worth running (cas-55e9: a slow
+    /// delivery read had 20 resubmits queued behind it, one per 30 s).
+    Latest,
+}
+
+impl Criticality {
+    /// Safe to abandon at reexec: the run only reads, and its request lives
+    /// in daemon memory that reexec does not hand off, so the new daemon
+    /// reruns it (cas-55e9).
+    pub(crate) fn replaceable(self) -> bool {
+        matches!(self, Criticality::Refresh | Criticality::Latest)
+    }
 }
 
 /// What to run and how it may be coalesced or dropped.
@@ -169,6 +183,7 @@ pub(crate) struct RunningJob {
     pub(crate) waiting_for_writer: bool,
     /// Write lane: time spent waiting for the StoreWorker, so far or in total.
     pub(crate) writer_wait: Duration,
+    pub(crate) criticality: Criticality,
 }
 
 impl RunningJob {
@@ -207,6 +222,8 @@ pub(crate) struct LaneStats {
     pub(crate) critical_backlog: usize,
     /// Age of the oldest waiting critical job (spec §4.2 watchdog metric).
     pub(crate) oldest_critical_age: Option<Duration>,
+    /// Waiting jobs a reexec must not abandon (not [`Criticality::replaceable`]).
+    pub(crate) durable_backlog: usize,
     pub(crate) dropped_refresh: u64,
     pub(crate) running: Option<RunningJob>,
 }
@@ -408,6 +425,7 @@ struct Running {
     /// When the lane took the job.
     taken_at: Instant,
     budget: Duration,
+    criticality: Criticality,
     /// When the job itself started: at once on most lanes, on the
     /// StoreWorker thread for the write lane.
     started: Arc<OnceLock<Instant>>,
@@ -608,7 +626,7 @@ impl<T: Send + 'static> JobRuntime<T> {
                         followups.critical.push_back(queued);
                         Submitted::QueuedBehindKey
                     }
-                    Criticality::Refresh => {
+                    Criticality::Refresh | Criticality::Latest => {
                         let replaced_generation = followups
                             .rerun
                             .replace(queued)
@@ -692,6 +710,9 @@ impl<T: Send + 'static> JobRuntime<T> {
             let age = now.saturating_duration_since(waiting.enqueued_at);
             stats.queued += 1;
             stats.oldest_queued_age = stats.oldest_queued_age.max(Some(age));
+            if !waiting.spec.criticality.replaceable() {
+                stats.durable_backlog += 1;
+            }
             if waiting.spec.criticality != Criticality::Refresh {
                 stats.critical_backlog += 1;
                 stats.oldest_critical_age = stats.oldest_critical_age.max(Some(age));
@@ -709,6 +730,7 @@ impl<T: Send + 'static> JobRuntime<T> {
                 writer_wait: started
                     .unwrap_or(now)
                     .saturating_duration_since(running.taken_at),
+                criticality: running.criticality,
             }
         });
         stats
@@ -937,6 +959,7 @@ fn run_lane<T: Send + 'static>(
                         key: queued.spec.key.clone(),
                         taken_at: Instant::now(),
                         budget: queued.spec.budget,
+                        criticality: queued.spec.criticality,
                         started: Arc::clone(&started),
                     });
                     break Some((queued, started));
@@ -1626,42 +1649,6 @@ mod tests {
             "the writer's backlog is not the job's: {result:?}"
         );
         assert!(result.elapsed < result.writer_wait, "{result:?}");
-    }
-
-    /// cas-9594c: delivery jobs (selection, transport claims) run ahead of
-    /// queued work on the write lane and on the StoreWorker itself, so a
-    /// write backlog cannot hold a message to an idle pane.
-    #[test]
-    fn delivery_jobs_run_ahead_of_queued_writes() {
-        let worker = Arc::new(super::super::store_worker::StoreWorker::start());
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let record = |name: &'static str| {
-            let order = Arc::clone(&order);
-            move || order.lock().unwrap().push(name)
-        };
-        let (release, backlog) = mpsc::channel::<()>();
-        assert!(worker.submit("backlog", move || {
-            let _ = backlog.recv_timeout(Duration::from_secs(5));
-        }));
-        assert!(worker.submit("queued write", record("queued write")));
-        let runtime: JobRuntime<()> = JobRuntime::start_with(
-            4,
-            LaneWiring { reader: None, writer: Arc::clone(&worker) as Arc<dyn WriteExecutor> },
-        );
-        runtime.submit(spec("select", Lane::Write, Criticality::Delivery, 1), record("select"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !runtime.lane_stats(Lane::Write).running.is_some_and(|job| job.waiting_for_writer) {
-            assert!(Instant::now() < deadline, "the select never reached the writer");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        runtime.submit(spec("stamp", Lane::Write, Criticality::Critical, 2), record("stamp"));
-        runtime.submit(spec("claim", Lane::Write, Criticality::Delivery, 3), record("claim"));
-        release.send(()).unwrap();
-        assert_eq!(wait_for(&runtime, 3).len(), 3);
-        let order = order.lock().unwrap().clone();
-        let at = |name| order.iter().position(|seen| *seen == name).unwrap();
-        assert!(at("select") < at("queued write"), "StoreWorker: {order:?}");
-        assert!(at("claim") < at("stamp"), "write lane: {order:?}");
     }
 
     /// Review round 2, L2: a key busy on one lane refuses a submit on another

@@ -591,6 +591,13 @@ fn handle_pre_tool_use_checked(
         return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-14", reason)));
     }
 
+    // cas-803f: a supervisor in a long foreground Bash call cannot hear the
+    // operator; such calls run in the background or go to a worker.
+    // gate[H-49 pre-tool]: Supervisor long foreground Bash
+    if let Some(reason) = super::supervisor_foreground::denial(input) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-49", reason)));
+    }
+
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // A worker or reviewer must not skip Git's pre-push hook: it enforces
@@ -1887,7 +1894,7 @@ fn worker_check_log_denial(input: &HookInput, suffix: &str) -> Option<String> {
 /// metadata, tree, version) is not a build. Commands passed to `sh -c` /
 /// `bash -c` are inspected too; quoted text in other commands (a commit
 /// message, an echo) is not.
-fn worker_command_rust_build(command: &str, cwd: &Path) -> Option<String> {
+pub(super) fn worker_command_rust_build(command: &str, cwd: &Path) -> Option<String> {
     worker_command_rust_build_at_depth(command, cwd, 0)
 }
 
@@ -4228,7 +4235,7 @@ fn shell_statements_with_pipes(tokens: Vec<ShellToken>) -> (Vec<Vec<String>>, Ve
     (statements, piped)
 }
 
-fn shell_word_basename(word: &str) -> &str {
+pub(super) fn shell_word_basename(word: &str) -> &str {
     std::path::Path::new(word)
         .file_name()
         .and_then(|name| name.to_str())

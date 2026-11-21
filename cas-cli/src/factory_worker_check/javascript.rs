@@ -41,7 +41,7 @@ pub(super) fn test_file(path: &str) -> bool {
 /// name suffix, or jest's `__tests__` directory; declarations never are.
 /// `test_file` stays the wide net for files that may hold tests. A file only
 /// that net catches is a support module: a `File` run of it finds no tests,
-/// so it widens to its package, whose run covers its consumers.
+/// so it widens to related tests for Jest, or to its package for other runners.
 pub(super) fn test_match(path: &str) -> bool {
     let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
     !stem.ends_with(".d")
@@ -59,7 +59,7 @@ pub(super) struct Invocation {
     pub(super) files: Vec<String>,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>` or `node --test <test files>`";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
@@ -85,6 +85,7 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
         let value = match *arg {
             "--config" | "-c" => Some(*rest.next()?),
             "--runInBand" | "-i" if runner == "jest" => continue,
+            "--findRelatedTests" if runner == "jest" => continue,
             "--testNamePattern" | "-t" if runner == "jest" => {
                 if rest.next()?.is_empty() { return None; }
                 continue;
@@ -201,7 +202,7 @@ pub(crate) fn changed_tests(
         let test_file = self::test_file(path);
         let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
             Ok(all) => all,
-            // The caller widens an unclassifiable source to its package.
+            // The caller widens an unclassifiable source to related/package proof.
             Err(error) => return Err(error),
         };
         let only_deletions = lines.iter().all(|(start, end)| start > end);
@@ -1579,7 +1580,11 @@ fn execute_tests(
                 }
             }
             if !matches!(widened, Some((super::widened::Scope::Package(_), _, _))) {
-                if runner == "jest" { command.arg("--runTestsByPath"); }
+                if runner == "jest" {
+                    command.arg(if matches!(widened, Some((super::widened::Scope::Related(_), _, _))) {
+                        "--findRelatedTests"
+                    } else { "--runTestsByPath" });
+                }
                 if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
                 else { command.arg(&file); }
             }

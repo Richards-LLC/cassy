@@ -1172,7 +1172,7 @@ impl GhCiTransport {
                 if file.size() > 1024 * 1024 || !(name == "lane.json" || name.ends_with("-attribution.json")) { continue; }
                 let Ok(data) = serde_json::from_reader::<_, serde_json::Value>(&mut file) else { continue };
                 if name == "lane.json" {
-                    matches_head = data["head"].as_str() == Some(head);
+                    matches_head = data["plan"]["head"].as_str() == Some(head);
                 } else if let Some(rows) = data["caused"].as_array() {
                     caused.extend(rows.iter().filter_map(|row| row["test"].as_str())
                         .map(str::trim).filter(|name| !name.is_empty()).map(str::to_string));

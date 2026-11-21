@@ -1457,6 +1457,7 @@ fn execute_tests(
     let mut count = 0;
     let mut attribution_notes = Vec::new();
     let reports = tempfile::tempdir()?;
+    let outcome = (|| -> Result<()> {
     for (path, selected) in by_file {
         // One config path: the caller's own `--config` wins over the
         // discovered runner config (cas-1468); never pass both.
@@ -1617,6 +1618,25 @@ fn execute_tests(
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
         } else { verify_repeats(runner, repo, &selected, run)? };
     }
+    Ok(())
+    })();
+    if let Err(error) = outcome {
+        if runner != "playwright" {
+            return Err(error);
+        }
+        // GH #2172: the temporary reports directory is removed on return,
+        // taking the traces and error contexts Playwright just printed.
+        // The failure stays first; the durable path follows it.
+        return Err(match retain_playwright_failure(cas_root, repo, head, reports.path()) {
+            Ok(Some(kept)) => anyhow::anyhow!(
+                "{error:#}\nFailed Playwright evidence (traces, error contexts, JSON reports) kept at {}; \
+                 the temporary paths printed above are removed when worker-check returns.",
+                kept.display()
+            ),
+            Ok(None) => error,
+            Err(copy) => anyhow::anyhow!("{error:#}\nFailed Playwright evidence could not be kept: {copy:#}"),
+        });
+    }
     if super::clean_head(repo)? != head {
         bail!("repository changed during JavaScript stability run");
     }
@@ -1631,6 +1651,51 @@ fn execute_tests(
         println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
+}
+
+/// Copy a failed Playwright run's output directory and JSON reports from the
+/// temporary `reports` directory into the task's artifact directory, keeping
+/// their layout. Passing runs never call this, so they leave no traces.
+fn retain_playwright_failure(cas_root: &Path, repo: &Path, head: &str, reports: &Path) -> Result<Option<PathBuf>> {
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(reports)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            name == "playwright-output" || (name.starts_with("report-") && name.ends_with(".json")) || name == "discovery.json"
+        })
+        .collect();
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    sources.sort();
+    let configured = crate::config::Config::load(cas_root).ok().and_then(|config| config.factory().artifacts_root.clone());
+    let base = crate::config::project_factory_artifacts_root(
+        cas_root,
+        &crate::config::resolved_factory_artifacts_root(configured.as_deref()),
+    );
+    let owner = crate::factory_capacity_wait::bound_task(cas_root, repo).unwrap_or_else(|| "worker-check".into());
+    let kept = base.join(owner).join("worker-check").join(format!(
+        "playwright-{}-{}",
+        head.get(..12).unwrap_or(head),
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    ));
+    fn copy(source: &Path, destination: &Path) -> Result<()> {
+        if source.is_dir() {
+            std::fs::create_dir_all(destination)?;
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                copy(&entry.path(), &destination.join(entry.file_name()))?;
+            }
+        } else if source.is_file() {
+            std::fs::copy(source, destination)?;
+        }
+        Ok(())
+    }
+    std::fs::create_dir_all(&kept)?;
+    for source in sources {
+        copy(&source, &kept.join(source.file_name().context("report entry name")?))?;
+    }
+    Ok(Some(kept))
 }
 
 fn validate_declared_discovery(
@@ -2974,6 +3039,55 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             assert_eq!(result.is_ok(), fail_at.is_none());
             assert_eq!(invocations, if fail_at.is_some() { 3 } else { 5 });
         }
+    }
+
+    /// GH #2172: a failed capped Playwright run printed trace.zip under its
+    /// temporary reports directory, which was gone once worker-check returned.
+    /// The failure now names a durable copy of that output.
+    #[cfg(unix)]
+    #[test]
+    fn failed_playwright_traces_outlive_worker_check_gh_2172() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let file = "e2e/retry.spec.ts";
+        std::fs::create_dir_all(repo.path().join("e2e")).unwrap();
+        std::fs::write(repo.path().join(file), "test('fails', async () => { expect(1).toBe(2); });\n").unwrap();
+        // A deterministic failure that writes a trace, as Playwright does.
+        let bin = repo.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("playwright"), "#!/bin/sh\nout=; prev=\nfor arg in \"$@\"; do [ \"$prev\" = --output ] && out=$arg; prev=$arg; done\n\
+            mkdir -p \"$out/retry-fails-chromium\" && printf trace > \"$out/retry-fails-chromium/trace.zip\"\n\
+            printf '{\"errors\":[],\"suites\":[]}' > \"$PLAYWRIGHT_JSON_OUTPUT_FILE\"\nexit 1\n").unwrap();
+        std::fs::set_permissions(bin.join("playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "failing spec"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        std::fs::write(cas_root.path().join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", artifacts.path().display().to_string())).unwrap();
+
+        let error = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &[id(file, "fails")], None, &[])
+            .unwrap_err();
+        let message = format!("{error:#}");
+        // One durable copy under the artifacts root, named by the failure.
+        let kept: Vec<PathBuf> = walkdir::WalkDir::new(artifacts.path()).into_iter().filter_map(Result::ok)
+            .filter(|entry| entry.file_name() == "report-0.json").map(|entry| entry.path().parent().unwrap().to_path_buf())
+            .collect();
+        assert_eq!(kept.len(), 1, "{message}");
+        assert!(message.contains(&kept[0].display().to_string()), "{message}");
+        assert_eq!(std::fs::read(kept[0].join("playwright-output/retry-fails-chromium/trace.zip")).unwrap(), b"trace");
     }
 
     #[test]

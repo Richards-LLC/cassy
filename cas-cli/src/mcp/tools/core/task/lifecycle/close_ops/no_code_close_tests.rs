@@ -3922,3 +3922,85 @@ fn shared_queue_checkout_rebinds_only_executable_work_gh2022() {
         }
     }
 }
+
+/// GH #2250/#2274: the worker may already have parked B, or only started
+/// B without a commit, when a relayed review correction is pushed on A's
+/// recorded source branch. B's lease must not acquire A's identified repair.
+#[tokio::test]
+async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
+    let mut env = TestEnvGuard::temp_home();
+    for b_parked in [true, false] {
+        let f = fixture(&mut env, "epic/next");
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-a0a0";
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["switch", "-c", &lane, "origin/epic/next"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let mut a = assigned(id, TaskType::Bug, "epic/next");
+        a.status = TaskStatus::Open;
+        f.put(&a);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        std::fs::write(checkout.join("repair.md"), "initial delivery\n").unwrap();
+        git(&checkout, &["add", "repair.md"]);
+        git(&checkout, &["commit", "-qm", "fix(cas-a0a0): initial delivery"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        let close = serde_json::json!({"action":"close", "id":id, "reason":"Delivery ready"});
+        let first = call(&f.worker, close.clone()).await;
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{first}");
+        let recorded = f.task(id).deliverables.factory_branch_anchor.unwrap();
+
+        let mut b = assigned("cas-b0b0", TaskType::Bug, "epic/next");
+        b.status = TaskStatus::Open;
+        f.put(&b);
+        call(&f.worker, serde_json::json!({"action":"start", "id":b.id})).await;
+        // Separate the lease clocks explicitly; Git timestamps must not depend
+        // on whether two starts happen to fall in the same host clock tick.
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        for (task, time) in [(id, "2025-01-01T00:00:00Z"), (b.id.as_str(), "2025-01-02T00:00:00Z")] {
+            conn.execute("UPDATE task_lease_history SET timestamp=?1 WHERE task_id=?2", rusqlite::params![time, task]).unwrap();
+        }
+        if b_parked {
+            std::fs::write(checkout.join("b.md"), "task B\n").unwrap();
+            git(&checkout, &["add", "b.md"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-b0b0): delivery B"]);
+            let branch = git(&checkout, &["branch", "--show-current"]);
+            git(&checkout, &["push", "-q", "origin", &branch]);
+            let response = call(&f.worker, serde_json::json!({"action":"close", "id":b.id, "reason":"Delivery B ready"})).await;
+            assert_eq!(f.task(&b.id).status, TaskStatus::AwaitingMerge, "{response}");
+        }
+        let b_before = f.task(&b.id);
+        git(&checkout, &["switch", &lane]);
+        for subject in ["fix(cas-b0b0): foreign repair\n\nContext: cas-a0a0", "fix: unnamed repair", "fix(cas-a0a0): restore review correction"] {
+            git(&checkout, &["reset", "--hard", &recorded]);
+            std::fs::write(checkout.join("repair.md"), format!("{subject}\n")).unwrap();
+            git(&checkout, &["add", "repair.md"]);
+            git(&checkout, &["commit", "-qm", subject]);
+            let own = subject.starts_with("fix(cas-a0a0)");
+            if own {
+                // GH #2274: an epic sync after the repair imports a sibling's
+                // delivery without changing which task owns the repair.
+                git(repo, &["switch", "epic/next"]);
+                std::fs::write(repo.join("target.md"), "integrated sibling\n").unwrap();
+                git(repo, &["add", "target.md"]);
+                git(repo, &["commit", "-qm", "fix(cas-c0c0): target progress"]);
+                git(repo, &["push", "-q", "origin", "epic/next"]);
+                git(&checkout, &["merge", "--no-ff", "-qm", "sync declared target", "origin/epic/next"]);
+            }
+            git(&checkout, &["push", "-q", "--force", "origin", &lane]);
+            let tip = git(&checkout, &["rev-parse", "HEAD"]);
+            let response = call(&f.worker, close.clone()).await;
+            assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+            assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(),
+                Some(if own { tip.as_str() } else { recorded.as_str() }),
+                "b_parked={b_parked}, subject={subject}: {response}");
+            assert_eq!(crate::gates::codes_in(&response).contains(&"G-60"), !own, "{response}");
+            let b_after = f.task(&b.id);
+            assert_eq!(b_after.status, b_before.status);
+            assert_eq!(b_after.deliverables.factory_branch_anchor, b_before.deliverables.factory_branch_anchor);
+        }
+    }
+}

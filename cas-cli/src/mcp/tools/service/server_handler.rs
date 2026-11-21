@@ -1141,10 +1141,8 @@ impl CasService {
                         warn!(%task_id, %error, "full late close refusal receipt unavailable");
                         format!("{summary}\nFull refusal receipt unavailable.")
                     })
-                } else if failed {
-                    late_close_summary(&joined)
                 } else {
-                    receipt.outcome.get().cloned().unwrap_or_else(|| late_close_summary(&joined))
+                    late_close_summary(&joined)
                 };
                 let note = format!(
                     "A close answered {disposition} before its handler finished (response budget {:.0}s); finished after {:.1}s. Result: {summary}. Timing (inclusive): {}",

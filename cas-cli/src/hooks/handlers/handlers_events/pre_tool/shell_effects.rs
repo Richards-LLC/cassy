@@ -179,13 +179,23 @@ enum Lexeme {
     Code,
     /// Text inside double quotes, where only expansions are live.
     Double,
-    /// Inert text: single or `$'...'` quotes, escapes, quote marks and comments.
+    /// Inert text: single-quoted text, escaped characters and quote marks.
     Literal,
 }
 
-/// Classify every byte of `source` (heredoc bodies already projected out).
-fn lexeme_map(source: &str) -> Vec<Lexeme> {
+/// Classify every byte of `source` (heredoc bodies already projected out) by
+/// Bash's quoting rules: a backslash quotes the next character (manual
+/// 3.1.2.1), single quotes preserve every character up to the next single
+/// quote (3.1.2.2), and double quotes keep text literal except `$`, backtick
+/// and backslash (3.1.2.3), where `$(` opens code again. `None` for a script
+/// using what this map does not model, so no counter is proved: a comment
+/// (3.1.3), ANSI-C `$'...'` quoting (3.1.2.4) or a backslash-newline line
+/// continuation, which Bash removes before splitting words.
+fn lexeme_map(source: &str) -> Option<Vec<Lexeme>> {
     let bytes = source.as_bytes();
+    if source.contains("\\\n") || source.contains("$'") {
+        return None;
+    }
     let mut map = vec![Lexeme::Literal; bytes.len()];
     // Open contexts: `true` is a double-quoted string, `false` a parenthesis
     // of code nested inside one.
@@ -216,19 +226,13 @@ fn lexeme_map(source: &str) -> Vec<Lexeme> {
         match ch {
             b'\\' => index += 2,
             b'\'' => index = source[index + 1..].find('\'').map_or(bytes.len(), |end| index + end + 2),
-            b'$' if bytes.get(index + 1) == Some(&b'\'') => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\'' {
-                    index += if bytes[index] == b'\\' { 2 } else { 1 };
-                }
-                index += 1;
-            }
             b'"' => {
                 stack.push(true);
                 index += 1;
             }
-            b'#' if index == 0 || b" \t\n;&|()".contains(&bytes[index - 1]) => {
-                index = source[index..].find('\n').map_or(bytes.len(), |end| index + end);
+            // Any `#` that could start a comment (a word's first character).
+            b'#' if index == 0 || !bytes[index - 1].is_ascii_alphanumeric() && !b"$_{".contains(&bytes[index - 1]) => {
+                return None;
             }
             _ => {
                 map[index] = Lexeme::Code;
@@ -241,7 +245,7 @@ fn lexeme_map(source: &str) -> Vec<Lexeme> {
             }
         }
     }
-    map
+    Some(map)
 }
 
 /// Shell-local names a script keeps numeric, so arithmetic over them cannot
@@ -277,7 +281,9 @@ fn numeric_locals(source: &str) -> HashSet<String> {
     }
     let bytes = source.as_bytes();
     let ident = |ch: u8| ch.is_ascii_alphanumeric() || ch == b'_';
-    let lexemes = lexeme_map(source);
+    let Some(lexemes) = lexeme_map(source) else {
+        return HashSet::new();
+    };
     let code = |position: usize| lexemes.get(position) == Some(&Lexeme::Code);
     // Spans inside `((...))` and `$((...))`, which the arithmetic checks validate.
     // Quoted, escaped or commented parens are text, never part of a span.
@@ -308,6 +314,14 @@ fn numeric_locals(source: &str) -> HashSet<String> {
             }
         }
         let Some(close) = close else { break };
+        // A span holding anything but arithmetic (quotes, a statement break,
+        // a substitution) is not trusted to keep a counter numeric.
+        if !source[open..=close].bytes().all(|ch| ident(ch) || ch == b' ' || ch == b'\t'
+            || b"()+-*/%<>=!&|^~?:,${}".contains(&ch))
+        {
+            at = open + 1;
+            continue;
+        }
         arithmetic.push(open..close);
         at = close;
     }
@@ -341,8 +355,30 @@ fn numeric_locals(source: &str) -> HashSet<String> {
             index += 1;
         }
     }
+    // Arithmetic source that may only be digits, operators and names; the
+    // names must themselves be numeric locals (checked once all are known).
+    let arithmetic_source = |text: &str| -> Option<String> {
+        text.bytes().all(|ch| ident(ch) || ch.is_ascii_whitespace() || b"()+-*/%<>=!&|^~?:,${}".contains(&ch))
+            .then(|| text.to_string())
+    };
+    // An assignment operator after a name inside arithmetic: its end, if any.
+    let arithmetic_assignment = |after: usize| -> Option<usize> {
+        let at = after + bytes[after..].iter().take_while(|ch| ch.is_ascii_whitespace()).count();
+        let rest = &bytes[at..];
+        if rest.starts_with(b"<<=") || rest.starts_with(b">>=") {
+            Some(at + 3)
+        } else if rest.first() == Some(&b'=') && rest.get(1) != Some(&b'=') {
+            Some(at + 1)
+        } else if rest.first().is_some_and(|ch| b"+-*/%&^|".contains(ch)) && rest.get(1) == Some(&b'=') {
+            Some(at + 2)
+        } else {
+            None
+        }
+    };
     let mut names = HashSet::new();
+    let mut sources: Vec<(&str, String)> = Vec::new();
     for name in candidates {
+        let mut name_sources = Vec::new();
         let mut first = true;
         let mut keeps_numeric = true;
         let mut from = 0;
@@ -364,10 +400,19 @@ fn numeric_locals(source: &str) -> HashSet<String> {
             } else if first {
                 assigns && unconditional(before) && bytes[end + 1..].first().is_some_and(u8::is_ascii_digit)
                     && numeric_value(end + 1).is_some_and(ends_word)
-            } else if in_arithmetic(start) {
-                true
+            } else if let Some(span) = arithmetic.iter().find(|span| span.contains(&start)) {
+                // An assignment inside arithmetic keeps the name numeric only
+                // when its value is arithmetic over numeric locals.
+                match arithmetic_assignment(end) {
+                    Some(value) => arithmetic_source(&source[value.min(span.end)..span.end])
+                        .map(|text| name_sources.push(text)).is_some(),
+                    None => true,
+                }
             } else if assigns {
                 numeric_value(end + 1).is_some_and(ends_word)
+                    && arithmetic.iter().find(|span| span.start == end + 2)
+                        .is_none_or(|span| arithmetic_source(&source[span.start + 2..span.end])
+                            .map(|text| name_sources.push(text)).is_some())
             } else if before.ends_with('$') {
                 true
             } else if before.ends_with("${") {
@@ -383,9 +428,23 @@ fn numeric_locals(source: &str) -> HashSet<String> {
         }
         if keeps_numeric && !first {
             names.insert(name.to_string());
+            sources.extend(name_sources.into_iter().map(|text| (name, text)));
         }
     }
-    names
+    // Drop a name assigned from any name that is not itself kept numeric,
+    // until no assignment depends on a dropped one.
+    loop {
+        let unproven: Vec<&str> = sources.iter().filter(|(name, text)| names.contains(*name)
+            && text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .any(|word| word.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_') && !names.contains(word)))
+            .map(|(name, _)| *name).collect();
+        if unproven.is_empty() {
+            return names;
+        }
+        for name in unproven {
+            names.remove(name);
+        }
+    }
 }
 
 /// `test` receives expanded arguments as data; a captured shell exit status is

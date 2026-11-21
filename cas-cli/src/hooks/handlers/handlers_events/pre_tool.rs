@@ -9588,6 +9588,18 @@ EOF
             format!("n=0 # ((\nn='{operand}' # ))\necho $((n+1))"),
             format!("n=0; echo \\(\\(; n='{operand}'; echo \\)\\); echo $((n+1))"),
             format!("n=0 # ((\ncase y in\na) n=x\nesac\ncase z in\nb) true\nesac\nx='{operand}'; echo $((n+1))"),
+            format!("n=0; cat <<EOF\n((\nEOF\nn='{operand}'\ncat <<EOF\n))\nEOF\necho $((n+1))"),
+            format!("n=0; cat <<'EOF'\n((\nEOF\nn='{operand}'\ncat <<'EOF'\n))\nEOF\necho $((n+1))"),
+            format!("n=0; echo $'(( \\' '; n='{operand}'; echo $' \\' ))'; echo $((n+1))"),
+            format!("n=0; x='{operand}'; (\\\n( n = x )); echo $((n+1))"),
+            format!("n=0; n\\\n='{operand}'; echo $((n+1))"),
+            // Every reassignment must be numeric-only, wherever it is spelled.
+            format!("n=0; x='{operand}'; (( n = x )); echo $((n+1))"),
+            format!("n=0; x='{operand}'; (( n += x )); echo $((n+1))"),
+            format!("n=0; n+='{operand}'; echo $((n+1))"),
+            format!("n=0; x='{operand}'; let n=x; echo $((n+1))"),
+            format!("n=0; for n in '{operand}'; do :; done; echo $((n+1))"),
+            format!("n=0; export n='{operand}'; echo $((n+1))"),
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();
@@ -9612,6 +9624,7 @@ EOF
             // GH #1866 replay: a read-only inventory with a shell-local counter.
             "missing=0; for p in a b; do [ -f \"$p\" ] || missing=$((missing+1)); done; echo $missing",
             "n=0; while [ $n -lt 3 ]; do n=$(( n + 1 )); done; ((n++)); echo \"${n}\"",
+            "n=0; m=2; (( n += m * 3 )); echo \"$((n+1))\"",
         ] {
             let response = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();

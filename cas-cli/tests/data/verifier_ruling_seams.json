@@ -1,0 +1,45 @@
+{
+  "review_date": "2026-11-21",
+  "common": {
+    "task": {"id": "fixture-delivery", "acceptance_criteria": "For an in-memory account with credits and sent fields, deduct one credit, append the submitted text to sent, and return the reader reply kind without asking for confirmation.", "demo_statement": "", "execution_note": "none"},
+    "review_context": "Synthetic read-only policy evaluation, not an authenticated dispatch. All other checks have supplied satisfactory evidence: PLAN-FIT and SIMPLICITY are VERIFIED; no journey is deferred. No task or parent cites a rule. The rule catalog and source files below are the complete tool responses for this fixture. Source line numbers start at one. Do not invent test runs or contact production services.",
+    "rule_catalog": [
+      {"id": "rule-credit", "status": "Proven", "paths": "src/send.py,tests/test_send.py", "created": "2026-11-03T12:00:00Z", "review_after": "2027-01-01T00:00:00Z", "source_ids": ["decision-ben-20261103"], "stakeholder": {"name": "Ben", "quote": "don't ask users about spending credits… it just does it", "scope": "Paid sends in src/send.py and their tests"}},
+      {"id": "rule-retired", "status": "Retired", "paths": "src/send.py", "created": "2026-10-01T12:00:00Z", "source_ids": ["decision-old"], "stakeholder": {"name": "Ben", "quote": "Ask before spending credits", "scope": "Paid sends"}},
+      {"id": "rule-other", "status": "Proven", "paths": "src/delete_account.py", "created": "2026-11-03T12:00:00Z", "review_after": "2027-01-01T00:00:00Z", "source_ids": ["decision-delete"], "stakeholder": {"name": "Ben", "quote": "Always require confirmation", "scope": "Account deletion only"}}
+    ],
+    "unchanged_files": {
+      "src/reader.py": "from typing import Literal, TypedDict\n\nclass Reply(TypedDict):\n    kind: Literal['summary', 'clarify']\n    text: str\n\ndef read(text: str) -> Reply:\n    return {'kind': 'summary' if text else 'clarify', 'text': text}\n",
+      "src/consume.py": "from src.reader import read\n\ndef consume(text):\n    reply = read(text)\n    if reply['kind'] == 'pick':\n        return 'picked'\n    return reply['kind']\n"
+    }
+  },
+  "cases": [
+    {
+      "id": "paid_test",
+      "delivery": {
+        "src/send.py": "def send(account, text):\n    return 'This uses credits. Want me to go ahead?'\n",
+        "tests/test_send.py": "from src.send import send\n\ndef paid_test():\n    assert send({'credits': 2, 'sent': []}, 'hello') == 'This uses credits. Want me to go ahead?'\n",
+        "tests/test_pick.py": "from unittest.mock import patch\nfrom src.consume import consume\n\ndef test_summary():\n    with patch('src.consume.read', return_value={'kind': 'summary', 'text': 'hello'}):\n        assert consume('hello') == 'summary'\n"
+      },
+      "expected": {"status": "rejected", "gate": "RULING-FIT", "result": "NOT VERIFIED", "source": "rule-credit", "file": "tests/test_send.py", "line": 4}
+    },
+    {
+      "id": "impossible_reader_fake",
+      "delivery": {
+        "src/send.py": "from src.consume import consume\n\ndef send(account, text):\n    account['credits'] -= 1\n    account['sent'].append(text)\n    return consume(text)\n",
+        "tests/test_send.py": "from src.send import send\n\ndef test_send():\n    account = {'credits': 2, 'sent': []}\n    result = send(account, 'hello')\n    assert account == {'credits': 1, 'sent': ['hello']}\n    assert result == 'summary'\n",
+        "tests/test_pick.py": "from unittest.mock import patch\nfrom src.consume import consume\n\ndef test_pick():\n    with patch('src.consume.read', return_value={'kind': 'pick', 'text': 'one'}):\n        assert consume('one') == 'picked'\n"
+      },
+      "expected": {"status": "rejected", "gate": "FAKE-SEAM", "result": "NOT VERIFIED", "source": "src/reader.py", "file": "tests/test_pick.py", "line": 5}
+    },
+    {
+      "id": "compliant",
+      "delivery": {
+        "src/send.py": "from src.consume import consume\n\ndef send(account, text):\n    account['credits'] -= 1\n    account['sent'].append(text)\n    return consume(text)\n",
+        "tests/test_send.py": "from src.send import send\n\ndef test_send():\n    account = {'credits': 2, 'sent': []}\n    result = send(account, 'hello')\n    assert account == {'credits': 1, 'sent': ['hello']}\n    assert result == 'summary'\n",
+        "tests/test_pick.py": "from unittest.mock import patch\nfrom src.consume import consume\n\ndef test_summary():\n    with patch('src.consume.read', return_value={'kind': 'summary', 'text': 'hello'}):\n        assert consume('hello') == 'summary'\n"
+      },
+      "expected": {"status": "approved", "gates": {"RULING-FIT": "VERIFIED", "FAKE-SEAM": "VERIFIED"}}
+    }
+  ]
+}

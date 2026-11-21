@@ -242,7 +242,10 @@ def plan(root, base, zero, history, delivery=False):
         for path in result["paths"]:
             if path.startswith((".claude/", ".codex/", ".grok/", "docs/", "changelog.d/")):
                 continue
-            if path.startswith(("scripts/", ".github/")):
+            # Commander e2e specs, helpers and the hub double never compile into
+            # Rust; lane-journeys runs them. Only a Rust test naming one is
+            # selected, so a journey-only diff runs no Rust (cas-a658).
+            if path.startswith(("scripts/", ".github/", "hub-web/e2e/")):
                 contract_paths.append(path)
                 continue
             if path in {"Cargo.toml", "Cargo.lock", ".config/nextest.toml"} or path.startswith((".cargo/", "vendor/")):

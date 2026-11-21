@@ -597,10 +597,9 @@ mod tests {
         git(repo, &["add", "work.txt"]);
         git(repo, &["commit", "-qm", "work"]);
         git(repo, &["checkout", "-q", "main"]);
-        let origin = repo.join("origin.git");
+        let origin = repo.join(".git/fixture-origin.git");
         git(repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
         git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
-        git(repo, &["push", "-q", "origin", "main", "epic/release-train-vnext-cas-tr"]);
         let root = repo.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"freeze-test\"\n").unwrap();

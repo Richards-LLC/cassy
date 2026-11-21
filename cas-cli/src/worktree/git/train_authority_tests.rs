@@ -89,6 +89,7 @@ impl Fixture {
         actor.machine_id = Some("fixture-machine".into());
         actor.factory_session = Some("session-a".into());
         actor.cc_session_id = Some("harness-a".into());
+        actor.pid = Some(std::process::id());
         crate::mcp::daemon::stamp_pid_fingerprint(&mut actor, std::process::id());
         actor
     }

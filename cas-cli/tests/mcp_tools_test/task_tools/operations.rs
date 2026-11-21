@@ -5745,6 +5745,7 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
 /// train tip with no work of its own; with an own commit it is still refused.
 #[tokio::test]
 async fn transfer_adopt_branch_takeover_cases_cas_ea31() {
+    let mut failures = Vec::new();
     for case in ["receiver-on-candidate", "anchor-in-history", "receiver-at-train-tip", "receiver-own-work"] {
         let mut env = TestEnvGuard::temp_home();
         let BranchAdoptionFixture { temp, destination, service, mut task, receiver, tip, .. } =
@@ -5783,15 +5784,23 @@ async fn transfer_adopt_branch_takeover_cases_cas_ea31() {
         })).unwrap();
         let result = service.task(Parameters(request)).await;
         if case == "receiver-own-work" {
-            result.expect_err("a receiver with its own unintegrated commit is refused");
-            assert_eq!(branch_transfer_git(dest, &["rev-parse", "HEAD"]), before);
+            if result.is_ok() || branch_transfer_git(dest, &["rev-parse", "HEAD"]) != before {
+                failures.push(format!("{case}: a receiver with its own unintegrated commit must be refused untouched"));
+            }
             continue;
         }
-        result.unwrap_or_else(|error| panic!("{case}: {error}"));
-        assert_eq!(branch_transfer_git(dest, &["branch", "--show-current"]), "factory/new-worker-cas-branch1100", "{case}");
-        assert_eq!(branch_transfer_git(dest, &["rev-parse", "HEAD"]), tip, "{case}");
-        assert!(!dest.join("later-task.txt").exists(), "{case}");
+        let adopted = (
+            branch_transfer_git(dest, &["branch", "--show-current"]),
+            branch_transfer_git(dest, &["rev-parse", "HEAD"]),
+            dest.join("later-task.txt").exists(),
+        );
+        if let Err(error) = result {
+            failures.push(format!("{case}: {error}"));
+        } else if adopted != ("factory/new-worker-cas-branch1100".to_string(), tip.clone(), false) {
+            failures.push(format!("{case}: adopted {adopted:?}, expected the delivery tip {tip}"));
+        }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[tokio::test]

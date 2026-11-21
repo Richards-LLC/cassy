@@ -10804,18 +10804,15 @@ impl CasCore {
                             && merged_receipt.is_none() && !is_epic
                             && task.deliverables.factory_branch_start.is_some()
                         {
+                            // The merged check and a target binding read the
+                            // target too; refresh it like the lane.
+                            if task.delivery_mode != cas_types::DeliveryMode::LocalMerge {
+                                fetch_parent_branch_best_effort(&close_project_root, &resolved_parent_branch);
+                            }
                             let lane_tip = task.assignee.as_deref()
                                 .map(|assignee| close_measured_factory_branch(&close_project_root, &task, assignee))
                                 .or_else(|| task_delivery_branch(&close_project_root, &task))
-                                .and_then(|branch| {
-                                    let pushed = format!("origin/{branch}");
-                                    resolve_branch_sha(&close_project_root, &branch).or_else(|| {
-                                        if task.delivery_mode != cas_types::DeliveryMode::LocalMerge {
-                                            fetch_parent_branch_best_effort(&close_project_root, &branch);
-                                        }
-                                        resolve_branch_sha(&close_project_root, &pushed)
-                                    })
-                                });
+                                .and_then(|branch| peer_lane_tip(&close_project_root, &branch, task.delivery_mode));
                             merged_receipt = lane_tip.clone()
                                 .filter(|tip| commit_is_merged_into_parent(&close_project_root, tip, &resolved_parent_branch));
                             if merged_receipt.is_none() {
@@ -17163,6 +17160,25 @@ fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
         }
     }
     unique
+}
+
+/// cas-6c33: the tip a peer machine's lane delivers. For a pushed delivery
+/// that is origin's branch, refreshed now: the closer's cached local branch
+/// and `origin/` ref can be older than what the peer pushed, so neither is
+/// ever the review boundary, and a failed refresh binds no lane at all. A
+/// `local_merge` lane, or a project with no origin, is authoritative locally.
+fn peer_lane_tip(
+    repo: &std::path::Path,
+    branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> Option<String> {
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge || !origin_remote_configured(repo) {
+        return resolve_branch_sha(repo, branch)
+            .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}")));
+    }
+    (crate::git_evidence::fetch_parent_branch_result(repo, branch) == crate::git_evidence::BoundedFetch::Succeeded)
+        .then(|| resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}^{{commit}}")))
+        .flatten()
 }
 
 /// cas-e33f: the branch every close-time git probe for `task` should name —

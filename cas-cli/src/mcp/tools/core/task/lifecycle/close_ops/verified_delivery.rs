@@ -277,12 +277,21 @@ impl ReviewedDelivery {
         if self.candidate.is_some() || self.repository.peer_premerge.is_some() {
             return false;
         }
-        let reference = if !origin_remote_configured(repo) {
+        let live_target = || if !origin_remote_configured(repo) {
             target.to_string()
         } else {
             preferred_live_target_ref_for_delivery(repo, target, task.delivery_mode).0
         };
         let head = &self.repository.head_commit;
+        // A stale cached target can miss a head that has since landed; ask
+        // the refreshed target before calling the head foreign.
+        if git_commit_is_ancestor(repo, head, &live_target()) {
+            return false;
+        }
+        if task.delivery_mode != cas_types::DeliveryMode::LocalMerge && origin_remote_configured(repo) {
+            fetch_parent_branch_best_effort(repo, target);
+        }
+        let reference = live_target();
         if git_commit_is_ancestor(repo, head, &reference) {
             return false;
         }

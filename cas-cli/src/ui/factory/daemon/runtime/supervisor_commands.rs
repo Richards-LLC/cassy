@@ -852,11 +852,15 @@ mod tests {
         daemon.app.mux.get_mut(&name).unwrap().mark_exited(Some(0));
         let abandoned = daemon.dispatch_supervisor_command(Request::Status, "never-sent".into(), owner.clone()).await.unwrap();
         assert!(matches!(abandoned, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
         drop(daemon.app.mux.remove_pane(&name));
         daemon = restart(daemon);
         let abandoned = daemon.dispatch_supervisor_command(Request::Status, "never-sent".into(), owner).await.unwrap();
         assert!(matches!(abandoned, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
-        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
+        // PTY teardown may write newline/EOT; neither is a command replay.
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&input).matches("/compact").count(), 1);
+        assert!(!input.windows(b"/finish".len()).any(|bytes| bytes == b"/finish"));
     }
     #[tokio::test(flavor = "current_thread")]
     async fn reload_cassy_requires_a_replacement_live_registry_pid_and_version() {

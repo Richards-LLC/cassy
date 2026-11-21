@@ -1959,6 +1959,103 @@ mod tests {
     }
 
     #[test]
+    fn expired_dead_claim_merge_retry_preserves_candidate_cas_de6d() {
+        for case in ["dead", "timedout-dead", "live", "unknown", "foreign", "unexpired", "other-owner"] {
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            run(repo, &["init", "-q", "-b", "epic/train"]);
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            env.set("CAS_ROOT", &root);
+            env.set("CAS_CLONE_PATH", repo);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='dead-claim-fixture'\n[qa]\nmode='batch'\n[verification]\nenabled=true\n").unwrap();
+            commit_file(repo, "src/lib.rs", "base\n", "base");
+            run(repo, &["checkout", "-q", "-b", "factory/worker"]);
+            let source = commit_file(repo, "src/lib.rs", "delivery\n", "delivery");
+            run(repo, &["checkout", "-q", "epic/train"]);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let mut owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+            owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+            let agents = core.open_agent_store().unwrap();
+            agents.register(&owner).unwrap();
+            core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+            let mut task = Task::new("cas-de6d-retry".into(), "Expired verifier retry".into());
+            task.depth = cas_types::TaskDepth::Deep;
+            task.assignee = Some("worker".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+            task.deliverables.parked_branch = Some("factory/worker".into());
+            task.deliverables.factory_branch_anchor = Some(source);
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:dead-claim-fixture".into(), target_branch: "epic/train".into(),
+            });
+            core.open_task_store().unwrap().add(&task).unwrap();
+            let first = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train");
+            let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
+                .unwrap_or_else(|| panic!("candidate did not dispatch: {first:?}"));
+            let mut child = cas_types::Agent::new_sub_agent("old-child".into(), "task-verifier".into(), owner.id.clone());
+            child.machine_id = owner.machine_id.clone();
+            // Reap a real subprocess before retry: no sleep or invented dead PID.
+            let mut process = std::process::Command::new("true").spawn().unwrap();
+            child.pid = Some(process.id());
+            process.wait().unwrap();
+            if case == "live" {
+                child.pid = Some(std::process::id());
+                crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
+            }
+            if case == "unknown" { child.pid = None; }
+            if case == "foreign" { child.machine_id = Some("peer-machine".into()); }
+            let old_capability = cas_store::issue_and_bind_server_verifier_handoff(
+                &root, &task.id, &dispatch.id, "old-attempt", &child,
+            ).unwrap();
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            if case != "unexpired" {
+                conn.execute("UPDATE verification_dispatches SET deadline_at=?2 WHERE id=?1",
+                    rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()]).unwrap();
+            }
+            if case == "timedout-dead" {
+                cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now()).unwrap().unwrap();
+            }
+            if case == "other-owner" {
+                let peer = cas_types::Agent::new_with_role("peer-owner".into(), "peer".into(), cas_types::AgentRole::Supervisor);
+                agents.register(&peer).unwrap();
+                core.bind_agent_identity(peer.id, crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+            }
+            let before = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            let held = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train");
+            assert!(held.is_err(), "retry must still await an independent verdict");
+            let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert_eq!(current.id, dispatch.id, "{case}");
+            assert_eq!(current.owner_agent_id, owner.id);
+            assert_eq!(current.repository, dispatch.repository);
+            assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
+            let recover = matches!(case, "dead" | "timedout-dead");
+            if !recover {
+                assert_eq!(serde_json::to_value(&current).unwrap(), serde_json::to_value(&before).unwrap(), "{case}");
+                continue;
+            }
+            assert_eq!(current.state, cas_types::VerificationDispatchState::Pending, "{case}: {held:?}");
+            assert!(current.deadline_at > chrono::Utc::now());
+            assert!(current.verifier_agent_id.is_none() && current.capability_id.is_none());
+            let consumed: (Option<String>, String) = conn.query_row(
+                "SELECT c.consumed_at,h.state FROM verification_capabilities c JOIN verification_handoffs h ON h.capability_id=c.id WHERE c.id=?1",
+                [&old_capability.id], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert!(consumed.0.is_some());
+            assert_eq!(consumed.1, "consumed");
+            let replacement = cas_types::Agent::new_sub_agent("replacement".into(), "task-verifier".into(), owner.id.clone());
+            let new_capability = cas_store::issue_and_bind_server_verifier_handoff(&root, &task.id, &dispatch.id, "replacement-attempt", &replacement).unwrap();
+            assert_ne!(old_capability.id, new_capability.id);
+            assert!(cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, &child.id, Some(&old_capability.id), false).is_err());
+            core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap_err();
+            assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id.as_deref(), Some(replacement.id.as_str()));
+        }
+    }
+
+    #[test]
     fn cas_da35c_expired_supervisor_approval_reuses_only_unchanged_candidate() {
         // A terminal close consumes the delivery cycle. Keep source-change
         // and final-close scenarios on independent real fixtures in this test.

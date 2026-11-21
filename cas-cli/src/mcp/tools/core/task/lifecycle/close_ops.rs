@@ -9949,7 +9949,7 @@ impl CasCore {
                         ).map(|sibling| format!(
                             "The advance belongs to task {sibling}. Deliver that task on its own branch; this task's recorded boundary remains unchanged."
                         )).unwrap_or_else(|| format!(
-                            "Ask the supervisor to run `{}task action=request_changes id={} reason=\"review the replacement delivery\"`, then follow `task action=start id={}` to resume the recorded branch.",
+                            "Ask the supervisor to request changes with `{}task action=request_changes id={} reason=\"review the replacement delivery\"`, then follow `task action=start id={}` to resume the recorded branch.",
                             crate::mcp::tools::core::guidance::caller_prefix(), task.id, task.id,
                         ));
                         if merge_conflicted && !task.deliverables.merge_conflicted {

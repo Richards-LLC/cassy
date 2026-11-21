@@ -113,7 +113,7 @@ fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
     ] {
         let reason = denied(handle_pre_tool_use(&input(tool, args.clone(), dir.path()), Some(&cas)).unwrap())
             .unwrap_or_else(|| panic!("{tool} {args} must be denied"));
-        assert!(crate::gates::codes_in(&reason).contains("H-07"), "{reason}");
+        assert!(crate::gates::codes_in(&reason).contains(&"H-07"), "{reason}");
         assert!(reason.contains("cas-pub-verify"), "the denial lists the open task: {reason}");
         assert!(!reason.contains("cas-pub-work ("), "a closed child is not listed: {reason}");
     }

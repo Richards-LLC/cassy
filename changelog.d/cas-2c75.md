@@ -14,4 +14,6 @@
   builds are shared only for the same source and target commits.
 - **Explicit syncs say when they were deferred** — Was: `cas cloud sync` and
   `cas ledger report` silently showed stale knowledge and quality data when
-  another round held their lock. Now: they print that the round was deferred.
+  another round held their lock. Now: the sync summary marks knowledge and
+  quality events deferred, in text and JSON, and the ledger report says its
+  fleet rows may be stale.

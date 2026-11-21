@@ -1232,6 +1232,41 @@ fn an_untaken_claim_is_released_after_its_ttl() {
     assert!(!jobs.has_claim(row, "worker-a"));
 }
 
+/// cas-20f6 (cas_bc4d, cas_1e7e2 lane flakes): a directed batch waits in the
+/// carry for its passenger's claim while a QueueSelect, whose writes run ahead
+/// of queued claims, re-reads that passenger as an unclaimed lone row. The
+/// fresh copy must not take the passenger's claim and submit it as its own
+/// turn; the carried leader delivers the whole batch once.
+#[test]
+fn a_carried_batch_keeps_its_passenger_out_of_a_fresh_selection() {
+    let (_root, cas_dir) = project();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let [lead, passenger] = ["First field report", "Second field report"]
+        .map(|text| queue.queued_prompt(enqueue(&cas_dir, "worker-a", text)).unwrap().unwrap());
+    let writer = TestWriter::start(true);
+    let mut jobs = jobs_on(&writer);
+    for row in [&lead, &passenger] {
+        assert!(!jobs.claim_resolved(&cas_dir, "s", row.id, "worker-a", "worker-a"));
+    }
+    let facts = super::super::queue_and_events::RowFacts { message_batch: vec![passenger.clone()], ..Default::default() };
+    jobs.carry_claimed_row(lead.clone(), facts);
+    let fresh = passenger.clone();
+    jobs.submit_select(request(&cas_dir), move |_, _| Ok(QueueSelection { rows: vec![fresh], ..Default::default() }));
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    let selection = jobs.take_selection().unwrap();
+    assert!(selection.rows.is_empty(), "the carry owns its passenger: {:?}",
+        selection.rows.iter().map(|row| row.id).collect::<Vec<_>>());
+
+    writer.open();
+    settle(&mut jobs, |jobs| [&lead, &passenger].iter()
+        .all(|row| jobs.claim_resolved(&cas_dir, "s", row.id, "worker-a", "worker-a")));
+    let batch = jobs.take_selection().expect("the carried batch comes back");
+    assert_eq!(batch.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
+    assert_eq!(batch.facts[&lead.id].message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
+    assert!(matches!(jobs.claim_for_inject(&cas_dir, "s", passenger.id, "worker-a", "worker-a"),
+        ClaimStep::Claimed(_)), "the passenger's claim is still the batch's");
+}
+
 
 #[test]
 fn cas_afe0_settled_broadcast_member_retires_without_fabricating_a_handoff() {

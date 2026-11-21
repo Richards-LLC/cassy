@@ -72,7 +72,7 @@ pub(crate) fn delivery_read_spec(generation: u64) -> JobSpec {
         kind: REVALIDATE_FRESH,
         key: DELIVERY_READ_KEY.to_string(),
         lane: Lane::Read,
-        criticality: Criticality::Critical,
+        criticality: Criticality::Latest,
         generation,
         budget: REVALIDATE_FRESH_BUDGET,
     }
@@ -117,7 +117,7 @@ pub(crate) fn idle_liveness_spec(generation: u64) -> JobSpec {
         kind: WORKER_HEALTH_PROBE,
         key: IDLE_LIVENESS_KEY.to_string(),
         lane: Lane::Blocking,
-        criticality: Criticality::Critical,
+        criticality: Criticality::Latest,
         generation,
         budget: WORKER_HEALTH_PROBE_BUDGET,
     }

@@ -1931,7 +1931,8 @@ impl QueueJobs {
                 Exec::Inline(done) => done.is_empty(),
                 Exec::Lanes(runtime) => lanes.iter().all(|lane| {
                     let stats = runtime.lane_stats(*lane);
-                    stats.running.is_none() && stats.queued == 0
+                    stats.running.as_ref().is_none_or(|job| job.criticality == Criticality::Refresh)
+                        && stats.critical_backlog == 0
                 }),
             };
             if idle { return Ok(()); }

@@ -190,12 +190,15 @@ class LaneBaseTests(unittest.TestCase):
         self.git('commit', '--allow-empty', '-qm', 'release: v9.99.7',
                  '-m', 'Release-Version: 9.99.7',
                  '-m', f'Prepared by scripts/release.sh on {shipped} from main 9.99.6.')
+        cut = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-q', 'main')
+        self.git('merge', '--no-ff', '-qm', 'land the prepared release', cut)
         released = self.git('rev-parse', 'HEAD')
         remote = self.repo / '.git' / 'origin.git'
         self.git('init', '--bare', '-q', str(remote))
         self.git('remote', 'add', 'origin', str(remote))
         self.git('push', '-q', 'origin', f'{released}:refs/heads/main',
-                 f'{released}:refs/heads/{shipped}', f'{released}:refs/heads/{opened}',
+                 f'{cut}:refs/heads/{shipped}', f'{released}:refs/heads/{opened}',
                  f'{self.epic}:refs/heads/epic/live')
         workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
         step = next(s for s in workflow['jobs']['release']['steps'] if s.get('id') == 'cleanup-epics')
@@ -226,7 +229,7 @@ class LaneBaseTests(unittest.TestCase):
 
         # Race only the recorded shipped branch after fetch, before push. A
         # later default tip cannot authorize deleting newer work on that branch.
-        self.git('push', '-q', 'origin', f'{released}:refs/heads/{shipped}')
+        self.git('push', '-q', 'origin', f'{cut}:refs/heads/{shipped}')
         self.git('commit', '--allow-empty', '-qm', 'later default progress')
         advanced = self.git('rev-parse', 'HEAD')
         self.git('push', '-q', 'origin', f'{advanced}:refs/heads/main')
@@ -236,7 +239,7 @@ class LaneBaseTests(unittest.TestCase):
         wrapper = race_bin / 'git'
         wrapper.write_text(f'#!/bin/sh\nif [ "$1" = push ]; then\n'
                            f'  {real_git} --git-dir={shlex.quote(str(remote))} update-ref '
-                           f'refs/heads/{shipped} {advanced} {released} || exit 1\n'
+                           f'refs/heads/{shipped} {advanced} {cut} || exit 1\n'
                            f'fi\nexec {real_git} "$@"\n')
         wrapper.chmod(0o755)
         result = subprocess.run(['bash', script, released, 'origin/main'], cwd=self.repo,

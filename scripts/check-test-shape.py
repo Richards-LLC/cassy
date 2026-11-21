@@ -10,15 +10,17 @@ Text-pin checks cover changed test files, so legacy pins do not block unrelated
 work. With --changed-since, only added or modified lines are checked for text
 pins; without it, changed test files are scanned in full. --changed-since uses
 merge-base(ref, HEAD), including working changes, excluding files imported only
-by a released-trunk sync merge.
+by a released-trunk sync merge or restored exactly to a recorded task target.
 """
 import argparse
 import ast
 from html import escape
 from functools import cache
+import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 from rust_test_source import tokens, pairs
 
@@ -1312,6 +1314,42 @@ def task_changed_paths(base):
     return paths
 
 
+def task_target_delta(base, paths):
+    """Do not attribute checkpoint repairs of the pinned task target to the task.
+
+    Missing/ambiguous bindings retain every check. Only a recorded start base
+    preceding the comparison base can vouch for byte-identical restorations.
+    The ordinary push range and introduced-line checks remain unchanged.
+    """
+    try:
+        branch = subprocess.check_output(
+            ['git', 'symbolic-ref', '--quiet', '--short', 'HEAD'], text=True,
+            stderr=subprocess.DEVNULL).strip()
+        if not branch.startswith('factory/'):
+            return paths
+        common = subprocess.check_output(
+            ['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip()
+        root = Path(os.environ.get('CAS_ROOT') or Path(common).parent / '.cas').expanduser().resolve()
+        starts = set()
+        with sqlite3.connect((root / 'cas.db').as_uri() + '?mode=ro', uri=True) as db:
+            for (raw,) in db.execute("SELECT deliverables FROM tasks WHERE status='in_progress'"):
+                start = (json.loads(raw or '{}').get('factory_branch_start') or {})
+                if start.get('branch') == branch:
+                    starts.add(start.get('base_sha'))
+        if len(starts) != 1:
+            return paths
+        start = starts.pop()
+        if (not isinstance(start, str) or not re.fullmatch(r'[0-9a-f]{40,64}', start)
+                or subprocess.run(['git', 'merge-base', '--is-ancestor', start, base],
+                                  stderr=subprocess.DEVNULL).returncode != 0):
+            return paths
+        delta = subprocess.check_output(
+            ['git', 'diff', '--name-only', '--no-renames', '-z', start], text=True).split('\0')
+        return paths.intersection(delta)
+    except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error, subprocess.CalledProcessError):
+        return paths
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--changed-since')
@@ -1325,7 +1363,7 @@ def main():
         if args.changed_since:
             base = subprocess.check_output(['git', 'merge-base', args.changed_since, 'HEAD'], text=True).strip()
             paths = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', base], text=True).split('\0')
-            owned = task_changed_paths(base)
+            owned = task_target_delta(base, task_changed_paths(base))
             paths = [path for path in paths if path in owned]
             text_pin_paths = {path for path in paths if path}
             changed_text_lines = {}

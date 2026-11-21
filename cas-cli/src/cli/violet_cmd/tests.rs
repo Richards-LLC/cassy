@@ -1462,8 +1462,22 @@ printf '%s' '[{"number":85,"title":"Release v3.85.0","headRefName":"epic/release
     result.expect("released report must not inherit unrelated focused-epic verification");
     assert_eq!(seen.borrow()[0]["epic_id"], "cas-released");
     assert_eq!(hub.calls().len(), 1);
-    // Explicit context wins; unrecognized/mixed files retain the session gate.
+    // Operational reports remain unattributed, including a version-looking
+    // PDF whose Markdown companion is not a generated release report.
     let unrelated = write_file(&dir, "v3.85.0.pdf", bytes);
+    std::fs::write(unrelated.with_extension("md"), "# Support v3.85.0\n\n## Daily counts\n").unwrap();
+    let shift = write_file(&dir, "shift-report.pdf", bytes);
+    for operational in [&shift, &unrelated] {
+        let name = operational.file_name().unwrap().to_str().unwrap();
+        let ops_hub = ScriptedHub::with(vec![file_receipt("F87", name, bytes)]);
+        run_cli_at(
+            &["post", "--channel", "cas-internal", "--file", operational.to_str().unwrap()],
+            &ops_hub, false, &gate, None, Some(&root),
+        ).1.expect("operational report remains unrelated to the focused release");
+        assert!(seen.borrow().last().unwrap()["epic_id"].is_null());
+        assert_eq!(ops_hub.calls().len(), 1);
+    }
+    // Explicit context wins; mixed release attachments retain the session gate.
     for extra in [
         vec!["--epic", "cas-focused"],
         vec!["--file", unrelated.to_str().unwrap()],

@@ -642,6 +642,13 @@ impl TaskStore for SyncingTaskStore {
     /// never saw the change. Stage one now and bind it to the committed
     /// revision; a crash before the receipt leaves a provably pre-commit
     /// intent rather than an ambiguous one.
+    fn publish_dependency_move(&self, removed: &Dependency, added: &Dependency) -> Result<()> {
+        let from_task = self.inner.get(&added.from_id)?;
+        self.queue_dependency_delete(removed, from_task.scope);
+        self.queue_dependency_upsert(added, &from_task);
+        Ok(())
+    }
+
     fn publish_current_row(&self, task_id: &str) -> Result<()> {
         let _sync_guard = self
             .queue

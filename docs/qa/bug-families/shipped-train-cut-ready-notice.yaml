@@ -1,4 +1,0 @@
-title: Shipped release trains suppress late cut-ready notices
-statement: A delayed green CI observation cannot emit release_cut_ready for a cut or terminal train, a stale open snapshot of a closed train, or a commit already contained in a version tag. Older release tags and non-version checkpoint tags preserve an unreleased train's notification.
-found: 2026-11-21
-tasks: [cas-74cbc]

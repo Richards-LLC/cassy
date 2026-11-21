@@ -799,9 +799,9 @@ impl Default for OrchestrationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct BuildGuardConfig {
-    /// Fallback load / CPU count ceiling when CPU PSI is unavailable.
+    /// Fallback load / CPU ceiling when neither PSI nor measured CPU busy is available.
     pub max_load_ratio: f64,
-    /// Maximum CPU `some avg10` stall time, as a percentage.
+    /// Maximum Linux CPU PSI `some avg10` or macOS measured CPU busy percentage.
     pub max_cpu_pressure_percent: f64,
     /// Maximum memory `some avg10` stall time, as a percentage.
     pub max_memory_pressure_percent: f64,

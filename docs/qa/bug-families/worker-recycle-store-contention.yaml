@@ -1,4 +1,0 @@
-title: A worker recycle that meets a brief shared-store hold is retried, not dropped
-statement: When another factory component holds the shared database for a few milliseconds as a worker recycle or clear_context starts, the request stays queued, the old worker keeps running, and a later factory pass completes the recycle without a manual retry.
-found: 2026-11-21
-tasks: [cas-aea9]

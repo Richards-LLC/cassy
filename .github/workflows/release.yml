@@ -56,7 +56,7 @@ jobs:
       tag: ${{ steps.decide.outputs.tag }}
       dry-run: ${{ steps.decide.outputs.dry-run }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 2
@@ -128,7 +128,7 @@ jobs:
       found: ${{ steps.lookup.outputs.found }}
       run-id: ${{ steps.lookup.outputs.run-id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
@@ -167,7 +167,7 @@ jobs:
       found: ${{ steps.lookup.outputs.found }}
       run-id: ${{ steps.lookup.outputs.run-id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
@@ -207,12 +207,12 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
       - name: Download the Linux archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: cas-x86_64-unknown-linux-gnu
           path: release
@@ -246,12 +246,12 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
       - name: Download the macOS archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: cas-aarch64-apple-darwin
           path: release
@@ -291,13 +291,13 @@ jobs:
       actions: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Download audited linux archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: cas-x86_64-unknown-linux-gnu
           path: release
@@ -305,7 +305,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Download audited macos archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: cas-aarch64-apple-darwin
           path: release
@@ -417,14 +417,15 @@ jobs:
       group: hub-static-production
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.detect.outputs.tag }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
+          package-manager-cache: false
 
       - name: Install pinned static-upload CLI
         run: npm install --global vercel@59.1.3
@@ -438,7 +439,7 @@ jobs:
 
       - name: Retain hosted hub receipt (including failures)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: hub-deployment
           path: ${{ runner.temp }}/hub-deployment.json

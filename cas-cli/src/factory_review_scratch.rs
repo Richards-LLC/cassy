@@ -446,13 +446,14 @@ pub(crate) fn verifier_lane_active(
 
 /// Only marker-verified review paths widen capped admission beyond worker lanes.
 pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
+    managed_checkout_task(cas, repo).is_some()
+}
+
+/// The task a marker-verified scratch checkout belongs to (cas-c152).
+pub(crate) fn managed_checkout_task(cas: &Path, repo: &Path) -> Option<String> {
     // Match create's scratch base even when the caller uses an aliased root.
-    let Ok(cas) = cas.canonicalize() else {
-        return false;
-    };
-    let Some(directory) = repo.parent() else {
-        return false;
-    };
+    let cas = cas.canonicalize().ok()?;
+    let directory = repo.parent()?;
     if directory
         .strip_prefix(base(&cas))
         .ok()
@@ -460,10 +461,11 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
         || repo.file_name() != Some(std::ffi::OsStr::new("repo"))
         || safe_path(repo).is_err()
     {
-        return false;
+        return None;
     }
-    owner(&cas, directory)
-        .is_ok_and(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
+    owner(&cas, directory).ok()
+        .filter(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
+        .map(|record| record.task_id)
 }
 
 fn discard_legacy_seed_stage(directory: &Path, checkout: &Path, lock: &File) -> Result<()> {

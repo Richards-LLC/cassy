@@ -1112,6 +1112,66 @@ async fn close_retries_a_note_in_the_terminal_write_gap_cas_90ea() {
     note_only_close_race(false, true).await;
 }
 
+/// GH #2277: a live pinned owner reviews a worker's artifact-only child;
+/// the worker cannot finalize it and another supervisor cannot take it over.
+#[tokio::test]
+async fn worker_no_code_train_child_parks_for_live_owner_cas_141a() {
+    let mut env = TestEnvGuard::temp_home();
+    let target = "epic/owner-review";
+    let f = fixture(&mut env, target);
+    let owner_id = "nocode-supervisor-session";
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut owner = agents.get(owner_id).unwrap();
+    owner.pid = Some(std::process::id());
+    owner.cc_session_id = Some("owner-session-preserved-after-clear".into());
+    agents.update(&owner).unwrap();
+    let mut epic = Task::new("cas-141a-train".into(), "owned train".into());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::InProgress;
+    epic.branch = Some(target.into());
+    epic.epic_verification_owner = Some(owner_id.into());
+    f.put(&epic);
+    let id = "cas-141a-child";
+    let mut child = assigned(id, TaskType::Chore, target);
+    child.execution_note = Some("no-code".into());
+    f.put(&child);
+    open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+        id.into(), epic.id.clone(), DependencyType::ParentChild,
+    )).unwrap();
+    claim(&f, id);
+    let request = serde_json::json!({
+        "action": "close", "id": id, "reason": "Measurement recorded",
+        "external_ref": PROOF,
+    });
+    let response = f.worker.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
+        .await.expect("worker close must park for the live train owner");
+    assert_ne!(response.is_error, Some(true), "{response:?}");
+    let parked = f.task(id);
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+    assert!(parked.closed_at.is_none());
+    assert!(parked.terminal_outcome.is_none());
+    assert_eq!(parked.external_ref.as_deref(), Some(PROOF));
+    assert!(parked.deliverables.factory_branch_anchor.is_none());
+    assert!(parked.deliverables.parked_branch.is_none());
+    assert!(agents.get_lease(id).unwrap().is_none());
+    assert_eq!(agents.get(owner_id).unwrap().cc_session_id, owner.cc_session_id);
+
+    agents.register(&Agent::new_with_role(
+        "other-supervisor".into(), "other-supervisor".into(), AgentRole::Supervisor,
+    )).unwrap();
+    let other = CasCore::with_daemon(f.cas_dir(), None, None);
+    other.set_agent_id_for_testing("other-supervisor".into());
+    let other = CasService::new(other, None);
+    let error = other.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
+        .await.unwrap_err();
+    assert!(error.message.contains("[G-113]"), "{error:?}");
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
+    let accepted = f.supervisor.task(Parameters(serde_json::from_value(request).unwrap()))
+        .await.unwrap();
+    assert_ne!(accepted.is_error, Some(true), "{accepted:?}");
+    assert_eq!(f.task(id).status, TaskStatus::Closed);
+}
+
 /// GH #1147: a no-code spike created under a code epic inherits the epic's
 /// WorkTarget. The worker's close must not park it for the epic branch.
 #[tokio::test]

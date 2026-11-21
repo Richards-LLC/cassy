@@ -6724,11 +6724,18 @@ impl CasCore {
         // field is reassigned or cleared. cas-73b8: the branch the merge gate
         // measured (a per-task branch when the worker used one), so merge
         // requests name it too.
-        parked.deliverables.record_park(
-            measured_branch.as_deref(),
-            factory_branch_anchor.as_deref(),
-            task.assignee.as_deref(),
-        );
+        // Artifact-only owner review has no code source to attribute to the
+        // worker's shared lane. A measured code delivery keeps normal records.
+        if task.execution_note.as_deref() != Some("no-code")
+            || measured_branch.is_some()
+            || factory_branch_anchor.is_some()
+        {
+            parked.deliverables.record_park(
+                measured_branch.as_deref(),
+                factory_branch_anchor.as_deref(),
+                task.assignee.as_deref(),
+            );
+        }
         // Parking precedes verification dispatch. Clear only this task's
         // pending flag so the next close attempt can create a fresh typed
         // dispatch after the merge gate succeeds.
@@ -12290,9 +12297,33 @@ impl CasCore {
             ));
         }
 
-        if crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root,&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some()
+        let owner_train = crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root, &task)
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+        if owner_train.is_some()
             || crate::cloud::peer_mailbox::train_parks::parked(&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some() {
             let actor = self.open_agent_store()?.get(&self.get_agent_id()?).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e.to_string()))?;
+            // gate-audit[train_owner_park]: G-113 Worker publication waits for
+            // the pinned owner; it cannot turn an artifact-only close into a verdict.
+            if actor.role == cas_types::AgentRole::Worker
+                && task.task_type != TaskType::Epic
+                && owner_train.is_some()
+            {
+                let mut parking = task.clone();
+                if no_code_without_own_commits
+                    || measured_evidence.as_ref().is_some_and(|measured| measured.paths.is_empty())
+                {
+                    parking.deliverables.factory_branch_anchor = None;
+                    parking.deliverables.historical_factory_branch_anchors.clear();
+                    parking.deliverables.parked_branch = None;
+                }
+                let message = format!("PARKED {}; awaiting the train owner's review.", task.id);
+                self.park_task_awaiting_merge(
+                    task_store.as_ref(), &parking, &task,
+                    "TRAIN OWNER REVIEW REQUIRED", &message, None, false, None,
+                    req.reason.as_deref(),
+                ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                return Ok(Self::success(message));
+            }
             crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?;
             crate::cloud::peer_mailbox::train_parks::require_admitted(&self.cas_root,&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?;
         }
@@ -13933,13 +13964,34 @@ impl CasCore {
                         format!("merge_source could not inspect delivery boundary: {error}")))?
                     .is_none()));
         if !grant_only && !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
-                    task.id, task.status
-                ),
-            ));
+            // cas-7305: an in-progress task has no park to decline. Its proof
+            // invalidation, anchor clearing and repair round all bind to one,
+            // and the worker already holds the task. Returning the findings
+            // is a decision note plus a wake to the assignee; a pushed PR is
+            // closed on its host. Both calls are replayable lines.
+            let mut message = format!(
+                "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
+                task.id, task.status
+            );
+            if task.status == TaskStatus::InProgress {
+                let note = serde_json::json!({
+                    "action": "notes", "id": task.id, "note_type": "decision",
+                    "notes": format!("Changes requested: {}", req.reason.trim()),
+                });
+                message.push_str(&format!(
+                    " To return review findings while it is in progress, record them on the task, then wake its worker \
+                     (close any open PR for the pushed branch on its host):\ntask {note}"
+                ));
+                if let Some(assignee) = task.assignee.as_deref() {
+                    let wake = serde_json::json!({
+                        "action": "message", "target": assignee, "kind": "status",
+                        "summary": format!("Changes requested: {}", task.id),
+                        "message": format!("Changes requested on {}: {}", task.id, req.reason.trim()),
+                    });
+                    message.push_str(&format!("\ncoordination {wake}"));
+                }
+            }
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
         // cas-bc25: a decline over recorded failing tests must name their class.
         let mut effective_class: Option<String> = None;

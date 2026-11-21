@@ -695,6 +695,56 @@ that source-specific receipt; unrelated package tests no longer hold the run.
   the integrated source base and absence of reachable task commits. The source
   audit remains intact; any recorded delivery still follows the delivery gates.
 
+### Train owner review
+
+Workers publish completed train children for the pinned owner to review. Artifact-only closes park with their portable evidence and release the worker lease; they do not acquire a code delivery from the worker's shared lane. The pinned owner retains final verification, merge and close authority.
+
+A supervisor's release freeze makes it the train's release owner when the recorded owner has left, gone stale or lives on another machine. After a cross-machine handoff, the receiving supervisor's freeze makes its machine govern auto-cut. A live owner of another factory session on the same machine keeps the train. Auto-cut refusals name the owner and its machine, and the cut notice counts each delivery merged into the train once.
+
+Checkpoint scope repairs can restore unrelated tests exactly to the active factory task's recorded start base. Test lint excludes those unchanged target files only when the branch binding is unique and the recorded base precedes the comparison base. Missing or invalid provenance retains all checks, and new prose assertions remain refused.
+
+### Build admission on macOS
+
+The CPU pressure threshold limits Linux PSI stalls or measured macOS CPU utilisation. macOS CPU sampling handles 32-bit tick counter wraparound; load per CPU is a fallback when no CPU measurement is available.
+
+Release delivery commands (`cas release installed`, `cas release published`) work on a host that has never registered a project. They create the empty host registry and record the release for the supplied project.
+
+A task's explicit target (`task update target_branch=...`) is pinned and wins over its epic's lane, including a retarget to trunk. worktree_merge merges a pinned trunk target without `allow_trunk` and still reports the trunk push. `request_changes` declines only parked deliveries. On an in-progress task it refuses and returns the ready-to-run note and worker-message calls that hand the findings back.
+
+Focused proof for Vue components and Vitest test helpers runs their importing
+specs through `vitest related --run`. Worker-check accepts the suggested command,
+and close consumes the source-specific receipt without running the whole package.
+
+### Capped test diagnostics
+
+Failed capped Vitest selections keep redacted assertion reports under the task artifacts directory. The failure names the durable report path so the assertion can be inspected after the test process and temporary reports have gone.
+
+Appending deliveries to an active train merge queue acknowledges the committed queue revision and each requested delivery's position. Origin reads, candidate preparation and verifier handoffs run in the existing daemon pass so slow advancement does not delay the append response.
+
+### Verification against rulings and real output contracts
+
+Delivery review discovers applicable stakeholder and operator rulings even when
+the task does not cite them. RULING-FIT rejects implementations and tests that
+contradict those rulings. FAKE-SEAM checks mocked component outputs against the
+real producer's contract, rejecting impossible fixtures. Both checks cite their
+sources and distinguish missing evidence from a known violation.
+
+Automatic Codex account selection treats a login check that timed out as inconclusive, not as logged out. A spawn still picks that registered account, and the spawn's own login check verifies it before launch, so parallel spawns resolve the same account as a single spawn.
+
+A failed capped Playwright run keeps its evidence. Worker-check runs Playwright with its reports directory under `<artifacts>/<task>/worker-check/`, keeps that directory when the run fails, and names it in the failure. Passing runs remove it.
+
+A worker recycle (`clear_context`) that meets brief store contention stays queued. The worker keeps running, and the next factory pass completes the recycle, so the supervisor does not have to request it again.
+
+Worker proof supports a capped package-scoped library check with default features disabled. Default and no-default compile receipts retain their configuration at the same commit and are imported separately by close, while focused test and integration requirements remain in force. Other feature overrides remain outside the worker command grammar.
+
+The macOS operator launch smoke submits temporary launchd jobs with an explicit clean environment, captures their terminal output and command exit status, and removes the jobs afterward. This lets release validation exercise operator launches independently of the factory process running the checks while retaining the agent refusal controls.
+
+### Read-only release previews
+
+Release previews can migrate a private snapshot of a lagging store while retaining the live project identity and release settings. Projects do not need to add a canonical identity to their configuration to preview a release; the snapshot carries that identity privately.
+
+Capped worker checks validate physical TMPDIR ancestry before creating temporary output or starting Cargo. A `.git` file, directory or symlink in that ancestry refuses admission with H-50, independently of Git discovery ceilings. Existing safe scratch selection and per-worktree ownership checks remain in force.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -828,6 +878,18 @@ When repository discovery is incomplete, the lifecycle receipt names the request
 When a replacement worker inherits a departed worker’s task delivery, task start records the replacement’s owned source branch after proving that it contains the previous source tips. Queued spawns preserve that resumed lane. An already parked source mismatch can be returned with `request_changes`, then approved through `rebind_branch` before the worker starts and parks again.
 
 Train merges accept added deliveries while a review waits. Advancement uses a bounded lease, so a stalled or departed driver cannot indefinitely hold an approved queue. Recovery records the retired owner and retains normal supervisor authority, verification, CI and publication checks.
+
+Factory CI excludes merged epic refs and bounds task-parent selection to 64 live refs and at most 127 ancestry comparisons. Overflow retains conservative validation. Release publication prunes remote epic tips contained in the published default-branch commit; deletion uses an exact-tip lease, is logged, and safely repeats on later releases.
+
+A green release-train CI result checks the current train state and containing version tags before asking the supervisor to cut. Shipped or closed trains produce no new cut-ready notice; an unreleased train still notifies once when it first turns green or recovers from red.
+
+Task parking publishes the ledger and its cited evidence before optional copies. Cloud begin, upload and completion share a twenty-second publication budget, including one retry while time remains. Unpublished optional files are listed in the evidence note; previously committed evidence is reused on retry.
+
+Release marker pushes can reuse recorded fast-row proof for a committed tip even when another commit is checked out. Proof remains bound to the pushed commit and comparison range, including web output when required. Missing proof directs the operator to a clean checkout where the pre-push hook can perform the complete validation.
+
+Every delivery park publishes its cited local evidence for the reviewing machine. Missing files or failed required uploads refuse the park with the unpublished paths so the worker can repair them before a peer review starts. Existing committed evidence is reused on retry.
+
+On ordinary deliveries, local QA artifacts that the close reason does not cite remain optional for publication, preserving log-only and evidence-waiver parks. Routed deliveries retain their required ledger evidence.
 
 ## Authoritative Sources
 

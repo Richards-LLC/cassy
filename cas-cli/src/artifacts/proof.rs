@@ -694,6 +694,36 @@ pub(crate) fn publish_routed_evidence(
     Ok(())
 }
 
+/// Synced publication times order revisions. A receiver's artifact-store time
+/// records its import, so it cannot establish which evidence revision is newer.
+fn newer_local_publication(
+    store: &SqliteArtifactStore,
+    task: &cas_types::Task,
+    file: &SyncedFile,
+    local_sha: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let (Some(id), Some(local_sha)) = (&file.artifact_id, local_sha) else { return Ok(None) };
+    let Some(manifest) = from_notes(&task.notes, id, &task.id)? else { return Ok(None) };
+    anyhow::ensure!(manifest.sha256 == file.sha256, "artifact {id} has other bytes");
+    let Ok(published) = chrono::DateTime::parse_from_rfc3339(&manifest.created_at) else { return Ok(None) };
+    for json in task.notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
+        let Ok(record) = serde_json::from_str::<PublishedArtifact>(json) else { continue };
+        if record.name != manifest.name || record.sha256 != local_sha
+            || validate(&record, &task.id).is_err()
+            || !chrono::DateTime::parse_from_rfc3339(&record.created_at).is_ok_and(|time| time > published)
+        { continue; }
+        // Keep the same conflict/revocation checks as a fetch, even when no
+        // download is needed for these already-present bytes.
+        from_notes(&task.notes, &record.id, &task.id)?;
+        if let Some(local) = store.get(&record.id)? {
+            super::require_available(&local)?;
+            anyhow::ensure!(same_artifact(&local, &record), "cached artifact {} has a different identity", record.id);
+        }
+        return Ok(Some(record.id));
+    }
+    Ok(None)
+}
+
 /// The newest routed-park manifest restored byte-identical where the verifier
 /// reads, or a refusal naming both machines' evidence directories (cas-e571).
 fn materialize_manifest(
@@ -728,8 +758,19 @@ fn materialize_manifest(
             })();
             if let Err(error) = committed { missing.push(format!("{} ({error})", file.name)); continue; }
         }
-        if identical(file) {
+        let local_sha = digest_file(&dir.join(&file.name)).ok().map(|(sha256, _)| sha256);
+        if local_sha.as_deref() == Some(file.sha256.as_str()) {
             continue;
+        }
+        match newer_local_publication(&store, task, file, local_sha.as_deref()) {
+            Ok(Some(id)) => {
+                if sync.strict {
+                    missing.push(format!("{} (newer local artifact {id}; re-park with its updated manifest)", file.name));
+                }
+                continue;
+            }
+            Err(error) => { missing.push(format!("{} ({error})", file.name)); continue; }
+            Ok(None) => {}
         }
         let fetched = (|| -> anyhow::Result<()> {
             let Some(id) = &file.artifact_id else {
@@ -882,6 +923,72 @@ impl PeerReviewer {
 mod tests {
     use super::*;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+
+    /// cas-5f96: an older park must not revert a subsequently published ledger.
+    /// A sealed park refuses that revision; a newer park still replaces old bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn newer_published_ledger_survives_stale_manifest_cas_5f96() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        let task = cas_types::Task::new("cas-5f96-fixture".into(), "ledger revisions".into());
+        let old_bytes = b"build e5d559d1d4\n";
+        let new_bytes = b"build 4e6f0d2695\n";
+        let mut records = Vec::new();
+        for (id, bytes, created_at) in [
+            ("old", old_bytes.as_slice(), "2026-11-20T20:00:00-05:00"),
+            ("new", new_bytes.as_slice(), "2026-11-21T01:30:00Z"),
+        ] {
+            let record = PublishedArtifact {
+                id: format!("art-{id}"), task_id: task.id.clone(), name: "LEDGER.md".into(),
+                mime: "text/markdown".into(), size_bytes: bytes.len() as u64,
+                sha256: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)),
+                cloud_artifact_id: Some(format!("cloud-{id}")), status: "committed".into(),
+                cloud_url: None, slack_permalink: None, created_at: created_at.into(), revocation: None,
+            };
+            Mock::given(method("GET")).and(path(format!("/api/artifacts/cloud-{id}/url")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{id}"), "url": format!("{}/blob/{id}", server.uri()),
+                    "size_bytes": bytes.len()})))
+                .expect(2).mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("/blob/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+                .expect(2).mount(&server).await;
+            records.push(record);
+        }
+        let owner = PeerReviewer::new(&server.uri(), task);
+        env.set("CAS_ROOT", &owner.root);
+        tokio::task::spawn_blocking(move || {
+            let ledger = owner.evidence_dir().join("LEDGER.md");
+            std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+            for strict in [false, true] {
+                for (local, manifest_index, published_new, expected) in [
+                    (new_bytes.as_slice(), 0, true, new_bytes.as_slice()),
+                    (old_bytes.as_slice(), 1, true, new_bytes.as_slice()),
+                    (new_bytes.as_slice(), 0, false, old_bytes.as_slice()),
+                ] {
+                    std::fs::write(&ledger, local).unwrap();
+                    let artifact = &records[manifest_index];
+                    let mut task = owner.task.clone();
+                    // Repeated older proof notes must not become newer revisions.
+                    task.notes = format!("{MARKER}{}\n{MARKER}{}\n{EVIDENCE_SYNC}{}",
+                        serde_json::to_string(&records[usize::from(published_new)]).unwrap(),
+                        serde_json::to_string(&records[0]).unwrap(),
+                        serde_json::to_string(&EvidenceSync {
+                            machine_id: "publisher".into(), root: "/publisher/evidence".into(), strict,
+                            files: vec![SyncedFile { name: "LEDGER.md".into(),
+                                sha256: artifact.sha256.clone(), artifact_id: Some(artifact.id.clone()) }],
+                        }).unwrap());
+                    let result = materialize_peer_evidence(&owner.root, &task);
+                    assert_eq!(std::fs::read(&ledger).unwrap(), expected,
+                        "strict={strict}, manifest={manifest_index}, published_new={published_new}");
+                    assert_eq!(result.is_err(), strict && manifest_index == 0 && published_new);
+                    if result.is_err() {
+                        assert!(result.unwrap_err().contains(&records[1].id));
+                    }
+                }
+            }
+        }).await.unwrap();
+    }
 
     /// cas-5601: a LEDGER.md published on a peer machine and missing here is
     /// restored by the real pre-merge preparation before its context digest,

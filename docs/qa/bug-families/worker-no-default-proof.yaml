@@ -1,4 +1,0 @@
-title: Worker no-default library checks retain distinct compile proof
-statement: A package-scoped library check can disable default features through the capped runner. Feature configurations retain separate commit/repository-bound receipts, and a failure invalidates only its own configuration. Broader feature, target, resource and identity overrides remain denied; compile evidence cannot replace test proof.
-found: 2026-11-21
-tasks: [cas-afe3]

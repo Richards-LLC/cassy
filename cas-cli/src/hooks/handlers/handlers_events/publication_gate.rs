@@ -3,8 +3,9 @@
 //! while the epic's verification task was still open, with a "final check
 //! still running" caveat; verification then found 18 wrong statements and the
 //! post had to be retracted. This pre-tool check refuses a `violet_post` that
-//! shares a file (`kind: "file"`, `"file_external"`, or a `"thread"` reply with
-//! `files`), or any post marked `deliverable: true`, while the epic has
+//! shares an epic-attributed file (`kind: "file"`, `"file_external"`, or a
+//! `"thread"` reply with `files`), or an attributed post marked
+//! `deliverable: true`, while that epic has
 //! open verification-type tasks. An operator's `PUBLICATION OVERRIDE:` note on
 //! the epic, recorded within the last few hours, lets one through, and each use
 //! is logged back onto the epic.
@@ -31,8 +32,7 @@ pub(crate) fn denial_with_overrides(tool: &str, input: Option<&Value>, cas_root:
     {
         return Some(reason);
     }
-    let gated: Vec<Value> = violet_posts(tool, input)
-        .into_iter()
+    let gated: Vec<Value> = posts.into_iter()
         .filter(is_deliverable_post)
         .collect();
     if gated.is_empty() {
@@ -41,51 +41,52 @@ pub(crate) fn denial_with_overrides(tool: &str, input: Option<&Value>, cas_root:
     let cas_root = cas_root?;
     let gated = with_artifact_tasks(gated, cas_root);
     let store = crate::store::open_task_store(cas_root).ok()?;
-    // The post may name its epic (or a task under it); otherwise the
-    // session's own focused epic is the one whose verification it waits on.
-    let epic_id = gated
-        .iter()
-        .find_map(|post| explicit_epic(post, store.as_ref()))
-        .or_else(crate::ui::factory::preferred_epic_id_from_session_metadata)?;
-    let epic = store.get(&epic_id).ok()?;
-    let mut open: Vec<String> = store
-        .get_subtasks(&epic.id)
-        .unwrap_or_default()
-        .iter()
-        .filter(|task| !task.is_terminal() && is_verification_task(task))
-        .map(|task| format!("{} ({}): {}", task.id, task.status, task.title))
-        .collect();
-    if epic.pending_verification {
-        open.push(format!(
-            "{}: the epic's own verification is pending",
-            epic.id
+    // A focused epic describes session activity, not ownership of every file.
+    // Resolve each post independently so an unrelated/verified report cannot
+    // adopt the focus or hide a later post belonging to a held epic (GH #2263).
+    for post in gated {
+        let Some(epic_id) = explicit_epic(&post, store.as_ref()) else { continue; };
+        let Ok(epic) = store.get(&epic_id) else { continue; };
+        let mut open: Vec<String> = store
+            .get_subtasks(&epic.id)
+            .unwrap_or_default()
+            .iter()
+            .filter(|task| !task.is_terminal() && is_verification_task(task))
+            .map(|task| format!("{} ({}): {}", task.id, task.status, task.title))
+            .collect();
+        if epic.pending_verification {
+            open.push(format!(
+                "{}: the epic's own verification is pending",
+                epic.id
+            ));
+        }
+        if open.is_empty() {
+            continue;
+        }
+        if let Some(override_line) = recent_override(&epic.notes, chrono::Utc::now()) {
+            let note = format!(
+                "[{}] DECISION: publication gate overridden for a Violet deliverable post by the recorded operator override ({override_line}). Verification still open: {}.",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                open.join("; ")
+            );
+            let _ = store.append_note(&epic.id, &note);
+            accepted_override_codes.push("H-07");
+            tracing::warn!(epic = %epic.id, "cas-f6ad: Violet deliverable post allowed by operator publication override");
+            continue;
+        }
+        return Some(format!(
+            "PUBLICATION BLOCKED (verification_pending): this Violet post shares a deliverable \
+             (kind=file or file_external, a thread reply with files, or deliverable=true) while epic {epic} still has open verification:\n  - {list}\n\n\
+             Do not share a deliverable before its verification passes; a \"final check still running\" \
+             caveat is not enough. Wait for those tasks to close, then post. Only the operator can \
+             authorize an earlier share: record their words on the epic with \
+             `task action=notes id={epic} note_type=decision notes=\"{OVERRIDE_MARKER} <operator's words>\"`. \
+             An override is valid for {OVERRIDE_WINDOW_HOURS} hours, and each post it lets through is logged on the epic.",
+            epic = epic.id,
+            list = open.join("\n  - "),
         ));
     }
-    if open.is_empty() {
-        return None;
-    }
-    if let Some(override_line) = recent_override(&epic.notes, chrono::Utc::now()) {
-        let note = format!(
-            "[{}] DECISION: publication gate overridden for a Violet deliverable post by the recorded operator override ({override_line}). Verification still open: {}.",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-            open.join("; ")
-        );
-        let _ = store.append_note(&epic.id, &note);
-        accepted_override_codes.push("H-07");
-        tracing::warn!(epic = %epic.id, "cas-f6ad: Violet deliverable post allowed by operator publication override");
-        return None;
-    }
-    Some(format!(
-        "PUBLICATION BLOCKED (verification_pending): this Violet post shares a deliverable \
-         (kind=file or file_external, a thread reply with files, or deliverable=true) while epic {epic} still has open verification:\n  - {list}\n\n\
-         Do not share a deliverable before its verification passes; a \"final check still running\" \
-         caveat is not enough. Wait for those tasks to close, then post. Only the operator can \
-         authorize an earlier share: record their words on the epic with \
-         `task action=notes id={epic} note_type=decision notes=\"{OVERRIDE_MARKER} <operator's words>\"`. \
-         An override is valid for {OVERRIDE_WINDOW_HOURS} hours, and each post it lets through is logged on the epic.",
-        epic = epic.id,
-        list = open.join("\n  - "),
-    ))
+    None
 }
 
 /// Every `violet_post` argument object this tool call would send.
@@ -179,8 +180,8 @@ fn collect_dispatch(code: &Value, posts: &mut Vec<Value>) {
 /// `kind: "file"` and `kind: "file_external"` always share an artifact, as
 /// does a `kind: "thread"` whose `replies[]` carry `files` (cas-1206, GH
 /// #1154: the 2026-10-09 contract added both routes); any other post shares
-/// one when it is marked `deliverable: true`. An unparseable dispatch fails
-/// toward the gate.
+/// one when it is marked `deliverable: true`. Publication still needs an
+/// epic/task/artifact attribution before its verification can bind the post.
 fn is_deliverable_post(post: &Value) -> bool {
     if post.is_null() {
         return true;

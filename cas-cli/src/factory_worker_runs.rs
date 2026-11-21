@@ -115,24 +115,44 @@ pub(crate) fn register(
 ) -> Result<Option<String>> {
     let repo = repo.canonicalize()?;
     let agents = crate::store::open_agent_store(root)?;
-    let mut owners = agents
+    let workers: Vec<_> = agents
         .list(None)?
         .into_iter()
         .filter(|agent| {
             agent.role == cas_types::AgentRole::Worker
                 && agent.is_alive()
                 && agent.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
-                && agent
-                    .metadata
-                    .get("clone_path")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| root.join("worktrees").join(&agent.name))
-                    .canonicalize()
-                    .ok()
-                    .as_ref()
-                    == Some(&repo)
         })
-        .collect::<Vec<_>>();
+        .collect();
+    // cas-c152: a run anywhere inside a worker's checkout (e.g. its hub-web
+    // package) is that worker's; the deepest checkout wins over an enclosing one.
+    let clone = |agent: &cas_types::Agent| {
+        agent.metadata.get("clone_path").map(PathBuf::from)
+            .unwrap_or_else(|| root.join("worktrees").join(&agent.name))
+            .canonicalize().ok()
+    };
+    let depth = workers.iter()
+        .filter_map(|agent| clone(agent).filter(|path| repo.starts_with(path)))
+        .map(|path| path.components().count())
+        .max();
+    let mut owners: Vec<_> = workers.iter()
+        .filter(|agent| clone(agent).is_some_and(|path| {
+            repo.starts_with(&path) && Some(path.components().count()) == depth
+        }))
+        .cloned()
+        .collect();
+    // A task-owned scratch checkout belongs to that task's live assignee.
+    let scratch_task = owners.is_empty()
+        .then(|| crate::factory_review_scratch::managed_checkout_task(root, &repo))
+        .flatten();
+    if let Some(task_id) = &scratch_task {
+        let task = crate::store::open_task_store_local(root)?.get(task_id)?;
+        owners = workers.iter()
+            .filter(|agent| task.assignee.as_deref()
+                .is_some_and(|assignee| assignee == agent.id || assignee == agent.name))
+            .cloned()
+            .collect();
+    }
     if owners.len() > 1 {
         bail!("detached run has ambiguous checkout ownership");
     }
@@ -140,10 +160,10 @@ pub(crate) fn register(
         return Ok(None);
     };
     let leases = agents.list_agent_leases(&owner.id)?;
-    let mut task = leases
+    let mut task = scratch_task.or_else(|| leases
         .into_iter()
         .find(|lease| lease.expires_at > now)
-        .map(|lease| lease.task_id);
+        .map(|lease| lease.task_id));
     if task.is_none() {
         let tasks = crate::store::open_task_store_local(root)?;
         let owned = tasks
@@ -511,6 +531,50 @@ mod tests {
         );
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }
+    /// cas-c152 (GH #2094): direct `--detach` runs from a worker's package
+    /// directory (cas-6af4, worktree/hub-web) or from its task-owned scratch
+    /// checkout (cas-fbff) registered nothing, so their completion never woke
+    /// the worker. Both belong to that worker; the scratch run to its task.
+    #[test]
+    fn detached_runs_in_a_worker_package_or_its_task_scratch_wake_it_cas_c152() {
+        let (_env, root, repo, log) = fixture();
+        let lane = root.join("worktrees").join("run-worker");
+        std::fs::create_dir_all(lane.join("hub-web")).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = agents.get("run-worker-id").unwrap();
+        worker.metadata.insert("clone_path".into(), lane.display().to_string());
+        agents.update(&worker).unwrap();
+        let now = Utc::now();
+        let package = register(&root, &lane.join("hub-web"), &log, now).unwrap()
+            .expect("a run inside the worker's checkout is tracked");
+        assert_eq!(load(&root, &package).unwrap().worker, "run-worker");
+
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&repo)
+            .status().unwrap().success(), "git {args:?}");
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\nrun.log\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "base"]);
+        let head = String::from_utf8(std::process::Command::new("git").args(["rev-parse", "HEAD"])
+            .current_dir(&repo).output().unwrap().stdout).unwrap().trim().to_string();
+        let mut task = cas_types::Task::new("cas-scratch".into(), "Scratch proof".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("run-worker".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let checkout = crate::factory_review_scratch::create(&root, &repo, "cas-scratch", None, &head).unwrap();
+        let scratch = register(&root, &checkout.path, &log, now).unwrap()
+            .expect("a run in the task's scratch checkout is tracked");
+        let run = load(&root, &scratch).unwrap();
+        assert_eq!((run.worker.as_str(), run.task.as_deref()), ("run-worker", Some("cas-scratch")));
+        finish(&root, &package, 0, now).unwrap();
+        finish(&root, &scratch, 1, now).unwrap();
+        reconcile(&root, Some("run-session"), now).unwrap();
+        reconcile(&root, Some("run-session"), now).unwrap();
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap()
+            .peek_for_targets(&["run-worker"], Some("run-session"), 10).unwrap();
+        assert_eq!(rows.len(), 2, "one wake per completed run");
+    }
+
     #[test]
     fn lost_completion_recovers_once_and_never_borrows_an_earlier_log_exit() {
         use std::io::Write;

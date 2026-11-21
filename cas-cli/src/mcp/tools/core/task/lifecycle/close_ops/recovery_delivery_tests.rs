@@ -2305,6 +2305,61 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
         cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }
 
+/// GH #2270: a parked delivery left an unreviewed proof cycle, then landed by
+/// git, and a later target commit superseded one of its paths. One audited
+/// supervisor close must satisfy both the reviewed drop and the missing
+/// pre-merge approval; unintegrated or unreviewed loss still refuses.
+#[tokio::test]
+async fn one_supervisor_close_recovers_reviewed_drop_without_premerge_approval_gh2270() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    let mut config = crate::config::Config::load(&cas_dir).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&cas_dir).unwrap();
+    close(&f).await;
+    let pending = cas_store::create_verification_dispatch_bound(
+        &cas_dir,
+        TASK,
+        "recovery-session",
+        "supervisor-session",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let close_with = |reason: String| supervisor.cas_task_close(Parameters(TaskCloseRequest {
+        no_delivery: None,
+        id: TASK.into(),
+        reason: Some(reason),
+        commit_receipt: Some(f.final_tip.clone()),
+        supervisor_override: Some(true),
+        stranded_branch_override: None,
+        search_manifest: None,
+    }));
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let unintegrated = text(close_with(format!("reviewed-drop: {} -- early", f.final_tip)).await.unwrap());
+    assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{unintegrated}");
+    git(repo, &["merge", "--no-ff", BRANCH, "-m", "land delivery by git"]);
+    std::fs::write(repo.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+    git(repo, &["add", "footer.css"]);
+    git(repo, &["commit", "-qm", "supersede footer spacing"]);
+    let replacement = git(repo, &["rev-parse", "HEAD"]);
+    let unreviewed = text(close_with("Reviewed the integrated historical delivery and missing pre-merge approval".into()).await.unwrap());
+    assert!(crate::gates::codes_in(&unreviewed).contains(&"G-56"), "{unreviewed}");
+    assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed);
+    let closed = text(close_with(format!("reviewed-drop: {replacement} -- later footer spacing supersedes it")).await.unwrap());
+    let task = tasks.get(TASK).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed, "{closed}");
+    assert!(task.notes.contains(&replacement) && task.notes.contains(&f.final_tip), "{}", task.notes);
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().unwrap();
+    assert_eq!(dispatch.id, pending.id, "recovery opens no post-merge review");
+}
+
 /// Point the fixture task's recorded start at `base` on the worker lane,
 /// with no parked or anchored delivery yet.
 fn start_on_lane(tasks: &dyn cas_store::TaskStore, base: &str) -> Task {

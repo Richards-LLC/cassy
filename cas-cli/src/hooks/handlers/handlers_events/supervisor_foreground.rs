@@ -2,7 +2,8 @@
 //! foreground Bash call, operator and Commander messages wait until it
 //! returns. A call expected to run long must use `run_in_background` or go to
 //! a worker. Codex and Grok shells have no `run_in_background`, and a
-//! subagent's foreground call does not hold the supervisor's pane.
+//! verifier's or other subagent's foreground call does not hold the
+//! supervisor's pane.
 use super::pre_tool::{shell_invocations, shell_statement_words, shell_word_basename, worker_command_rust_build};
 use cas_core::hooks::types::HookInput;
 use std::path::Path;
@@ -46,7 +47,10 @@ const SSH_VALUE_OPTIONS: &[&str] = &[
 pub(super) fn denial(input: &HookInput) -> Option<String> {
     if input.tool_name.as_deref() != Some("Bash")
         || !crate::harness_policy::is_supervisor(input)
-        || input.agent_id.as_deref().is_some_and(|id| !id.is_empty())
+        // A verifier or other child is not the operator's pane. A Teams
+        // supervisor carries its own `supervisor@<team>` agent_id on every hook.
+        || input.agent_type.as_deref() == Some("task-verifier")
+        || crate::hooks::handlers::handlers_middle::factory_inbox::is_child_hook(input)
         || input.workspace_root.is_some()
         || cas_core::env_overlay::var("CAS_HOOK_HARNESS").is_ok_and(|harness| harness.eq_ignore_ascii_case("codex"))
     {

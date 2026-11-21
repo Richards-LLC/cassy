@@ -192,6 +192,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
+      const versionOnRow = (version: string | RegExp) => page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true })
+        .getByRole("button", { name: /^cas-src on /, includeHidden: true }).getByText(version);
       await journey.stage("See Reload Cassy on the older supervisor card without opening a menu", async () => {
         await journey.open();
         await expect(conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true })).toBeVisible();
@@ -206,14 +208,15 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const receipt = commandReceipts(page);
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload is queued until this turn ends.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
-        await expect(conversationRow(page).getByText("9.99.1")).toBeVisible();
+        // A phone now shows the conversation; the list row behind it keeps the old version.
+        await expect(versionOnRow("9.99.1")).toHaveCount(1);
         machine.sessions[0]!.mcp_version = "9.99.2";
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         await captureReload(page, "reloaded-toast", viewport.width);
         // In step with its machine the row shows no version (cas-da546).
-        await expect(conversationRow(page).getByText(/\d+\.\d+\.\d+/)).toHaveCount(0);
+        await expect(versionOnRow(/\d+\.\d+\.\d+/)).toHaveCount(0);
         await expect(conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true })).toBeHidden();
         expect(hub.sends).toHaveLength(0);
       });

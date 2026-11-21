@@ -94,7 +94,7 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, proof: Proof, cou
     Ok(())
 }
 
-pub(super) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope) -> Result<()> {
+pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope) -> Result<()> {
     let directory = receipt_path(cas_root, &repo.canonicalize()?, head);
     let Some(directory) = directory.parent().filter(|directory| directory.is_dir()) else { return Ok(()) };
     for entry in std::fs::read_dir(directory)? {

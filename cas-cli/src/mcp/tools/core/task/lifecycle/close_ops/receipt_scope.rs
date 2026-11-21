@@ -1076,7 +1076,7 @@ mod tests {
                 .current_dir(repo.path()).status().unwrap().success());
             let identity = Identity::exact(path, if rust { "child::owned" } else { "owned" });
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             std::fs::write(repo.path().join(path), format!("{old}{added}")).unwrap();
             std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
             let head = commit_changelog_fixture(repo.path(), "add owned test");
@@ -1088,7 +1088,7 @@ mod tests {
             assert!(held.contains(&identity.path) && held.contains(&identity.name), "{runner}: {held}");
             assert!(!held.contains("untouched"));
             stability::record(root.path(), repo.path(), &head, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             let packages = crate::factory_worker_check::passing_test_packages(root.path(), repo.path(), &head);
             assert_eq!(packages, if rust { vec!["fixture".to_string()] } else { vec![] });
             let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
@@ -1110,7 +1110,7 @@ mod tests {
             let held = park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).unwrap();
             assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains(&identity.name), "{held}");
             stability::record(root.path(), repo.path(), &changed, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             assert!(park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).is_none());
             std::fs::write(repo.path().join("README.md"), "after corrected test proof\n").unwrap();
             let retry = commit_changelog_fixture(repo.path(), "docs after corrected test proof");
@@ -1155,7 +1155,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let sibling = Identity::exact(path, "sibling");
-        let proof = |tests: Vec<Identity>| Proof { runner: "vitest".into(), tests, consecutive_passes: 5, elapsed_ms: 0 };
+        let proof = |tests: Vec<Identity>| Proof { runner: "vitest".into(), tests, consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() };
         stability::record(root.path(), repo.path(), &head, proof(vec![other.clone(), sibling.clone()])).unwrap();
         stability::invalidate(root.path(), repo.path(), &head, std::slice::from_ref(&other)).unwrap();
         let passing = PassingTests::new(root.path(), repo.path(), &head);
@@ -1459,7 +1459,7 @@ raise SystemExit(1 if failed else 0)
             if !tests.is_empty() {
                 assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
                 stability::record(root.path(), repo.path(), &head, stability::Proof {
-                    runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1,
+                    runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1, inactive: Vec::new(),
                 }).unwrap();
             }
             assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");

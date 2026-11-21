@@ -354,8 +354,24 @@ pub fn verify_worker_worktree_binding(
 ///
 /// Shared by the PreToolUse commit guard and `my_context` so both name the
 /// same canonical binding.
-pub fn sibling_misbinding_message(worker_name: &str, owner: &str, branch: &str, cwd: &str) -> String {
+pub fn sibling_misbinding_message(
+    worker_name: &str,
+    owner: &str,
+    branch: &str,
+    cwd: &str,
+    recovery: Option<&TakeoverPatch>,
+) -> String {
     let expected_branch = expected_worker_branch(worker_name);
+    // cas-ea31 (takeover case 1): in the worker's own registered checkout the
+    // way out is to keep the edits and switch back, not to move directories.
+    if let Some(patch) = recovery {
+        return format!(
+            "🚫 WORKER ISOLATION MISBINDING: you are '{worker_name}', but your checkout {cwd} is \
+             on '{branch}', which belongs to worker '{owner}'. Committing here would put your work \
+             on that worker's branch.\n\n{}",
+            recovery_steps(worker_name, patch),
+        );
+    }
     format!(
         "🚫 WORKER ISOLATION MISBINDING: you are '{worker_name}', but {cwd} is checked out on \
          '{branch}' — that is worker '{owner}''s worktree.\n\n\
@@ -376,23 +392,44 @@ pub fn sibling_misbinding_message(worker_name: &str, owner: &str, branch: &str, 
     )
 }
 
-/// H-22 refusal for a factory branch no registered agent owns, in the
-/// worker's own registered checkout (cas-ea31, cas-7e76a). Every command it
-/// prints is one H-22 admits: save the edits, clean the tree, switch back.
-pub fn branch_not_owned_message(worker_name: &str, branch: &str, save_patch: &str) -> String {
+/// Where a refusal tells the worker to save its edits: shell-quoted directory
+/// and file, both already safe to paste.
+pub struct TakeoverPatch {
+    pub dir: String,
+    pub file: String,
+}
+
+/// The recovery H-22 prints in the worker's own registered checkout. Every
+/// command is one H-22 admits: save the edits, clean the tree, switch back,
+/// then optionally bring the edits along.
+fn recovery_steps(worker_name: &str, patch: &TakeoverPatch) -> String {
     let expected_branch = expected_worker_branch(worker_name);
     format!(
-        "WORKER_BRANCH_NOT_OWNED: 🚫 '{branch}' is not one of your branches, and no registered \
-         worker owns it. Yours are '{expected_branch}' and '{expected_branch}-<task-id>'.\n\n\
-         Keep your edits, clean the tree, then switch back:\n  \
-         git diff HEAD > {save_patch}\n  \
+        "Keep your edits, clean the tree, then switch back to your own branch:\n  \
+         mkdir -p {dir}\n  \
+         git diff HEAD > {file}\n  \
          git restore --staged --worktree .\n  \
          git switch {expected_branch}\n\n\
+         To bring the edits along, apply them on your branch:\n  \
+         git apply {file}\n\n\
          To take over another worker's delivery, ask your supervisor to run `task action=transfer \
          id=<task-id> to_agent={worker_name} adopt_branch=true supervisor_override=true`; it copies \
          the delivery to your own per-task branch.\n\n\
          Note: --no-verify does NOT bypass this guard (it only skips git hooks, not the Claude \
-         Code PreToolUse harness)."
+         Code PreToolUse harness).",
+        dir = patch.dir,
+        file = patch.file,
+    )
+}
+
+/// H-22 refusal for a factory branch no registered agent owns (cas-ea31,
+/// cas-7e76a): no owner is invented from the branch name.
+pub fn branch_not_owned_message(worker_name: &str, branch: &str, patch: &TakeoverPatch) -> String {
+    let expected_branch = expected_worker_branch(worker_name);
+    format!(
+        "WORKER_BRANCH_NOT_OWNED: 🚫 '{branch}' is not one of your branches, and no registered \
+         worker owns it. Yours are '{expected_branch}' and '{expected_branch}-<task-id>'.\n\n{}",
+        recovery_steps(worker_name, patch),
     )
 }
 

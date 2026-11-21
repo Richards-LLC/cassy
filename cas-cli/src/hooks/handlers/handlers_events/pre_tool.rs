@@ -3617,18 +3617,22 @@ fn check_worker_git_commit_scope_at_target(
         ) {
             crate::factory_isolation::WorkerBinding::Own => {}
             crate::factory_isolation::WorkerBinding::Sibling { owner } => {
+                // cas-ea31 (takeover case 1): inside the worker's own registered
+                // checkout the refusal carries the admitted way back.
+                let recovery = is_isolated.then(|| takeover_patch(&cwd, &registered_name));
                 return Some(crate::factory_isolation::sibling_misbinding_message(
                     &registered_name,
                     &owner,
                     &branch,
                     &cwd,
+                    recovery.as_ref(),
                 ));
             }
             crate::factory_isolation::WorkerBinding::Unowned => {
                 return Some(crate::factory_isolation::branch_not_owned_message(
                     &registered_name,
                     &branch,
-                    &takeover_patch_path(&cwd, &registered_name),
+                    &takeover_patch(&cwd, &registered_name),
                 ));
             }
             crate::factory_isolation::WorkerBinding::Other if !is_isolated => {
@@ -3654,28 +3658,30 @@ fn check_worker_git_commit_scope_at_target(
     None
 }
 
-/// Where an unowned-branch refusal tells the worker to save its edits: the
-/// project's artifact root, which the workspace guard admits; else a file in
-/// the checkout, which `git restore` leaves alone.
-fn takeover_patch_path(cwd: &str, worker: &str) -> String {
-    let file = format!("takeover-{worker}.patch");
-    let path = crate::store::find_cas_root_ignoring_env(std::path::Path::new(cwd))
+/// Where a recovery refusal tells the worker to save its edits: the project's
+/// artifact root, which the workspace guard admits; else the checkout itself,
+/// where `git restore` leaves the untracked patch alone.
+fn takeover_patch(cwd: &str, worker: &str) -> crate::factory_isolation::TakeoverPatch {
+    let dir = crate::store::find_cas_root_ignoring_env(std::path::Path::new(cwd))
         .ok()
         .map(|root| {
             let configured = crate::config::Config::load(&root)
                 .ok()
                 .and_then(|config| config.factory().artifacts_root.clone());
-            crate::config::resolved_factory_artifact_paths(&root, configured.as_deref())
-                .project_root
-                .join(&file)
-                .display()
-                .to_string()
+            crate::config::resolved_factory_artifact_paths(&root, configured.as_deref()).project_root
         })
-        .unwrap_or(file);
-    if path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
-        path
-    } else {
-        format!("'{}'", path.replace('\'', "'\\''"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let quote = |path: &std::path::Path| {
+        let path = path.display().to_string();
+        if path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
+            path
+        } else {
+            format!("'{}'", path.replace('\'', "'\\''"))
+        }
+    };
+    crate::factory_isolation::TakeoverPatch {
+        file: quote(&dir.join(format!("takeover-{worker}.patch"))),
+        dir: quote(&dir),
     }
 }
 
@@ -12523,8 +12529,10 @@ mod worker_commit_guard_tests {
         let cwd = repo.path().to_str().unwrap();
         assert!(std::process::Command::new("git").args(["switch", "-c", "factory/worker-staging"])
             .current_dir(repo.path()).output().unwrap().status.success());
+        let home = tempfile::tempdir().unwrap();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_CLONE_PATH", Some(cwd)), ("CAS_AGENT_NAME", Some("worker")),
+            ("HOME", home.path().to_str()),
         ]);
         for command in ["git cherry-pick --abort", "git merge --abort", "git rebase --abort", "git reset --merge", "git switch main", "git switch -C factory/worker"] {
             assert!(check_worker_git_commit_scope_for_command(cwd, command).is_none(), "{command}");
@@ -12551,6 +12559,38 @@ mod worker_commit_guard_tests {
         for remedy in remedies {
             assert!(check_worker_git_commit_scope_for_command(cwd, remedy).is_none(), "{remedy}");
         }
+
+        // Takeover case 1 with a registered sibling (cas-7e76a): the refusal
+        // names the real owner, and running its printed steps in order keeps
+        // the staged and unstaged edits and returns to the worker's branch.
+        let root = crate::store::init_cas_dir(repo.path()).unwrap();
+        crate::store::open_agent_store(&root).unwrap().register(&cas_types::Agent::new_with_role(
+            "sibling-id".into(), "sibling".into(), cas_types::AgentRole::Worker,
+        )).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["switch", "-C", "factory/worker", "main"]);
+        git(&["switch", "-c", "factory/sibling"]);
+        std::fs::write(repo.path().join("staged.txt"), "staged edit").unwrap();
+        git(&["add", "staged.txt"]);
+        std::fs::write(repo.path().join("f.txt"), "unstaged edit").unwrap();
+        let refused = check_worker_git_commit_scope_for_command(cwd, "git commit -m wip")
+            .expect("a registered sibling's branch is not committable");
+        assert!(refused.contains("WORKER ISOLATION MISBINDING") && refused.contains("'sibling'"), "{refused}");
+        let steps: Vec<&str> = refused.lines().map(str::trim)
+            .filter(|line| line.starts_with("git ") || line.starts_with("mkdir ")).collect();
+        assert!(steps.len() >= 5, "{refused}");
+        for step in steps {
+            assert!(check_worker_git_commit_scope_for_command(cwd, step).is_none(), "{step}");
+            let output = std::process::Command::new("sh").arg("-c").arg(step).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "{step}: {output:?}");
+        }
+        assert_eq!(git(&["branch", "--show-current"]), "factory/worker");
+        assert_eq!(std::fs::read_to_string(repo.path().join("staged.txt")).unwrap(), "staged edit");
+        assert_eq!(std::fs::read_to_string(repo.path().join("f.txt")).unwrap(), "unstaged edit");
         let redirected = format!("git --git-dir '{}' --work-tree '{cwd}' merge --abort", outside.path().join(".git").display());
         assert!(check_worker_git_commit_scope_for_command(cwd, &redirected).is_some());
     }

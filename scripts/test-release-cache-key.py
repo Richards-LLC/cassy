@@ -20,7 +20,7 @@ class ReleaseCacheKeyTest(unittest.TestCase):
         # Actions reads the unset property as empty. The self-hosted target dir is its
         # own cache, so that path never uploads target to the Actions cache.
         saves = [(step, sh) for job in workflow["jobs"].values() for step in job.get("steps", [])
-                 if step.get("uses") == "actions/cache/save@v4"
+                 if step.get("uses", "").startswith("actions/cache/save@")
                  for sh in (["true", "false"] if "SELF_HOSTED" in job.get("env", {}) else [""])]
         self.assertTrue(saves, "release prebuild must still seed caches on main")
         self.assertIn("true", {sh for _, sh in saves}, "the self-hosted macOS path must be checked")

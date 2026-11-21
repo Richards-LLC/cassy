@@ -81,6 +81,10 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.publish_current_row(task_id)
     }
 
+    fn publish_dependency_move(&self, removed: &Dependency, added: &Dependency) -> Result<()> {
+        self.inner.publish_dependency_move(removed, added)
+    }
+
     fn create_atomic(
         &self,
         task: &Task,

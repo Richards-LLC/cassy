@@ -13,7 +13,8 @@
 #     export from their shell rc (CLAUDE_CODE_NATIVE_CURSOR, _NO_FLICKER);
 #   - a login shell inside a pseudo-terminal (`script`);
 #   - on Linux, a transient systemd user unit, so the process leaves the
-#     caller's agent ancestry and cgroup (the release gate is driven by one).
+#     caller's agent ancestry and cgroup (the release gate is driven by one);
+#   - on macOS, a transient launchd job, so launchd owns the process ancestry.
 # Each operator-only entry point runs with --check-launch, which stops at the
 # launch boundary. The operator must pass every one; the same invocation with
 # CAS_AGENT_ROLE set must be refused.
@@ -43,8 +44,7 @@ operator_env=(
     "CLAUDE_CODE_NATIVE_CURSOR=1" "CLAUDE_CODE_NO_FLICKER=1"
 )
 
-# Leave the caller's process tree and cgroup where the host allows it. macOS
-# has neither an ancestry nor a cgroup signal, so a clean env is the operator.
+# Leave the caller's process tree and cgroup where the host allows it.
 detach=()
 if [[ "$(uname -s)" == Linux ]] && command -v systemd-run >/dev/null 2>&1 \
     && systemd-run --user --quiet --wait --pipe --collect true >/dev/null 2>&1; then
@@ -52,16 +52,45 @@ if [[ "$(uname -s)" == Linux ]] && command -v systemd-run >/dev/null 2>&1 \
 fi
 
 # Run one command line in a login shell on a pseudo-terminal, from the project.
-in_operator_terminal() {
+in_operator_terminal() (
     local command_line="cd '$project' && $1" extra_env="${2:-}"
     local -a env_args=("${operator_env[@]}")
     [[ -z "$extra_env" ]] || env_args+=("$extra_env")
     if [[ "$(uname -s)" == Darwin ]]; then
-        ${detach[@]+"${detach[@]}"} env -i "${env_args[@]}" script -q /dev/null /bin/bash -lc "$command_line"
+        # env -i alone leaves the caller's ancestors intact. Submit to launchd
+        # rather than relaxing the production operator ancestry guard. Scrub
+        # the launch manager's environment as well as the caller's.
+        local job label status deadline
+        job="$(mktemp -d "$scratch/job.XXXXXX")"
+        label="com.cassy.operator-smoke.${job##*/}.$$"
+        trap 'launchctl remove "$label" >/dev/null 2>&1 || true' EXIT
+        launchctl submit -l "$label" -o "$job/output" -e "$job/error" -- \
+            /usr/bin/env -i "${env_args[@]}" /bin/bash -c '
+                result=$1; shift
+                "$@"
+                code=$?
+                printf "%s\n" "$code" > "$result.tmp"
+                mv "$result.tmp" "$result"
+            ' operator-smoke "$job/status" script -q /dev/null /bin/bash -lc "$command_line"
+        # Submission is not completion. Preserve the PTY command's exit code,
+        # including negative controls, and bound a failed launch before cleanup.
+        deadline=$((SECONDS + 60))
+        until [[ -f "$job/status" ]]; do
+            if (( SECONDS >= deadline )); then
+                cat "$job/output" "$job/error" 2>/dev/null || true
+                printf 'operator launch smoke: launchd job timed out\n' >&2
+                return 124
+            fi
+            sleep 0.1
+        done
+        cat "$job/output" "$job/error"
+        status="$(cat "$job/status")"
+        [[ "$status" =~ ^[0-9]+$ ]] || return 125
+        return "$status"
     else
         ${detach[@]+"${detach[@]}"} env -i "${env_args[@]}" script -qec "/bin/bash -lc \"$command_line\"" /dev/null
     fi
-}
+)
 
 # A real `cas init` project: its default config is what the operator launches
 # with, including factory.nice_cargo=true.

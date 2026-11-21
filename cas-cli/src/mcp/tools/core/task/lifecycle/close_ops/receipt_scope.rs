@@ -1467,11 +1467,10 @@ raise SystemExit(1 if failed else 0)
         assert!(failures.is_empty(), "{failures:?}");
     }
 
-    /// GH #2257: a source with no sibling spec must select its consumers,
-    /// never the whole backend, and earn proof the park reader accepts.
+    /// Source advice, native related selection and the park reader share one
+    /// fixture; each runner must exclude an unrelated failure in its package.
     #[cfg(unix)]
-    #[test]
-    fn jest_source_related_tests_command_and_park_receipt_gh2257() {
+    fn source_related_tests_fixture(runner: &str, source: &str, changed: &str) {
         use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
         use std::os::unix::fs::PermissionsExt;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -1491,21 +1490,31 @@ raise SystemExit(1 if failed else 0)
             assert!(output.status.success(), "{output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
         };
-        let source = "apps/backend/src/conversations/v2/make-it-mine-request.ts";
-        let consumer = "apps/backend/test/conversation.spec.ts";
+        let package = source.split('/').take(2).collect::<Vec<_>>().join("/");
+        let (test_dir, parent) = if runner == "vitest" { ("app/test", "../../") } else { ("test", "../") };
+        let consumer = format!("{package}/{test_dir}/consumer.spec.ts");
+        let binding = if source.ends_with(".vue") { "value" } else { "{ value }" };
+        let consumer_source = format!("import {binding} from '{parent}{}';\nit('claims', () => {{ void value; }});\n", source.strip_prefix(&format!("{package}/")).unwrap());
         write(".gitignore", "node_modules/\ntarget/\n");
-        write("apps/backend/package.json", r#"{"devDependencies":{"jest":"30"}}"#);
-        write("apps/backend/jest.config.js", "module.exports = {};\n");
-        write(source, "export const value = 1;\n");
+        write(&format!("{package}/package.json"), &format!(r#"{{"devDependencies":{{"{runner}":"3"}}}}"#));
+        write(&format!("{package}/{runner}.config.js"), if runner == "vitest" {
+            "module.exports = { root: 'app' };\n"
+        } else { "module.exports = {};\n" });
+        write(source, if source.ends_with(".vue") { "<template><div>one</div></template>\n" } else { "export const value = 1;\n" });
         // The consuming spec is elsewhere; a sibling-name heuristic cannot find it.
-        write(consumer, "import { value } from '../src/conversations/v2/make-it-mine-request';\nit('claims', () => {});\n");
-        write("apps/backend/test/unrelated.spec.ts", "it('unrelated', () => { throw 0; });\n");
+        write(&consumer, &consumer_source);
+        write(&format!("{package}/{test_dir}/unrelated.spec.ts"), "it('unrelated', () => { throw 0; });\n");
         // Framework boundary: implement the import-graph selection predicate,
         // report unrelated failures and report an empty selection as empty.
-        write("apps/backend/node_modules/.bin/jest", r#"#!/usr/bin/env python3
+        write(&format!("{package}/node_modules/.bin/{runner}"), r#"#!/usr/bin/env python3
 import json, pathlib, re, sys
 a = sys.argv[1:]
-specs = sorted(pathlib.Path.cwd().rglob('*.spec.ts'))
+test_root = pathlib.Path.cwd()
+if '--config' in a:
+    config = pathlib.Path(a[a.index('--config') + 1])
+    configured_root = re.search(r"\broot:\s*['\"]([^'\"]+)", config.read_text())
+    if configured_root: test_root = config.parent / configured_root[1]
+specs = sorted(test_root.rglob('*.spec.ts'))
 if '--listTests' in a:
     print(json.dumps([str(p) for p in specs]))
     sys.exit(0)
@@ -1515,11 +1524,15 @@ def depends(spec, target, seen=None):
     seen.add(spec)
     if spec == target: return True
     for name in re.findall(r"from\s+['\"]([^'\"]+)", spec.read_text()):
-        dependency = (spec.parent / name).resolve().with_suffix('.ts')
+        dependency = (spec.parent / name).resolve()
+        if not dependency.suffix: dependency = dependency.with_suffix('.ts')
         if dependency.is_file() and depends(dependency, target, seen): return True
     return False
 if '--findRelatedTests' in a:
     target = pathlib.Path(a[a.index('--findRelatedTests') + 1]).resolve()
+    specs = [p for p in specs if depends(p, target)]
+elif 'related' in a:
+    target = (test_root / a[-1]).resolve()
     specs = [p for p in specs if depends(p, target)]
 elif '--runTestsByPath' in a:
     target = pathlib.Path(a[a.index('--runTestsByPath') + 1]).resolve()
@@ -1532,46 +1545,73 @@ pathlib.Path('target').mkdir(exist_ok=True)
 with pathlib.Path('target/executed.jsonl').open('a') as out: out.write(json.dumps([str(p) for p in specs]) + '\n')
 sys.exit(0 if ok else 1)
 "#);
-        std::fs::set_permissions(repo.join("apps/backend/node_modules/.bin/jest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(repo.join(format!("{package}/node_modules/.bin/{runner}")), std::fs::Permissions::from_mode(0o755)).unwrap();
         git(&["init", "-q", "-b", "main"]);
         git(&["add", "."]); git(&["commit", "-qm", "base"]);
         git(&["checkout", "-qb", "delivery"]);
-        // A valid production method named `it` collides with the static test
-        // API recognizer, reproducing the uncertain-source branch of G-61.
-        write(source, "export function value(it: { claim: () => number }) { return it.claim(); }\n");
+        write(source, changed);
         git(&["commit", "-qam", "change source"]);
         std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
         let head = git(&["rev-parse", "HEAD"]);
         let paths = vec![source.to_owned()];
         let task = Task::new("cas-1587".into(), "related source proof".into());
-        let held = park_refusals(root.path(), &repo, &task, &paths, &head, "main", None);
-        assert!(held.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61")));
-        let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
-        assert!(tests.is_empty());
+        let scopes = vec![widened::scope(&repo, source)];
         let commands = widened::commands(root.path(), &repo, &paths, &scopes);
         assert_eq!(commands.len(), 1);
         // These bytes are the runnable command consumed by worker-check.
         let (_, command) = commands[0].split_once(" -- ").unwrap();
         let args = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
-        assert!(args.iter().any(|arg| arg == "--findRelatedTests"), "{commands:?}");
+        if runner == "jest" {
+            assert!(args.iter().any(|arg| arg == "--findRelatedTests"), "{commands:?}");
+        } else {
+            assert!(args.starts_with(&["vitest".into(), "related".into(), "--run".into()]), "{commands:?}");
+        }
+        let (tests, required) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(required, scopes);
+        let held = park_refusals(root.path(), &repo, &task, &paths, &head, "main", None);
+        assert!(held.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61")));
         javascript::execute(root.path(), &args, &repo, &[]).unwrap();
-        let runs = std::fs::read_to_string(repo.join("apps/backend/target/executed.jsonl")).unwrap();
+        let runs = std::fs::read_to_string(repo.join(format!("{package}/target/executed.jsonl"))).unwrap();
         let executed = runs.lines().map(|line| serde_json::from_str::<Vec<String>>(line).unwrap()).collect::<Vec<_>>();
-        assert_eq!(executed, [vec![repo.join(consumer).to_str().unwrap().to_owned()]]);
+        assert_eq!(executed, [vec![repo.join(&consumer).to_str().unwrap().to_owned()]]);
         assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes).is_empty());
         assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
         // A receipt for this source cannot cover a second source in the package.
-        write("apps/backend/src/other.ts", "export const value = 3;\n");
-        let other = widened::scope(&repo, "apps/backend/src/other.ts");
+        let other_source = format!("{package}/src/other.ts");
+        write(&other_source, "export const value = 3;\n");
+        let other = widened::scope(&repo, &other_source);
         assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()]), [other]);
-        std::fs::remove_file(repo.join("apps/backend/src/other.ts")).unwrap();
+        std::fs::remove_file(repo.join(&other_source)).unwrap();
         // A failing related spec must withdraw the old proof at the new tip.
-        write(consumer, "import { value } from '../src/conversations/v2/make-it-mine-request';\nit('claims', () => { throw 0; });\n");
+        write(&consumer, &consumer_source.replace("void value;", "throw 0;"));
         git(&["commit", "-qam", "related failure"]);
         let failed = git(&["rev-parse", "HEAD"]);
         assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());
         assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
         assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", None).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jest_source_related_tests_command_and_park_receipt_gh2257() {
+        source_related_tests_fixture("jest", "apps/backend/src/conversations/v2/make-it-mine-request.ts",
+            "export function value(it: { claim: () => number }) { return it.claim(); }\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vitest_vue_related_tests_command_and_park_receipt_gh2265() {
+        source_related_tests_fixture("vitest", "apps/frontend/app/src/components/chat/ChatLinkPreview.vue",
+            "<script setup lang=\"ts\">const value = 2;</script><template>{{ value }}</template>\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vitest_helper_related_tests_command_and_park_receipt_gh2265() {
+        for source in ["apps/frontend/test/edit-part.ts", "apps/frontend/__tests__/make-it-mine.ts"] {
+            source_related_tests_fixture("vitest", source, "export const value = 2;\n");
+        }
     }
 
     fn changelog_fixture() -> tempfile::TempDir {

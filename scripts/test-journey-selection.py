@@ -198,8 +198,14 @@ class SelectionTests(unittest.TestCase):
         self.assertNotEqual(self.run_selector('--paths', 'hub-web/src/reply.ts', head='missing-sha', check=False).returncode, 0)
 
     def test_responsive_goals_real_diff_parses_regex_apostrophe(self):
+        # Its own fixture: a regex literal holding an apostrophe, then quoted
+        # code, so a parser that reads the apostrophe as a string opener misses
+        # the edit (the copied real file lost this regex in cas-d8cd).
         path = 'hub-web/e2e/journeys/responsive-goals.ts'
-        source = (REPO / path).read_text()
+        source = ("export async function phonePairLink(page, journey, token, earlier) {\n"
+                  "  const label = /Machine's hub address/;\n"
+                  "  return page.getByText(label).filter({ hasText: 'paired' });\n"
+                  "}\n")
         self.write(path, source)
         spec = self.root / 'hub-web/e2e/reply.journey.ts'
         spec.write_text(spec.read_text() + '\nimport { phonePairLink } from "./journeys/responsive-goals";\nphonePairLink(page, journey, token, earlier);\n')

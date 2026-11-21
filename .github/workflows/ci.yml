@@ -114,7 +114,7 @@ jobs:
       receipt-head: ${{ steps.tree-dedupe.outputs.receipt-head }}
       receipt-tree: ${{ steps.tree-dedupe.outputs.receipt-tree }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -190,7 +190,7 @@ jobs:
         if: >-
           github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
           && steps.tree-dedupe.outputs.reuse-source == 'full-gate'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: train-full-gate
           path: target/full-gate-adoption/
@@ -213,7 +213,7 @@ jobs:
     needs: ci-diff
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -371,7 +371,7 @@ jobs:
     env:
       LEGACY_SCOPED: ${{ needs.ci-diff.outputs.class != 'docs-only' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # A slim factory push builds nothing that needs the submodules.
           submodules: ${{ vars.CAS_LANE_SLIM == 'true' && 'false' || 'recursive' }}
@@ -498,7 +498,7 @@ jobs:
       - name: Publish CI impact evidence
         if: >-
           env.LEGACY_SCOPED == 'true' && (always())
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-test-impact-${{ github.run_id }}-scoped-fast
           path: target/ci-impact/
@@ -553,7 +553,7 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # A slim factory push builds nothing that needs the submodules.
           submodules: ${{ (github.event_name == 'push' && vars.CAS_LANE_SLIM == 'true') && 'false' || 'recursive' }}
@@ -716,7 +716,7 @@ jobs:
 
       - name: Publish CI impact evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-test-impact-${{ github.run_id }}-scoped
           path: target/ci-impact/
@@ -792,7 +792,7 @@ jobs:
     needs: [ci-diff]
     runs-on: ${{ fromJSON(needs.ci-diff.outputs.runner) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -939,7 +939,7 @@ jobs:
       - name: Publish the source-built CLI
         id: cli-publish
         if: success() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: preflight-cli
           overwrite: true
@@ -1020,7 +1020,7 @@ jobs:
     needs: [ci-diff]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -1103,7 +1103,7 @@ jobs:
     needs: [ci-diff]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -1174,7 +1174,7 @@ jobs:
     needs: [ci-diff]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -1233,7 +1233,7 @@ jobs:
       run:
         working-directory: hub-web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -1343,7 +1343,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -1385,7 +1385,7 @@ jobs:
       # failures can leave native reports without producing receipt.json.
       - name: Upload Commander journey evidence and first-failure receipts
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always()) }}"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: queue-flakes-playwright-${{ matrix.shard }}
           path: |
@@ -1443,7 +1443,7 @@ jobs:
     outputs:
       producer-run: ${{ steps.job-receipt.outputs.producer_run || github.run_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -1560,7 +1560,7 @@ jobs:
 
       - name: Preserve complete train suite build log
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: train-suite-build
           path: target/train-suite-build/
@@ -1578,7 +1578,7 @@ jobs:
 
       - name: Upload full suite archive and CLI runner
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fast-validation-suite-archive
           path: |
@@ -1636,7 +1636,7 @@ jobs:
       cancel-in-progress: true
     env: *suite-archive-profile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -1690,7 +1690,7 @@ jobs:
       actions: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -1729,7 +1729,7 @@ jobs:
 
       - name: Download full suite archive
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: fast-validation-suite-archive
           run-id: ${{ needs.fast-validation-suite-build.outputs.producer-run || github.run_id }}
@@ -1783,7 +1783,7 @@ jobs:
 
       - name: Preserve complete train shard evidence
         if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: train-suite-shard-${{ matrix.shard }}
           path: target/train-suite/
@@ -1791,7 +1791,7 @@ jobs:
 
       - name: Publish full-suite recall evidence
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always()) }}"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-test-impact-${{ github.run_id }}-full-${{ matrix.shard }}
           path: target/ci-impact/
@@ -1815,7 +1815,7 @@ jobs:
 
       - name: Publish queue rust first-failure receipts
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')))) }}"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: queue-flakes-rust-${{ matrix.shard }}
           path: target/queue-flakes/rust-${{ matrix.shard }}/
@@ -1856,7 +1856,7 @@ jobs:
     needs: [ci-diff]
     runs-on: ${{ fromJSON(needs.ci-diff.outputs.runner) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -2016,14 +2016,14 @@ jobs:
     steps:
       # Collection and repair publication share this hosted rollup. Writable
       # credentials never enter the shard/test jobs or checkout's Git config.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: inputs.full-set || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.run-fast-validation == 'true'
         with:
           pattern: train-suite-*
@@ -2039,14 +2039,14 @@ jobs:
             --build-status "$BUILD_RESULT" --shards-status "$SHARDS_RESULT"
       - name: Publish train receipt and complete logs
         if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.run-fast-validation == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: train-rust-suite
           path: target/train-suite-evidence/
           overwrite: true
           if-no-files-found: error
           retention-days: 90
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         if: always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && needs.ci-diff.outputs.class != 'docs-only'
         with:
           pattern: queue-flakes-*
@@ -2062,7 +2062,7 @@ jobs:
           if [[ ! -d target/queue-flake-receipts ]]; then exit 0; fi
           python3 scripts/ci-queue-flakes.py reconcile --issues-repo Richards-LLC/cassy \
             --receipts target/queue-flake-receipts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && needs.ci-diff.outputs.class != 'docs-only'
         with:
           name: queue-flake-publication
@@ -2186,14 +2186,14 @@ jobs:
 
       - name: Publish successful merge-queue tree receipt
         if: github.event_name == 'merge_group'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: merge-queue-validated-tree-${{ steps.merge-queue-tree.outputs.hash }}
           path: merge-queue-validation-receipt.txt
           retention-days: 30
           if-no-files-found: error
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         if: inputs.full-set && !cancelled() && needs.ci-diff.outputs.run-fast-validation == 'true'
         with:
           pattern: full-gate-job-*
@@ -2213,7 +2213,7 @@ jobs:
             --started-at "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)"
       - name: Publish complete full-set receipt
         if: inputs.full-set && !cancelled() && needs.ci-diff.outputs.run-fast-validation == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: train-full-gate
           overwrite: true
@@ -2252,7 +2252,7 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -2329,7 +2329,7 @@ jobs:
         run: |
           echo "macOS Check is advisory. Release Prebuild proves macOS release artifacts before publication."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: github.event_name != 'pull_request'
         with:
           submodules: recursive
@@ -2490,7 +2490,7 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -2555,7 +2555,7 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -2594,7 +2594,7 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -2652,7 +2652,7 @@ jobs:
       RUSTC_WRAPPER: ""
       SCCACHE_GHA_ENABLED: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -2676,13 +2676,13 @@ jobs:
         run: cargo build -p cas --timings
 
       - name: Upload timings
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cargo-timings
           path: target/cargo-timings
 
       - name: Upload benchmark
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: build-benchmark
           path: |

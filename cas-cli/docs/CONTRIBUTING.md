@@ -2872,6 +2872,10 @@ For a Jest source input, the suggested command is `jest --findRelatedTests
 <source file>`: the capped runner executes only that source's test dependents
 from its Jest config root and records proof for that source. It never drops the
 source selector to run the whole package; an empty related selection is not proof.
+Vitest source inputs, including Vue components and shared test helpers, use
+`vitest related --run <source file>` with the same source-specific receipt.
+Only Jest treats an arbitrary file under `__tests__` as a test by default;
+Vitest helpers there retain their source role and select importing specs.
 That wider set runs once and records a separate widened receipt at the tested
 commit. Park consumes it without executing tests; identified changed tests still
 owe five consecutive passes. Caller Jest name filters cannot narrow this proof.
@@ -2935,6 +2939,14 @@ The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close
 copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
+A package-scoped `cargo check -p <crate> --lib --no-default-features` also
+uses the capped runner. That flag is accepted once, only with `--lib`; arbitrary
+`--features`, all-feature, target, profile and environment overrides remain
+refused. Default and no-default checks have separate configuration-bound
+receipts at the same commit, and close imports each with its feature identity.
+Retrying one configuration cannot invalidate the other's receipt. Legacy check
+receipts with no feature field mean default features.
+
 Check receipts are optional compile-only evidence and do not waive test proof.
 
 When worker admission is unavailable but a supervisor has already run the
@@ -2983,13 +2995,16 @@ command and changes no worker admission guard.
 Build admission reads Linux `/proc/pressure/cpu` and `/proc/pressure/memory`
 `some avg10` stall percentages, plus `MemAvailable` from `/proc/meminfo`.
 Valid CPU PSI replaces the raw load check, so unrelated I/O-heavy work does not
-block an otherwise healthy host. Missing or malformed CPU PSI falls back to
-one-minute load divided by CPU count. Missing memory probes remain unknown.
+block an otherwise healthy host. When neither CPU PSI nor a native CPU utilisation sample is available, admission
+falls back to one-minute load divided by CPU count. Missing memory probes remain
+unknown.
 Memory pressure and the memory floor are rechecked even when a proof continuation
 carries its earlier CPU admission. Swap usage alone is not a refusal signal;
-PSI measures time lost to contention. macOS reads one-minute load with `getloadavg`
-and estimates available memory from free plus inactive pages via `host_statistics64`;
-PSI stays unavailable there.
+PSI measures time lost to contention. macOS measures CPU utilisation from
+32-bit Mach ticks over a 250 ms window, including counter wraparound, and compares
+it with `max_cpu_pressure_percent`. One-minute load from `getloadavg` is only the
+fallback when CPU sampling fails. macOS estimates available memory from free plus
+inactive pages via `host_statistics64`; PSI stays unavailable there.
 
 Supervisors advertise `build_capacity_v1` in existing registration and heartbeat
 metadata: free builder slots, one-minute load, CPU count and available CPU/memory
@@ -3061,8 +3076,8 @@ candidate directories use the release-scratch GC naming and ownership protocol.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
-| `factory.build_guard.max_load_ratio` | `1.0` | Positive finite fallback load/CPU ceiling |
-| `factory.build_guard.max_cpu_pressure_percent` | `90.0` | Maximum CPU `some avg10`, 0–100% |
+| `factory.build_guard.max_load_ratio` | `1.0` | Positive finite load/CPU ceiling if both CPU PSI and native CPU sampling are unavailable |
+| `factory.build_guard.max_cpu_pressure_percent` | `90.0` | Maximum Linux CPU PSI `some avg10` or macOS measured CPU utilisation, 0–100% |
 | `factory.build_guard.max_memory_pressure_percent` | `10.0` | Maximum memory `some avg10`, 0–100% |
 | `factory.build_guard.min_available_memory_gib` | `2` | Minimum available GiB; 0 disables this floor |
 
@@ -4821,6 +4836,10 @@ files imported only by a released-trunk sync merge are excluded, while task
 edits before and after that merge remain checked. As with task attribution,
 every side parent must belong to `origin/<trunk>` (or local trunk when the
 remote ref is absent); other merges stay in scope.
+For an active factory branch, files restored byte-for-byte to its unique recorded
+task start base are also excluded, provided that base precedes the comparison
+base. Missing, ambiguous or invalid task bindings retain the ordinary checks;
+any remaining file change still receives them, including working edits.
 the release fast rows and Scoped Validation run this form. Intentional external
 wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does
@@ -5039,6 +5058,19 @@ root. The layers are:
 A process that deliberately hides a same-user write from these checks is out
 of reach. A hard boundary needs agents running as a separate Unix user.
 
+**Scratch QA of the setter (GH #2186).** A worker cannot run the write-roots
+setter, even with an isolated HOME, `XDG_CONFIG_HOME` or `CAS_ROOT`: PreToolUse
+refuses the tool call (H-11) and the binary refuses a worker cgroup (H-41).
+Neither has a test or scratch bypass. The supported worker QA is the capped
+fixture
+`cli::config::operator_ops::tests::scratch_write_roots_setter_qa_keeps_operator_only_policy_gh_2186`.
+In an isolated HOME and scratch project it parses the real command, writes the
+scratch `config.toml` under the operator pane's cgroup, and proves that the
+same command text is still refused by H-11 from an agent and by H-41 from a
+worker cgroup. A capture of the installed binary is an operator row: the
+operator runs it from their own terminal or as `! cas …` in the supervisor's
+pane.
+
 ## Default Codex worker account
 
 Set `factory.codex_home` with `cas config set factory.codex_home "~/.codex-work"`
@@ -5242,8 +5274,17 @@ frozen in 24 hours, the last at least `release.auto_cut_min_interval_hours`
 (default 2) ago. A zero daily cap turns auto-cut off. Only the verification
 owner's machine applies its project config; a peer daemon cannot substitute
 its own enabled defaults, and an unknown owner or machine declines with
-G-122. A live successor on the owner's machine can recover the cut. Every
-freeze note, including an operator takeover, records `machine=<label>`.
+G-122, naming the owner as this machine resolves it (name, id and registered
+machine). A live successor on the owner's machine can recover the cut. A live
+supervisor's `train_freeze` takes over release ownership
+(`epic_verification_owner`) from a departed, stale or other-machine owner, so
+after a cross-machine handoff the receiving supervisor's freeze makes its
+machine the train's (GH #1826); a live owner of another factory session on
+this machine keeps the train. Every freeze note, including an operator
+takeover, records `machine=<label>`. The cut notice counts each task's newest
+merge into the train once while it is still that task's delivery, so merged
+deliveries awaiting their verdict or batch QA count and a dropped, reopened one
+does not.
 It freezes the train, then waits for the supervisor's
 `release-notes.md` in the train's artifact directory, waking the supervisor
 once per tip with a deadline. With the draft present it runs the
@@ -5276,6 +5317,9 @@ that observed run with `supervisor_override=true reason="<decision>"` (CLI:
 `--supervisor-override --reason "<decision>"`); Cassy records the decision on the
 train. The override never waives a later red or a delivery's own merge gates.
 
+Appending to an active queue returns its committed revision and delivery
+positions before origin reads, candidate preparation or verifier handoffs. The
+existing factory daemon starts the appended reviews on its next pass.
 The action records the queue and returns immediately. The existing factory
 daemon's CI scan resumes it through `worktree_merge`, reusing the current
 candidate approval or requesting review when context changes. Pending reviews

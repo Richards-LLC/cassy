@@ -295,6 +295,12 @@ fn binding(root: &Path, repo: &Path, now: DateTime<Utc>) -> Result<Option<Capaci
     }
 }
 
+/// The one in-progress task the live worker owning `repo` holds, if any.
+/// Worker-check files a failed run's evidence under it (GH #2172).
+pub(crate) fn bound_task(root: &Path, repo: &Path) -> Option<String> {
+    binding(root, repo, Utc::now()).ok().flatten().map(|wait| wait.task_id)
+}
+
 /// Called only for typed admission-capacity refusals, not dirty trees,
 /// compiler/test failures or I/O errors. First refusal survives each retry.
 #[cfg(test)]

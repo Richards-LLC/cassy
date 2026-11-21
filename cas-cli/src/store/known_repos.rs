@@ -82,8 +82,9 @@ pub(crate) fn classify_known_repo(path: &Path) -> KnownRepoState {
 /// call multiple times — both migrations use idempotent table/index creation,
 /// and already-recorded migration IDs are skipped.
 ///
-/// Intended callers: `cas init` (once per repo, via `init_cas_dir`) and
-/// the `cas known-repos` subcommand itself. Hot startup paths (MCP serve,
+/// Intended callers: `cas init` (once per repo, via `init_cas_dir`), the
+/// `cas known-repos` subcommand itself, and release delivery's root listing
+/// (`cas release installed` and `published`, cas-6b73). Hot startup paths (MCP serve,
 /// factory daemon boot) MUST NOT call this — those only upsert.
 pub fn ensure_host_schema() -> anyhow::Result<()> {
     let cas_dir = host_cas_dir();

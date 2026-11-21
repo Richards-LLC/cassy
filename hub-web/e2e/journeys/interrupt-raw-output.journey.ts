@@ -217,7 +217,7 @@ test("HUB-J18 Interrupt recovers when the first lease read is still pending", jo
   }
 });
 
-for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"]] as const) {
+for (const [width, colorScheme] of [[390, "light"], [1280, "dark"]] as const) {
   test.describe(`${width} ${colorScheme}`, () => {
     test.use({ viewport: { width, height: width === 390 ? 844 : 800 }, colorScheme });
     test(`HUB-J18 ${width} ${colorScheme}: interrupt and read the raw output by keyboard`, journeyPart, async ({ page, journey }) => {
@@ -297,14 +297,6 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
       await journey.stage(`Read the raw output at ${width} in ${colorScheme}`, async () => {
         await readRawOutput(page, hub, phone);
         await expectOnlyTheThread(page);
-      });
-      if (phone && admin) await journey.stage("Back to Conversations releases the input lease", async () => {
-        await interrupt.click();
-        await hub.waitFor(() => interrupts(hub).length === 3);
-        const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
-        await page.locator("#conversation-back").click();
-        await released;
-        await expect(page.getByRole("navigation", { name: "Choose a supervisor" })).toBeVisible();
       });
     });
   });

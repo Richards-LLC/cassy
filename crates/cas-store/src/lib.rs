@@ -263,7 +263,8 @@ pub use verification_store::{
     cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
     consume_verifier_capability_with_conn, consume_current_premerge_verifier_handoff_with_conn, correct_parked_delivery_execution_note,
-    correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets, carry_forward_approved_verification,
+    correct_parked_delivery_proof_scope, correct_parked_delivery_proof_scope_with_parent_move,
+    correct_parked_delivery_proof_targets, carry_forward_approved_verification,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
     extend_verification_dispatch_deadline,
@@ -659,6 +660,13 @@ pub trait TaskStore: Send + Sync {
     /// bypassed this store, such as `request_changes` (cas-a836). Stores
     /// without cloud sync have nothing to publish.
     fn publish_current_row(&self, _task_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Queue a ParentChild move that a direct transaction already committed
+    /// (cas-cc3a): `removed` left this store, `added` arrived. Stores without
+    /// cloud sync have nothing to publish.
+    fn publish_dependency_move(&self, _removed: &Dependency, _added: &Dependency) -> Result<()> {
         Ok(())
     }
 

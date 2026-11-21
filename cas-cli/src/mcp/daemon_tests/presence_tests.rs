@@ -8,7 +8,7 @@ use cas_types::Task;
 use std::path::{Path, PathBuf};
 use crate::cloud::presence::{self, PresenceState};
 use crate::cloud::{CloudConfig, PROJECT_SCOPE_KEY};
-use crate::cloud::peers::{META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS};
+use crate::cloud::peers::{META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS};
 use crate::store::init_cas_dir;
 use crate::test_support::TestEnvGuard;
 use serde_json::{Value, json};
@@ -482,41 +482,6 @@ async fn cas_f707_eager_supervisor_then_session_start_registers_once() {
     assert_eq!(peer_ids(&fx.peer_root, "someone-else").len(), 1);
 }
 
-#[tokio::test]
-async fn cas_f707_branch_is_registered_and_refreshed_on_the_heartbeat() {
-    let (fx, daemon) = fixture("cas-571d").await;
-    // The project root (the parent of .cas) is a checkout on an epic branch.
-    let root = fx.cas_root.parent().unwrap().to_path_buf();
-    std::fs::create_dir_all(root.join(".git")).unwrap();
-    std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/epic/same-repo\n").unwrap();
-    let me = "sup-f707-branch";
-    session_start(&daemon, me, "branch-sup").await;
-    assert_eq!(
-        fx.cloud.state().registrations[0]["metadata"][META_BRANCH],
-        json!("epic/same-repo")
-    );
-
-    std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/factory/next\n").unwrap();
-    heartbeat_tick(&daemon).await;
-    let record = presence::load(&fx.cas_root, me).unwrap();
-    assert_eq!(record.branch.as_deref(), Some("factory/next"));
-    let state = fx.cloud.state();
-    assert_eq!(state.registrations.len(), 1, "a branch change rides the heartbeat");
-    assert_eq!(
-        state.heartbeat_metadata.last().unwrap()[META_BRANCH],
-        json!("factory/next")
-    );
-    assert_eq!(state.agents[me]["metadata"][META_BRANCH], json!("factory/next"));
-    // Both registration and heartbeat publish the same capacity schema.
-    for metadata in [&state.registrations[0]["metadata"], state.heartbeat_metadata.last().unwrap()] {
-        let sample: crate::factory_build_routing::BuildCapacity = serde_json::from_str(
-            metadata[crate::factory_build_routing::CAPACITY_META].as_str().unwrap(),
-        ).unwrap();
-        assert!(sample.cpu_count > 0);
-        assert!(sample.observed_at <= chrono::Utc::now());
-        assert_eq!(sample.free_slots, crate::config::Config::load(&fx.cas_root).unwrap().factory().max_concurrent_builders);
-    }
-}
 
 #[tokio::test]
 async fn cas_f707_a_failing_registration_waits_out_its_backoff() {

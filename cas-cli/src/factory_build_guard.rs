@@ -641,45 +641,54 @@ fn macos_load_1m() -> Option<f64> {
 }
 
 /// Busy percent between two cumulative `[user, system, idle, nice]` tick
-/// samples; `None` when no time elapsed or the counters went backwards.
+/// samples, allowing the 32-bit Mach counters to wrap; `None` if no time elapsed.
 #[cfg(any(target_os = "macos", test))]
-fn cpu_busy_from_ticks(before: [u64; 4], after: [u64; 4]) -> Option<f64> {
-    let delta = |index: usize| after[index].checked_sub(before[index]);
-    let (user, system, idle, nice) = (delta(0)?, delta(1)?, delta(2)?, delta(3)?);
+fn cpu_busy_from_ticks(before: [u32; 4], after: [u32; 4]) -> Option<f64> {
+    let delta = |index: usize| u64::from(after[index].wrapping_sub(before[index]));
+    let (user, system, idle, nice) = (delta(0), delta(1), delta(2), delta(3));
     let total = user + system + idle + nice;
     (total > 0).then(|| (user + system + nice) as f64 * 100.0 / total as f64)
 }
 
 #[cfg(target_os = "macos")]
-#[allow(deprecated)] // libc exposes Mach host statistics, but deprecates mach_task_self.
-fn macos_cpu_ticks() -> Option<[u64; 4]> {
+#[allow(deprecated)] // libc deprecates mach_task_self but requires its port here.
+fn with_macos_host(
+    probe: impl FnOnce(libc::mach_port_t) -> libc::kern_return_t,
+) -> libc::kern_return_t {
     unsafe extern "C" {
         fn mach_port_deallocate(
             task: libc::mach_port_t,
             name: libc::mach_port_t,
         ) -> libc::kern_return_t;
     }
+    // SAFETY: mach_host_self returns a send right owned by this call.
+    let host = unsafe { libc::mach_host_self() };
+    let status = probe(host);
+    // SAFETY: release this call's send right after the statistics query.
+    unsafe { mach_port_deallocate(libc::mach_task_self(), host) };
+    status
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cpu_ticks() -> Option<[u32; 4]> {
     let mut info = std::mem::MaybeUninit::<libc::host_cpu_load_info>::zeroed();
     let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
     // SAFETY: the zeroed buffer is sized for HOST_CPU_LOAD_INFO and count is
-    // its integer count; the host send right is released before returning.
-    let status = unsafe {
-        let host = libc::mach_host_self();
-        let status = libc::host_statistics(
+    // its integer count. The helper owns and releases the host send right.
+    let status = with_macos_host(|host| unsafe {
+        libc::host_statistics(
             host,
             libc::HOST_CPU_LOAD_INFO,
             info.as_mut_ptr().cast(),
             &mut count,
-        );
-        mach_port_deallocate(libc::mach_task_self(), host);
-        status
-    };
+        )
+    });
     if status != libc::KERN_SUCCESS {
         return None;
     }
     // SAFETY: a successful call populated the buffer.
     let ticks = unsafe { info.assume_init() }.cpu_ticks;
-    let tick = |state: libc::c_int| u64::from(ticks[state as usize]);
+    let tick = |state: libc::c_int| ticks[state as usize];
     Some([
         tick(libc::CPU_STATE_USER),
         tick(libc::CPU_STATE_SYSTEM),
@@ -696,29 +705,19 @@ fn macos_cpu_busy_percent() -> Option<f64> {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(deprecated)] // libc exposes Mach host statistics, but deprecates mach_task_self.
 fn macos_available_memory() -> Option<u64> {
-    unsafe extern "C" {
-        fn mach_port_deallocate(
-            task: libc::mach_port_t,
-            name: libc::mach_port_t,
-        ) -> libc::kern_return_t;
-    }
     let mut stats = std::mem::MaybeUninit::<libc::vm_statistics64>::zeroed();
     let mut count = libc::HOST_VM_INFO64_COUNT;
-    // SAFETY: Mach returns a host send right owned by this call. The zeroed
-    // buffer is correctly sized for HOST_VM_INFO64; count is its integer count.
-    let status = unsafe {
-        let host = libc::mach_host_self();
-        let status = libc::host_statistics64(
+    // SAFETY: the zeroed buffer is sized for HOST_VM_INFO64 and count is its
+    // integer count. The helper owns and releases the host send right.
+    let status = with_macos_host(|host| unsafe {
+        libc::host_statistics64(
             host,
             libc::HOST_VM_INFO64,
             stats.as_mut_ptr().cast(),
             &mut count,
-        );
-        mach_port_deallocate(libc::mach_task_self(), host);
-        status
-    };
+        )
+    });
     if status != libc::KERN_SUCCESS || count < 3 {
         return None;
     }
@@ -978,6 +977,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn cas_94ed_macos_native_host_probes_are_available() {
+        assert!(macos_cpu_ticks().is_some());
         let snapshot =
             evaluate(32, None, 0, 1, 4).with_host(Path::new("/proc"), &FactoryConfig::default());
         assert!(
@@ -991,6 +991,13 @@ mod tests {
                 .pressure
                 .available_memory_bytes
                 .is_some_and(|bytes| bytes > 0),
+            "{snapshot:?}"
+        );
+        assert!(
+            snapshot
+                .pressure
+                .cpu_busy_percent
+                .is_some_and(|busy| busy.is_finite() && (0.0..=100.0).contains(&busy)),
             "{snapshot:?}"
         );
     }
@@ -1207,10 +1214,24 @@ mod tests {
     }
 
     #[test]
+    fn cas_546d_macos_cpu_ticks_wrap_at_u32_max() {
+        let max_tick = 0xffff_ffff;
+        assert_eq!(
+            cpu_busy_from_ticks(
+                [max_tick - 9, max_tick - 9, max_tick - 9, max_tick],
+                [30, 28, 11, 0],
+            ),
+            Some(79.0),
+        );
+        // Four full-width deltas must not overflow the accumulated total.
+        assert_eq!(cpu_busy_from_ticks([0; 4], [max_tick; 4]), Some(75.0));
+    }
+
+    #[test]
     fn cas_234d_macos_gates_on_measured_cpu_busy_not_io_inflated_load() {
         // Prowl, Nov 14: load 113 on 18 cores, 1 rustc, 21% idle. Ticks are
         // [user, system, idle, nice] deltas between two samples.
-        let busy = |ticks: [u64; 4]| cpu_busy_from_ticks([0; 4], ticks);
+        let busy = |ticks| cpu_busy_from_ticks([0; 4], ticks);
         assert_eq!(busy([40, 38, 21, 1]), Some(79.0));
         assert_eq!(busy([0; 4]), None);
         let admit = |busy: f64| {

@@ -2102,6 +2102,107 @@ bug_families:
       newer queue state. Normal target publication and supervisor authority gates
       remain in force.
     fixed_by: [cas-deb2]
+  capped-temp-git-ancestry:
+    title: Capped temporary directories exclude physical Git ancestry
+    statement: TMPDIR must resolve outside checkout ancestry. A selected path beneath any .git marker refuses admission with registered H-50 before temporary output is created or exported, including Git ceilings, linked-worktree files and symlink aliases.
+    found: 2026-11-21
+    tasks: [cas-f45a]
+  checkpoint-scope-repair:
+    title: Checkpoint scope repair preserves target-identical tests
+    statement: Pre-push fast rows must admit byte-identical restoration to the active task's recorded target while refusing introduced prose assertions. Wrong branch bindings and recorded bases after the checkpoint cannot exempt files.
+    found: 2026-11-21
+    tasks: [cas-3c12]
+  codex-spawn-login-probe-contention:
+    title: Concurrent Codex spawns resolve the same account when a login probe times out
+    statement: A spawn whose Codex login probe times out under concurrent spawns still selects the registered account a single spawn would, rather than falling back to a missing default Codex home and refusing.
+    found: 2026-11-21
+    tasks: [cas-9ab7]
+  explicit-trunk-retarget-merge:
+    title: An explicit trunk retarget of an epic task merges without allow_trunk
+    statement: A supervisor's task update target_branch to trunk pins the target, so worktree_merge accepts it without allow_trunk and still reports the trunk push. request_changes on in-progress work refuses with the replayable note and worker message that return the findings.
+    found: 2026-11-21
+    tasks: [cas-7305]
+  macos-operator-smoke-ancestry:
+    title: macOS operator smoke leaves factory ancestry
+    statement: All four operator entry points run through a clean transient launchd job and refuse explicit agent invocations; clearing environment variables alone cannot remove parent-process ancestry. Production ancestry guards remain enforced.
+    found: 2026-11-21
+    tasks: [cas-da66]
+  merged-epic-ci-base:
+    title: Merged epic refs do not accumulate task-parent comparison work
+    statement: Factory CI filters merged epic refs, bounds live-parent comparisons, and release publication safely prunes merged remote epic branches.
+    tasks: [cas-066a3]
+    fixed_by: [cas-066a3]
+    journeys: [FACTORY-MERGE, CLI-RELEASE]
+    invariants: []
+  non-head-fast-row-receipt:
+    title: Non-HEAD cut-marker pushes consult matching fast-row receipts before checkout admission
+    tasks: [cas-a267]
+    journeys: [CLI-RELEASE]
+    statement: >-
+      Push an earlier commit to an epic ref while another commit is checked out.
+      Matching commit and comparison-base PASS receipts admit the push without
+      rerunning checks on the current checkout. Missing, failed, wrong-SHA and
+      wrong-base receipts refuse. Changes requiring web output also require the
+      same-range web receipt. Missing-proof advice requires a clean checkout and
+      retry so the hook can perform every required check.
+    fixed_by: [cas-a267]
+  ordinary-park-cited-proof-portability:
+    title: Ordinary parks require portable cited proof
+    statement: A delivery cannot park while a file cited in its close reason is missing or not committed to Cloud. A refusal names all unpublished paths; successful publication records the files for a peer reviewer.
+    found: 2026-11-21
+    tasks: [cas-dae1]
+  park-evidence-publication-bounded:
+    title: Park evidence publication is bounded and requires only cited evidence
+    statement: A task close publishes its ledger and the evidence files the ledger cites within a fixed budget, retrying a failed upload once. A failed upload of a file the ledger does not cite, such as a folder copied from another task, never refuses the park; it is listed as unpublished.
+    found: 2026-11-21
+    tasks: [cas-8018]
+  release-owner-follows-freeze:
+    title: Release readiness follows the supervisor that froze the train after a handoff
+    statement: After a cross-machine handoff, the receiving live supervisor's freeze takes over the train's release ownership, so auto-cut runs on its machine. Refusals name the owner and its machine, and the cut notice counts each delivery merged into the train once, including merged deliveries awaiting their verdict.
+    found: 2026-11-21
+    tasks: [cas-1d33]
+  release-roots-fresh-host:
+    title: Release delivery on a host with no project registry records the supplied project
+    statement: On a new machine or an isolated HOME where no project was ever registered, cas release installed and cas release published create the empty host registry and record the release for the supplied project, instead of failing with a missing known_repos table.
+    found: 2026-11-21
+    tasks: [cas-6b73]
+  retained-work-symlinked-checkout:
+    title: Retained-work recovery matches a worker's checkout through symlinked path spellings
+    statement: A live worker whose recorded checkout path differs from Git's listing only by a symlink (macOS /var vs /private/var) is recognised as the checkout's owner and kept out of the retained-work banner, while retired workers' local work is still reported.
+    found: 2026-11-21
+    tasks: [cas-55a5]
+  shipped-train-cut-ready-notice:
+    title: Shipped release trains suppress late cut-ready notices
+    statement: A delayed green CI observation cannot emit release_cut_ready for a cut or terminal train, a stale open snapshot of a closed train, or a commit already contained in a version tag. Older release tags and non-version checkpoint tags preserve an unreleased train's notification.
+    found: 2026-11-21
+    tasks: [cas-74cbc]
+  train-append-acknowledgement:
+    title: Train appends acknowledge committed positions before advancement
+    statement: An active train_merge append returns its saved queue revision and requested delivery positions without waiting for origin reads or review preparation. The existing daemon subsequently prepares appended reviews and preserves ordered publication and pending-verifier recovery.
+    found: 2026-11-21
+    tasks: [cas-7f934]
+  vitest-vue-helper-related-proof:
+    title: Vue components and Vitest helpers select related specs for focused proof
+    statement: G-61 suggests a runnable bounded related command for Vue source and helpers, including helpers under __tests__, and accepts its receipt.
+    tasks: [cas-7794]
+    fixed_by: [cas-7794]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]
+  worker-check-playwright-failure-evidence:
+    title: Failed capped Playwright runs keep their traces after worker-check returns
+    statement: A failing capped Playwright run keeps its traces, error contexts and JSON reports in a directory under the task artifacts and names that path in the failure, instead of writing them to a temporary directory that is removed when worker-check exits.
+    found: 2026-11-21
+    tasks: [cas-a582]
+  worker-no-default-proof:
+    title: Worker no-default library checks retain distinct compile proof
+    statement: A package-scoped library check can disable default features through the capped runner. Feature configurations retain separate commit/repository-bound receipts, and a failure invalidates only its own configuration. Broader feature, target, resource and identity overrides remain denied; compile evidence cannot replace test proof.
+    found: 2026-11-21
+    tasks: [cas-afe3]
+  worker-recycle-store-contention:
+    title: A worker recycle that meets a brief shared-store hold is retried, not dropped
+    statement: When another factory component holds the shared database for a few milliseconds as a worker recycle or clear_context starts, the request stays queued, the old worker keeps running, and a later factory pass completes the recycle without a manual retry.
+    found: 2026-11-21
+    tasks: [cas-aea9]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -3133,14 +3234,10 @@ journeys:
     url: /commander/
     trigger: the `#pair=…&hub=…&scopes=…` link printed by `cas hub pair`, opened in a browser
   steps:
-  - Open the link the machine printed — the dialog opens by itself and the secret leaves the address bar
-  - Confirm the machine — the hub address and machine name arrive filled in from the link; only your name is left,
-    with the focus ring on it
-  - Check the technical details — the origin and the granted scope boxes, in sentence case
-  - Pair — the exchange goes to the link's machine
-  - Reach the supervisor — the machine's supervisor is listed and opens
-  - Paired machines names each pairing's fleet permissions — the missing permission and its related note are ordered
-    before the re-pair command, without a disabled Stop and restart button that looks like an available fleet action
+  - Open a link that grants factory:manage — the dialog names the fleet permission before pairing
+  - Pair, and the pairing holds factory:manage — the accepted exchange retains the granted permission
+  - Paired machines names each pairing's fleet permissions — the missing permission precedes its re-pair command
+  - Scroll the focused invitation form and tap Technical details — opening the disclosure preserves the scrolled form
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -3200,7 +3297,8 @@ journeys:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/pair-link.journey.ts
-  catalog_gaps: the exchange endpoint is doubled
+  catalog_gaps: The exchange endpoint is doubled. The original end-to-end pair-link test was deleted under the operator
+    flake policy (cas-6af4); fleet permission and scrolled disclosure parts remain automated.
 - id: HUB-J3
   name: Find the conversation that needs me
   status: live
@@ -3408,37 +3506,14 @@ journeys:
     url: /commander/
     trigger: an open conversation with a live supervisor
   steps:
-  - Open the conversation — the composer names the supervisor
-  - Write and send — the message appears at once as "Sending…" and the composer clears
-  - See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
-  - See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
-  - A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer
-    only points at it); the list does not preview it as said
-  - A refused Take control keeps focus on the message — when another device holds the session the take is refused;
-    the message names the device in control, once, in plain words, and the composer only points at it; its Take
-    control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back
-    on its own; keyboard focus stays on it, never the page body
-  - Take control from the message, then retry — the refused message carries the Take control its refusal names (the
-    conversation header has none); once control is taken it drops Take control and says Retry will send it, its
-    actions are 44px targets on a phone, and Retry then sends it
-  - Dismiss a refused message and bring it back — Dismiss (the corner ×, by keyboard or mouse) or a sideways swipe
-    on a touch screen takes the refused message out of the thread; the composer stops pointing at it and the list
-    stops previewing it; a "1 unsent message" chip (a 44px target on a phone) brings it back with Edit and Retry,
-    focus landing on Retry; a short swipe settles back, and under reduced motion a swipe dismisses at once with
-    no slide
-  - Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
-  - A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and
-    the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed"
-    or Retry, and it is sent once
-  - A message Cassy can't confirm offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15
-    seconds after the send) "Sending…" gives way to "Not confirmed · Cassy couldn't confirm delivery to <supervisor>.
-    Retry sends it again."; the retry goes out and is delivered
-  - Not confirmed settles once the supervisor replies after it — a supervisor turn that arrives after the give-up
-    turns the card into "Not confirmed · The supervisor has replied since; send it again only if it missed this."
-    with no Retry, so nothing invites a duplicate send; a quiet underlined "Send again" resends it without retyping
-  - Focus on the opening card moves into the conversation — with keyboard focus on the connection card's Details
-    while a slow relay opens the conversation, focus lands in the composer when the conversation replaces the card,
-    never the page body; focus elsewhere (the list search) stays where it is
+  - Send while this device does not hold the session — message-only pairing sends without taking pane control
+  - Delivered without taking pane control — the transport receipt marks the message delivered
+  - A correlated revoked send names pairing while a new draft survives — refused text and newer text or file drafts
+    stay separate
+  - The header offers usable Re-pair while Edit still recovers the refused text — pairing recovery preserves the newer
+    draft
+  - A message whose receipt never came settles as Not confirmed — no reply or receipt is invented
+  - The lease lapses; Send again delivers without taking control — resending does not acquire terminal input
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -3522,7 +3597,9 @@ journeys:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/reply-typed.journey.ts
-  catalog_gaps: delivery by a running daemon and operator stamping are doubled
+  catalog_gaps: Delivery by a running daemon and operator stamping are doubled. The monolithic typing/refusal journey
+    was deleted under the operator flake policy (cas-6af4); message-only pairing, revoked-send recovery and Send again
+    parts remain automated.
 - id: HUB-J6
   name: Reply by voice
   status: live
@@ -4047,29 +4124,17 @@ journeys:
     url: /commander/
     trigger: '`/commander/` on a 390 px phone paired with full control access but without `session:launch`'
   steps:
-  - A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission
-    too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch
-    form without a new pairing
+  - A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission too)
+    opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch form
+    without a new pairing
   - The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
-  - Open New session and find the project — the most recently used project leads, a running project offers Attach,
-    Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as
-    the machine's default
-  - Choose the account — every Claude account on the machine is listed with the selected project's recommendation preselected (falling back to the default); changing projects refreshes the recommendation; a logged-out
-    one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has
-    no account step; the summary names the chosen account
-  - Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>)
-    on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
-  - The session outlives the tab — after a reload the new session is still running and its conversation reopens
   - A running project attaches instead of starting again — Attach opens the existing session's conversation
-  - A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain
-    heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
+  - A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading
+    and the next step, with the machine's own message behind a disclosure; Back keeps the choices
   - Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and
     Start lands in the new session
-  - A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close
-    stays visible and the page does not scroll sideways
-  - Open Accounts from the shell, inspect per-machine login and capacity, confirm a named profile removal and see New session refresh without a page reload
-  - Check usage on Claude and Codex rows in Accounts and New session without selecting or switching an account; see Checked at, Usage as of, Eastern reset times and stale/missing reasons
-  - Open Quality from the palette for the selected conversation; read the rubric that moved most with its factor on one line, every rubric per merged delivery with pending sources, and supervisor tokens by wake source
+  - A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close stays
+    visible and the page does not scroll sideways
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -4155,9 +4220,13 @@ journeys:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/launch-session.journey.ts
-  catalog_gaps: The catalog suite doubles the hub protocol. The separate real-hub HUB-J13 part covers project browse,
-    session start, reaper/daemon/PTY startup, first message and reply without a planted CAS_ROOT.
-    Provider and service placement alone are inert; official model action remains a bounded live check.
+  catalog_gaps: the catalog suite doubles the hub protocol. The separate HUB-J13 part in `real-hub.journey.ts` crosses
+    the real project browse, session start, reaper, daemon, PTY startup, first message and operator reply with the
+    production-shaped absence of CAS_ROOT. Provider and service placement alone are inert. The Rust startup regression
+    separately proves that a Teams write before pane readiness retries into the PTY once ready, without a provider
+    generating replies. Official-login model action and surviving a hub restart remain real-machine assembly checks.
+    The original new-session/account-selection/persistence and reconnecting-sheet cases were deleted under the operator
+    flake policy (cas-6af4); the remaining grant, attach, refused-launch, browse and account parts remain automated.
 - id: HUB-J14
   name: Tell a project's live sessions apart
   status: live

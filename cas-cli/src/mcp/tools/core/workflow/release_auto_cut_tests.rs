@@ -114,6 +114,10 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
             &run(repo, &["rev-parse", LANE]), false, false, now).unwrap();
         let Outcome::Declined(reason) = declined else { panic!("peer auto-cut accepted") };
         assert_eq!(crate::gates::codes_in(&reason), vec!["G-122"]);
+        // GH #1826: the refusal resolves the owner, and its machine when registered.
+        for identity in std::iter::once("sup-id").chain(remote_owner) {
+            assert!(reason.contains(identity), "{reason}");
+        }
     }
     config.set("release.auto_cut_max_per_day", "4").unwrap();
     config.save(&root).unwrap();

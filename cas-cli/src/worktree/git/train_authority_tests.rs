@@ -279,8 +279,7 @@ fn train_authority_stale_owner_publication_cas_6456() {
     let fixture = Fixture::new();
     let admitted = Snapshot::read(&fixture.left, "cas-6456").unwrap();
     let candidate = fixture.candidate(&fixture.left, "old-owner-candidate");
-    let root = fixture.left.join(".cas");
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::store::init_cas_dir(&fixture.left).unwrap();
     std::fs::write(
         root.join("config.toml"),
         "[project]\ncanonical_id = \"fixture\"\n",
@@ -321,13 +320,44 @@ fn train_authority_stale_owner_publication_cas_6456() {
     );
     // Another clone completes the transfer after A's admission, before its
     // delayed publication resumes. The remote state, not a roster, fences A.
-    let restarted = Identity {
-        owner: fixture.actor.owner.clone(),
-        incarnation: "session-a/process-restarted".into(),
-    };
-    let refreshed = admitted
-        .refresh_incarnation(&fixture.right, &fixture.actor, &restarted)
-        .unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    agents.register(&actor).unwrap();
+    agents.update(&actor).unwrap();
+    let mut replacement = actor.clone();
+    replacement.id = "owner-a-restarted".into();
+    replacement.cc_session_id = Some("harness-a-restarted".into());
+    replacement.registered_at = chrono::Utc::now();
+    agents.register(&replacement).unwrap();
+    agents.update(&replacement).unwrap();
+    // A matching name/session cannot retire a still-live predecessor.
+    assert!(!crate::cloud::peer_mailbox::owns_recipient(
+        &root,
+        &replacement,
+        &actor.id
+    ));
+    let mut retired = actor.clone();
+    retired.status = crate::types::AgentStatus::Shutdown;
+    agents.update(&retired).unwrap();
+    // A different machine still cannot inherit the old mailbox.
+    replacement.machine_id = Some("unrelated-machine".into());
+    agents.update(&replacement).unwrap();
+    assert!(
+        crate::factory_session_scope::require_train_owner(&root, &train, &replacement).is_err()
+    );
+    replacement.machine_id = actor.machine_id.clone();
+    agents.update(&replacement).unwrap();
+    assert!(crate::cloud::peer_mailbox::owns_recipient(
+        &root,
+        &replacement,
+        &actor.id
+    ));
+    assert_eq!(
+        crate::factory_session_scope::require_train_owner(&root, &train, &replacement).unwrap(),
+        admitted.record.generation
+    );
+    let restarted = crate::train_owner::identity(&replacement, &fixture.actor.owner).unwrap();
+    let refreshed = Snapshot::read(&fixture.right, "cas-6456").unwrap();
+    assert_eq!(refreshed.record.identity, restarted);
     assert_eq!(refreshed.record.generation, admitted.record.generation);
     let error = admitted
         .publish(

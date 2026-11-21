@@ -27,7 +27,7 @@ impl Fixture {
             protocol: 1, project: "fixture".into(), train: "cas-6456".into(),
             target: "epic/release-train-test-cas-6456".into(), identity: actor.clone(),
             epoch: 1, generation: "generation-a".into(), phase: Phase::Active,
-            target_sha: base.clone(), operation: "enroll".into(), transfer: None,
+            target_sha: base.clone(), operation: "enroll".into(), transfer: None, quiescence: None, accepted: None,
         };
         let tip = record_commit(&left, None, &record).unwrap();
         command(&left, &["push", "origin", &format!("{tip}:{}", reference("cas-6456").unwrap())], None).unwrap();
@@ -135,4 +135,53 @@ fn train_authority_raw_writer_divergence_cas_6456() {
     assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_TARGET_DIVERGED"));
     assert_eq!(fixture.target(), raw);
     assert_eq!(Snapshot::read(&fixture.left, "cas-6456").unwrap().tip, admitted.tip);
+}
+
+
+struct Settled(std::cell::Cell<usize>);
+impl TransferChecks for Settled {
+    fn external_clear(&self, _: &Snapshot) -> Result<serde_json::Value, String> {
+        self.0.set(self.0.get() + 1);
+        Ok(serde_json::json!({"provider": "fixture", "prs": [], "runs": []}))
+    }
+    fn publishers_stopped(&self, _: &Snapshot) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"runtime": "fixture", "disposition": "fenced"}))
+    }
+}
+
+#[test]
+fn train_authority_abort_reaccept_cas_6456() {
+    let fixture = Fixture::new();
+    let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+    let successor = Identity { owner: "owner-b".into(), incarnation: "session-b/process-b".into() };
+    let settled = Settled(std::cell::Cell::new(0));
+    let draining = first.prepare(&fixture.left, &fixture.actor, &successor, "transfer-1").unwrap();
+    let quiesced = draining.quiesce(&fixture.left, &fixture.actor, &settled).unwrap();
+    let aborted = quiesced.abort(&fixture.left, &fixture.actor, &settled).unwrap();
+    assert_ne!(aborted.record.generation, first.record.generation);
+    assert_eq!(aborted.record.phase, Phase::Active);
+    // B's delayed accept from the other clone cannot revive the aborted id.
+    let error = quiesced.accept(&fixture.right, &successor, "transfer-1", &first.record.generation, &settled).unwrap_err();
+    assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_CONFLICT"));
+    assert_eq!(Snapshot::read(&fixture.right, "cas-6456").unwrap().tip, aborted.tip);
+    let draining = aborted.prepare(&fixture.left, &fixture.actor, &successor, "transfer-2").unwrap();
+    let error = draining.prepare(&fixture.right, &fixture.actor, &fixture.actor, "transfer-2").unwrap_err();
+    assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_CONFLICT"));
+    let quiesced = draining.quiesce(&fixture.left, &fixture.actor, &settled).unwrap();
+    let accepted = quiesced.accept(&fixture.right, &successor, "transfer-2", &aborted.record.generation, &settled).unwrap();
+    assert_ne!(accepted.record.generation, aborted.record.generation);
+    // Projection repair reuses the accepted generation, but always rechecks
+    // external publishers even when the target has never moved.
+    let observations = settled.0.get();
+    let repaired = quiesced.accept(&fixture.left, &successor, "transfer-2", &aborted.record.generation, &settled).unwrap();
+    assert_eq!(repaired.tip, accepted.tip);
+    assert!(settled.0.get() >= observations + 2);
+    let draining = accepted.prepare(&fixture.right, &successor, &fixture.actor, "transfer-3").unwrap();
+    let quiesced = draining.quiesce(&fixture.right, &successor, &settled).unwrap();
+    let returned = quiesced.accept(&fixture.left, &fixture.actor, "transfer-3", &accepted.record.generation, &settled).unwrap();
+    assert_ne!(returned.record.generation, first.record.generation);
+    assert_ne!(returned.record.generation, aborted.record.generation);
+    assert_eq!(returned.record.identity, fixture.actor);
+    assert_eq!(fixture.target(), fixture.base);
+    assert_eq!(returned.record.target_sha, fixture.base);
 }

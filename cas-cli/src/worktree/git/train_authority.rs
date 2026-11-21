@@ -40,7 +40,23 @@ pub(crate) struct Record {
     pub target_sha: String,
     pub operation: String,
     pub transfer: Option<Transfer>,
+    #[serde(default)]
+    pub quiescence: Option<serde_json::Value>,
+    #[serde(default)]
+    pub accepted: Option<Acceptance>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Acceptance {
+    pub transfer_id: String,
+    pub prior_generation: String,
+    pub generation: String,
+    pub successor: Identity,
+}
+
+#[path = "train_transfer.rs"]
+mod transfer;
+pub(crate) use transfer::TransferChecks;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Snapshot {

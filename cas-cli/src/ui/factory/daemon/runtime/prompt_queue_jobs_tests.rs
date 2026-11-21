@@ -222,7 +222,8 @@ fn flv2_queue_stamps_on_writer() {
     let writer = TestWriter::start(false);
     let mut jobs = jobs_on(&writer);
 
-    // QueueSelect runs its store work on the writer and returns the batch.
+    // QueueSelect reads on the select lane, writes on the writer, and
+    // returns the batch (cas-b355).
     let select_threads = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&select_threads);
     jobs.submit_select(request(&cas_dir), move |request, generation| {
@@ -237,8 +238,8 @@ fn flv2_queue_stamps_on_writer() {
     let selection = jobs.take_selection().expect("the selection lands as a completion");
     assert_eq!(
         select_threads.lock().unwrap().as_slice(),
-        ["test-store-writer"],
-        "the selection's store work ran on the writer, not the caller"
+        ["factory-jobs-select"],
+        "the selection ran on the select lane, not the caller or the writer"
     );
     let ids: Vec<i64> = selection.rows.iter().map(|row| row.id).collect();
     assert_eq!(ids, vec![delivered, released]);
@@ -274,12 +275,12 @@ fn flv2_queue_stamps_on_writer() {
     jobs.settle_injects(&cas_dir);
     settle(&mut jobs, |jobs| jobs.in_flight().len() == 0);
 
-    // Every selection and stamp ran on the writer thread, none on the caller.
+    // Every selection write and stamp ran on the writer thread, none on the caller.
     let ran = writer.ran();
     assert_eq!(
         ran.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
-        vec!["QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueSettle", "QueueSettle"],
-        "the selection, then receipt, delivered, release and two settles: {ran:?}"
+        vec!["QueueSelect", "QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueSettle", "QueueSettle"],
+        "the selection's two writes, then receipt, delivered, release and two settles: {ran:?}"
     );
     assert!(ran.iter().all(|(_, thread)| thread == "test-store-writer"), "{ran:?}");
 

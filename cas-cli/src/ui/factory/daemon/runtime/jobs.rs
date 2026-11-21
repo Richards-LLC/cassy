@@ -602,11 +602,11 @@ impl<T: Send + 'static> JobRuntime<T> {
                     None
                 };
                 let lane_writer = (lane == Lane::Write).then(|| Arc::clone(&writer));
-                let hop = Arc::clone(&writer);
+                let hop = (lane != Lane::Write).then(|| Arc::clone(&writer));
                 match std::thread::Builder::new()
                     .name(lane.thread_name().into())
                     .spawn(move || {
-                        let _hop = WriterHop::install(hop);
+                        let _hop = hop.map(WriterHop::install);
                         run_lane(&thread_shared, lane, &sender, lane_reader, lane_writer)
                     }) {
                     Ok(handle) => Some(handle),

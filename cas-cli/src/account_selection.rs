@@ -140,7 +140,10 @@ pub fn recommend<'a>(
 /// The account an automatic launch uses: the recommendation, else a Codex
 /// home whose usage is merely unknown. Missing usage is not a failed login;
 /// the policy has already excluded disabled, stale, logged-out and duplicate
-/// homes (cas-2ece). Shared by spawn_workers and the premerge verifier.
+/// homes (cas-2ece). Last, a Codex home whose login probe timed out
+/// (cas-9ab7): concurrent spawns' probes contend, and an inconclusive probe
+/// is not a logout. The spawn's own auth preflight still checks the chosen
+/// home. Shared by spawn_workers and the premerge verifier.
 pub fn launch_choice<'a>(
     accounts: &'a [Account],
     provider: Provider,
@@ -149,10 +152,18 @@ pub fn launch_choice<'a>(
 ) -> Selection<'a> {
     let mut selection = recommend(accounts, provider, now, config);
     if selection.recommended.is_none() && provider == Provider::Codex {
+        let inconclusive = |account: &Account, reason: &str| {
+            // recommend() already gave disabled, stale and duplicate homes
+            // their own exclusion reasons.
+            reason == LOGIN_UNAVAILABLE_REASON
+                && account.login_state == LoginState::Unknown
+                && !account.flags.never_logged_in
+        };
         selection.recommended = selection
             .excluded
             .iter()
             .find(|(_, reason)| reason == "usage unknown")
+            .or_else(|| selection.excluded.iter().find(|(account, reason)| inconclusive(account, reason)))
             .map(|(account, reason)| Recommendation { account, reason: reason.clone() });
     }
     selection

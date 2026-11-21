@@ -211,6 +211,8 @@ impl Snapshot {
         checks.publishers_stopped(&live)?;
         let mut next = live.record.clone();
         next.phase = Phase::Active;
+        next.epoch = next.epoch.checked_add(1).ok_or_else(conflict)?;
+        next.generation = uuid::Uuid::new_v4().to_string();
         next.accepted = None;
         next.quiescence = None;
         next.operation = format!("abort:{}", next.transfer.as_ref().ok_or_else(conflict)?.id);

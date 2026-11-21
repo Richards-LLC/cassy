@@ -2686,6 +2686,119 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{closed}");
 }
 
+/// GH #2282 (gabber, Nov 21): a delivery parked for `target` that later lands
+/// there outside worktree_merge. Returns the fixture, the supervisor's core
+/// and the task store after the park; `land` performs the landing.
+async fn parked_for(env: &mut TestEnvGuard, target: &str) -> (Recovery, CasCore, std::sync::Arc<dyn cas_store::TaskStore>) {
+    let f = fixture_with_surface(env, "service.py", false);
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let base = git(repo, &["rev-parse", "main"]);
+    // The target starts before the delivery's merge of main, as gabber's
+    // develop, staging and epic branches did.
+    git(repo, &["branch", target, &git(repo, &["rev-parse", "main~1"])]);
+    git(repo, &["update-ref", &format!("refs/remotes/origin/{target}"), target]);
+    let tasks = open_task_store(&root).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    let work_target = WorkTarget { repo_selector: "project:cas-c6e1-fixture-project".into(), target_branch: target.into() };
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.work_target = Some(work_target.clone());
+    task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
+    task.deliverables.parked_branch = Some(BRANCH.into());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target, assignee: WORKER.into(), branch: BRANCH.into(), base_sha: base,
+    });
+    task.notes = "no changelog: disposable reconcile fixture".into();
+    tasks.update(&task).unwrap();
+    let config = root.join("config.toml");
+    std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+        .replace("enabled=false", "enabled=true")
+        .replace("mode='per_task'", "mode='batch'")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    for mut agent in agents.list(None).unwrap() {
+        agent.factory_session = Some("reconcile-fixture".into());
+        agents.update(&agent).unwrap();
+    }
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(root, None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    (f, supervisor, tasks)
+}
+
+/// Merge `source` into `target` in the primary checkout and publish it.
+fn merge_into(repo: &Path, target: &str, source: &str, message: &str) {
+    git(repo, &["checkout", "-q", target]);
+    git(repo, &["merge", "-q", "--no-ff", source, "-m", message]);
+    git(repo, &["checkout", "-q", "main"]);
+    git(repo, &["update-ref", &format!("refs/remotes/origin/{target}"), target]);
+}
+
+/// The reconcile pass dispatched a verifier on the contained delivery; its
+/// approval closes the task with no per-task override.
+async fn approve_dispatched(supervisor: &CasCore, tasks: &dyn cas_store::TaskStore, landed: &str) {
+    let root = supervisor.cas_root.clone();
+    let parked = tasks.get(TASK).unwrap();
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+    assert_eq!(parked.deliverables.green_merge_commit.as_deref(), Some(landed));
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
+        .expect("a contained delivery with no verdict gets a post-merge verifier");
+    assert_eq!(dispatch.repository.as_ref().unwrap().anchor_commits, vec![parked.deliverables.factory_branch_anchor.clone().unwrap()]);
+    let review = Parameters(serde_json::from_value(serde_json::json!({
+        "task_id": TASK, "dispatch_id": dispatch.id, "status": "approved", "summary": "Reviewed the landed delivery"
+    })).unwrap());
+    let recorded = supervisor.cas_verification_add(review).await.unwrap();
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{}", text(recorded));
+}
+
+#[tokio::test]
+async fn pr_into_develop_reconciles_through_post_merge_verifier_gh2282() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, supervisor, tasks) = parked_for(&mut env, "develop").await;
+    let repo = f.dir.path();
+    merge_into(repo, "develop", BRANCH, "Merge pull request #41 from factory/recovered-worker");
+    crate::factory_delivery_wake::reconcile_contained(&repo.join(".cas"), "reconcile-fixture").await.unwrap();
+    approve_dispatched(&supervisor, tasks.as_ref(), &git(repo, &["rev-parse", "develop"])).await;
+}
+
+#[tokio::test]
+async fn manual_epic_merge_with_approval_closes_on_reconcile_gh2282() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, supervisor, tasks) = parked_for(&mut env, "epic/gabber-train").await;
+    let repo = f.dir.path();
+    merge_into(repo, "epic/gabber-train", BRANCH, "merge recovered worker");
+    let review = Parameters(serde_json::from_value(serde_json::json!({
+        "task_id": TASK, "dispatch_id": null, "status": "approved", "summary": "Reviewed the integrated delivery"
+    })).unwrap());
+    let recorded = supervisor.cas_verification_add(review).await.unwrap();
+    assert_ne!(recorded.is_error, Some(true), "{recorded:?}");
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+    // The approval alone never closes a delivery merged outside
+    // worktree_merge; the reconcile pass's observed landing does.
+    crate::factory_delivery_wake::reconcile_contained(&repo.join(".cas"), "reconcile-fixture").await.unwrap();
+    let closed = tasks.get(TASK).unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed, "{}", closed.notes);
+    assert_eq!(closed.deliverables.green_merge_commit, Some(git(repo, &["rev-parse", "epic/gabber-train"])));
+}
+
+#[tokio::test]
+async fn develop_to_staging_promotion_reconciles_only_once_contained_gh2282() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, supervisor, tasks) = parked_for(&mut env, "staging").await;
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    git(repo, &["branch", "develop", "staging"]);
+    merge_into(repo, "develop", BRANCH, "Merge pull request #42 from factory/recovered-worker");
+    // On develop but not yet on its staging target: G-70 still owns it.
+    crate::factory_delivery_wake::reconcile_contained(&root, "reconcile-fixture").await.unwrap();
+    let parked = tasks.get(TASK).unwrap();
+    assert!(parked.deliverables.green_merge_commit.is_none());
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    merge_into(repo, "staging", "develop", "Promote develop to staging");
+    crate::factory_delivery_wake::reconcile_contained(&root, "reconcile-fixture").await.unwrap();
+    approve_dispatched(&supervisor, tasks.as_ref(), &git(repo, &["rev-parse", "staging"])).await;
+}
+
 /// GH2240: a peer fast-forwarded a never-parked delivery into the target and
 /// the worker's checkout is not on this machine. The supervisor's close and
 /// its direct verdict must bind that delivery, never the supervisor's own

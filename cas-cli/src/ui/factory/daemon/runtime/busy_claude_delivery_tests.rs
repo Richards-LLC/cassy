@@ -489,3 +489,45 @@ fn only_a_tool_call_in_flight_counts_as_activity() {
         assert_eq!(gate_decline_activity(deny(reason), evidence), None, "{reason}");
     }
 }
+
+/// cas-5463 probe (temporary): trace an urgent row to a busy Claude worker.
+#[tokio::test]
+async fn probe_urgent_busy_worker_cas_5463() {
+    let mut factory = BusyWorkerFactory::new(&[]).await;
+    factory.tool_call_in_flight();
+    let queue = factory.queue();
+    let earlier = queue.enqueue_with_session("supervisor", WORKER, "earlier decision GH2275-A", SESSION).unwrap();
+    let mut trace = String::new();
+    for pass in 0..3 {
+        factory.daemon.process_prompt_queue().await.unwrap();
+        let report = queue.message_delivery_report(earlier).unwrap().unwrap();
+        trace.push_str(&format!("A pass {pass}: deferred={:?} report={report:?}\n", queue.deferred_inbox_state(earlier).unwrap()));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let urgent = queue.enqueue_urgent("supervisor", WORKER, "stop and rebase GH2275-B", Some(SESSION), None, None, true).unwrap();
+    for pass in 0..10 {
+        factory.daemon.process_prompt_queue().await.unwrap();
+        let report = queue.message_delivery_report(urgent).unwrap().unwrap();
+        let row = queue.queued_prompt(urgent).unwrap().unwrap();
+        trace.push_str(&format!("B pass {pass}: deferred={:?} row={row:?} report={report:?}\n", queue.deferred_inbox_state(urgent).unwrap()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    rusqlite::Connection::open(factory.cas_dir.join("cas.db")).unwrap()
+        .execute("UPDATE prompt_queue SET created_at=?, next_attempt_at=NULL WHERE id=?",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(), urgent])
+        .unwrap();
+    let mut typed = String::new();
+    for pass in 0..60 {
+        factory.daemon.process_prompt_queue().await.unwrap();
+        for pane in factory.daemon.app.mux.panes_mut() {
+            let (bytes, _) = pane.drain_output();
+            typed.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        if pass % 10 == 0 {
+            let report = queue.message_delivery_report(urgent).unwrap().unwrap();
+            trace.push_str(&format!("B late pass {pass}: deferred={:?} report={report:?}\n", queue.deferred_inbox_state(urgent).unwrap()));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("typed={typed:?}\n{trace}");
+}

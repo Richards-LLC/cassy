@@ -5741,12 +5741,14 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
 /// Case 2: the receiver already sits on one of the task's branches, just not
 /// the first that resolves. Case 3: after a review return cleared the anchor,
 /// the prior worker's task branch is at the train base while the parked lane
-/// holds the delivery and a later task. Case 4: the receiver is at a newer
+/// holds the delivery and a later task (also with the receiver reset to the
+/// delivery tip, GH #2073). Case 4: the receiver is at a newer
 /// train tip with no work of its own; with an own commit it is still refused.
 #[tokio::test]
 async fn transfer_adopt_branch_takeover_cases_cas_ea31() {
     let mut failures = Vec::new();
-    for case in ["receiver-on-candidate", "anchor-in-history", "receiver-at-train-tip", "receiver-own-work"] {
+    for case in ["receiver-on-candidate", "anchor-in-history", "receiver-at-delivery-after-return",
+        "receiver-at-train-tip", "receiver-own-work"] {
         let mut env = TestEnvGuard::temp_home();
         let BranchAdoptionFixture { temp, destination, service, mut task, receiver, tip, .. } =
             branch_adoption_fixture(&mut env);
@@ -5761,7 +5763,12 @@ async fn transfer_adopt_branch_takeover_cases_cas_ea31() {
                 branch_transfer_git(dest, &["switch", handoff]);
                 task.deliverables.handoff_branches.push(handoff.into());
             }
-            "anchor-in-history" => {
+            // GH #2073: after a review return the receiver was reset to the
+            // delivery tip and was still refused as diverging.
+            "anchor-in-history" | "receiver-at-delivery-after-return" => {
+                if case == "receiver-at-delivery-after-return" {
+                    branch_transfer_git(dest, &["reset", "--hard", &tip]);
+                }
                 branch_transfer_git(root, &["branch", "factory/test-agent-cas-branch1100", &base]);
                 std::fs::write(root.join("later-task.txt"), "separate work").unwrap();
                 branch_transfer_git(root, &["add", "later-task.txt"]);

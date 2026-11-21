@@ -8881,8 +8881,8 @@ mod tests {
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
-        git(&["branch", "epic/lane"]);
-        git(&["branch", "epic/renamed"]);
+        git(&["branch", "epic/lane-cas-e721-epic"]);
+        git(&["branch", "epic/renamed-cas-e721-epic"]);
         let root = repo.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"merge-e721\"\n").unwrap();
@@ -8900,18 +8900,18 @@ mod tests {
         let target = |branch: &str| cas_types::WorkTarget { repo_selector: "project:merge-e721".into(), target_branch: branch.into() };
         let mut epic = cas_types::Task::new("cas-e721-epic".into(), "epic".into());
         epic.task_type = cas_types::TaskType::Epic;
-        epic.branch = Some("epic/lane".into());
+        epic.branch = Some("epic/lane-cas-e721-epic".into());
         epic.deliverables.work_target = Some(target("main"));
         tasks.add(&epic).unwrap();
 
         for (case, branch, repo_arg, expected) in [
             ("explicit base", Some("main"), Some(repo.to_str().unwrap()), "main"),
             ("branch only", Some("main"), None, "main"),
-            ("repo default", None, Some(repo.to_str().unwrap()), "epic/lane"),
-            ("implicit", None, None, "epic/lane"),
-            ("explicit lane", Some("epic/lane"), None, "epic/lane"),
+            ("repo default", None, Some(repo.to_str().unwrap()), "epic/lane-cas-e721-epic"),
+            ("implicit", None, None, "epic/lane-cas-e721-epic"),
+            ("explicit lane", Some("epic/lane-cas-e721-epic"), None, "epic/lane-cas-e721-epic"),
         ] {
-            epic.branch = Some("epic/lane".into());
+            epic.branch = Some("epic/lane-cas-e721-epic".into());
             tasks.update(&epic).unwrap();
             let request = serde_json::from_value(serde_json::json!({
                 "title": case, "task_type": "task", "risk": "none", "epic": epic.id,
@@ -8929,9 +8929,9 @@ mod tests {
             assert_eq!(resolved.branch, expected, "{case}: merge");
             assert_eq!(resolved.trunk_fallback, expected == "main");
 
-            epic.branch = Some("epic/renamed".into());
+            epic.branch = Some("epic/renamed-cas-e721-epic".into());
             tasks.update(&epic).unwrap();
-            let renamed = if expected == "main" { "main" } else { "epic/renamed" };
+            let renamed = if expected == "main" { "main" } else { "epic/renamed-cas-e721-epic" };
             assert_eq!(effective_task_work_target(&started, Some(&epic)), Some(target(renamed)), "{case}: rename");
             assert_eq!(super::resolve_system_b_merge_target(
                 tasks.as_ref(), agents.as_ref(), Some(&child.id), &executor.id, false, || "main".to_string(),
@@ -8947,7 +8947,7 @@ mod tests {
             legacy.deliverables.work_target = Some(target("main"));
             tasks.add(&legacy).unwrap();
             tasks.add_dependency(&cas_types::Dependency::new(legacy.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
-            assert_eq!(effective_task_work_target(&legacy, Some(&epic)), Some(target("epic/renamed")));
+            assert_eq!(effective_task_work_target(&legacy, Some(&epic)), Some(target("epic/renamed-cas-e721-epic")));
             let request = serde_json::from_value(serde_json::json!({"id": legacy.id})).unwrap();
             core.cas_task_update_with_target(request, None, Some("main"), scope_fix,
                 scope_fix.then_some("repair effective target that differs from raw target"), None).await.unwrap();

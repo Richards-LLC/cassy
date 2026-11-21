@@ -1,0 +1,4 @@
+title: Capped temporary directories exclude physical Git ancestry
+statement: TMPDIR must resolve outside checkout ancestry. A selected path beneath any .git marker refuses admission with registered H-50 before temporary output is created or exported, including Git ceilings, linked-worktree files and symlink aliases.
+found: 2026-11-21
+tasks: [cas-f45a]

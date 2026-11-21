@@ -2,13 +2,18 @@
 //!
 //! A Claude worker's Bash tool runs inside Claude Code's sandbox (Seatbelt on
 //! macOS). Cassy writes the `sandbox` settings block in two halves:
-//! [`claude_sandbox_block`] from the project's resolved roots when the worker
-//! settings file is written, and [`apply_worktree`] from the worker checkout at
-//! launch. Git paths are exact. The shared `.git` directory itself is never
+//! [`claude_sandbox_block`] from the project's resolved roots and the worker's
+//! current tasks when the worker settings file is written (each spawn or
+//! recycle), and [`apply_worktree`] from the worker checkout at launch. The
+//! profile grants only the current tasks' artifact directories and the
+//! checkout's own scratch, so a worker whose assignment changes is relaunched
+//! (cas-f157). Git paths are exact. The shared `.git` directory itself is never
 //! writable: allowlisting it re-opens `.git/config` and `.git/hooks`, which the
 //! sandbox's built-in protection only covers for repositories under the
 //! working directory (cas-ac77, measured in a throwaway repository).
 
+use cas_types::factory_scratch::{checkout_tmp_dir, worker_target_dir};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,6 +23,12 @@ use std::process::Command;
 pub const SANDBOX_ENV: &str = "CAS_WORKER_SANDBOX";
 /// Stage A: the sandbox enforces and the replaced text guards only log.
 pub const SHADOW: &str = "shadow";
+/// Harness environment listing the tasks whose artifact directories the
+/// launched profile grants, comma-separated; empty when it grants none.
+pub const TASKS_ENV: &str = "CAS_WORKER_SANDBOX_TASKS";
+/// Top-level worker settings key carrying [`LaunchInputs`]. The launch
+/// removes it before Claude reads the settings.
+pub const LAUNCH_KEY: &str = "casWorkerLaunch";
 
 /// Hosts a worker shell reaches: GitHub, crates.io and the npm registry.
 pub const ALLOWED_DOMAINS: [&str; 9] = [
@@ -50,9 +61,53 @@ pub fn secret_write_denied(file_name: &str) -> bool {
         || SECRET_NAME_FRAGMENTS.iter().any(|fragment| file_name.contains(fragment))
 }
 
+/// Cassy's inputs for the launch half of the profile, which knows the checkout.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchInputs {
+    /// The tasks whose artifact directories the static half grants; `None`
+    /// when Cassy could not read the worker's assignment, so no start is
+    /// compared against it.
+    pub tasks: Option<Vec<String>>,
+    /// Root of every checkout's private temporary directory.
+    pub tmp_root: Option<PathBuf>,
+    /// Configured `factory.scratch_root`, which relocates a managed
+    /// checkout's Cargo target.
+    pub scratch_root: Option<PathBuf>,
+}
+
+impl LaunchInputs {
+    /// The checkout's own scratch directories: its private temporary
+    /// directory and a relocated Cargo target. Never a scratch root itself.
+    pub fn checkout_scratch(&self, worktree: &Path) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(root) = &self.tmp_root {
+            dirs.push(checkout_tmp_dir(root, worktree));
+        }
+        let target = worker_target_dir(self.scratch_root.as_deref(), worktree);
+        if !target.starts_with(worktree) {
+            dirs.push(target);
+        }
+        dirs.iter().map(|dir| canonical_spelling(dir)).collect()
+    }
+}
+
+/// Seatbelt matches the kernel's canonical path, and sandbox-runtime keeps an
+/// absent path as spelled, so a grant for a directory created later must
+/// already be canonical (macOS `/tmp` is `/private/tmp`). Resolves the
+/// deepest existing ancestor and keeps the rest.
+pub fn canonical_spelling(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        if let Ok(real) = ancestor.canonicalize() {
+            let rest = path.strip_prefix(ancestor).unwrap_or(Path::new(""));
+            return if rest.as_os_str().is_empty() { real } else { real.join(rest) };
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Inputs resolved by Cassy for the static half of the profile.
 pub struct ProfileRoots<'a> {
-    /// Effective operator write roots, artifact and scratch roots.
+    /// Effective operator write roots and the current tasks' artifact dirs.
     pub write_roots: &'a [PathBuf],
     /// The project store (`CAS_ROOT`).
     pub cas_root: &'a Path,
@@ -148,13 +203,14 @@ pub fn git_paths_for(git_dir: &Path, common: &Path) -> GitPaths {
 }
 
 /// Add the worker checkout's paths to a `sandbox` block: the checkout, its
-/// exact git paths, and denies for Claude settings a worker could otherwise
-/// widen its own profile with.
-pub fn apply_worktree(sandbox: &mut Value, worktree: &Path, git: Option<&GitPaths>) {
+/// own scratch directories, its exact git paths, and denies for Claude
+/// settings a worker could otherwise widen its own profile with.
+pub fn apply_worktree(sandbox: &mut Value, worktree: &Path, git: Option<&GitPaths>, scratch: &[PathBuf]) {
     let Some(filesystem) = sandbox.get_mut("filesystem").and_then(Value::as_object_mut) else {
         return;
     };
     let mut allow = vec![worktree.to_path_buf()];
+    allow.extend(scratch.iter().cloned());
     let mut deny = vec![
         worktree.join(".claude/settings.json"),
         worktree.join(".claude/settings.local.json"),

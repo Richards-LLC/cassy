@@ -115,8 +115,11 @@ impl Backend for Claude {
 
 /// cas-3751a: complete the worker settings' `sandbox` block with this
 /// checkout's exact paths and mark the harness as sandboxed, so the stage-A
-/// text guards only log for Bash. Settings without a `sandbox` block (Linux,
-/// sandbox off, no settings file) launch unchanged.
+/// text guards only log for Bash. cas-f157: Cassy's launch inputs are removed
+/// from the settings, the checkout's own scratch is granted, and the granted
+/// tasks are named in the harness environment so a start of any other task
+/// relaunches the worker. Settings without a `sandbox` block (Linux, sandbox
+/// off, no settings file) launch unchanged.
 fn apply_worker_sandbox(config: &mut PtyConfig, cwd: &Path) {
     use crate::worker_sandbox;
     let Some(flag) = config.args.iter().position(|arg| arg == "--settings") else {
@@ -134,6 +137,10 @@ fn apply_worker_sandbox(config: &mut PtyConfig, cwd: &Path) {
     let Ok(serde_json::Value::Object(mut settings)) = serde_json::from_str::<serde_json::Value>(&text) else {
         return;
     };
+    let launch: worker_sandbox::LaunchInputs = settings
+        .remove(worker_sandbox::LAUNCH_KEY)
+        .and_then(|inputs| serde_json::from_value(inputs).ok())
+        .unwrap_or_default();
     let Some(sandbox) = settings.get_mut("sandbox") else {
         return;
     };
@@ -143,9 +150,12 @@ fn apply_worker_sandbox(config: &mut PtyConfig, cwd: &Path) {
             tracing::warn!(path = %dir.display(), %error, "worker sandbox: could not pre-create git dir");
         }
     }
-    worker_sandbox::apply_worktree(sandbox, cwd, git.as_ref());
+    worker_sandbox::apply_worktree(sandbox, cwd, git.as_ref(), &launch.checkout_scratch(cwd));
     config.args[flag + 1] = serde_json::Value::Object(settings).to_string();
     config.env.push((worker_sandbox::SANDBOX_ENV.into(), worker_sandbox::SHADOW.into()));
+    if let Some(tasks) = &launch.tasks {
+        config.env.push((worker_sandbox::TASKS_ENV.into(), tasks.join(",")));
+    }
 }
 
 /// One role-aware application for initial, dynamic and recycled Claude panes.

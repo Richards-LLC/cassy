@@ -48,7 +48,7 @@ fn generated_profile_never_allowlists_the_shared_git_dir() {
             write_roots: &[],
             cas_root: &tmp.path().join("cas"),
         });
-        apply_worktree(&mut sandbox, checkout, Some(&git));
+        apply_worktree(&mut sandbox, checkout, Some(&git), &[]);
         let allow = allow_list(&sandbox);
         assert!(!allow.contains(&common), "the shared .git is allowlisted for {}", checkout.display());
         let deny: Vec<PathBuf> = sandbox["filesystem"]["denyWrite"]
@@ -179,11 +179,15 @@ fn bypass_corpus_is_blocked_through_the_generated_profile() {
     for dir in &git_layout.create {
         std::fs::create_dir_all(dir).unwrap();
     }
+    // cas-f157: the profile grants one task's artifact dir and this
+    // checkout's own temporary dir, never their roots.
+    let own_artifacts = artifacts.join("cas-own");
+    let launch = LaunchInputs { tasks: Some(vec!["cas-own".into()]), tmp_root: Some(scratch.clone()), scratch_root: None };
     let mut sandbox = claude_sandbox_block(&ProfileRoots {
-        write_roots: &[artifacts.clone(), scratch.clone()],
+        write_roots: &[own_artifacts.clone()],
         cas_root: &root.join("cas"),
     });
-    apply_worktree(&mut sandbox, &worktree, Some(&git_layout));
+    apply_worktree(&mut sandbox, &worktree, Some(&git_layout), &launch.checkout_scratch(&worktree));
     let settings = root.join("srt-settings.json");
     std::fs::write(&settings, srt_settings(&sandbox).to_string()).unwrap();
     let sandbox_box = Box_ { srt, settings, worktree: worktree.clone(), outside: outside.clone() };
@@ -230,13 +234,21 @@ echo '[core]' >> {config} 2>/dev/null && echo config=WRITTEN
 echo x > {hooks}/pre-push 2>/dev/null && echo hooks=WRITTEN
 echo S=1 > .env 2>/dev/null && echo env=WRITTEN
 echo k > id_ed25519 2>/dev/null && echo key=WRITTEN
+mkdir -p {own_artifacts} && echo x > {own_artifacts}/f && echo own_artifacts=ok
+mkdir -p {own_tmp} && echo x > {own_tmp}/f && echo own_tmp=ok
+mkdir -p {sibling} 2>/dev/null; echo x > {sibling}/f 2>/dev/null && echo sibling_artifacts=WRITTEN
+echo x > {scratch}/f 2>/dev/null && echo scratch_root=WRITTEN
 true",
         config = common.join("config").display(),
         hooks = common.join("hooks").display(),
+        own_artifacts = own_artifacts.display(),
+        own_tmp = cas_types::factory_scratch::checkout_tmp_dir(&scratch, &worktree).display(),
+        sibling = artifacts.join("cas-sibling").display(),
+        scratch = scratch.display(),
     );
     let (_, text) = sandbox_box.run(&git_rows, &outside.join("git-rows"), true);
-    for expected in ["commit=ok", "factory_branch=ok", "fetch=ok"] {
+    for expected in ["commit=ok", "factory_branch=ok", "fetch=ok", "own_artifacts=ok", "own_tmp=ok"] {
         assert!(text.contains(expected), "{expected} missing: {text}");
     }
-    assert!(!text.contains("WRITTEN"), "a protected git or secret path was written: {text}");
+    assert!(!text.contains("WRITTEN"), "a protected git, secret, sibling task or scratch root path was written: {text}");
 }

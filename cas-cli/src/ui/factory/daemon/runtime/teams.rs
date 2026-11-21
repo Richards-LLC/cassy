@@ -859,7 +859,7 @@ impl TeamsManager {
             let worker_settings_path_buf = Self::worker_settings_path_for(session_name, name);
             let worker_settings_path =
                 worker_settings_path_buf.to_string_lossy().to_string();
-            if let Err(e) = Self::write_worker_settings_to(&worker_settings_path_buf) {
+            if let Err(e) = Self::write_worker_settings_to(&worker_settings_path_buf, session_name, name) {
                 tracing::warn!(
                     "Failed to pre-write worker settings for {} at {:?}: {}",
                     name,
@@ -951,18 +951,24 @@ impl TeamsManager {
     }
 
     /// Write a worker settings file at the given absolute path, creating the
-    /// parent directory if needed. Idempotent.
-    pub fn write_worker_settings_to(path: &std::path::Path) -> anyhow::Result<()> {
+    /// parent directory if needed. Idempotent. Written at every spawn and
+    /// recycle, so its sandbox grants `worker`'s current tasks (cas-f157).
+    pub fn write_worker_settings_to(
+        path: &std::path::Path,
+        session: &str,
+        worker: &str,
+    ) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut body = Self::worker_settings_contents();
-        // cas-3751a: the launch adds the checkout's exact paths to this block.
-        if let Some(sandbox) = crate::store::find_cas_root()
-            .ok()
-            .and_then(|root| crate::worker_sandbox_profile::worker_sandbox_block(&root))
-        {
+        // cas-3751a: the launch adds the checkout's exact paths to this block
+        // and removes the launch inputs.
+        if let Some((sandbox, launch)) = crate::store::find_cas_root().ok().and_then(|root| {
+            crate::worker_sandbox_profile::worker_sandbox_settings(&root, Some(session), worker)
+        }) {
             body["sandbox"] = sandbox;
+            body[cas_mux::worker_sandbox::LAUNCH_KEY] = launch;
         }
         let body = serde_json::to_string_pretty(&body)?;
         std::fs::write(path, body)?;
@@ -1900,7 +1906,7 @@ impl TeamsManager {
                 "Failed to restore Claude team tree before spawning a teammate");
         }
         let worker_settings_path = self.teams_dir.join(format!("{name}-settings.json"));
-        if let Err(e) = Self::write_worker_settings_to(&worker_settings_path) {
+        if let Err(e) = Self::write_worker_settings_to(&worker_settings_path, &self.team_name, name) {
             tracing::warn!(
                 "Failed to write worker settings for {} at {:?}: {}",
                 name,

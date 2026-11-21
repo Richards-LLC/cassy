@@ -2609,8 +2609,39 @@ impl CasCore {
         self.start_task_with_principal(req, Some(principal)).await
     }
 
-    // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
+    /// cas-f157: a sandboxed worker's launched profile grants only the tasks
+    /// it held at launch. A successful start of any other task relaunches the
+    /// worker through the recycle path; the relaunch regenerates the profile
+    /// for its current tasks and resumes this one.
     async fn start_task_with_principal(
+        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+    ) -> Result<CallToolResult, McpError> {
+        let worker = principal.as_ref().map(|principal| principal.agent().clone());
+        let task_id = req.id.clone();
+        let mut result = self.start_task_inner(req, principal).await?;
+        let worker = match worker {
+            Some(worker) => Some(worker),
+            None => self.get_agent_id().ok().and_then(|id| self.open_agent_store().ok()?.get(&id).ok()),
+        };
+        if result.is_error != Some(true)
+            && let Some(worker) = worker.filter(|worker| worker.role == cas_types::AgentRole::Worker)
+        {
+            let text = match crate::worker_sandbox_profile::relaunch_for_started_task(&self.cas_root, &worker, &task_id) {
+                Ok(false) => None,
+                Ok(true) => Some(format!(
+                    "\n\nSANDBOX RELAUNCH: this pane's OS sandbox was launched for other tasks, so Bash cannot write {task_id}'s artifact directory. Cassy is relaunching this worker with a profile for {task_id}; the task stays started and the relaunched pane is told to resume it. End your turn now and do not edit until the relaunch.")),
+                Err(error) => Some(format!(
+                    "\n\nSANDBOX RELAUNCH NOT QUEUED: {error}. Bash cannot write {task_id}'s artifact directory until this worker is relaunched; ask the supervisor to recycle it.")),
+            };
+            if let Some(text) = text {
+                result.content.push(rmcp::model::ContentBlock::text(text));
+            }
+        }
+        Ok(result)
+    }
+
+    // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
+    async fn start_task_inner(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
     ) -> Result<CallToolResult, McpError> {
         let mut queued_start = principal.is_some();

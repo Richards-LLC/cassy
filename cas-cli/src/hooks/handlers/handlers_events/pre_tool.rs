@@ -9605,6 +9605,10 @@ EOF
             "echo n=0; echo $((n+1))".to_owned(),
             "n=0 true; echo $((n+1))".to_owned(),
             format!("n='{operand}0' bash -c 'echo n=0; echo $((n+1))'"),
+            // cas-87a4 r3: an escaped `;` is word data, not a statement break.
+            "echo \\;n=0; echo $((n+1))".to_owned(),
+            "bash -c 'echo \\;n=0; echo $((n+1))'".to_owned(),
+            format!("n='{operand}0' bash -c 'echo \\;n=0; echo $((n+1))'"),
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();

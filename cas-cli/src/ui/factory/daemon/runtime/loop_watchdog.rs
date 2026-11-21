@@ -1585,7 +1585,7 @@ mod tests {
             (running.kind.as_str(), running.age_ms),
             ("QueueStamp", 1_500)
         );
-        assert_eq!(status.job_lanes.len(), 4, "{:?}", status.job_lanes);
+        assert_eq!(status.job_lanes.len(), JOB_LANES.len(), "{:?}", status.job_lanes);
         let wedge = status.wedge.expect("wedge in loop.json");
         assert_eq!(
             (wedge.lane.as_str(), wedge.step.as_str()),

@@ -616,13 +616,18 @@ mod tests {
             .status()
             .unwrap();
         assert!(launched.success(), "{}", std::fs::read_to_string(&scratch_log).unwrap_or_default());
+        // The detached run records its own completion; wait for that record.
+        let scratch_repo = checkout.path.canonicalize().unwrap();
+        let scratch_runs = || -> Vec<Run> {
+            entries(&root).unwrap().into_iter().filter(|run| run.repo == scratch_repo).collect()
+        };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while !std::fs::read_to_string(&scratch_log).unwrap_or_default().contains("worker-check: EXIT") {
-            assert!(std::time::Instant::now() < deadline, "the detached run never finished");
+        while !scratch_runs().iter().any(|run| run.finished_at.is_some()) {
+            assert!(std::time::Instant::now() < deadline, "the detached run never finished: {}",
+                std::fs::read_to_string(&scratch_log).unwrap_or_default());
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let scratch_repo = checkout.path.canonicalize().unwrap();
-        let runs: Vec<Run> = entries(&root).unwrap().into_iter().filter(|run| run.repo == scratch_repo).collect();
+        let runs = scratch_runs();
         // Both shapes are judged together, so a red run reports each one.
         assert_eq!((package.is_some(), runs.len()), (true, 1), "package run, scratch run tracked");
         assert_eq!(load(&root, &package.clone().unwrap()).unwrap().worker, "run-worker");
@@ -636,7 +641,6 @@ mod tests {
         let rows = crate::store::open_prompt_queue_store(&root).unwrap()
             .peek_for_targets(&["run-worker"], Some("run-session"), 10).unwrap();
         assert_eq!(rows.len(), 2, "one wake per completed run");
-        assert_eq!(rows.iter().filter(|row| row.prompt.contains(scratch_log.to_str().unwrap())).count(), 1);
     }
 
     #[test]

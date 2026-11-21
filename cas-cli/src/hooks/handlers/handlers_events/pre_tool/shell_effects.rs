@@ -250,9 +250,10 @@ fn lexeme_map(source: &str) -> Option<Vec<Lexeme>> {
 
 /// Shell-local names a script keeps numeric, so arithmetic over them cannot
 /// evaluate injected source (GH #1866). A name qualifies only when its first
-/// occurrence is a literal-integer assignment that runs unconditionally (no
-/// control construct, pipe, group or substitution before it), and every later
-/// occurrence is another assignment of an integer or of `$((...))`, a plain
+/// occurrence is a literal-integer assignment statement of its own that runs
+/// unconditionally (no control construct, pipe, group or substitution before
+/// it; not an argument or a prefix assignment), and every later occurrence is
+/// another such statement assigning an integer or `$((...))`, a plain
 /// `$name`/`${name}` read, or an operand inside an arithmetic span. Any other
 /// use (`read`, `for name in`, `declare`, `${name:=...}`, quoted text, ...)
 /// disqualifies it.
@@ -375,6 +376,26 @@ fn numeric_locals(source: &str) -> HashSet<String> {
             None
         }
     };
+    // A counter's origin and every reassignment must be an assignment
+    // statement of its own, at command position: never an argument
+    // (`echo n=0`), a prefix assignment for one command (`n=0 true`), a
+    // background or pipeline element, or a value inherited from outside.
+    let command_position = |prefix: &str| {
+        let prefix = prefix.trim_end_matches([' ', '\t']);
+        prefix.is_empty()
+            || (prefix.ends_with([';', '\n', '{']) && !prefix.ends_with(";;"))
+            || prefix.ends_with("&&")
+            || prefix.ends_with("||")
+            || prefix.rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').next()
+                .is_some_and(|word| matches!(word, "then" | "do" | "else"))
+    };
+    let statement_ends = |at: usize| {
+        let rest = source[at..].trim_start_matches([' ', '\t']);
+        rest.is_empty()
+            || (rest.starts_with([';', '\n']) && !rest.starts_with(";&"))
+            || rest.starts_with("&&")
+            || rest.starts_with("||")
+    };
     let mut names = HashSet::new();
     let mut sources: Vec<(&str, String)> = Vec::new();
     for name in candidates {
@@ -398,8 +419,9 @@ fn numeric_locals(source: &str) -> HashSet<String> {
                 !first && lexemes[start] == Lexeme::Double
                     && (before.ends_with('$') || (before.ends_with("${") && bytes.get(end) == Some(&b'}')))
             } else if first {
-                assigns && unconditional(before) && bytes[end + 1..].first().is_some_and(u8::is_ascii_digit)
-                    && numeric_value(end + 1).is_some_and(ends_word)
+                assigns && unconditional(before) && command_position(before)
+                    && bytes[end + 1..].first().is_some_and(u8::is_ascii_digit)
+                    && numeric_value(end + 1).is_some_and(|value_end| ends_word(value_end) && statement_ends(value_end))
             } else if let Some(span) = arithmetic.iter().find(|span| span.contains(&start)) {
                 // An assignment inside arithmetic keeps the name numeric only
                 // when its value is arithmetic over numeric locals.
@@ -409,7 +431,8 @@ fn numeric_locals(source: &str) -> HashSet<String> {
                     None => true,
                 }
             } else if assigns {
-                numeric_value(end + 1).is_some_and(ends_word)
+                command_position(before)
+                    && numeric_value(end + 1).is_some_and(|value_end| ends_word(value_end) && statement_ends(value_end))
                     && arithmetic.iter().find(|span| span.start == end + 2)
                         .is_none_or(|span| arithmetic_source(&source[span.start + 2..span.end])
                             .map(|text| name_sources.push(text)).is_some())

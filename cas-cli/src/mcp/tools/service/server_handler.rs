@@ -405,6 +405,42 @@ fn first_tool_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
     })
 }
 
+fn committed_task_answer(
+    receipt: &super::mutation_receipt::Receipt,
+    description: &str,
+) -> rmcp::model::CallToolResult {
+    let (followup, kind) = match receipt.action() {
+        "start" => (
+            "Assignment accepted. Start follow-up continues in the background; read task notes for START CONTEXT and close checks when it finishes. Do not retry start.".to_string(),
+            "start_context",
+        ),
+        "close" => (
+            "Remaining close follow-up continues in the background; read task notes for its outcome. Do not retry.".to_string(),
+            "close_outcome",
+        ),
+        action => (
+            format!("Remaining {action} follow-up continues in the background; read task notes for its outcome. Do not retry."),
+            "task_notes",
+        ),
+    };
+    let recovery = receipt.task_id().map(|id| serde_json::json!({
+        "kind": kind, "tool": "task",
+        "arguments": {"action": "notes", "id": id, "offset": 0, "limit": 1600},
+    }));
+    let hint = receipt.task_id().map(|id| format!(
+        "\nRead: task action=notes id={id} offset=0 limit=1600"
+    )).unwrap_or_default();
+    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
+        "COMMITTED: {description}. {followup}{hint}\nTiming (inclusive, + running): {}",
+        receipt.timings(),
+    ))]);
+    answer.structured_content = Some(serde_json::json!({
+        "mutation_outcome": "COMMITTED", "action": receipt.action(),
+        "task_id": receipt.task_id(), "recovery": recovery,
+    }));
+    answer
+}
+
 fn refusal_text(joined: &Result<ToolResult, tokio::task::JoinError>) -> Option<&str> {
     match joined {
         Ok(Ok(result)) if result.is_error == Some(true) => first_tool_text(result),
@@ -711,16 +747,25 @@ impl CasService {
                         action = receipt.action(),
                     ) + &format!("\nTiming (inclusive, + running): {}", receipt.timings()))]));
                 }
-                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
-                    "COMMITTED: {description}. Remaining close follow-up continues in the background; \
-                     read task notes for its outcome. Do not retry.\nTiming (inclusive, + running): {}",
-                    receipt.timings(),
-                ))]))
+                Ok(committed_task_answer(&receipt, &description))
             }
             Won::Deadline => {
                 if let Some(durable) = merge_receipt {
                     let answer = durable.answer(&receipt);
                     durable.watch(self.clone(), handle, receipt);
+                    return Ok(answer);
+                }
+                // A terminal start is already accepted, even if the total
+                // response budget wins before its post-commit grace expires.
+                if tool_name == "task" && action == "start" && receipt.terminal.get().is_some() {
+                    let description = receipt.outcome.get().cloned()
+                        .or_else(|| receipt.commit.get().map(|commit| commit.description.clone()))
+                        .unwrap_or_else(|| "start committed".into());
+                    let answer = committed_task_answer(&receipt, &description);
+                    tokio::spawn(async move {
+                        let _ = handle.await;
+                        log_post_commit("task", &receipt, "finished in the background");
+                    });
                     return Ok(answer);
                 }
                 let elapsed = start.elapsed();
@@ -758,7 +803,28 @@ impl CasService {
                     // is not followed by a late write the caller never sees.
                     handle.abort();
                 }
-                let outcome = if let Some(id) = &continuation_id {
+                // Full task history can outlive the response budget. Give read-only
+                // callers an executable bounded request rather than a blind retry.
+                // A notes append is a mutation, even with read options attached.
+                let read_recovery = if commit.is_none() && tool_name == "task"
+                    && (matches!(action, "show" | "get") || (action == "notes"
+                        && arguments.is_some_and(|args| args.get("notes").is_none_or(serde_json::Value::is_null))))
+                {
+                    arguments.and_then(|args| {
+                        let id = args.get("id")?.as_str()?;
+                        let offset = args.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                        let limit = args.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(1600).clamp(4, 1600);
+                        Some(serde_json::json!({
+                            "tool": "task", "arguments": {
+                                "action": action, "id": id, "full": false,
+                                "offset": offset, "limit": limit,
+                            },
+                        }))
+                    })
+                } else { None };
+                let outcome = if read_recovery.is_some() {
+                    "not applicable (the timed-out call was read-only)".to_string()
+                } else if let Some(id) = &continuation_id {
                     format!("{} (registration keeps running; its final outcome will appear in your inbox with continuation_id={id}; do not retry)",
                         if commit.is_some() { "COMMITTED" } else { "IN_PROGRESS" })
                 } else if close_unfinished && commit.is_some() {
@@ -780,12 +846,19 @@ impl CasService {
                 } else {
                     String::new()
                 };
+                let pagination_hint = read_recovery.as_ref().map(|recovery| {
+                    let args = &recovery["arguments"];
+                    format!(" Use pagination: task action={action} id={} full=false offset={} limit={}; follow next= from each page.",
+                        args["id"].as_str().unwrap_or_default(), args["offset"], args["limit"])
+                }).unwrap_or_default();
                 warn!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, budget_ms = budget.as_millis() as u64, mutation_outcome = %outcome, "MCP response deadline elapsed");
                 Err(rmcp::ErrorData {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
+                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}{pagination_hint}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if (registration && commit.is_none()) || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if (registration && commit.is_none()) || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if read_recovery.is_some() { "NOT_APPLICABLE" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "code": read_recovery.as_ref().map(|_| "task_read_paginate"),
+                        "recovery": read_recovery,
                         "continuation_id": continuation_id,
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
@@ -2777,10 +2850,11 @@ mod tests {
         std::fs::create_dir_all(&core.cas_root).unwrap();
         let tasks = core.open_task_store().unwrap();
         let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
-        for (action, id, status, kind) in [
-            ("start", "cas-start", cas_types::TaskStatus::InProgress, "start_context"),
-            ("notes", "cas-notes", cas_types::TaskStatus::Open, "task_notes"),
-            ("close", "cas-close", cas_types::TaskStatus::Closed, "close_outcome"),
+        for (action, id, status, kind, deadline) in [
+            ("start", "cas-start", cas_types::TaskStatus::InProgress, "start_context", false),
+            ("notes", "cas-notes", cas_types::TaskStatus::Open, "task_notes", false),
+            ("close", "cas-close", cas_types::TaskStatus::Closed, "close_outcome", false),
+            ("start", "cas-start-deadline", cas_types::TaskStatus::InProgress, "start_context", true),
         ] {
             tasks.add(&cas_types::Task::new(id.into(), "slow task operation".into())).unwrap();
             let args = serde_json::json!({"action":action, "id":id});
@@ -2789,7 +2863,7 @@ mod tests {
             let (finished, continued) = tokio::sync::oneshot::channel();
             let answer = service.call_with_deadline_and_grace(
                 "task", args.as_object(), std::time::Duration::from_secs(55),
-                std::time::Duration::ZERO, async move {
+                if deadline { std::time::Duration::from_secs(60) } else { std::time::Duration::ZERO }, async move {
                     let mut task = store.get(id).unwrap();
                     task.status = status;
                     store.update(&task).unwrap();
@@ -2837,12 +2911,12 @@ mod tests {
         task.notes = "caller supplied history\n".repeat(1000);
         tasks.add(&task).unwrap();
         let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
-        for action in ["show", "get", "notes"] {
-            let args = serde_json::json!({"action":action, "id":task.id, "full":true});
+        for (index, (action, offset, limit)) in [("show", 0, 1600), ("get", 0, 1600), ("notes", 0, 1600), ("notes", 32, 2000)].into_iter().enumerate() {
+            let args = serde_json::json!({"action":action, "id":task.id, "full":true, "offset":offset, "limit":limit});
             let sender = service.clone();
             let request = serde_json::from_value(args.clone()).unwrap();
             let error = service.call_with_deadline(
-                "task", args.as_object(), std::time::Duration::from_secs(55), async move {
+                "task", args.as_object(), std::time::Duration::from_secs(55 * (index as u64 + 1)), async move {
                     let read = sender.task(Parameters(request)).await.unwrap();
                     assert_eq!(read.is_error, Some(false));
                     std::future::pending().await
@@ -2853,7 +2927,7 @@ mod tests {
             assert_eq!(data["code"], "task_read_paginate");
             assert_eq!(data["recovery"]["tool"], "task");
             assert_eq!(data["recovery"]["arguments"], serde_json::json!({
-                "action":action, "id":task.id, "full":false, "offset":0, "limit":1600,
+                "action":action, "id":task.id, "full":false, "offset":offset, "limit":1600,
             }));
             let read = service.task(Parameters(serde_json::from_value(
                 data["recovery"]["arguments"].clone(),
@@ -2862,6 +2936,21 @@ mod tests {
             assert!(super::first_tool_text(&read).unwrap().len() < 1800);
             assert_eq!(tasks.get(&task.id).unwrap().notes, task.notes);
         }
+        // A notes write with full=true is not a read-only retry candidate.
+        let args = serde_json::json!({"action":"notes", "id":task.id, "notes":"caller payload", "full":true});
+        let sender = service.clone();
+        let request = serde_json::from_value(args.clone()).unwrap();
+        let error = service.call_with_deadline(
+            "task", args.as_object(), std::time::Duration::from_secs(300), async move {
+                sender.task(Parameters(request)).await.unwrap();
+                std::future::pending().await
+            },
+        ).await.unwrap_err();
+        let data = error.data.unwrap();
+        assert_eq!(data["mutation_outcome"], "COMMITTED");
+        assert!(data["recovery"].is_null());
+        assert!(data["code"].is_null());
+        assert_eq!(tasks.get(&task.id).unwrap().notes.matches("caller payload").count(), 1);
     }
 
     #[tokio::test(start_paused = true)]

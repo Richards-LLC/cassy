@@ -153,12 +153,11 @@ pub fn launch_choice<'a>(
     let mut selection = recommend(accounts, provider, now, config);
     if selection.recommended.is_none() && provider == Provider::Codex {
         let inconclusive = |account: &Account, reason: &str| {
+            // recommend() already gave disabled, stale and duplicate homes
+            // their own exclusion reasons.
             reason == LOGIN_UNAVAILABLE_REASON
                 && account.login_state == LoginState::Unknown
-                && !account.flags.disabled
-                && !account.flags.stale_login
                 && !account.flags.never_logged_in
-                && account.flags.duplicate_of.is_none()
         };
         selection.recommended = selection
             .excluded

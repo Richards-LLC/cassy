@@ -57,16 +57,20 @@ fn train_authority_atomic_publication_cas_6456() {
     let right_head = fixture.candidate(&fixture.right, "right-candidate");
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let results = std::thread::scope(|scope| {
-        let run = |snapshot: Snapshot, repo: &Path, head: &str| {
-            let barrier = barrier.clone();
-            let actor = &fixture.actor;
-            scope.spawn(move || {
-                barrier.wait();
-                snapshot.publish(&GitOperations::new(repo.to_path_buf()), actor, head)
-            })
-        };
-        let a = run(left, &fixture.left, &left_head);
-        let b = run(right, &fixture.right, &right_head);
+        let actor = &fixture.actor;
+        let repo_a = &fixture.left;
+        let repo_b = &fixture.right;
+        let head_a = &left_head;
+        let head_b = &right_head;
+        let start = barrier.clone();
+        let a = scope.spawn(move || {
+            start.wait();
+            left.publish(&GitOperations::new(repo_a.clone()), actor, head_a)
+        });
+        let b = scope.spawn(move || {
+            barrier.wait();
+            right.publish(&GitOperations::new(repo_b.clone()), actor, head_b)
+        });
         [a.join().unwrap(), b.join().unwrap()]
     });
     assert_eq!(results.iter().filter(|r| r.as_ref().is_ok_and(|p| p.is_published())).count(), 1, "{results:?}");

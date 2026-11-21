@@ -1,0 +1,4 @@
+title: Park evidence publication is bounded and requires only cited evidence
+statement: A task close publishes its ledger and the evidence files the ledger cites within a fixed budget, retrying a failed upload once. A failed upload of a file the ledger does not cite, such as a folder copied from another task, never refuses the park; it is listed as unpublished.
+found: 2026-11-21
+tasks: [cas-8018]

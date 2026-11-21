@@ -258,7 +258,12 @@ interface SessionOptions {
   changed(): void;
   /** A finished command's one-line outcome, shown once as a self-clearing toast. */
   settled?(receipt: CommandReceipt): void;
+  /** The hub's retained receipt for a command whose daemon is gone (cas-b521);
+   * "retry" while its daemon may still run or the store is busy. */
+  readRetained?(ref: string): Promise<CommandReceipt | "retry" | undefined>;
 }
+/** Waits before re-reading a retained receipt the hub could not answer yet. */
+const RETAINED_RETRY_MS = [1_000, 2_000, 4_000];
 const COMMAND_OUTCOME_WINDOW_MS = 95_000;
 // Finish can outlast the short confirmation window. Keep read-only recovery
 // within the daemon's ten-minute receipt retention; never resubmit the command.
@@ -364,8 +369,22 @@ export class SupervisorCommandSession {
       }
       this.endedCommands.set(receipt.client_ref, reason);
       this.settleEnded(receipt, reason);
+      this.readRetained(receipt.client_ref);
     }
     this.options.changed();
+  }
+  private readonly retainedReads = new Set<string>();
+  /** The daemon is gone; the receipt it left may still say how the command
+   * ended. This only reads: nothing is ever resent. */
+  private readRetained(ref: string, attempt = 0): void {
+    const read = this.options.readRetained;
+    if (!read || (attempt === 0 && this.retainedReads.has(ref))) return;
+    this.retainedReads.add(ref);
+    void read(ref).then(result => {
+      if (result !== "retry") { if (result) this.receive(result); return; }
+      const wait = RETAINED_RETRY_MS[attempt];
+      if (wait !== undefined) setTimeout(() => this.readRetained(ref, attempt + 1), wait);
+    }, () => undefined);
   }
   private canSettleEnded(receipt: CommandReceipt): boolean {
     return receipt.phase === "queued" || receipt.phase === "submitted" || receipt.phase === "unconfirmed" || receipt.interactive;

@@ -36,10 +36,30 @@ pub(crate) fn load(root: &Path, session: &str, supervisor: &str) -> cas_store::R
     })
 }
 
+fn key(session: &str, supervisor: &str, device_id: &Value, client_ref: &Value) -> cas_store::Result<String> {
+    Ok(format!("{}{}", prefix(session, supervisor), hex::encode(Sha256::digest(serde_json::to_vec(&(device_id, client_ref))?))))
+}
+
+/// One caller's receipt, for a reader that must not change the store: no
+/// retention pass, no schema creation, and a short bounded wait.
+pub(crate) fn read(root: &Path, session: &str, supervisor: &str, device_id: &str, client_ref: &str) -> cas_store::Result<Option<Value>> {
+    let key = key(session, supervisor, &Value::from(device_id), &Value::from(client_ref))?;
+    if !root.join("cas.db").exists() { return Ok(None); }
+    let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_millis(250))?;
+    let found = conn.query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| row.get::<_, String>(0));
+    match found {
+        // Unreadable bytes are a missing row, as they are to the daemon.
+        Ok(value) => Ok(serde_json::from_str(&value).ok()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message.starts_with("no such table") => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(crate) fn write(root: &Path, session: &str, supervisor: &str, value: &Value, mode: Write) -> cas_store::Result<bool> {
     let receipt = &value["receipt"];
-    let owner = (&receipt["device_id"], &receipt["client_ref"]);
-    let key = format!("{}{}", prefix(session, supervisor), hex::encode(Sha256::digest(serde_json::to_vec(&owner)?)));
+    let key = key(session, supervisor, &receipt["device_id"], &receipt["client_ref"])?;
     let value = serde_json::to_string(value)?;
     transaction(root, |conn| {
         let sql = match mode {

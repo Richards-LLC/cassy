@@ -1002,6 +1002,11 @@ export class HubConnectionSupervisor {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/quality`);
   }
 
+  /** A command's retained outcome after its daemon is gone (cas-b521). */
+  async retainedCommandReceipt(session: string, ref: string): Promise<import("./supervisor-commands").CommandReceipt> {
+    return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/commands/${encodeURIComponent(ref)}`);
+  }
+
   async lease(session: string): Promise<LeaseState> {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/lease`);
   }

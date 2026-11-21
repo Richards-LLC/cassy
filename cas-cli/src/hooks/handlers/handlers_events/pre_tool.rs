@@ -12503,6 +12503,55 @@ mod worker_commit_guard_tests {
     }
 
     #[test]
+    fn registered_worker_suffixes_keep_ownership_and_sibling_boundaries_cas_ea31() {
+        use cas_types::{Agent, AgentRole};
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let foreign = make_git_repo();
+        let root = crate::store::init_cas_dir(repo.path()).unwrap();
+        let foreign_root = crate::store::init_cas_dir(foreign.path()).unwrap();
+        for (cas_root, names) in [
+            (&root, vec!["worker", "worker-staging", "worker0"]),
+            (&foreign_root, vec!["worker", "worker-01ea"]),
+        ] {
+            let agents = crate::store::open_agent_store(cas_root).unwrap();
+            for name in names {
+                let mut agent = Agent::new_with_role(name.into(), name.into(), AgentRole::Worker);
+                if cas_root == &root && name == "worker" {
+                    agent.metadata.insert("clone_path".into(), repo.path().display().to_string());
+                }
+                agents.register(&agent).unwrap();
+            }
+        }
+        env.set("CAS_ROOT", &foreign_root);
+        env.set("CAS_AGENT_NAME", "worker");
+        env.set("CAS_CLONE_PATH", repo.path());
+        let command = "git commit -m 'fix(cas-ea31): fixture'";
+        let mut failures = Vec::new();
+        for (branch, denied) in [
+            ("factory/worker", false), ("factory/worker-01ea", false),
+            ("factory/worker-review", false), ("factory/worker-cas-ea31", false),
+            ("factory/worker-staging", true), ("factory/worker-staging-cas-ea31", true),
+            ("factory/worker0", true), ("factory/worker0-cas-ea31", true),
+        ] {
+            let output = std::process::Command::new("git").args(["switch", "-C", branch])
+                .current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let result = worker_git_scope_violation_for_command_with_worktree(
+                repo.path().to_str().unwrap(), command, Some(repo.path()),
+            );
+            if result.is_some() != denied { failures.push((branch, denied, result.map(|(_, message)| message))); }
+            assert!(worker_git_scope_violation_for_command_with_worktree(
+                foreign.path().to_str().unwrap(), command, Some(repo.path()),
+            ).is_some());
+            assert!(worker_git_scope_violation_for_command_with_worktree(
+                repo.path().to_str().unwrap(), "git switch -C factory/worker", Some(repo.path()),
+            ).is_none());
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
     fn own_factory_branch_commit_is_still_allowed() {
         let tmp = make_git_repo();
         let p = tmp.path().to_string_lossy().to_string();

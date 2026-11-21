@@ -271,8 +271,15 @@ fn checkout_task_beside_parked_delivery(
     task_id: &str,
     target: &str,
     require_fresh_base: bool,
+    admit_switch: &dyn Fn() -> Result<(), String>,
 ) -> Result<String, String> {
     let git = GitOperations::new(checkout.to_path_buf());
+    // cas-22c6: already on the task branch, nothing below moves the checkout.
+    if crate::factory_isolation::branch_at(checkout).as_deref()
+        != Some(crate::factory_isolation::worker_task_branch(worker, task_id).as_str())
+    {
+        admit_switch()?;
+    }
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(checkout)
@@ -349,6 +356,7 @@ fn reconcile_reused_factory_branch(
     task_identity: Option<&close_ops::TaskCommitIdentity>,
     recorded_start_branch: Option<&str>,
     parked_task_for_tip: impl Fn(&str) -> Option<String>,
+    admit_move: &dyn Fn() -> Result<(), String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
         return Ok(ReusedFactoryBranchStart::Unchanged);
@@ -452,6 +460,7 @@ fn reconcile_reused_factory_branch(
     }
 
     if git.is_ancestor(&factory_tip, &target_tip) {
+        admit_move()?;
         require_clean_tracked_tree()?;
         git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
@@ -552,6 +561,7 @@ fn reconcile_reused_factory_branch(
             // cas-2c75: every off-target commit already shipped on trunk and
             // none is this task's; start from the target, as an ancestor tip does.
             if only_released_commits {
+                admit_move()?;
                 git.reset_hard_in_dir(worktree_path, &target_tip).map_err(|error| {
                     format!("Cannot reset reused factory branch {expected_branch} to `{target_branch}`: {error}")
                 })?;
@@ -573,6 +583,7 @@ fn reconcile_reused_factory_branch(
                 tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
             ));
         }
+        admit_move()?;
         require_clean_tracked_tree()?;
         let keep = format!("parked/{task_id}");
         let kept = std::process::Command::new("git")
@@ -646,7 +657,7 @@ mod reused_factory_branch_tests {
         let target = "epic/never-pushed";
         for require_fresh_base in [false, true] {
             let error = checkout_task_beside_parked_delivery(
-                repo.path(), "test-worker", "cas-8bc4", target, require_fresh_base,
+                repo.path(), "test-worker", "cas-8bc4", target, require_fresh_base, &|| Ok(()),
             )
             .expect_err("missing target must be refused");
             assert!(error.contains(target), "{error}");
@@ -668,13 +679,13 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["branch", "epic/local-only"]);
         git(repo.path(), &["push", "origin", "main:refs/heads/epic/origin-only"]);
 
-        let error = checkout_task_beside_parked_delivery(repo.path(), "test-worker", "cas-0001", "epic/absent", false)
+        let error = checkout_task_beside_parked_delivery(repo.path(), "test-worker", "cas-0001", "epic/absent", false, &|| Ok(()))
             .expect_err("a target absent locally and on origin is refused");
         assert!(error.contains("epic/absent"), "{error}");
         assert!(git(repo.path(), &["branch", "--list", "factory/*"]).is_empty());
 
         for (task, target) in [("cas-0002", "epic/local-only"), ("cas-0003", "epic/origin-only")] {
-            let branch = checkout_task_beside_parked_delivery(repo.path(), "test-worker", task, target, false)
+            let branch = checkout_task_beside_parked_delivery(repo.path(), "test-worker", task, target, false, &|| Ok(()))
                 .expect("a target present in one place starts");
             assert_eq!(git(repo.path(), &["rev-parse", &branch]), git(repo.path(), &["rev-parse", "main"]));
         }
@@ -691,7 +702,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -715,7 +726,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect("unrelated prior delivery is reported, not reset");
         let ReusedFactoryBranchStart::Occupied { commit } = result else {
             panic!("unrelated prior delivery must occupy the lane: {result:?}");
@@ -750,12 +761,12 @@ mod reused_factory_branch_tests {
         };
 
         let ungranted = identity(Vec::new());
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&ungranted), None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&ungranted), None, |_| None, &|| Ok(()))
             .expect("ungranted import is reported");
         assert!(matches!(result, ReusedFactoryBranchStart::Occupied { .. }), "{result:?}");
 
         let granted = identity(vec![pr_head]);
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&granted), None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&granted), None, |_| None, &|| Ok(()))
             .expect("granted import resumes");
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), tip);
@@ -785,7 +796,7 @@ mod reused_factory_branch_tests {
             ..Default::default()
         };
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "epic/train", Some(&identity), None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "epic/train", Some(&identity), None, |_| None, &|| Ok(()))
             .expect("a released-only lane starts");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -798,7 +809,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -817,7 +828,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect_err("tracked changes must block reset");
 
     }
@@ -840,7 +851,7 @@ mod reused_factory_branch_tests {
 
         let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
-        })
+        }, &|| Ok(()))
         .expect("a parked tip moves instead of refusing");
 
         assert_eq!(
@@ -877,7 +888,7 @@ mod reused_factory_branch_tests {
 
         let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
-        })
+        }, &|| Ok(()))
         .expect("a parked tip moves instead of refusing");
         let ReusedFactoryBranchStart::MovedFromParked { delivery_branch, .. } = result else {
             panic!("moved from parked: {result:?}");
@@ -2762,16 +2773,6 @@ impl CasCore {
                     checkout.canonicalize().is_ok_and(|root| root == context.repo_root)
                 })
             });
-        // cas-22c6 (GH #2286): every start of an Open task may cut or switch
-        // the worker's branch (checkout_task_beside_parked_delivery), queued
-        // or direct. Admit it before any task, lease or checkout mutation;
-        // artifact-only work in the shared checkout never moves it (GH #2022).
-        if task.status == TaskStatus::Open
-            && !shared_no_code_start
-            && let Some(worker) = worker.as_ref().filter(|worker| worker.metadata.contains_key("clone_path"))
-        {
-            crate::worker_task_queue::admit_checkout_switch(&self.cas_root, worker, &task.id)?;
-        }
 
         // Use the commit guard's identity predicate before claiming QA or
         // mutating the task, lease or checkout. A foreign factory ref must not
@@ -2976,6 +2977,22 @@ impl CasCore {
                         .get("clone_path")
                         .map(std::path::Path::new)
                         .unwrap_or(target_repo_root);
+                    // cas-22c6 (GH #2286): queued or direct, a start that
+                    // would move this checkout's branch or HEAD waits while a
+                    // detached run reads it or it holds uncommitted work
+                    // (G-161). A start that keeps the checkout as it is, such
+                    // as a same-branch resume, is never refused here. Every
+                    // move below runs before the task, lease or checkout
+                    // records change; artifact-only shared starts skip this
+                    // block (GH #2022).
+                    let admit_task = task.id.clone();
+                    let admit_switch = || -> Result<(), String> {
+                        if !worker.metadata.contains_key("clone_path") {
+                            return Ok(());
+                        }
+                        crate::worker_task_queue::admit_checkout_switch(&self.cas_root, &worker, &admit_task)
+                            .map_err(|error| error.message.into_owned())
+                    };
                     let (worker_repo_root, _) = super::repo_context::git_layout(worker_checkout)
                         .map_err(|error| {
                             Self::error(
@@ -3039,7 +3056,7 @@ impl CasCore {
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
                             worker_checkout, &worker.name, &task.id, target_branch,
-                            task.deliverables.factory_branch_start.is_none(),
+                            task.deliverables.factory_branch_start.is_none(), &admit_switch,
                         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                         Some(format!("\nTask start preserved {previous}; starting on {worker_branch}."))
                     } else if task.status == TaskStatus::Open {
@@ -3053,7 +3070,7 @@ impl CasCore {
                             .map(|parked| {
                                 let preserved = parked.branch.clone().unwrap_or_else(|| worker_branch.clone());
                                 worker_branch = checkout_task_beside_parked_delivery(
-                                    worker_checkout, &worker.name, &task.id, target_branch, false,
+                                    worker_checkout, &worker.name, &task.id, target_branch, false, &admit_switch,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                                 Ok::<_, McpError>(format!(
                                     "\n\n🔀 PARKED BRANCH PRESERVED: {} stays on {preserved} at {}. This task uses {worker_branch}.",
@@ -3107,7 +3124,7 @@ impl CasCore {
                         let owner_task = owner_task.to_string();
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
-                            worker_checkout, &worker.name, &task.id, target_branch, false,
+                            worker_checkout, &worker.name, &task.id, target_branch, false, &admit_switch,
                         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                         beside_note = Some(format!(
                             "\n\n🔀 TASK BRANCH CUT: {previous} stays {owner_task}'s delivery, unchanged. This task starts on {worker_branch} from `{target_branch}`."
@@ -3171,6 +3188,7 @@ impl CasCore {
                                 .filter(|parked| parked.task_id != task.id)
                                 .map(|parked| parked.task_id)
                             },
+                            &admit_switch,
                         ) {
                             Ok(ReusedFactoryBranchStart::Reset) => {
                                 reset_start_base = true;
@@ -3203,7 +3221,7 @@ impl CasCore {
                                 ))?;
                                 let tip = tip.trim();
                                 worker_branch = checkout_task_beside_parked_delivery(
-                                    worker_checkout, &worker.name, &task.id, target_branch, false,
+                                    worker_checkout, &worker.name, &task.id, target_branch, false, &admit_switch,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                                 Some(format!(
                                     "\n\n🔀 TASK BRANCH CUT: {lane} stays unchanged at tip {tip}. Unattributed work outside `{target_branch}` includes {commit}. This task starts on {worker_branch} from `{target_branch}`, so its PR does not wait for that work."

@@ -92,7 +92,11 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
         .open(locks.join("shared-queue-checkout.lock")).map_err(|_| refused())?;
     lock.try_lock_exclusive().map_err(|_| refused())?;
-    admit_checkout_switch(root, worker, task_id)?;
+    let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
+    // cas-22c6: only a switch to the worker's lane can move a live run's tree.
+    if crate::factory_isolation::branch_at(checkout).as_deref() != Some(branch.as_str()) {
+        admit_checkout_switch(root, worker, task_id)?;
+    }
     let git = |args: &[&str]| std::process::Command::new("git").current_dir(checkout)
         .args(args).output().map_err(|_| refused());
     let status = git(&["status", "--porcelain"])?;
@@ -105,18 +109,18 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
             && matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
             && ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref()))
     { return Err(refused()); }
-    let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
     let exists = git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])?.status.success();
     let switched = if exists { git(&["switch", &branch])? } else { git(&["switch", "-c", &branch])? };
     if !switched.status.success() { return Err(refused()); }
     crate::factory_isolation::verify_worker_worktree_binding(&worker.name, checkout, None).map_err(error)
 }
 
-/// cas-22c6 (GH #2286): the one admission for every start that may switch a
-/// worker's checkout: queue advancement, a direct start of the queued
-/// successor, and a plain start that cuts a task branch beside a parked
-/// delivery. A detached proof run still reading the checkout, or
-/// uncommitted work in it, would lose its tree mid-run.
+/// cas-22c6 (GH #2286): the one admission for every start that would move a
+/// worker's checkout, queued or direct: a switch to the worker's lane or a
+/// task branch, and a reset of a reused lane to its target. Callers ask only
+/// when the move would actually happen, so a same-branch resume is admitted.
+/// A detached proof run still reading the checkout, or uncommitted work in
+/// it, would lose its tree mid-run.
 pub(crate) fn admit_checkout_switch(root: &Path, worker: &Agent, task_id: &str) -> Result<(), McpError> {
     let Some(busy) = queue_checkout_busy(root, worker) else { return Ok(()) };
     // gate[G-161 start]: Task start waits while the worker's checkout is busy

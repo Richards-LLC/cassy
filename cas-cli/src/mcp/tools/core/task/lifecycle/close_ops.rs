@@ -6698,6 +6698,7 @@ impl CasCore {
         merge_conflicted: bool,
         measured_branch: Option<String>,
         close_reason: Option<&str>,
+        record_delivery: bool,
     ) -> cas_store::Result<()> {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
@@ -6726,9 +6727,9 @@ impl CasCore {
         // requests name it too.
         // Artifact-only owner review has no code source to attribute to the
         // worker's shared lane. A measured code delivery keeps normal records.
-        if task.execution_note.as_deref() != Some("no-code")
+        if record_delivery && (task.execution_note.as_deref() != Some("no-code")
             || measured_branch.is_some()
-            || factory_branch_anchor.is_some()
+            || factory_branch_anchor.is_some())
         {
             parked.deliverables.record_park(
                 measured_branch.as_deref(),
@@ -10027,6 +10028,7 @@ impl CasCore {
                             false,
                             measured_branch.clone(),
                             req.reason.as_deref(),
+                            true,
                         ) {
                             return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
                         }
@@ -12309,9 +12311,11 @@ impl CasCore {
                 && owner_train.is_some()
             {
                 let mut parking = task.clone();
-                if no_code_without_own_commits
-                    || measured_evidence.as_ref().is_some_and(|measured| measured.paths.is_empty())
-                {
+                // GH #2284: the positively measured no_delivery disposition
+                // has no source, even without an execution_note methodology.
+                let without_delivery = empty_delivery || no_code_without_own_commits
+                    || measured_evidence.as_ref().is_some_and(|measured| measured.paths.is_empty());
+                if without_delivery {
                     parking.deliverables.factory_branch_anchor = None;
                     parking.deliverables.historical_factory_branch_anchors.clear();
                     parking.deliverables.parked_branch = None;
@@ -12320,7 +12324,7 @@ impl CasCore {
                 self.park_task_awaiting_merge(
                     task_store.as_ref(), &parking, &task,
                     "TRAIN OWNER REVIEW REQUIRED", &message, None, false, None,
-                    req.reason.as_deref(),
+                    req.reason.as_deref(), !without_delivery,
                 ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
                 return Ok(Self::success(message));
             }
@@ -30583,7 +30587,7 @@ mod merge_state_gate_tests {
         tasks.update(&task).unwrap();
         task = tasks.get(&task.id).unwrap();
         core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
-            Some(first.clone()), false, Some(branch.clone()), None).unwrap();
+            Some(first.clone()), false, Some(branch.clone()), None, true).unwrap();
         let parked = tasks.get(&task.id).unwrap();
         let reminders = crate::store::open_reminder_store(&root).unwrap();
         assert_eq!(reminders.list_all_pending().unwrap().len(), 2);
@@ -30643,7 +30647,7 @@ mod merge_state_gate_tests {
                 cas_types::DependencyType::ParentChild)).unwrap();
             assert!(task.deliverables.work_target.is_none() && task.branch.is_none());
             core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
-                Some(tip.clone()), false, Some("factory/relay-worker".into()), None).unwrap();
+                Some(tip.clone()), false, Some("factory/relay-worker".into()), None, true).unwrap();
             let watches = crate::store::open_reminder_store(&root).unwrap().list_all_pending().unwrap();
             assert_eq!(watches.len(), 2, "{expected}");
             assert!(watches.iter().all(|row| row.owner_id == "relay-supervisor-id" && row.target_id == "relay-supervisor-id"));
@@ -30715,7 +30719,7 @@ mod merge_state_gate_tests {
             core.park_task_awaiting_merge(
                 &tasks, &parking, &task, "MERGE REQUIRED", "delivery is ready for merge",
                 Some(tip.clone()), false, Some("factory/relay-worker-cas-3a82".into()),
-                Some("PASS delivery-tip: relay fixture"),
+                Some("PASS delivery-tip: relay fixture"), true,
             ).unwrap();
             let parked = tasks.get(&task.id).unwrap();
             let watches = crate::store::open_reminder_store(&root).unwrap().list_all_pending().unwrap();
@@ -30822,7 +30826,7 @@ mod merge_state_gate_tests {
             let refused = core.park_task_awaiting_merge(
                 &tasks, &stale_close, &stale_close, "MERGE REQUIRED", "stale close still running",
                 Some(tip.clone()), false, Some("factory/relay-worker-cas-3a82".into()),
-                Some("PASS delivery-tip: stale close"),
+                Some("PASS delivery-tip: stale close"), true,
             ).expect_err("GH #1276: a stale close cannot erase the review rejection");
             assert!(refused.to_string().contains("task changed"));
             let reopened = tasks.get(&task.id).unwrap();
@@ -30862,7 +30866,7 @@ mod merge_state_gate_tests {
             let refused = core.park_task_awaiting_merge(
                 &tasks, &snapshot, &snapshot, "MERGE REQUIRED", "stale close",
                 Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
-                Some("PASS delivery-tip: stale close"),
+                Some("PASS delivery-tip: stale close"), true,
             ).expect_err(field);
             assert!(refused.to_string().contains("task changed"), "{field}: {refused}");
             assert_eq!(serde_json::to_value(tasks.get(&original.id).unwrap()).unwrap(),

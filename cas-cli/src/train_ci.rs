@@ -555,6 +555,68 @@ fn record_timings(root: &Path, train: &str, state: &Value) {
 mod tests {
     use super::*;
 
+    /// GH #2184: CI completion can arrive after publication or after the
+    /// observer took its open-epic snapshot. Neither may invite a second cut.
+    #[test]
+    fn shipped_train_green_does_not_notify_cut_ready_gh2184() {
+        use cas_types::{Agent, AgentRole, Task, TaskStatus, TaskType};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut observed = Vec::new();
+        for (case, expected) in [
+            ("assembled", 1), ("older-release", 1), ("checkpoint-tag", 1),
+            ("published-tag", 0), ("cut", 0), ("closed", 0), ("stale-closed", 0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let git = |args: &[&str]| {
+                let output = Command::new("git").current_dir(repo)
+                    .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                    .args(args).output().unwrap();
+                assert!(output.status.success(), "git {args:?}: {output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_owned()
+            };
+            git(&["init", "-q", "-b", "main"]);
+            std::fs::write(repo.join("README.md"), "prior release\n").unwrap();
+            git(&["add", "."]); git(&["commit", "-qm", "prior release"]);
+            if case == "older-release" { git(&["tag", "v1.0.0"]); }
+            std::fs::write(repo.join("README.md"), "assembled train\n").unwrap();
+            git(&["commit", "-qam", "assembled"]);
+            let head = git(&["rev-parse", "HEAD"]);
+            if case == "published-tag" { git(&["tag", "-a", "v1.0.1", "-m", "published"]); }
+            if case == "checkpoint-tag" { git(&["tag", "checkpoint"]); }
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            // This fixture proves the manual cut-ready path, independent of
+            // the operator's current auto-cut settings.
+            std::fs::write(root.join("config.toml"), "[release]\nauto_cut_max_per_day=0\n").unwrap();
+            let mut owner = Agent::new_with_role("sup".into(), "sup".into(), AgentRole::Supervisor);
+            owner.factory_session = Some("session".into());
+            crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+            let mut epic = Task::new("cas-train".into(), "Train".into());
+            epic.task_type = TaskType::Epic;
+            epic.labels.push("release-train".into());
+            epic.branch = Some("main".into());
+            epic.epic_verification_owner = Some(owner.id.clone());
+            if case == "cut" { epic.labels.push("release-train-cut".into()); }
+            if case == "closed" { epic.status = TaskStatus::Closed; }
+            let tasks = crate::store::open_task_store(&root).unwrap();
+            tasks.add(&epic).unwrap();
+            if case == "stale-closed" {
+                let mut closed = epic.clone(); closed.status = TaskStatus::Closed;
+                tasks.update(&closed).unwrap();
+            }
+            let state = serde_json::json!({"outcome":"PASS", "head":head, "run_id":"2184", "run_attempt":1});
+            notify(&root, &epic, None, &state).unwrap();
+            let rows = crate::store::open_supervisor_queue_store(&root).unwrap().peek("sup", 10).unwrap();
+            // The durable machine payload identifies the notice independently
+            // of its human-facing wording.
+            let kinds = rows.iter().map(|row| serde_json::from_str::<Value>(&row.payload).unwrap()["kind"].clone()).collect::<Vec<_>>();
+            if kinds.len() != expected || kinds.iter().any(|kind| kind != "release_cut_ready") {
+                observed.push((case, expected, kinds));
+            }
+        }
+        assert!(observed.is_empty(), "{observed:?}");
+    }
+
     /// Nov 7: red at one tip, then the repair's green tip woke nobody.
     #[test]
     fn green_after_red_wakes_the_supervisor_once_per_tip() {

@@ -3358,6 +3358,82 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
         .collect::<Vec<_>>().join("\n")
 }
 
+/// GH #2233: a terminal task can arrive before its lease cleanup (for
+/// example through peer sync). Both direct starts and queue repair must heal
+/// that stale ownership, while retaining the single unfinished task fence.
+#[tokio::test]
+async fn cancelled_work_does_not_block_next_start_gh2233() {
+    let mut env = TestEnvGuard::temp_home();
+    for daemon in [false, true] {
+        for state in ["cancelled", "cancelled-stale-lease", "closed-stale-lease", "assigned", "leased"] {
+            let f = queue_control_fixture(&mut env);
+            let previous = "cas-8488-current";
+            let next = "cas-8488-one";
+            let mut successor = f.task(next);
+            successor.execution_note = Some("no-code".into());
+            successor.external_ref = Some(PROOF.into());
+            f.put(&successor);
+            queue_control(&f, Some(vec![next])).await;
+            let agents = open_agent_store(&f.cas_dir()).unwrap();
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            match state {
+                "cancelled" | "cancelled-stale-lease" => {
+                    call(&f.supervisor, serde_json::json!({
+                        "action":"cancel", "id":previous, "reason":"Superseded by peer delivery",
+                    })).await;
+                    assert_eq!(f.task(previous).status, TaskStatus::Cancelled);
+                }
+                "closed-stale-lease" => {
+                    // Terminal projection arriving before lease cleanup.
+                    let mut task = f.task(previous);
+                    task.status = TaskStatus::Closed;
+                    f.put(&task);
+                }
+                "assigned" => { agents.release_lease(previous, "nocode-worker-session").unwrap(); }
+                "leased" => {
+                    let mut task = f.task(previous);
+                    task.status = TaskStatus::Open;
+                    f.put(&task);
+                }
+                _ => unreachable!(),
+            }
+            if state == "cancelled-stale-lease" {
+                claim(&f, previous);
+            }
+            env.set("CAS_AGENT_ROLE", "worker");
+            let unfinished = matches!(state, "assigned" | "leased");
+            if daemon {
+                crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+            } else {
+                let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+                    "action":"start", "id":next,
+                })).unwrap())).await;
+                if unfinished {
+                    let error = result.unwrap_err();
+                    assert!(error.message.contains("G-08"), "{state}: {error}");
+                    // Execute the suggested hold action through the real
+                    // handler; terminal work must never need this remedy.
+                    call(&f.worker, serde_json::json!({
+                        "action":"update", "id":previous, "status":"blocked",
+                    })).await;
+                    assert_eq!(f.task(previous).status, TaskStatus::Blocked);
+                } else {
+                    result.unwrap_or_else(|error| panic!("{state}: {error}"));
+                }
+            }
+            assert_eq!(f.task(next).status,
+                if unfinished { TaskStatus::Open } else { TaskStatus::InProgress },
+                "daemon={daemon}, state={state}");
+            if !unfinished {
+                assert!(agents.list_active_leases().unwrap().iter()
+                    .filter(|lease| lease.agent_id == "nocode-worker-session")
+                    .all(|lease| lease.task_id == next));
+                assert_eq!(agents.get("nocode-worker-session").unwrap().active_tasks, 1);
+            }
+        }
+    }
+}
+
 /// GH #1760: resuming blocked, untouched work through the queue binds its
 /// fresh lane before a first commit, without discarding earlier delivery.
 #[tokio::test]

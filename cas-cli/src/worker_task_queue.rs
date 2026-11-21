@@ -12,6 +12,32 @@ pub(crate) fn conversation_generation(worker: &Agent) -> String {
     format!("{}|{}", worker.id, worker.cc_session_id.as_deref().unwrap_or_default())
 }
 
+/// Terminal task state can reach this machine before its lease cleanup.
+/// Reconcile only this worker's exact lease generation before WIP admission.
+pub(crate) fn unfinished_worker_leases(
+    tasks: &dyn cas_store::TaskStore,
+    agents: &dyn cas_store::AgentStore,
+    worker: &Agent,
+) -> cas_store::Result<Vec<cas_types::TaskLease>> {
+    let mut active = Vec::new();
+    for lease in agents.list_active_leases()?.into_iter().filter(|lease| lease.agent_id == worker.id) {
+        let terminal = match tasks.get(&lease.task_id) {
+            Ok(task) => task.is_terminal(),
+            // Unknown tasks remain ownership fences, as before.
+            Err(cas_store::StoreError::NotFound(_) | cas_store::StoreError::TaskNotFound(_)) => false,
+            Err(error) => return Err(error),
+        };
+        if terminal {
+            agents.release_lease_if_owner_epoch(
+                &lease.task_id, &worker.id, lease.epoch, "Terminal task no longer owns worker WIP",
+            )?;
+        } else {
+            active.push(lease);
+        }
+    }
+    Ok(active)
+}
+
 fn error(message: impl std::fmt::Display) -> McpError {
     CasCore::error(ErrorCode::INVALID_PARAMS, message.to_string())
 }
@@ -580,13 +606,11 @@ impl CasCore {
                         .as_deref()
                         .is_some_and(|a| a == worker.name || a == worker.id)
             })
-            || agents
-                .list_active_leases()
+            || unfinished_worker_leases(tasks.as_ref(), agents.as_ref(), &worker)
                 .map_err(error)?
                 .iter()
                 .any(|lease| {
-                    lease.agent_id == worker.id
-                        && Some(lease.task_id.as_str()) != queue.current_task.as_deref()
+                    Some(lease.task_id.as_str()) != queue.current_task.as_deref()
                 })
         {
             return Ok(Some(format!(

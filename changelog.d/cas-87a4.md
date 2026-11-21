@@ -9,7 +9,8 @@
   value), every later assignment must be such a statement of an integer or
   `$((...))`, and no command in the script may
   assign it another way. Every reassignment, including one inside arithmetic,
-  must draw only on other proven counters. Quoted, escaped or heredoc text never
-  counts as arithmetic, and a script with comments, `$'...'` quoting or
-  backslash-newline continuations proves no counter. Any other arithmetic over
+  must draw only on other proven counters. The proof reads the guard's own shell
+  tokens, so quoted, escaped, commented or heredoc text (including an escaped
+  `;`) never acts as a statement break, an assignment or arithmetic, and a word
+  joined by a line continuation is not trusted. Any other arithmetic over
   variables is still refused.

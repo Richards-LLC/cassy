@@ -1459,7 +1459,7 @@ fn execute_tests(
     // GH #2172: a Playwright run writes its reports under the task's artifact
     // directory; a failure keeps them so the traces it printed stay readable.
     let reports = if runner == "playwright" {
-        let parent = playwright_reports_parent(cas_root, repo);
+        let parent = javascript_reports_parent(cas_root, repo);
         std::fs::create_dir_all(&parent)?;
         tempfile::Builder::new().prefix(&format!("playwright-{}-", head.get(..12).unwrap_or(head))).tempdir_in(parent)?
     } else {
@@ -1629,6 +1629,17 @@ fn execute_tests(
     Ok(())
     })();
     if let Err(error) = outcome {
+        if runner == "vitest" {
+            return Err(match retain_vitest_reports(cas_root, repo, head, reports.path()) {
+                Ok(kept) => anyhow::anyhow!(
+                    "{error:#}\nFailed Vitest assertion reports (redacted JSON) are kept at {}.",
+                    kept.display()
+                ),
+                Err(capture) => anyhow::anyhow!(
+                    "{error:#}\nCould not retain Vitest assertion reports: {capture:#}"
+                ),
+            });
+        }
         if runner != "playwright" {
             return Err(error);
         }
@@ -1655,9 +1666,34 @@ fn execute_tests(
     Ok(proof)
 }
 
-/// Where a Playwright run's reports directory lives: the task's artifact
-/// directory, or a shared worker-check one when no task owns the checkout.
-fn playwright_reports_parent(cas_root: &Path, repo: &Path) -> PathBuf {
+/// Copy only the report protocol payload; temporary scope files stay private
+/// and success receipts retain their existing lifecycle.
+fn retain_vitest_reports(cas_root: &Path, repo: &Path, head: &str, reports: &Path) -> Result<PathBuf> {
+    let parent = javascript_reports_parent(cas_root, repo);
+    std::fs::create_dir_all(&parent)?;
+    let kept = tempfile::Builder::new()
+        .prefix(&format!("vitest-{}-", head.get(..12).unwrap_or(head)))
+        .tempdir_in(parent)?;
+    let mut count = 0;
+    for entry in std::fs::read_dir(reports)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry.file_name().to_string_lossy().starts_with("report-")
+            && entry.path().extension().is_some_and(|extension| extension == "json")
+        {
+            let report: Value = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+            let redacted = crate::ai_enrichment::redact_json(&report);
+            std::fs::write(kept.path().join(entry.file_name()), serde_json::to_vec_pretty(&redacted)?)?;
+            count += 1;
+        }
+    }
+    anyhow::ensure!(count > 0, "no Vitest JSON report was produced");
+    Ok(kept.keep())
+}
+
+/// Where failure reports live: the task's artifact directory, or a shared
+/// worker-check one when no task owns the checkout.
+fn javascript_reports_parent(cas_root: &Path, repo: &Path) -> PathBuf {
     let configured = crate::config::Config::load(cas_root).ok().and_then(|config| config.factory().artifacts_root.clone());
     let base = crate::config::project_factory_artifacts_root(
         cas_root,

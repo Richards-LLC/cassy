@@ -1747,49 +1747,84 @@ async fn e1d3_finished_work_event_answer_without_a_client_is_dropped() {
     assert_eq!(daemon.work_events.in_flight(), 0, "no answer waits for a reconnect");
 }
 
-const REQUESTER_CHILD: &str =
-    "ui::factory::daemon::runtime::relay_jobs_tests::verifier_launch_requester_child_cas_5f88";
-
-/// The requester side of the cas-5f88 test, run as its own process: the real
-/// launch entrypoint starts its factory launch retry, then the process waits
-/// to be killed mid-retry.
-#[test]
-#[ignore = "cas-5f88 requester child; run by verifier_launch_survives_its_requester_exiting_cas_5f88"]
-fn verifier_launch_requester_child_cas_5f88() {
-    let var = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from);
-    let (Some(root), Some(task), Some(dispatch), Some(ready)) = (
-        var("CAS_5F88_ROOT"), var("CAS_5F88_TASK"), var("CAS_5F88_DISPATCH"), var("CAS_5F88_READY"),
-    ) else {
-        return;
-    };
-    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-    let task = core.open_task_store().unwrap().get(task.to_str().unwrap()).unwrap();
-    let dispatch = cas_store::get_verification_dispatch(&root, dispatch.to_str().unwrap()).unwrap();
-    let retry = crate::mcp::tools::core::workflow::premerge_verification::launch_automatic_verifier(
-        &core, &task, &dispatch,
-    )
-    .unwrap()
-    .expect("a factory-owned dispatch is requested on its own retry thread");
-    std::fs::write(&ready, "retrying").unwrap();
-    let _ = retry.join();
-    std::thread::sleep(Duration::from_secs(600));
-}
-
-/// cas-5f88: a worker's close asked for a verifier, and its MCP process was
-/// killed while its launch retry was still waiting for the factory daemon.
-/// The daemon's normal prompt-queue pass starts exactly one verifier for that
-/// dispatch, with no supervisor step.
+/// cas-5f88: kill the real launch retry owner after observing its second
+/// request. Only the daemon's scheduled pass can then start the verifier.
 #[tokio::test]
 async fn verifier_launch_survives_its_requester_exiting_cas_5f88() {
     use cas_store::AgentStore;
+    use std::os::unix::{fs::PermissionsExt, process::ExitStatusExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Re-enter this test binary as the requester process. This is the real
+    // production retry owner, with no injected retry closure or readiness flag.
+    if let Some(root) = std::env::var_os("CAS_5F88_REQUESTER_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let task = core.open_task_store().unwrap().get("cas-5f88-close").unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        crate::mcp::tools::core::workflow::premerge_verification::launch_automatic_verifier(
+            &core, &task, &dispatch,
+        ).unwrap().expect("factory launch retry owner").join().unwrap();
+        panic!("the requester must be killed during its retry");
+    }
+
     let mut env = crate::test_support::TestEnvGuard::temp_home();
+    // The production GUI socket lives under HOME. Keep its spelling within
+    // macOS's Unix socket path limit even under the capped runner's TMPDIR.
+    let socket_home = crate::test_paths::short_socket_tempdir();
+    let home_alias = socket_home.path().join("h");
+    std::os::unix::fs::symlink(env.home(), &home_alias).unwrap();
+    env.set("HOME", &home_alias);
     let (_dir, cas_dir) = project_with_worker();
     env.set("CAS_ROOT", &cas_dir);
-    // The claim is the launch; no provider account is needed or used.
-    env.set("CAS_TEST_HUB_PATH", env.home().join("no-provider"));
+    let bin = env.home().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    env.set("CAS_TEST_HUB_PATH", &bin);
+    // No Codex account; use the supported Claude fallback, including real
+    // account selection, executable/auth probes, spawn and verdict recording.
+    let account = env.home().join(".claude-review");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".credentials.json"), "{}").unwrap();
+    let provider = bin.join("claude");
+    std::fs::write(&provider, r#"#!/bin/sh
+set -eu
+case "$1" in
+    --version) echo '9.9.9 (Claude Code)' ;;
+    auth) echo '{"loggedIn":true}' ;;
+    -p)
+        cat > "$CAS_5F88_PROMPT"
+        printf '%s\n' "$$" >> "$CAS_5F88_STARTS"
+        read -r finish < "$CAS_5F88_FINISH"
+        echo '{"status":"rejected","summary":"Controlled review completed","confidence":0.95,"files_reviewed":"README.md","issues":"[]"}'
+        ;;
+    *) exit 64 ;;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    env.set("CAS_TEST_CLAUDE_BIN", &provider);
+    let starts = cas_dir.join("verifier-starts");
+    let prompt = cas_dir.join("verifier-prompt");
+    let finish = cas_dir.join("verifier-finish");
+    env.set("CAS_5F88_STARTS", &starts);
+    env.set("CAS_5F88_PROMPT", &prompt);
+    env.set("CAS_5F88_FINISH", &finish);
+    let finish_path = std::ffi::CString::new(finish.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid, NUL-terminated path in this disposable fixture.
+    assert_eq!(unsafe { libc::mkfifo(finish_path.as_ptr(), 0o600) }, 0);
+    // O_RDWR lets setup open the gate before the provider arrives. Release on
+    // assertion failure too, so no subprocess survives a failed test.
+    struct FinishVerifier(std::fs::File);
+    impl Drop for FinishVerifier {
+        fn drop(&mut self) {
+            let _ = std::io::Write::write_all(&mut self.0, b"finish\n");
+        }
+    }
+    let mut finish = FinishVerifier(std::fs::OpenOptions::new().read(true).write(true).open(finish).unwrap());
+
     let mut owner = cas_types::Agent::new_with_role(
         "relay-owner".into(), "relay-supervisor".into(), cas_types::AgentRole::Supervisor,
     );
+    owner.pid = Some(std::process::id());
     owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
     owner.factory_session = Some("provision-test".into());
     cas_store::SqliteAgentStore::open(&cas_dir).unwrap().register(&owner).unwrap();
@@ -1801,56 +1836,106 @@ async fn verifier_launch_survives_its_requester_exiting_cas_5f88() {
         &cas_dir, &task.id, "w-1", &owner.id, &cas_types::VerificationProofBoundary::task(),
         chrono::Utc::now() + chrono::Duration::minutes(10), false,
     ).unwrap();
-    // The requester has been retrying for two minutes when it dies.
-    let db = cas_dir.join("cas.db");
-    rusqlite::Connection::open(&db).unwrap().execute(
+    // Age the durable request past the daemon's grace period, without waiting
+    // on wall time or changing the retry owner's production clock.
+    rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap().execute(
         "UPDATE verification_dispatches SET requested_at = ?1 WHERE id = ?2",
         rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339(), dispatch.id],
     ).unwrap();
-    let ready = cas_dir.join("requester-retrying");
-    let mut requester = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", REQUESTER_CHILD, "--ignored", "--nocapture", "--test-threads=1"])
-        .env("CAS_5F88_ROOT", &cas_dir)
-        .env("CAS_5F88_TASK", &task.id)
-        .env("CAS_5F88_DISPATCH", &dispatch.id)
-        .env("CAS_5F88_READY", &ready)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !ready.exists() {
-        assert!(requester.try_wait().unwrap().is_none(), "the requester exited before it retried");
-        assert!(Instant::now() < deadline, "the requester never started its launch retry");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let socket = crate::ui::factory::gui_socket_path("provision-test");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    struct Requester(std::process::Child);
+    impl Drop for Requester {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
-    requester.kill().unwrap();
-    requester.wait().unwrap();
+    let exact = format!("{}::verifier_launch_survives_its_requester_exiting_cas_5f88",
+        module_path!().split_once("::").unwrap().1);
+    let mut requester = Requester(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
+        .env("CAS_5F88_REQUESTER_ROOT", &cas_dir)
+        .spawn().unwrap());
 
-    let launches = || -> i64 {
-        rusqlite::Connection::open(&db).unwrap().query_row(
-            "SELECT COUNT(*) FROM verification_capabilities WHERE dispatch_id = ?1",
-            [&dispatch.id], |row| row.get(0),
-        ).unwrap()
-    };
+    // Refuse the first actual LaunchVerifier with a retryable protocol code.
+    // The second received frame proves that request_with_retry retried; leave
+    // its response outstanding and SIGKILL the process that owns that retry.
+    for attempt in 1..=2 {
+        let mut stream = tokio::time::timeout(Duration::from_secs(60), async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(&crate::ui::factory::encode_message(&crate::ui::factory::DaemonMessage::Welcome {
+                session_name: "provision-test".into(),
+                state: crate::ui::factory::SessionState {
+                    focused_pane: None, panes: vec![], epic_id: None, epic_title: None, cols: 80, rows: 24,
+                },
+                scrollback: None,
+                protocol_version: crate::ui::factory::PROTOCOL_VERSION,
+                capabilities: crate::ui::factory::local_gui_capabilities(),
+                pane_bootstrap: vec![],
+            }).unwrap()).await.unwrap();
+            let mut header = [0; crate::ui::factory::FRAME_HEADER_SIZE];
+            stream.read_exact(&mut header).await.unwrap();
+            let size = crate::ui::factory::decode_length(&header);
+            assert!(size <= crate::ui::factory::MAX_MESSAGE_SIZE);
+            let mut body = vec![0; size];
+            stream.read_exact(&mut body).await.unwrap();
+            match serde_json::from_slice::<crate::ui::factory::ClientMessage>(&body).unwrap() {
+                crate::ui::factory::ClientMessage::LaunchVerifier { dispatch_id } => assert_eq!(dispatch_id, dispatch.id),
+                other => panic!("unexpected request: {other:?}"),
+            }
+            stream
+        }).await.expect("the retry owner must send an actual launch request");
+        if attempt == 1 {
+            stream.write_all(&crate::ui::factory::encode_message(&crate::ui::factory::DaemonMessage::Error {
+                message: "verifier_factory_store_busy: controlled contention".into(),
+                client_ref: Some(dispatch.id.clone()),
+            }).unwrap()).await.unwrap();
+        } else {
+            requester.0.kill().unwrap();
+            assert_eq!(requester.0.wait().unwrap().signal(), Some(libc::SIGKILL));
+            let mut byte = [0];
+            assert_eq!(tokio::time::timeout(Duration::from_secs(10), stream.read(&mut byte)).await.unwrap().unwrap(), 0);
+        }
+    }
+    drop(listener);
+    assert!(!starts.exists(), "no verifier ran before requester death");
+    assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap().state,
+        cas_types::VerificationDispatchState::Pending);
+
     let mut daemon = daemon_on_lanes(&cas_dir);
-    // A minute has passed since the last poison sweep.
-    fn sweep_due(daemon: &mut FactoryDaemon) -> &mut FactoryDaemon {
+    async fn scheduled_pass(daemon: &mut FactoryDaemon) {
         daemon.last_prompt_poison_sweep = Some(Instant::now() - Duration::from_secs(61));
-        daemon
+        daemon.process_prompt_queue().await.unwrap();
+        settle_relays(daemon).await;
     }
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while launches() == 0 && Instant::now() < deadline {
-        sweep_due(&mut daemon).process_prompt_queue().await.unwrap();
-        daemon.drain_relay_jobs();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !starts.exists() && Instant::now() < deadline {
+        scheduled_pass(&mut daemon).await;
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // Later sweeps find it launched and start nothing more.
+    assert!(starts.exists(), "scheduled daemon recovery never started a verifier subprocess");
+    // Keep the real provider alive while later normal scheduling passes try
+    // to recover the same request. Count actual process starts, not claims.
     for _ in 0..3 {
-        settle_relays(&mut daemon).await;
-        sweep_due(&mut daemon).process_prompt_queue().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        scheduled_pass(&mut daemon).await;
     }
-    settle_relays(&mut daemon).await;
-    assert_eq!(launches(), 1, "one verifier launch for the orphaned dispatch");
+    let pids = std::fs::read_to_string(&starts).unwrap();
+    assert_eq!(pids.lines().count(), 1, "one verifier subprocess for this dispatch");
+    assert_ne!(pids.trim().parse::<u32>().unwrap(), requester.0.id());
+    assert!(std::fs::read_to_string(prompt).unwrap().contains(&dispatch.id));
+    std::io::Write::write_all(&mut finish.0, b"finish\n").unwrap();
+    let verdict = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(verdict) = cas_store::get_verification_for_dispatch(&cas_dir, &dispatch.id).unwrap() {
+                break verdict;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("the launched verifier must finish this exact dispatch");
+    assert_eq!(verdict.status, cas_types::VerificationStatus::Rejected);
+    assert_eq!(verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
+    scheduled_pass(&mut daemon).await;
+    assert_eq!(std::fs::read_to_string(starts).unwrap(), pids);
 }

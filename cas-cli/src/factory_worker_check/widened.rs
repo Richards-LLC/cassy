@@ -71,8 +71,14 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
             } else { "jest --findRelatedTests" };
             return vec![format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())];
         }
-        let path = paths.iter().find(|path| &self::scope(repo, path) == scope).map(String::as_str)
-            .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None }).unwrap_or(".");
+        // Only a JavaScript input reaches the runner; a JSON catalogue or SQL
+        // migration in the same package shares the scope but is refused (GH #2224, #2266).
+        let path = paths.iter().filter(|path| javascript::javascript(path))
+            .find(|path| &self::scope(repo, path) == scope).map(String::as_str)
+            .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None });
+        let Some(path) = path else {
+            return vec![format!("one capped run of a changed JavaScript file in {scope:?}: `cas factory worker-check --cas-root {} -- <runner> <changed .js/.ts file>`", cas_root.display())];
+        };
         javascript::runner_hint(repo, path).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"])
             .into_iter().map(|runner| format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())).collect()
     }).collect()
@@ -106,4 +112,28 @@ pub(super) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope
         { std::fs::remove_file(entry.path())?; }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GH #2266: a migration rename beside a fixture edit widens the package;
+    /// every prescribed command must be one the capped runner accepts.
+    #[test]
+    fn package_proof_never_prescribes_a_non_javascript_input() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("apps/backend/test/fixtures")).unwrap();
+        std::fs::write(repo.path().join("apps/backend/package.json"), "{}").unwrap();
+        let paths = ["apps/backend/prisma/migrations/1_init/migration.sql", "apps/backend/src/scenarios.json",
+            "apps/backend/test/fixtures/patterns.ts"].map(String::from);
+        let scopes = [scope(repo.path(), &paths[2])];
+        assert_eq!(scopes, [Scope::Package("apps/backend".into())]);
+        let commands = commands(Path::new("/cas"), repo.path(), &paths, &scopes);
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(javascript::invocation(&args).map(|run| run.files), Some(vec![paths[2].clone()]), "{command}");
+        }
+    }
 }

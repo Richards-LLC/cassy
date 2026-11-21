@@ -210,6 +210,7 @@ pub(crate) fn admit_assignment(root: &Path, task: &cas_types::Task, live: Option
 }
 
 impl CasCore {
+    // gate-audit[supervisor_only]: selector Restricts the caller to the owning supervisor; when false a worker reads only its own queue. Neither value waives G-162.
     fn queue_worker(&self, name: &str, supervisor_only: bool) -> Result<Agent, McpError> {
         let agents = self.open_agent_store()?;
         let caller_id = self.get_registered_agent_id_read_only()?;

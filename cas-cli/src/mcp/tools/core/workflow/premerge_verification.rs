@@ -1962,7 +1962,7 @@ mod tests {
 
     #[test]
     fn expired_dead_claim_merge_retry_preserves_candidate_cas_de6d() {
-        for case in ["dead", "timedout-dead", "live", "unknown", "foreign", "unexpired", "other-owner"] {
+        for case in ["dead", "timedout-dead", "live", "unreadable", "mismatch", "shutdown", "unknown", "foreign", "unexpired", "other-owner"] {
             let mut env = crate::test_support::TestEnvGuard::temp_home();
             crate::store::known_repos::ensure_host_schema().unwrap();
             let dir = tempfile::tempdir().unwrap();
@@ -2007,15 +2007,20 @@ mod tests {
             let mut process = std::process::Command::new("true").spawn().unwrap();
             child.pid = Some(process.id());
             process.wait().unwrap();
-            if case == "live" {
+            if matches!(case, "live" | "unreadable" | "mismatch" | "shutdown") {
                 child.pid = Some(std::process::id());
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
+                if case == "mismatch" { child.pid_starttime = Some(child.pid_starttime.unwrap_or(0) + 1); }
             }
             if case == "unknown" { child.pid = None; }
             if case == "foreign" { child.machine_id = Some("peer-machine".into()); }
             let old_capability = cas_store::issue_and_bind_server_verifier_handoff(
                 &root, &task.id, &dispatch.id, "old-attempt", &child,
             ).unwrap();
+            if case == "shutdown" {
+                child.status = cas_types::AgentStatus::Shutdown;
+                agents.update(&child).unwrap();
+            }
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
             if case != "unexpired" {
                 conn.execute("UPDATE verification_dispatches SET deadline_at=?2 WHERE id=?1",
@@ -2047,6 +2052,13 @@ mod tests {
                     assert_eq!(serde_json::to_value(fenced).unwrap(), serde_json::to_value(&before).unwrap());
                 }
             }
+            if case == "unreadable" {
+                // Keep the consumer/store real; inject only a failed OS read
+                // while its PID existence probe still observes the live process.
+                let observed = automatic::recover_expired_claim_with_probes(&retry_core, &before,
+                    crate::mcp::daemon::pid_alive, |_| None).unwrap();
+                assert_eq!(observed.state, before.state, "unreadable fingerprint must retain the live claim");
+            }
             let held = retry_core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train");
             assert!(held.is_err(), "retry must still await an independent verdict");
             let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
@@ -2056,7 +2068,7 @@ mod tests {
             assert_eq!(current.requested_at, dispatch.requested_at);
             assert_eq!(current.receipt_id, dispatch.receipt_id);
             assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
-            let recover = matches!(case, "dead" | "timedout-dead");
+            let recover = matches!(case, "dead" | "timedout-dead" | "mismatch" | "shutdown");
             let audits: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1",
                 [&dispatch.id], |row| row.get(0),

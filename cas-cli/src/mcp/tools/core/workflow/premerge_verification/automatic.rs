@@ -332,6 +332,14 @@ fn request_with_retry(
 /// An owning supervisor's retry may release only a positively dead local child.
 /// The store fences the liveness observation against registration/claim races.
 pub(super) fn recover_expired_claim(core: &CasCore, dispatch: &VerificationDispatch) -> Result<VerificationDispatch, String> {
+    recover_expired_claim_with_probes(core, dispatch,
+        crate::mcp::daemon::pid_alive, crate::mcp::daemon::read_pid_starttime)
+}
+
+pub(super) fn recover_expired_claim_with_probes(
+    core: &CasCore, dispatch: &VerificationDispatch,
+    pid_alive: impl Fn(u32) -> bool, read_starttime: impl Fn(u32) -> Option<u64>,
+) -> Result<VerificationDispatch, String> {
     let now = chrono::Utc::now();
     if dispatch.deadline_at > now
         || !matches!(dispatch.state, cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut)
@@ -347,7 +355,8 @@ pub(super) fn recover_expired_claim(core: &CasCore, dispatch: &VerificationDispa
     if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str())
         || !(child.status == cas_types::AgentStatus::Shutdown || matches!(
             crate::mcp::daemon::evaluate_liveness(&child,
-                crate::mcp::daemon::pid_alive, crate::mcp::daemon::pid_matches_fingerprint),
+                &pid_alive, |pid, expected| pid_alive(pid)
+                    && read_starttime(pid).is_some_and(|actual| actual == expected)),
             crate::mcp::daemon::LivenessOutcome::Dead { .. }
         ))
     { return Ok(dispatch.clone()); }

@@ -7,3 +7,11 @@
   the most specific registered name. Git guards, binding checks and task
   start/adoption/close use that ownership while preserving checkout containment
   and recovery to the worker's own branch.
+
+- **Git hook ownership matches the factory guard** — A
+  factory/<worker>-<suffix> branch is the worker's own unless a registered
+  worker of that full name exists. Installed pre-commit and pre-push hooks now
+  consult the same registered ownership as H-22, including longer sibling
+  namespaces. Preservation refs still require an explicit matching source and
+  destination; a sibling's task ref remains protected. The cas-b153 fixture now
+  registers its overlapping sibling to preserve that intended rejection.

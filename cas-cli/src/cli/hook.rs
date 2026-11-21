@@ -79,6 +79,9 @@ pub enum HookCommand {
     /// Validate a non-fast-forward checkpoint push against live task/delivery state.
     #[command(name = "WorkerCheckpointPush")]
     WorkerCheckpointPush,
+    /// Check a factory branch against registered worker ownership for Git hooks.
+    #[command(name = "WorkerBranchOwned")]
+    WorkerBranchOwned { branch: String },
     /// Record a factory worker pre-push refusal for supervisor activity views.
     #[command(name = "WorkerPushRejected")]
     WorkerPushRejected,
@@ -119,7 +122,23 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::MessageDisplay => execute_event("MessageDisplay", cli),
         HookCommand::WorkerPushRejected => execute_worker_push_rejected(),
         HookCommand::WorkerCheckpointPush => execute_worker_checkpoint_push(),
+        HookCommand::WorkerBranchOwned { branch } => execute_worker_branch_owned(branch),
     }
+}
+
+/// H-39/H-40 use the same registered namespace decision as H-22. The worker's
+/// explicit CAS_ROOT also supports isolated clones with no checkout-local store.
+fn execute_worker_branch_owned(branch: &str) -> anyhow::Result<()> {
+    use anyhow::{Context, ensure};
+    let worker = std::env::var("CAS_AGENT_NAME").context("WorkerBranchOwned: missing worker identity")?;
+    ensure!(!worker.trim().is_empty(), "WorkerBranchOwned: missing worker identity");
+    let binding = match store::find_cas_root() {
+        Ok(root) => crate::factory_isolation::classify_worker_binding_in(&root, &worker, Some(branch)),
+        Err(_) => crate::factory_isolation::classify_worker_binding(&worker, Some(branch)),
+    };
+    ensure!(binding == crate::factory_isolation::WorkerBinding::Own,
+        "WorkerBranchOwned: {branch} is not owned by {worker}");
+    Ok(())
 }
 
 /// H-40's narrow exception for a supervisor-directed rebase of live work.

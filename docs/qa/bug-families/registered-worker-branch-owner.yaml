@@ -1,4 +1,4 @@
 title: Worker branch ownership uses registered identities
-statement: A worker can mutate its own temporary or task branch in its assigned checkout, while overlapping registered siblings and their task branches remain protected. Explicit hook registry context or the checkout's own store controls ownership; ambient CAS_ROOT cannot select a foreign registry. Recovery and checkout containment remain enforced.
+statement: A worker can mutate its own temporary or task branch in its assigned checkout, while overlapping registered siblings and their task branches remain protected. Explicit hook registry context or the checkout's own store controls ownership; ambient CAS_ROOT cannot select a foreign registry. Recovery and checkout containment remain enforced. Installed H-39 and H-40 shell hooks share the ownership resolver, including sibling preservation-ref denial.
 found: 2026-11-21
 tasks: [cas-ea31]

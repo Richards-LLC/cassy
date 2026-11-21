@@ -1925,26 +1925,16 @@ impl TeamsManager {
     pub const WORKER_PRE_COMMIT_HOOK: &'static str = "#!/bin/sh
 trap 'status=$?; if [ \"$status\" -ne 0 ]; then cas gates record-refusal --message \"[H-39]\" >/dev/null 2>&1 || true; fi; exit \"$status\"' EXIT
 # Cassy factory worker guard — installed by `cas factory` when spawning isolated workers.
-# Workers may ONLY commit on their own factory/<name> branch, or on their own
-# per-task branch factory/<name>-<task-id> while factory/<name> is frozen for a
-# parked delivery (cas-73b8). All other branches (main, master, staging, epic/*,
-# arbitrary branches, and detached HEAD) are denied.
+# Canonical, temporary and task refs use registered worker ownership (cas-ea31).
+# A longer registered worker name wins; protected and detached refs stay denied.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 expected=\"factory/$CAS_AGENT_NAME\"
-own_task_branch() {
-  case \"$1\" in
-    \"$expected\"-*) suffix=${1#\"$expected\"-} ;;
-    *) return 1 ;;
-  esac
-  case \"$suffix\" in
-    \"\"|*[!A-Za-z0-9._-]*) return 1 ;;
-    [A-Za-z]*-[A-Za-z0-9]*) return 0 ;;
-    *) return 1 ;;
-  esac
+owns_worker_branch() {
+  cas hook WorkerBranchOwned \"$1\" >/dev/null 2>&1
 }
-if [ -n \"$CAS_AGENT_NAME\" ] && [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
+if [ -n \"$CAS_AGENT_NAME\" ] && [ \"$branch\" != \"$expected\" ] && ! owns_worker_branch \"$branch\"; then
   echo \"Cassy COMMIT GUARD: worker '$CAS_AGENT_NAME' cannot commit from '$branch'.\" >&2
-  echo \"Expected the exact worker branch '$expected', or your per-task branch '$expected-<task-id>'. The checkout may belong to another worker. [H-39]\" >&2
+  echo \"Expected your registered factory namespace '$expected'. The checkout may belong to another worker. [H-39]\" >&2
   exit 1
 fi
 case \"$branch\" in
@@ -1985,6 +1975,9 @@ own_task_branch() {
     *) return 1 ;;
   esac
 }
+owns_worker_branch() {
+  cas hook WorkerBranchOwned \"$1\" >/dev/null 2>&1
+}
 record_push_rejection() {
   CAS_PUSH_GUARD_BRANCH=\"$branch\" CAS_PUSH_GUARD_REMOTE_REF=\"$1\" \\
     cas hook WorkerPushRejected >/dev/null 2>&1 || true
@@ -1993,10 +1986,10 @@ if [ -z \"$CAS_AGENT_NAME\" ]; then
   echo \"Cassy PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns. [H-40]\" >&2
   exit 1
 fi
-if [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
+if [ \"$branch\" != \"$expected\" ] && ! owns_worker_branch \"$branch\"; then
   record_push_rejection \"<head:$branch>\"
   echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch' — this is not your branch.\" >&2
-  echo \"Expected the exact worker branch '$expected' or your per-task branch '$expected-<task-id>'. Refusing to graft the current HEAD onto another branch. [H-40]\" >&2
+  echo \"Expected your registered factory namespace '$expected'. Refusing to graft the current HEAD onto another branch. [H-40]\" >&2
   exit 1
 fi
 # Per-task work pushes only to its own name. On the reusable lane, also
@@ -2008,7 +2001,8 @@ while read local_ref local_sha remote_ref remote_sha; do
   if [ \"$remote_ref\" != \"refs/heads/$branch\" ] && ! {
     [ \"$branch\" = \"$expected\" ] &&
     [ \"$local_ref\" = \"$remote_ref\" ] &&
-    own_task_branch \"${remote_ref#refs/heads/}\";
+    own_task_branch \"${remote_ref#refs/heads/}\" &&
+    owns_worker_branch \"${remote_ref#refs/heads/}\";
   }; then
     record_push_rejection \"$remote_ref\"
     echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch. [H-40]\" >&2

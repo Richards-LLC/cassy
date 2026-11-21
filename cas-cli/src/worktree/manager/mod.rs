@@ -626,17 +626,21 @@ impl WorktreeManager {
     }
 
     /// Integrate an exact parked delivery independently of a reused worker's
-    /// checkout. The local branch and a fresh origin fetch must both agree
-    /// with the anchor; the isolated merge consumes the immutable SHA. This
-    /// operation deliberately has no cleanup option.
-    pub(crate) fn merge_pushed_delivery_preserving_worktree(
+    /// checkout. The local branch must agree with the anchor; a pushed
+    /// delivery (`pushed_proof`) also needs a fresh origin fetch that agrees.
+    /// A local_merge delivery has no origin source ref to prove (GH #2151).
+    /// The isolated merge consumes the immutable SHA. This operation
+    /// deliberately has no cleanup option.
+    pub(crate) fn merge_parked_delivery_preserving_worktree(
         &self,
         worktree: &mut Worktree,
         anchor: &str,
+        pushed_proof: bool,
         publication: Option<&mut crate::worktree::git::MergePublication<'_>>,
     ) -> WorktreeResult<Option<String>> {
+        let proof = if pushed_proof { "pushed delivery proof" } else { "local delivery proof" };
         let refuse = |detail: String| WorktreeError::UncommittedChanges(format!(
-            "dirty source checkout retained: pushed delivery proof required; {detail}. No merge was attempted"
+            "dirty source checkout retained: {proof} required; {detail}. No merge was attempted"
         ));
         let anchor = self.git.resolve_commit(anchor)
             .ok_or_else(|| refuse("parked anchor cannot be resolved".into()))?;
@@ -644,14 +648,16 @@ impl WorktreeManager {
         if self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str()) {
             return Err(refuse("source tip does not match the parked anchor".into()));
         }
-        let pushed_ref = format!("refs/remotes/origin/{}", worktree.branch);
-        let refspec = format!("+refs/heads/{}:{pushed_ref}", worktree.branch);
-        self.git.fetch_branch(&refspec)
-            .map_err(|error| refuse(format!("could not verify pushed ref: {error}")))?;
-        if self.git.resolve_commit(&pushed_ref).as_deref() != Some(anchor.as_str())
-            || self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str())
-        {
-            return Err(refuse("pushed ref or local source tip does not match the parked anchor".into()));
+        if pushed_proof {
+            let pushed_ref = format!("refs/remotes/origin/{}", worktree.branch);
+            let refspec = format!("+refs/heads/{}:{pushed_ref}", worktree.branch);
+            self.git.fetch_branch(&refspec)
+                .map_err(|error| refuse(format!("could not verify pushed ref: {error}")))?;
+            if self.git.resolve_commit(&pushed_ref).as_deref() != Some(anchor.as_str())
+                || self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str())
+            {
+                return Err(refuse("pushed ref or local source tip does not match the parked anchor".into()));
+            }
         }
         if publication.is_some() {
             return self.merge_preserving_worktree_at_with_publication(worktree, true, false, &anchor, publication);

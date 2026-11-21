@@ -5934,6 +5934,11 @@ impl CasCore {
 
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
                 .or(dirty_pushed_anchor);
+            // GH #2151: a local_merge delivery integrates its exact local
+            // anchor; only a pushed delivery owes origin source-ref proof.
+            let pushed_proof = !scoped_task.as_deref()
+                .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
+            let source_label = if pushed_proof { "pushed ref origin/" } else { "local ref " };
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
             unpublished_merge_base = attempted_target_tip.clone();
             let merge_result = if publish_before_ref {
@@ -5977,10 +5982,10 @@ impl CasCore {
                     }
                 };
                 if let Some(anchor) = pushed_anchor {
-                    let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor, Some(&mut publish));
+                    let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, pushed_proof, Some(&mut publish));
                     if result.is_ok() {
                         pushed_source_note = format!(
-                            "\nSource: pushed ref origin/{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
+                            "\nSource: {source_label}{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
                             worktree.branch,
                         );
                     }
@@ -5992,10 +5997,10 @@ impl CasCore {
                     )
                 }
             } else if let Some(anchor) = pushed_anchor {
-                let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor, None);
+                let result = manager.merge_parked_delivery_preserving_worktree(&mut worktree, anchor, pushed_proof, None);
                 if result.is_ok() {
                     pushed_source_note = format!(
-                        "\nSource: pushed ref origin/{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
+                        "\nSource: {source_label}{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
                         worktree.branch,
                     );
                 }

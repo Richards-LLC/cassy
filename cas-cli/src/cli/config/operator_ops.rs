@@ -955,6 +955,62 @@ large_artifact_dir = \"before\"\n",
         assert!(report["every_project_roots"].as_array().unwrap().iter().any(|root| root == &parent.display().to_string()), "{report}");
     }
 
+    /// GH #2186 (cas-91f7): the supported scratch QA path for the
+    /// operator-only setter. A worker cannot run the write-roots setter
+    /// itself: H-11 refuses the tool call and H-41 refuses a worker cgroup,
+    /// and no test hook switches either off. This replays the command against
+    /// an isolated HOME and scratch project. The real CLI parses it, then the
+    /// setter below the cgroup read writes the scratch config.toml under the
+    /// operator pane's cgroup. The same command text stays refused from an
+    /// agent and from a worker cgroup.
+    #[test]
+    fn scratch_write_roots_setter_qa_keeps_operator_only_policy_gh_2186() {
+        use crate::cli::config::ConfigCommands;
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let project = home.join("scratch-project");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let scratch = home.join("scratch-root");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let command = format!("cas config set factory.write_roots {}", scratch.display());
+
+        let cli = <Cli as clap::Parser>::parse_from(command.split(' '));
+        let Some(crate::cli::Commands::Config(ConfigCommands::Set(args))) = &cli.command else {
+            panic!("`{command}` is not a config set");
+        };
+        assert_eq!(args.key, "factory.write_roots");
+        let change = set_project_write_roots(&args.value, &cas_root, PANE_CGROUP).unwrap();
+        let stored = vec![scratch.display().to_string()];
+        assert_eq!(change.stored, stored);
+        assert_eq!(crate::config::Config::load(&cas_root).unwrap().factory().write_roots, stored);
+        let written = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+
+        let agent_call = crate::hooks::HookInput {
+            cwd: project.display().to_string(),
+            hook_event_name: "PreToolUse".into(),
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({"command": command})),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+        let hook = serde_json::to_value(
+            crate::hooks::handlers::handle_pre_tool_use(&agent_call, Some(&cas_root)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(hook["hookSpecificOutput"]["permissionDecision"], "deny", "{hook}");
+        let reason = hook["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or_default();
+        assert_eq!(crate::gates::codes_in(reason), vec!["H-11"], "{hook}");
+
+        let worker = "0::/user.slice/app.slice/tab(2).scope/cas-worker-cassy-agile-raven-93-golden-finch-99";
+        let refused = set_project_write_roots("", &cas_root, worker).unwrap_err().to_string();
+        assert_eq!(crate::gates::codes_in(&refused), vec!["H-41"]);
+        assert_eq!(
+            std::fs::read_to_string(cas_root.join("config.toml")).unwrap(),
+            written,
+            "a refusal writes nothing"
+        );
+    }
+
     /// GH #1182: setting roots refuses inside a factory worker (or server)
     /// cgroup, and refuses unsafe roots without touching config.toml.
     #[test]

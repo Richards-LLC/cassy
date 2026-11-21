@@ -465,6 +465,20 @@ esac
         owned = self.fast_from(self.base, **env)
         self.assertIn("PASS journey-catalog", owned.stdout, owned.stdout + owned.stderr)
 
+    def test_bash_3_without_a_bash_4_refuses_clearly_cas_eae6(self):
+        # macOS /bin/bash is 3.2. With the re-exec already spent (or no bash 4
+        # anywhere), the gate refuses in one line instead of dying on `declare -A`.
+        old = command(self.repo, "/bin/bash", "-c", "(( BASH_VERSINFO[0] < 4 ))")
+        if old.returncode != 0:
+            self.skipTest("/bin/bash is 4+ on this host")
+        env = dict(os.environ, CAS_RELEASE_GATE_BASH_REEXEC="1")
+        result = command(self.repo, "/bin/bash", "scripts/release-gate.sh", "--fast-rows", "--base", self.base, env=env)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        # Refused before any gate work: no receipt, and one stderr line rather
+        # than the parser error plus its usage text.
+        self.assertEqual(result.stdout, "", result.stdout)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1, result.stderr)
+
     def test_validator_recovery_names_the_installer_failure_and_uses_a_cas_on_path_cas_d4ed(self):
         installer = self.repo / ".git" / "failing-install.sh"
         installer.write_text('#!/usr/bin/env bash\necho "INSTALLER-CAUSE-8c1f http 403" >&2\ntouch "$(dirname "$0")/installer-ran"\nexit 1\n')

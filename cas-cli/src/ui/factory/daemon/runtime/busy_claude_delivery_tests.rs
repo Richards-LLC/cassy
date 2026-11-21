@@ -490,44 +490,61 @@ fn only_a_tool_call_in_flight_counts_as_activity() {
     }
 }
 
-/// cas-5463 probe (temporary): trace an urgent row to a busy Claude worker.
-#[tokio::test]
-async fn probe_urgent_busy_worker_cas_5463() {
-    let mut factory = BusyWorkerFactory::new(&[]).await;
+/// cas-5463 (GH #2275, notification 2597724): an urgent send to a Claude
+/// worker mid tool call is held by design for that call (cas-73f7), reported
+/// as stage=gated, nudge_not_attempted. The send must say it is held and
+/// when Cassy interrupts, not fail as an unconfirmed interrupt.
+#[tokio::test(flavor = "current_thread")]
+async fn urgent_send_to_a_worker_mid_tool_call_reports_the_hold_gh2275() {
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut factory = BusyWorkerFactory::new(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_AGENT_NAME", Some("supervisor")),
+        ("CAS_FACTORY_SESSION", Some(SESSION)),
+    ])
+    .await;
     factory.tool_call_in_flight();
-    let queue = factory.queue();
-    let earlier = queue.enqueue_with_session("supervisor", WORKER, "earlier decision GH2275-A", SESSION).unwrap();
-    let mut trace = String::new();
-    for pass in 0..3 {
-        factory.daemon.process_prompt_queue().await.unwrap();
-        let report = queue.message_delivery_report(earlier).unwrap().unwrap();
-        trace.push_str(&format!("A pass {pass}: deferred={:?} report={report:?}\n", queue.deferred_inbox_state(earlier).unwrap()));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let urgent = queue.enqueue_urgent("supervisor", WORKER, "stop and rebase GH2275-B", Some(SESSION), None, None, true).unwrap();
-    for pass in 0..10 {
-        factory.daemon.process_prompt_queue().await.unwrap();
-        let report = queue.message_delivery_report(urgent).unwrap().unwrap();
-        let row = queue.queued_prompt(urgent).unwrap().unwrap();
-        trace.push_str(&format!("B pass {pass}: deferred={:?} row={row:?} report={report:?}\n", queue.deferred_inbox_state(urgent).unwrap()));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    rusqlite::Connection::open(factory.cas_dir.join("cas.db")).unwrap()
-        .execute("UPDATE prompt_queue SET created_at=?, next_attempt_at=NULL WHERE id=?",
-            rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(), urgent])
-        .unwrap();
-    let mut typed = String::new();
-    for pass in 0..60 {
-        factory.daemon.process_prompt_queue().await.unwrap();
-        for pane in factory.daemon.app.mux.panes_mut() {
-            let (bytes, _) = pane.drain_output();
-            typed.push_str(&String::from_utf8_lossy(&bytes));
+    let core = crate::mcp::CasCore::with_daemon(factory.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("supervisor-id".into());
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::tools::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::tools::CasService::new(core);
+    let _socket = cas_factory::DaemonNotifier::bind(&factory.cas_dir).unwrap();
+    let request: cas_mcp::types::CoordinationRequest = serde_json::from_value(serde_json::json!({
+        "action": "message",
+        "target": WORKER,
+        "summary": "stop",
+        "message": "Stop and rebase onto the train tip.",
+        "urgent": true,
+    }))
+    .unwrap();
+    let send = service.coordination(Parameters(request));
+    let daemon = &mut factory.daemon;
+    let passes = async {
+        for _ in 0..1500 {
+            daemon.process_prompt_queue().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        if pass % 10 == 0 {
-            let report = queue.message_delivery_report(urgent).unwrap().unwrap();
-            trace.push_str(&format!("B late pass {pass}: deferred={:?} report={report:?}\n", queue.deferred_inbox_state(urgent).unwrap()));
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("typed={typed:?}\n{trace}");
+    };
+    tokio::pin!(send);
+    tokio::pin!(passes);
+    let result = tokio::select! {
+        result = &mut send => result,
+        _ = &mut passes => panic!("the send never returned"),
+    };
+    let text: String = result
+        .unwrap_or_else(|error| panic!("a held interrupt is not a failed send: {error:?}"))
+        .content
+        .into_iter()
+        .filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text),
+            _ => None,
+        })
+        .collect();
+    assert!(text.starts_with("held #"), "{text}");
+    let id: i64 = text["held #".len()..].split(' ').next().unwrap().parse().unwrap();
+    let report = factory.queue().message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient), "{report:?}");
+    assert!(report.recipient_transport_at.is_none(), "nothing was typed into the call: {report:?}");
 }

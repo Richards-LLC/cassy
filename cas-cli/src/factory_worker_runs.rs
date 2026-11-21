@@ -113,6 +113,29 @@ pub(crate) fn register(
     log: &Path,
     now: DateTime<Utc>,
 ) -> Result<Option<String>> {
+    record(root, repo, Some(log), None, now)
+}
+
+/// cas-22c6: a run its caller is watching (a foreground check or a proof
+/// script). It holds the checkout while `pid` lives and sends no completion
+/// notice; the caller already sees the result.
+pub(crate) fn attend(
+    root: &Path,
+    repo: &Path,
+    log: Option<&Path>,
+    pid: u32,
+    now: DateTime<Utc>,
+) -> Result<Option<String>> {
+    record(root, repo, log, Some(pid), now)
+}
+
+fn record(
+    root: &Path,
+    repo: &Path,
+    log: Option<&Path>,
+    attended: Option<u32>,
+    now: DateTime<Utc>,
+) -> Result<Option<String>> {
     let repo = repo.canonicalize()?;
     let agents = crate::store::open_agent_store(root)?;
     let workers: Vec<_> = agents
@@ -187,14 +210,14 @@ pub(crate) fn register(
         session: owner.factory_session,
         task,
         repo,
-        log: log.canonicalize()?,
-        log_offset: std::fs::metadata(log)?.len(),
+        log: log.map(Path::canonicalize).transpose()?.unwrap_or_default(),
+        log_offset: log.map(std::fs::metadata).transpose()?.map_or(0, |meta| meta.len()),
         started_at: now,
-        pid: None,
-        fingerprint: None,
+        pid: attended,
+        fingerprint: attended.and_then(crate::mcp::daemon::read_pid_starttime),
         finished_at: None,
         exit_code: None,
-        notified: false,
+        notified: attended.is_some(),
     };
     let _lock = lock(root)?;
     save(root, &run)?;

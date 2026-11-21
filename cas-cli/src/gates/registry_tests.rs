@@ -450,12 +450,13 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         std::fs::set_permissions(&fake_cas, std::fs::Permissions::from_mode(0o755)).unwrap();
         let script = dir.path().join("fast-rows-pre-push.sh");
         std::fs::write(&script, include_str!("../../../scripts/fast-rows-pre-push.sh")).unwrap();
+        std::fs::write(dir.path().join("worker-run.sh"), include_str!("../../../scripts/worker-run.sh")).unwrap();
         for accepts_fact in [true, false] {
             if !accepts_fact {
                 std::fs::write(&fake_cas, "#!/bin/sh\nexit 1\n").unwrap();
             }
             let mut hook = Command::new("bash").arg(&script).current_dir(dir.path())
-                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv)
+                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv).env_remove("CAS_ROOT")
                 .env("CAS_SKIP_FAST_ROWS", "fixture hotfix")
                 .stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
             writeln!(hook.stdin.take().unwrap(), "refs/heads/factory/fixture {} refs/heads/factory/fixture {}", "1".repeat(40), "0".repeat(40)).unwrap();

@@ -5,3 +5,7 @@
   matching Chromium from the lockfile. The supervisor-commands journey finds
   its composer, Send button, command palette and command buttons by role and
   accessible name instead of IDs and data attributes.
+- **The slash-command palette updates when the conversation connects** — a
+  command typed while Commander was still connecting to the supervisor showed
+  "Commands work once the conversation is connected" until the text changed;
+  it now lists the matching commands as soon as the conversation is live.

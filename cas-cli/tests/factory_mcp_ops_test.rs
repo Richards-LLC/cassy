@@ -6862,12 +6862,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         named.force = Some(true);
         named.dry_run = Some(false);
         named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
-        // Exact-path admission deliberately rejects aliases, including macOS
-        // /var -> /private/var. Canonicalize the fixture service's root too.
-        let core = CasCore::with_daemon(env.cas_root.canonicalize().unwrap(), None, None);
-        core.set_agent_id_for_testing("test-agent-id".to_string());
-        let service = CasService::new(core, None);
-        let result = service.factory_request(Parameters(named)).await.unwrap();
+        let result = env.service.factory_request(Parameters(named)).await.unwrap();
         let text = get_text(&result);
         assert!(!target.exists(), "native exact-path reclaim must succeed: {text}");
         assert_eq!(std::fs::read(orphan.join("source.rs")).unwrap(), b"uncommitted source");
@@ -7227,22 +7222,11 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 
 /// A real verdict frees disposable build output immediately, keeping the small
 /// source checkout available for the existing two-hour audit grace period.
-fn review_target_env() -> FactoryTestEnv {
-    let mut env = FactoryTestEnv::with_server_supervisor();
-    // Match the canonical owner path written by scratch-checkout; macOS's
-    // temporary directory otherwise reaches the /var -> /private/var alias.
-    env.cas_root = env.cas_root.canonicalize().unwrap();
-    let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
-    core.set_agent_id_for_testing("test-supervisor-id".into());
-    env.service = CasService::new(core, None);
-    env
-}
-
 #[tokio::test]
 async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     use fs2::FileExt;
     use notify::Watcher;
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "verdict-target");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -7349,7 +7333,7 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
 #[tokio::test]
 async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
     use fs2::FileExt;
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     let mut failures = Vec::new();
     init_sync_repo(&env, "interrupted-review-trash");
     let project = env.cas_root.parent().unwrap();
@@ -7489,7 +7473,7 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
 /// remains protected even after a task closes or an earlier dispatch times out.
 #[tokio::test]
 async fn test_gc_preserves_active_review_target_cas_f275() {
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "active-review-target");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -7565,7 +7549,7 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
 /// target until the task closed (25 GB for one task on the live store).
 #[tokio::test]
 async fn test_gc_reclaims_superseded_walk_of_open_task_cas_49163() {
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "superseded-walk");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -7625,7 +7609,7 @@ async fn test_gc_reclaims_superseded_walk_of_open_task_cas_49163() {
 /// SQLite task state and the public factory GC handler.
 #[tokio::test]
 async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "review-control");
     let project = env.cas_root.parent().unwrap();
     // Real Cargo output is ignored; untracked reviewer notes are not.

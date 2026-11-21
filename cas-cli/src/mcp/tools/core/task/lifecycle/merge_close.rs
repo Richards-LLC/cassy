@@ -397,6 +397,38 @@ impl CasCore {
         }
     }
 
+    /// GH #2282: a parked delivery Cassy observed on its recorded target,
+    /// merged outside `worktree_merge` (a PR, a manual merge or a promotion).
+    /// `landed` is the target tip that contains the anchor. The ordinary close
+    /// then reuses an approval, or dispatches the post-merge verifier whose
+    /// approval closes the task.
+    pub(crate) async fn close_after_observed_landing(
+        &self,
+        task_id: &str,
+        target: &str,
+        landed: &str,
+    ) -> CassyMergeClose {
+        let Ok(store) = self.open_task_store() else {
+            return CassyMergeClose::NotEligible;
+        };
+        match store.record_merge_admission(task_id, landed, cas_types::MergeCiAdmission::Advisory) {
+            Ok(true) => {}
+            Ok(false) => return CassyMergeClose::NotEligible,
+            Err(error) => return CassyMergeClose::Held(format!(
+                "the observed landing could not be recorded ({error}); retry task close."
+            )),
+        }
+        let note = format!(
+            "Cassy observed this delivery on {target} at {landed}, merged outside worktree_merge; CI at that tip is unconfirmed."
+        );
+        if let Err(error) = store.append_trusted_note(task_id, &note) {
+            return CassyMergeClose::Held(format!(
+                "the observed landing note could not be recorded ({error}); retry task close."
+            ));
+        }
+        super::close_ops::as_contained_reconcile_close(self.close_green_merged_delivery(task_id)).await
+    }
+
     /// cas-46ea: a supervisor may merge a pushed lane tip before its worker
     /// parks (merge on green). Record the park the worker would have made, at
     /// the exact merged tip, so the post-merge close below applies unchanged.

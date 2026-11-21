@@ -4424,6 +4424,12 @@ impl FactoryDaemon {
                         ) {
                             tracing::warn!(%error, "CI merge retry scan failed");
                         }
+                        // GH #2282: parked deliveries already on their target close here.
+                        if let Err(error) = retry_runtime.block_on(
+                            crate::factory_delivery_wake::reconcile_contained(&watch_cas_dir, &session_name)
+                        ) {
+                            tracing::warn!(%error, "contained delivery reconcile deferred");
+                        }
                         // cas-f823: open trains take main's new commits. Before the
                         // GitHub reads below, so an API error cannot skip the sync.
                         if let Err(error) = crate::train_main_sync::sync_open_trains(&watch_cas_dir) {

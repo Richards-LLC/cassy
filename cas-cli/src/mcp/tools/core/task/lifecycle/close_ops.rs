@@ -297,6 +297,21 @@ const DISPATCH_SUMMARY_PREFIX: &str = "Dispatch requested";
 tokio::task_local! {
     /// cas-eda0: present while Cassy itself closes a delivery it merged.
     static CASSY_MERGE_CLOSE: ();
+    /// GH #2282: present while Cassy closes a parked delivery it observed
+    /// already contained in its recorded target.
+    static CONTAINED_RECONCILE_CLOSE: ();
+}
+
+/// GH #2282: run `close` as Cassy's reconcile of a parked delivery that
+/// landed outside `worktree_merge`. With no reusable verdict, close
+/// dispatches the post-merge verifier on the contained delivery instead of
+/// refusing with G-70; an uncontained delivery is still refused.
+pub(crate) async fn as_contained_reconcile_close<F: std::future::Future>(close: F) -> F::Output {
+    CONTAINED_RECONCILE_CLOSE.scope((), close).await
+}
+
+fn in_contained_reconcile_close() -> bool {
+    CONTAINED_RECONCILE_CLOSE.try_with(|_| ()).is_ok()
 }
 
 /// cas-eda0: run `close` as Cassy's own post-merge close. Every ordinary
@@ -10834,6 +10849,9 @@ impl CasCore {
                         // gate[G-70 close-after-merge as-of]: Pre-merge approval missing for a merged factory delivery
                         if !is_epic && !empty_delivery
                             && !(supervisor_tier_two_recovery && merged_receipt.is_some())
+                            && !(in_contained_reconcile_close()
+                                && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor|
+                                    commit_is_merged_into_parent(&close_project_root, anchor, &resolved_parent_branch)))
                             && task.deliverables.factory_branch_anchor.is_some()
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))

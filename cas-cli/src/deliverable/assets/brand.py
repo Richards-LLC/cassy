@@ -48,6 +48,25 @@ TYPE_ROLES = {
 }
 RADIUS_ALIASES = {'panel': ('panel', 'hero', 'dialog', 'card', 'xl', 'lg'),
                   'tile': ('tile', 'card', 'md', 'lg'), 'chip': ('chip', 'pill', 'sm')}
+
+
+def alias_roles(present):
+    """Report roles absent from `present`, each named by its first present alias.
+
+    Both brand paths use it, so every DESIGN.md wears the same report roles the
+    close gate requires (report_quality BRAND_TOKENS). Returns ({role: alias}, defaulted).
+    """
+    filled, defaulted = {}, []
+    for role, aliases in ROLE_ALIASES.items():
+        if role not in present:
+            alias = next((a for a in aliases if a in present or a in filled), None)
+            if alias:
+                filled[role] = alias
+            else:
+                defaulted.append(role)
+    return filled, defaulted
+
+
 COLOR = re.compile(r'#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b|rgba?\([0-9.,% ]+\)')
 SKIP_DIRS = {'node_modules', 'dist', 'build', 'out', 'coverage', 'target', 'vendor'}
 
@@ -224,7 +243,12 @@ def design_md(project_root, path, meta, head):
         # Print is always the light set: a dark-scheme block applies on screen only.
         css.append(DARK_SCHEME.sub('@media screen and (prefers-color-scheme: dark)', content))
     # A role named like its variable is already defined; aliasing it would be a cycle.
-    aliases = ';'.join('--' + role + ':var(' + name + ')' for role, name in roles if '--' + role != name)
+    aliases = ['--' + role + ':var(' + name + ')' for role, name in roles if '--' + role != name]
+    # Declared roles stay authoritative; a report role neither maps nor sheets
+    # define takes the project's semantic alias, as value keys do.
+    present = {role for role, _ in roles} | set(re.findall(r'--([a-z][a-z0-9-]*)\s*:', '\n'.join(css)))
+    aliases += ['--' + role + ':var(--' + alias + ')' for role, alias in alias_roles(present)[0].items()]
+    aliases = ';'.join(aliases)
     return '\n'.join(css) + '\n:root{' + aliases + '}'
 
 
@@ -301,14 +325,9 @@ def value_keys(project_root, chain, warnings, profile_fonts=()):
             roles[role] = color
     if not roles:
         return None
-    defaulted = []
-    for role, aliases in ROLE_ALIASES.items():
-        if role not in roles:
-            alias = next((roles[a] for a in aliases if a in roles), None)
-            if alias:
-                roles[role] = alias
-            else:
-                defaulted.append(role)
+    filled, defaulted = alias_roles(roles)
+    for role, alias in filled.items():
+        roles[role] = roles[alias]
     css_vars = ['--' + role + ':' + value for role, value in roles.items()]
     faces, picked, type_receipt = [], pick_type(typography), {}
     # PROFILE.md `fonts` name the faces a design-spec DESIGN.md cannot carry.

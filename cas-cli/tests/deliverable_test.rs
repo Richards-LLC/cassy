@@ -649,3 +649,42 @@ fn deliverable_feature_report_template_finalizes_in_the_project_brand() {
     );
     assert!(!html.contains("src=\"pairs/"), "{html}");
 }
+
+/// GH #2152: a DESIGN.md whose CSS maps name a muted-text role but no
+/// evidence role branded and finalized for a customer, then the close gate
+/// refused the report for a missing `--evidence`. Generation and admission
+/// share one role contract; an explicit map stays authoritative.
+#[test]
+fn deliverable_css_map_brand_declares_every_report_role_the_close_gate_requires() {
+    let project = finalize_fixture("<h1 data-verdict>Ready.</h1>", &[]);
+    let root = project.path();
+    fs::create_dir_all(root.join("styles")).unwrap();
+    fs::write(
+        root.join("styles/tokens.css"),
+        ":root{--nw-bg:#fffdf3;--nw-ink:#232124;--nw-muted:#6b6670;--nw-line:#e4e0d8;--nw-accent:#ff682f}\n",
+    )
+    .unwrap();
+    let maps = "bg: \"--nw-bg\"\n  surface: \"--nw-bg\"\n  ink: \"--nw-ink\"\n  text-muted: \"--nw-muted\"\n  line: \"--nw-line\"\n  verdict: \"--nw-accent\"";
+    for (extra, evidence) in [("", "--evidence:var(--ink-muted)"), ("\n  evidence: \"--nw-accent\"", "--evidence:var(--nw-accent)")] {
+        fs::write(
+            root.join("DESIGN.md"),
+            format!("---\nname: Northwind\nsource:\n  - styles/tokens.css\nmaps:\n  {maps}{extra}\n---\n"),
+        )
+        .unwrap();
+        let output = cas_cmd(root)
+            .args(["--json", "deliverable", "finalize", "report/draft.html"])
+            .args(["--audience", "customer", "--out", "report/final.html"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let receipt: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(receipt["findings"], Value::Array(vec![]), "{receipt}");
+        let html = fs::read_to_string(root.join("report/final.html")).unwrap();
+        let gate = cas::deliverable::report_quality::check(&html, None);
+        assert!(!gate.iter().any(|finding| finding.code == "brand-tokens"), "{gate:?}");
+        assert_eq!(html.matches("--evidence:").count(), 1, "{html}");
+        assert!(html.contains(evidence), "{html}");
+    }
+}

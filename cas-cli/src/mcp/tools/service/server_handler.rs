@@ -413,6 +413,11 @@ fn refusal_text(joined: &Result<ToolResult, tokio::task::JoinError>) -> Option<&
     }
 }
 
+fn peer_publication_failed(joined: &Result<ToolResult, tokio::task::JoinError>) -> bool {
+    matches!(joined, Ok(Ok(result)) if result.structured_content.as_ref()
+        .and_then(|v| v["code"].as_str()) == Some("park_publication_failed"))
+}
+
 /// First line of a late close's answer, bounded for a task note.
 pub(super) fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> String {
     let text = match joined {
@@ -560,10 +565,16 @@ impl CasService {
             .and_then(|args| args.get(task_id_key))
             .and_then(serde_json::Value::as_str);
         let receipt = super::mutation_receipt::Receipt::new(tool_name, action, task_id);
+        let close_guard = if tool_name == "task" && action == "close" {
+            super::close_continuation::worker_close_guard(self).map_err(|error|
+                Self::error(rmcp::model::ErrorCode::INVALID_REQUEST, error))?
+        } else { None };
+        let handler_close_guard = close_guard.clone();
         let tool_work = self.tool_work.permit();
         let start = std::time::Instant::now();
         let mut handle = tokio::spawn(super::mutation_receipt::scope(receipt.clone(), async move {
             let _tool_work = tool_work;
+            let _close_guard = handler_close_guard;
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             let _memory_call = crate::mcp::server::memory::Call::started();
             if registration || merge {
@@ -607,6 +618,19 @@ impl CasService {
         };
         match won {
             Won::Handler(joined) => {
+                // A fast post-park publication failure owes the same durable
+                // retry as a close that already answered COMMITTED.
+                if tool_name == "task" && action == "close" && peer_publication_failed(&joined)
+                    && let Some(task_id) = task_id
+                {
+                    let continuation = super::close_continuation::LateClose::begin(self, task_id)
+                        .map_err(|error| Self::error(rmcp::model::ErrorCode::INTERNAL_ERROR, error))?;
+                    let note = late_close_summary(&joined);
+                    let recorded = tokio::task::spawn_blocking(move || continuation.finish(note, true, true)).await;
+                    if !matches!(recorded, Ok(Ok(()))) {
+                        warn!(?recorded, "Park publication retained for daemon recovery");
+                    }
+                }
                 if let Some(durable) = &merge_receipt {
                     durable.finish(&joined, &receipt, None).map_err(|error| rmcp::ErrorData {
                         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
@@ -1094,9 +1118,9 @@ impl CasService {
             let recorded = tokio::task::spawn_blocking(move || {
                 // A checked disposition belongs to this request, unlike the row's
                 // current status or the legacy error-shaped MERGE REQUIRED reply.
-                let summary = if let Some(outcome) = receipt.outcome.get() {
-                    outcome.clone()
-                } else if let (Some(summary), Some(detail)) =
+                let failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true));
+                let retry_peer_park = peer_publication_failed(&joined);
+                let summary = if let (Some(summary), Some(detail)) =
                     (receipt.park_refusal_summary.get(), refusal_text(&joined))
                 {
                     let artifacts_root = service.inner.load_config().factory().artifacts_root;
@@ -1108,8 +1132,10 @@ impl CasService {
                         warn!(%task_id, %error, "full late close refusal receipt unavailable");
                         format!("{summary}\nFull refusal receipt unavailable.")
                     })
-                } else {
+                } else if failed {
                     late_close_summary(&joined)
+                } else {
+                    receipt.outcome.get().cloned().unwrap_or_else(|| late_close_summary(&joined))
                 };
                 let note = format!(
                     "A close answered {disposition} before its handler finished (response budget {:.0}s); finished after {:.1}s. Result: {summary}. Timing (inclusive): {}",
@@ -1117,7 +1143,7 @@ impl CasService {
                     elapsed.as_secs_f64(),
                     receipt.timings(),
                 );
-                continuation.finish(note, !matches!(&joined, Ok(Ok(_))))
+                continuation.finish(note, failed, retry_peer_park)
                     .map(|_| task_id)
             })
             .await;

@@ -12707,7 +12707,8 @@ impl FactoryDaemon {
                     .iter()
                     .map(|name| (name.clone(), releasable_task_ids(self.app.cas_dir(), name)))
                     .collect();
-                for name in &workers_to_stop {
+                let mut report = self.app.shutdown_workers(count, &names, force).await;
+                for (name, _) in &report.stopped {
                     self.dead_workers.insert(name.clone());
                     // GH #1592: an intentional stop ends the boot watch. The
                     // exit is this request taking effect, never a boot failure.
@@ -12724,15 +12725,13 @@ impl FactoryDaemon {
                             "Stopped by a shutdown request before registration.",
                         );
                     }
-                    // Also release bindings for workers that never made it into
-                    // worker_names (early pre-assign only) — shutdown_worker
-                    // only runs for live workers.
+                    // A refused teardown must retain bindings and live mail.
+                    // Settle only workers that actually stopped.
                     crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
                         self.app.cas_dir(),
                         name,
                     );
                 }
-                let mut report = self.app.shutdown_workers(count, &names, force).await;
                 for (name, released) in &mut report.stopped {
                     let still_held = releasable_task_ids(self.app.cas_dir(), name);
                     for id in held_before.get(name).into_iter().flatten() {

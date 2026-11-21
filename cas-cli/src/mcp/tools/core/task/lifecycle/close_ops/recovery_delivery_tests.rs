@@ -2755,8 +2755,9 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
             crate::mcp::tools::service::close_continuation::recover(&root);
             panic!("shutdown discarded a live close: {}", open_task_store(&root).unwrap().get(TASK).unwrap().notes);
         }
-        assert!(app.shutdown_worker(WORKER, true).await.is_err());
-        assert!(app.shutdown_worker_for_recycle(WORKER).await.is_err());
+        assert!(stop.unwrap_err().to_string().contains("code=worker_close_pending"));
+        assert!(app.shutdown_worker(WORKER, true).await.unwrap_err().to_string().contains("code=worker_close_pending"));
+        assert!(app.shutdown_worker_for_recycle(WORKER).await.unwrap_err().to_string().contains("code=worker_close_pending"));
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
         parked.write_all(b"R").unwrap();
         outcome.read_exact(&mut byte).unwrap();
@@ -2769,6 +2770,14 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         assert_eq!(task.notes.matches("CLOSE_OUTCOME:").count(), 1, "{}", task.notes);
         assert!(!task.notes.contains("code=continuation_lost"), "{}", task.notes);
         if fail_sync {
+            assert!(task.notes.contains("code=park_publication_failed"), "{}", task.notes);
+            let journals = std::fs::read_dir(root.join("close-continuations")).unwrap()
+                .map(|entry| entry.unwrap().path()).filter(|path| path.extension().is_some_and(|s| s == "json"))
+                .collect::<Vec<_>>();
+            assert_eq!(journals.len(), 1);
+            let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(&journals[0]).unwrap()).unwrap();
+            assert_eq!(journal["retry_peer_park"], true);
+            assert_eq!(journal["failed"], true);
             let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
             let notices = queue.list_pending("supervisor-session").unwrap();
             assert_eq!(notices.iter().filter(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed").count(), 1);

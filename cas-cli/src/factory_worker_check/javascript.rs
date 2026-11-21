@@ -27,7 +27,7 @@ fn safe_path(path: &str) -> bool {
 pub(super) fn javascript(path: &str) -> bool {
     matches!(
         Path::new(path).extension().and_then(|ext| ext.to_str()),
-        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts")
+        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "vue")
     )
 }
 
@@ -41,12 +41,12 @@ pub(super) fn test_file(path: &str) -> bool {
 /// name suffix, or jest's `__tests__` directory; declarations never are.
 /// `test_file` stays the wide net for files that may hold tests. A file only
 /// that net catches is a support module: a `File` run of it finds no tests,
-/// so it widens to related tests for Jest, or to its package for other runners.
-pub(super) fn test_match(path: &str) -> bool {
+/// so it widens to related tests for Jest/Vitest, or to its package otherwise.
+pub(super) fn test_match(path: &str, runner: Option<&str>) -> bool {
     let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
     !stem.ends_with(".d")
         && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
-            || path.split('/').any(|part| part == "__tests__"))
+            || (runner == Some("jest") && path.split('/').any(|part| part == "__tests__")))
 }
 
 /// A scoped JavaScript stability command, however the shell names its runner.
@@ -59,7 +59,7 @@ pub(super) struct Invocation {
     pub(super) files: Vec<String>,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
@@ -71,6 +71,7 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
         rest => rest,
     };
     let (runner, rest) = match args {
+        ["vitest", "related", rest @ ..] => ("vitest", rest),
         ["vitest", "run", rest @ ..] | ["vitest", rest @ ..] => ("vitest", rest),
         ["jest", rest @ ..] => ("jest", rest),
         ["playwright", "test", rest @ ..] | ["playwright", rest @ ..] => ("playwright", rest),
@@ -85,6 +86,7 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
         let value = match *arg {
             "--config" | "-c" => Some(*rest.next()?),
             "--runInBand" | "-i" if runner == "jest" => continue,
+            "--run" if runner == "vitest" => continue,
             "--findRelatedTests" if runner == "jest" => continue,
             "--testNamePattern" | "-t" if runner == "jest" => {
                 if rest.next()?.is_empty() { return None; }
@@ -193,6 +195,11 @@ pub(crate) fn changed_tests(
         // runtime identities for callbacks merely present in its final tree.
         if lines.is_empty() {
             continue;
+        }
+        // Vue's template/SFC grammar is not JavaScript test registration.
+        // Its runner owns dependency discovery, including the Vue transform.
+        if path.ends_with(".vue") {
+            bail!("Vue component {path} requires related-test proof");
         }
         let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
         let old = show(repo, base, path)?
@@ -1512,8 +1519,10 @@ fn execute_tests(
             let file = repo.join(path);
             match runner {
                 "vitest" => {
+                    if matches!(widened, Some((super::widened::Scope::Related(_), _, _))) {
+                        command.args(["related", "--run"]);
+                    } else { command.arg("run"); }
                     command
-                        .arg("run")
                         .args(&config)
                         .args([
                             "--retry",
@@ -1586,6 +1595,10 @@ fn execute_tests(
                     } else { "--runTestsByPath" });
                 }
                 if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
+                else if runner == "vitest" && matches!(widened, Some((super::widened::Scope::Related(_), _, _))) {
+                    // Vitest's related inputs are relative to its config root.
+                    command.arg(file.strip_prefix(&package)?);
+                }
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));

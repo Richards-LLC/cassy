@@ -12823,9 +12823,14 @@ impl FactoryDaemon {
                         .map_err(|error| anyhow::anyhow!(
                             "launch refused before stopping {name}; the worker keeps running: {error}"
                         ))?;
-                    if !stopped && crate::factory_worker_runs::recycle_waits_for_build(
-                        self.app.cas_dir(), &name, &self.session_name,
-                    )? {
+                    let waits = if stopped { Ok(false) } else {
+                        crate::factory_worker_runs::recycle_waits_for_build(
+                            self.app.cas_dir(), &name, &self.session_name,
+                        )
+                    };
+                    // cas-aea9: a store held by another thread under this
+                    // pass's spent budget read nothing; retry next pass.
+                    if waits.as_ref().map_or_else(super::delivery::lost_store_to_contention, |waits| *waits) {
                         // Keep the same request pending; the next daemon pass
                         // resumes it once its own producer releases the lease.
                         self.pending_spawns.push_back(PendingSpawn::Recycle {
@@ -12833,6 +12838,7 @@ impl FactoryDaemon {
                         });
                         return Ok(None);
                     }
+                    waits?;
                     self.pane_buffers.remove(&name);
                     self.forget_probe_pane(&name);
                     if !stopped {

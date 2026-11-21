@@ -7008,6 +7008,7 @@ impl CasCore {
         candidate: &str,
         target: &str,
     ) -> bool {
+        if task.status != TaskStatus::AwaitingMerge { return false; }
         let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else { return false; };
         let Some(branch) = task.deliverables.parked_branch.as_deref()
             .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))

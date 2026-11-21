@@ -2603,7 +2603,7 @@ async fn supervisor_stability_exception_reaches_park_gh2041() {
 #[tokio::test]
 async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     let mut env = TestEnvGuard::temp_home();
-    for history in ["review", "absent", "legacy-error", "typed-error"] {
+    for history in ["review", "typed-error", "legacy-error", "absent"] {
     let f = fixture_with_surface(&mut env, "service.py", false);
     let repo = f.dir.path();
     let root = repo.join(".cas");
@@ -2703,7 +2703,10 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
         git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
         let output = text(supervisor.cas_task_close(replay()).await.unwrap());
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{history}: {output}");
-        assert!(crate::gates::codes_in(&output).contains(&"G-70"), "recovery must emit its audited override code: {output}");
+        let latest = verifications.get_latest_for_task(TASK).unwrap().unwrap();
+        assert_eq!(latest.status, VerificationStatus::Skipped);
+        assert_eq!(latest.agent_id.as_deref(), Some("supervisor-session"));
+        assert!(tasks.get(TASK).unwrap().notes.contains(arguments["reason"].as_str().unwrap()));
         if let Some(error) = prior_error {
             assert_eq!(serde_json::to_value(verifications.get("ver-bwrap-error").unwrap()).unwrap(), error);
         }

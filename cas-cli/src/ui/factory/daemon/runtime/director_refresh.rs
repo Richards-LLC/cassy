@@ -746,7 +746,7 @@ impl DirectorRefresh {
             jobs.submit_external_read(spec, work)
         };
         match submitted {
-            Submitted::Queued | Submitted::QueuedBehindKey => {
+            Submitted::Queued | Submitted::QueuedBehindKey | Submitted::Coalesced { .. } => {
                 if let Some(liveness) = liveness {
                     self.start_idle_liveness(jobs, generation, liveness);
                 }
@@ -776,7 +776,7 @@ impl DirectorRefresh {
             hook.run(IDLE_LIVENESS_JOB);
             Box::new(FactoryJobOutput::IdleLiveness(request.read()))
         });
-        if !matches!(submitted, Submitted::Queued | Submitted::QueuedBehindKey) {
+        if !matches!(submitted, Submitted::Queued | Submitted::QueuedBehindKey | Submitted::Coalesced { .. }) {
             tracing::warn!(?submitted, "idle-worker liveness refused by the job runtime");
             self.idle_liveness.fail(generation);
         }

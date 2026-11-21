@@ -442,7 +442,7 @@ async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
             if state != "missing" {
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
                 let body = if file.file_name().unwrap() == "LEDGER.md" {
-                    "schema: 2\ncovers: cas-dae1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| M01 | probe | ok [source: own.md:1] | terminal: ok | PASS | fixture | base.txt | - |\n".to_string()
+                    "schema: 2\ncovers: cas-dae1\ncells=1; PASS=1; FAIL=0; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| M01 | probe | ok [source: own.md:1] | terminal: ok | PASS | fixture | base.txt | - |\n".to_string()
                 } else { format!("proof {index}\n") };
                 std::fs::write(file, body).unwrap();
             }

@@ -1785,6 +1785,14 @@ async fn verifier_launch_survives_its_requester_exiting_cas_5f88() {
     let account = env.home().join(".claude-review");
     std::fs::create_dir_all(&account).unwrap();
     std::fs::write(account.join(".credentials.json"), "{}").unwrap();
+    // Claude selection requires an observed capacity window as well as login.
+    std::fs::write(account.join(".cas-claude-usage.json"), serde_json::to_vec(&serde_json::json!({
+        "identity": null,
+        "observed_at": chrono::Utc::now(),
+        "windows": [{"name": "5h", "used_percent": 0.0,
+            "reset_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            "spend_dollars": null}],
+    })).unwrap()).unwrap();
     let provider = bin.join("claude");
     std::fs::write(&provider, r#"#!/bin/sh
 set -eu

@@ -2771,8 +2771,7 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         if fail_sync {
             let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
             let notices = queue.list_pending("supervisor-session").unwrap();
-            assert_eq!(notices.iter().filter(|n| n.context.as_ref().is_some_and(|c|
-                c.get("code").and_then(|v| v.as_str()) == Some("close_continuation_failed"))).count(), 1);
+            assert_eq!(notices.iter().filter(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed").count(), 1);
         } else {
             assert_eq!(cas_store::list_qa_passes(&root, TASK).unwrap().len(), 1);
         }

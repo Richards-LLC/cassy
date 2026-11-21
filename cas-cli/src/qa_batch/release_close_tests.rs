@@ -331,6 +331,35 @@ fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
     git(&["add", "docs/guide.md"]);
     git(&["commit", "-qm", "docs"]);
     let published = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "--allow-empty", "-qm", "release"]);
+    let release = git(&["rev-parse", "HEAD"]);
+    // Only the forge boundary is fake: target CI is green even when the
+    // delivery's exact anchor has no checks, or has pending/failed checks.
+    let checks = |conclusion: Option<&str>| serde_json::json!({"check_runs": [
+        {"name": "Classify Changes", "status": "completed", "conclusion": "success"},
+        {"name": "Docs Lint", "status": if conclusion.is_some() { "completed" } else { "in_progress" }, "conclusion": conclusion},
+        {"name": "Scoped Validation (factory/PR)", "status": "completed", "conclusion": "skipped"}
+    ]});
+    let response = root.join("late-ci.json");
+    std::fs::write(&response, r#"{"check_runs":[]}"#).unwrap();
+    let gh = root.join("gh-fixture");
+    crate::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
+if [ "$1 $2" = 'repo view' ]; then
+    printf '%s\n' '{{"nameWithOwner":"example/exempt"}}'
+    exit 0
+fi
+printf '%s\n' "$4" >> .cas/ci-requests.log
+case "$4" in
+repos/example/exempt/commits/{published}/check-runs) cat .cas/late-ci.json ;;
+repos/example/exempt/commits/{release}/check-runs) cat <<'JSON'
+{}
+JSON
+;;
+repos/example/exempt/commits/{code}/check-runs) printf '%s\n' '{{"check_runs":[]}}' ;;
+*) exit 97 ;;
+esac
+"#, checks(Some("success"))));
+    env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut train = Task::new("cas-exempt-train".into(), "train".into());
     train.task_type = cas_types::TaskType::Epic;
@@ -339,6 +368,7 @@ fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
     let window = crate::rapid_response::enable(&root, tasks.as_ref(), &train.id,
         chrono::Duration::hours(1), "incident", "revert", now).unwrap();
     let mut expected = BTreeMap::new();
+    let mut late_id = String::new();
     for (kind, admission, gate) in [
         ("mechanical", Some(MergeCiAdmission::Green), None),
         ("light", Some(MergeCiAdmission::Green), None),
@@ -365,6 +395,9 @@ fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
             base_sha: if kind == "mechanical" || kind == "forced" { code.clone() } else { base.clone() },
         });
         tasks.add(&task).unwrap();
+        if kind == "mechanical" && admission == Some(MergeCiAdmission::Green) {
+            late_id = id.clone();
+        }
         tasks.add_dependency(&cas_types::Dependency::new(id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
         if let Some(admission) = admission { tasks.record_merge_admission(&id, &published, admission).unwrap(); }
         if kind.starts_with("rapid") { assert!(crate::rapid_response::record_skip(&root, &window, &id, "verification", "not sampled")); }
@@ -385,7 +418,7 @@ fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
     crate::rapid_response::disable(&root, tasks.as_ref(), &train.id, now + chrono::Duration::minutes(1)).unwrap();
     let scope = ReleaseScope {
         project_id: "exempt".into(), repository: "example/exempt".into(), release_id: "v9.99.0".into(),
-        reviewed_sha: code, final_release_sha: published, promotion_pr: None, release_tag: None,
+        reviewed_sha: code, final_release_sha: release, promotion_pr: None, release_tag: None,
         constituent_epic_ids: vec![], included_task_ids: expected.keys().cloned().collect(),
         no_code_members: BTreeMap::new(), proof_refs: vec![],
     };
@@ -397,6 +430,35 @@ fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
             Some(code) => assert!(matches!(outcomes.get(&id), Some(CassyMergeClose::Held(reason)) if reason == code), "{id}: {:?}", outcomes.get(&id)),
         }
     }
+
+    // Replay the pending-at-merge incident through release preview and apply,
+    // without reopening the shipped docs task or producing a no-op merge.
+    tasks.record_merge_admission(&late_id, &published, MergeCiAdmission::Advisory).unwrap();
+    let before = tasks.get(&late_id).unwrap();
+    let scope = ReleaseScope { included_task_ids: vec![late_id.clone()], ..scope };
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    for (case, response_body, eligible) in [
+        ("pending", checks(None), false),
+        ("failed", checks(Some("failure")), false),
+        ("wrong-anchor", serde_json::json!({"check_runs": []}), false),
+        ("late-green", checks(Some("success")), true),
+    ] {
+        std::fs::write(&response, response_body.to_string()).unwrap();
+        let outcomes = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+        let outcome = outcomes.get(&late_id).unwrap();
+        assert_eq!(matches!(outcome, CassyMergeClose::Closed { .. }), eligible, "{case}: {outcome:?}");
+        if !eligible { assert!(matches!(outcome, CassyMergeClose::Held(code) if code == "LANE_CI_MISSING"), "{case}: {outcome:?}"); }
+        assert_eq!(serde_json::to_value(tasks.get(&late_id).unwrap()).unwrap(), serde_json::to_value(&before).unwrap());
+    }
+    let requests = std::fs::read_to_string(root.join("ci-requests.log")).unwrap_or_default();
+    assert!(requests.lines().any(|endpoint| endpoint == format!("repos/example/exempt/commits/{published}/check-runs")));
+    assert!(!requests.lines().any(|endpoint| endpoint == format!("repos/example/exempt/commits/{}/check-runs", scope.final_release_sha)));
+    let outcomes = reconcile_members(&root, &repo, &inventory, true, &mut |_, _| Ok(())).unwrap();
+    assert!(matches!(outcomes.get(&late_id), Some(CassyMergeClose::Closed { .. })));
+    let closed = tasks.get(&late_id).unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert_eq!(closed.deliverables.factory_branch_anchor, before.deliverables.factory_branch_anchor);
+    assert_eq!(closed.deliverables.green_merge_commit, before.deliverables.green_merge_commit);
 }
 
 #[test]

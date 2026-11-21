@@ -625,6 +625,36 @@ pub(crate) fn publish_routed_evidence(
     Ok(())
 }
 
+/// Synced publication times order revisions. A receiver's artifact-store time
+/// records its import, so it cannot establish which evidence revision is newer.
+fn newer_local_publication(
+    store: &SqliteArtifactStore,
+    task: &cas_types::Task,
+    file: &SyncedFile,
+    local_sha: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let (Some(id), Some(local_sha)) = (&file.artifact_id, local_sha) else { return Ok(None) };
+    let Some(manifest) = from_notes(&task.notes, id, &task.id)? else { return Ok(None) };
+    anyhow::ensure!(manifest.sha256 == file.sha256, "artifact {id} has other bytes");
+    let Ok(published) = chrono::DateTime::parse_from_rfc3339(&manifest.created_at) else { return Ok(None) };
+    for json in task.notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
+        let Ok(record) = serde_json::from_str::<PublishedArtifact>(json) else { continue };
+        if record.name != manifest.name || record.sha256 != local_sha
+            || validate(&record, &task.id).is_err()
+            || !chrono::DateTime::parse_from_rfc3339(&record.created_at).is_ok_and(|time| time > published)
+        { continue; }
+        // Keep the same conflict/revocation checks as a fetch, even when no
+        // download is needed for these already-present bytes.
+        from_notes(&task.notes, &record.id, &task.id)?;
+        if let Some(local) = store.get(&record.id)? {
+            super::require_available(&local)?;
+            anyhow::ensure!(same_artifact(&local, &record), "cached artifact {} has a different identity", record.id);
+        }
+        return Ok(Some(record.id));
+    }
+    Ok(None)
+}
+
 /// The newest routed-park manifest restored byte-identical where the verifier
 /// reads, or a refusal naming both machines' evidence directories (cas-e571).
 fn materialize_manifest(
@@ -659,8 +689,19 @@ fn materialize_manifest(
             })();
             if let Err(error) = committed { missing.push(format!("{} ({error})", file.name)); continue; }
         }
-        if identical(file) {
+        let local_sha = digest_file(&dir.join(&file.name)).ok().map(|(sha256, _)| sha256);
+        if local_sha.as_deref() == Some(file.sha256.as_str()) {
             continue;
+        }
+        match newer_local_publication(&store, task, file, local_sha.as_deref()) {
+            Ok(Some(id)) => {
+                if sync.strict {
+                    missing.push(format!("{} (newer local artifact {id}; re-park with its updated manifest)", file.name));
+                }
+                continue;
+            }
+            Err(error) => { missing.push(format!("{} ({error})", file.name)); continue; }
+            Ok(None) => {}
         }
         let fetched = (|| -> anyhow::Result<()> {
             let Some(id) = &file.artifact_id else {

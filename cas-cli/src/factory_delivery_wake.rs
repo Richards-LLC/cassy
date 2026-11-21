@@ -180,7 +180,9 @@ pub(crate) async fn reconcile_contained(root: &Path, session: &str) -> Result<()
             Some(core) => core,
             None => core.insert(reconcile_core(root, &supervisor)?),
         };
-        let outcome = core.close_after_observed_landing(&task.id, &target, &landed).await;
+        let outcome = close_ops::as_contained_reconcile_close(core.close_after_published_merge(
+            &task.id, &landed, cas_types::MergeCiAdmission::Advisory, None,
+        )).await;
         if active(&task.id) {
             in_flight += 1;
         }

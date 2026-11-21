@@ -361,6 +361,7 @@ fn take_ownership(root: &Path, task: &mut Task, taker: &cas_types::Agent) -> Res
         taker.name, taker.id, task.id, owner.as_deref().unwrap_or("no recorded owner"))))
 }
 
+// gate-audit[promote]: selector Explicit ordinary-epic promotion; take_ownership still checks every enrolled train owner and this flag cannot reassign it.
 fn freeze_with_promotion(
     root: &Path,
     train_id: &str,
@@ -1052,11 +1053,16 @@ mod tests {
                 _ => {},
             }
             agents.update(&owner).unwrap();
-            let error = other.factory(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
-            assert_eq!(error.message.split(':').next(), Some("TRAIN_OWNER_TRANSFER_REQUIRED"), "{state}: {error}");
-            let train = store.get("cas-tr").unwrap();
-            assert!(freeze_of(&train).is_none());
-            assert_eq!(train.epic_verification_owner.as_deref(), Some("sup-id"));
+            for decision in [None, Some("promote")] {
+                let mut attempt = request.clone();
+                if let Some(decision) = decision { attempt["decision"] = decision.into(); }
+                let error = other.factory(Parameters(serde_json::from_value(attempt).unwrap())).await.unwrap_err();
+                assert_eq!(error.message.split(':').next(), Some("TRAIN_OWNER_TRANSFER_REQUIRED"), "{state}: {error}");
+                assert_eq!(crate::gates::codes_in(&error.message), vec!["G-113"]);
+                let train = store.get("cas-tr").unwrap();
+                assert!(freeze_of(&train).is_none());
+                assert_eq!(train.epic_verification_owner.as_deref(), Some("sup-id"));
+            }
         }
     }
 

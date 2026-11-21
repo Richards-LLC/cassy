@@ -1519,9 +1519,13 @@ impl CasCore {
     ) -> Result<Candidate, McpError> {
         // Coalescing only schedules work. The unchanged builder's resolved
         // source/target/context key and file lock still own immutable authority.
+        // cas-2c75: key on the resolved SHAs, so a retry after the target
+        // moves never joins a build for the old target.
+        let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
+        let target_sha = review_target(repo, target).map_err(fail)?;
         let identity = serde_json::to_vec(&(&self.cas_root, &task.id,
-            &task.deliverables.factory_branch_anchor, repo, source, target,
-            &digest, &inherited_supervisor_call)).map_err(fail)?;
+            &task.deliverables.factory_branch_anchor, repo, source, &source_sha, target,
+            &target_sha, &digest, &inherited_supervisor_call)).map_err(fail)?;
         let key = format!("{:x}", Sha256::digest(identity));
         let worker = self.clone();
         let build_task = task.clone();

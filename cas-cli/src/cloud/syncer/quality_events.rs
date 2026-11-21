@@ -121,6 +121,7 @@ impl CloudSyncer {
         // Serialize these cursors independently of task/entry sync, including
         // explicit CLI/ledger callers. Contention defers this optional round.
         let Some(_lease) = crate::cloud::sync_lease::SyncLease::try_acquire_quality(self.queue.cas_dir())? else {
+            summary.deferred = true;
             return Ok(summary);
         };
         if let Some(refusal) = self.ephemeral_project_refusal() {

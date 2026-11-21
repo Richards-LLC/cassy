@@ -2085,7 +2085,12 @@ fn sync_project_knowledge_with_output(
     }
 
     let Some(_lease) = crate::cloud::sync_lease::SyncLease::try_acquire_knowledge(cas_root)? else {
-        tracing::debug!("knowledge sync deferred: another round is active");
+        // cas-2c75: an explicit sync says so; silence would read as "nothing new".
+        if emit_output && cli.json {
+            println!("{}", serde_json::json!({"knowledge": {"deferred": true}}));
+        } else if emit_output {
+            eprintln!("  Knowledge: deferred, another sync round is running; rerun to include knowledge and quality events");
+        }
         return Ok(KnowledgeSyncSummary::default());
     };
 
@@ -2117,6 +2122,9 @@ fn sync_project_knowledge_with_output(
         }
     };
     match syncer.sync_quality_events(true) {
+        Ok(summary) if summary.deferred && emit_output && !cli.json => {
+            eprintln!("  Quality events: deferred, another sync round is running");
+        }
         Ok(summary) => tracing::debug!(?summary, "quality events synced"),
         Err(e) => tracing::warn!(error = %e, "quality events sync failed (non-fatal)"),
     }

@@ -1641,7 +1641,7 @@ impl ProxyEngine {
             // never reached it. Send the same request_id once more; Violet
             // dedupes by it. Any other outcome keeps its answer.
             if let Some(arguments) = resend.filter(|_| never_sent && state == "not_posted" && lookup["reason"] == "request_not_found") {
-                let mut params = CallToolRequestParams::new("violet_post");
+                let mut params = rmcp::model::CallToolRequestParams::new("violet_post");
                 params.arguments = Some(arguments.clone());
                 let resent = self.call_upstream(config::VIOLET_SERVER, params).await;
                 return Box::pin(self.reconcile_violet_message(caller, dispatch_kind, request_id, None, resent)).await;

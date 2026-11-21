@@ -2215,6 +2215,13 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Optio
 /// process's stdout (the shell's log redirect), never the harness pipe.
 #[cfg(unix)]
 pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    execute_detached_with(&std::env::current_exe()?, cas_root, args, isolated_test_env, test_env)
+}
+
+/// [`execute_detached`] with the runner's executable named, so a test can
+/// stand in for the `cas` binary (cas-c152).
+#[cfg(unix)]
+pub(crate) fn execute_detached_with(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if !allowed_args(args) {
         bail!(admission_refusal(args));
     }
@@ -2223,7 +2230,7 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_e
     let log = detached_log_path().context("detached worker-check requires a regular output log")?;
     let run = crate::factory_worker_runs::register(cas_root, &repo, &log, chrono::Utc::now())?;
     let command = detached_runner_command_with_run(
-        &std::env::current_exe()?, cas_root, args, isolated_test_env, run.as_deref(), test_env,
+        executable, cas_root, args, isolated_test_env, run.as_deref(), test_env,
     );
     let mut child = match spawn_detached(command).context("starting the detached worker-check runner") {
         Ok(child) => child,
@@ -2417,6 +2424,12 @@ pub(crate) fn diff_base(repo: &Path, target: Option<&str>) -> Result<String> {
     git(repo, &["merge-base", "refs/remotes/origin/HEAD", "HEAD"])
         .or_else(|_| git(repo, &["rev-parse", "HEAD^"]))
         .or_else(|_| git(repo, &["rev-parse", "HEAD"]))
+}
+
+/// The capped producer with a stand-in cargo and no systemd scope (tests).
+#[cfg(test)]
+pub(crate) fn execute_with_cargo_for_test(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
+    execute_at_with_scope(cas_root, args, cwd, cargo, None, None)
 }
 
 fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>) -> Result<()> {

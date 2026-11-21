@@ -3251,7 +3251,7 @@ fn same_except_close_audit(before: &Task, after: &Task) -> bool {
 pub(crate) mod lifecycle_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
     #[derive(PartialEq)]
-    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark }
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark, AfterPark }
     static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3272,6 +3272,14 @@ pub(crate) mod lifecycle_race_hook {
 
     pub(crate) fn before_park(task_id: &str, hook: impl FnOnce() + Send + 'static) {
         HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforePark, Box::new(hook)));
+    }
+
+    pub(crate) fn after_park(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::AfterPark, Box::new(hook)));
+    }
+
+    pub(super) fn fire_after_park(task_id: &str) {
+        fire_at(task_id, Phase::AfterPark);
     }
 
     pub(super) fn fire_before_park(task_id: &str) {
@@ -6778,6 +6786,8 @@ impl CasCore {
                         parked.deliverables.parked_branch.as_deref().unwrap_or("recorded delivery branch"),
                         parked.deliverables.factory_branch_anchor.as_deref().unwrap_or("recorded delivery tip")),
                 );
+                #[cfg(test)]
+                lifecycle_race_hook::fire_after_park(&task.id);
                 self.retire_delivered_worker_cache(&parked);
                 // cas-3a82 / P1.5: a successful park produces one AwaitingMerge
                 // relay. A refused close stays a tool error for the worker.

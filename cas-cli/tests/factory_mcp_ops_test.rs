@@ -61,7 +61,10 @@ impl FactoryTestEnv {
 
     fn with_agent_id_and_env(agent_id: &str, env_guard: Option<EnvGuard>) -> Self {
         let temp = TempDir::new().expect("Failed to create temp dir");
-        let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
+        // cas-253d: macOS temp roots (/tmp, /var) are symlinks, and host
+        // retention refuses symlinked ancestors; keep the project physical.
+        let cas_root = init_cas_dir(&temp.path().canonicalize().expect("canonical temp dir"))
+            .expect("Failed to init CAS dir");
 
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing(agent_id.to_string());
@@ -78,7 +81,8 @@ impl FactoryTestEnv {
     fn without_agent_id() -> Self {
         let env_guard = EnvGuard::ensure_isolated_home();
         let temp = TempDir::new().expect("Failed to create temp dir");
-        let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
+        let cas_root = init_cas_dir(&temp.path().canonicalize().expect("canonical temp dir"))
+            .expect("Failed to init CAS dir");
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         let service = CasService::new(core, None);
         Self {
@@ -7895,8 +7899,10 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
 async fn test_gc_retains_file_written_after_dirty_probe_cas_75ae() {
     const CHILD: &str = "REVIEW_GC_RACE_CHILD_75AE";
     if std::env::var_os(CHILD).is_none() {
-        let home = TempDir::new().unwrap();
-        let bin = home.path().join("bin");
+        let home_dir = TempDir::new().unwrap();
+        // cas-253d: host retention refuses symlinked ancestors such as macOS /tmp.
+        let home = home_dir.path().canonicalize().unwrap();
+        let bin = home.join("bin");
         std::fs::create_dir(&bin).unwrap();
         let inherited_path = std::env::var_os("PATH").unwrap();
         let real_git = std::env::split_paths(&inherited_path)
@@ -7932,10 +7938,10 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
         command
             .args(["--exact", filter, "--nocapture"])
             .env(CHILD, "1")
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("REVIEW_GC_REAL_GIT_75AE", real_git)
-            .env("REVIEW_GC_RACE_CONTROL_75AE", home.path().join("armed"))
+            .env("REVIEW_GC_RACE_CONTROL_75AE", home.join("armed"))
             .env("PATH", path);
         clear_account_selectors(&mut command);
         let output = command.output().unwrap();

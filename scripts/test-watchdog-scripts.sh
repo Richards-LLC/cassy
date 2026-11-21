@@ -134,7 +134,6 @@ fi
 queued_output="$tmp/queued-output"
 if env "${run_env[@]}" "$queued_script" >"$queued_output" 2>&1; then
     queued_text="$(<"$queued_output")"; gh_log="$(<"$tmp/gh.log")"
-    expect_text "$(<"$tmp/gh.log")" 'actions/runs/101/cancel' 'queued watchdog cancels stale non-merge-group run'
     expect_absent "$gh_log" 'actions/runs/102' 'queued watchdog leaves merge-group scope alone'
     expect_absent "$gh_log" 'actions/runs/103' 'queued watchdog preserves threshold-fresh run'
     expect_absent "$gh_log" 'actions/runs/107/cancel' 'queued watchdog preserves a fresh rerun of an old run'
@@ -142,7 +141,6 @@ if env "${run_env[@]}" "$queued_script" >"$queued_output" 2>&1; then
     expect_absent "$gh_log" 'actions/runs/109/cancel' 'queued watchdog leaves a run queued behind busy online runners'
     expect_count "$gh_log" 'actions/runs?status=in_progress&per_page=100' 1 'queued watchdog reads busy runners once per sweep'
     expect_text "$gh_log" 'actions/runs/101/cancel' 'queued watchdog cancels a run whose runner labels have no busy runner'
-    expect_text "$gh_log" 'actions/runs/101/cancel' 'queued watchdog sends cancel only after status re-read'
     expect_text "$queued_text" 'selected=2 cancel_accepted=2 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0' 'queued watchdog reports accepted requests separately from reclamation'
 else
     printf 'FAIL queued watchdog fixture exits successfully\n' >&2; fail=$((fail + 1))

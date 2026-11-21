@@ -9730,6 +9730,12 @@ impl CasCore {
             }
         }
 
+        // GH #2270: the operator decision covers only measured non-Tier-2
+        // deliveries; an unmeasurable tier keeps every check.
+        let operator_recovery_below_tier_two = operator_recovery.is_some()
+            && super::review_tier::tier_for_delivery(&task, &close_project_root).is_some_and(|decision| {
+                decision.tier != super::review_tier::VerificationTier::Adversarial
+            });
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             // Renew the explicit review before handing this delivery to merge.
@@ -10177,11 +10183,10 @@ impl CasCore {
             // cas-5ea7: a passed fast-lane receipt is this delivery's QA walk.
             // GH #2270: the operator's recovery decision for this epic is the
             // same waiver for a contained historical delivery (D1: no per-task
-            // review), recorded against the cited commit. Tier 2 keeps its QA.
+            // review), recorded against the cited commit. Tier 2 keeps its QA,
+            // and a delivery whose tier cannot be measured is treated as Tier 2.
             let operator_qa_waiver = operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-64"))
-                && !super::review_tier::tier_for_delivery(&task, &close_project_root).is_some_and(|decision| {
-                    decision.tier == super::review_tier::VerificationTier::Adversarial
-                });
+                && operator_recovery_below_tier_two;
             match if fast_lane_receipt_passed { super::qa_dispatch::QaCloseGate::Clear } else { self.independent_qa_close_gate(
                 &task,
                 &close_project_root,
@@ -10579,7 +10584,7 @@ impl CasCore {
                 // may be the containing merge, so the recorded delivery anchor
                 // itself must also be on the target.
                 let contained_recovery = (operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-70"))
-                    && !tier_two && !is_epic
+                    && operator_recovery_below_tier_two && !is_epic
                     && !in_cassy_merge_close()
                     && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor|
                         commit_is_merged_into_parent(&close_project_root, anchor, &resolved_parent_branch))

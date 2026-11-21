@@ -2317,8 +2317,15 @@ async fn parked_in_decided_epic(
     let mut config = crate::config::Config::load(&cas_dir).unwrap();
     config.set("verification.enabled", "true").unwrap();
     config.save(&cas_dir).unwrap();
-    close(&f).await;
+    let mut parked = close(&f).await;
     let tasks = open_task_store(&cas_dir).unwrap();
+    // The recorded lane start makes the delivered tier measurable.
+    parked.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: parked.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(),
+        base_sha: git(f.dir.path(), &["merge-base", "main", &f.final_tip]),
+    });
+    tasks.update(&parked).unwrap();
     for epic in ["cas-ep2270", "cas-epother"] {
         let mut task = Task::new(epic.into(), format!("{epic} train"));
         task.task_type = TaskType::Epic;

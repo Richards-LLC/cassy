@@ -315,7 +315,8 @@ pub(super) fn validated_started_delivery(
         }
         if on_lane
             && (merged.is_empty()
-                || !merge_brings_foreign_work(repo, &parents[0], merged, &target, &identity))
+                || !merge_brings_foreign_work(repo, &parents[0], merged, &target,
+                    upstream.as_deref().map(|reference| &reference[1..]), &identity))
             // The inherited repository identity can recover real WIP, but
             // cannot make an unnamed, unrecorded empty checkpoint task-owned.
             // Such metadata-only commits still need their own attribution.
@@ -588,12 +589,14 @@ pub(crate) fn branch_task_claims(
 /// or another lane's commit already on the target, imports someone else's
 /// content: its first-parent diff is theirs. Unnamed commits off the target
 /// stay attributable (a worker's own side branch). Unknowable Git state keeps
-/// the merge, as before.
+/// the merge, as before. GH #2163: an unnamed commit already on the released
+/// trunk is upstream work too, like one on the target.
 fn merge_brings_foreign_work(
     repo: &Path,
     first_parent: &str,
     merged_parents: &[String],
     target: &str,
+    released: Option<&str>,
     identity: &TaskCommitIdentity,
 ) -> bool {
     for parent in merged_parents {
@@ -614,9 +617,13 @@ fn merge_brings_foreign_work(
         ) else {
             return false;
         };
+        let exclude_released = released.map(|reference| format!("^{reference}"));
         let Some(off_target) = git_text(
             repo,
-            &["rev-list", "--no-merges", parent, &exclude_first, &exclude_target],
+            &["rev-list", "--no-merges", parent, &exclude_first, &exclude_target]
+                .into_iter()
+                .chain(exclude_released.as_deref())
+                .collect::<Vec<_>>(),
         ) else {
             return false;
         };
@@ -757,6 +764,7 @@ fn task_delivery_selection(
     }
     let historical_receipt = tip.is_some() && window.supervisor_override_reason.is_some();
     let target = preferred_diff_target_ref(repo, parent);
+    let released = released_trunk_ref(repo, parent);
     let tip = tip.unwrap_or("HEAD");
     let base = git_text(repo, &["merge-base", tip, &target])?;
     // GH #1382: an unmerged start base can carry the preceding task's UI.
@@ -866,6 +874,7 @@ fn task_delivery_selection(
                         &c.parent,
                         &c.merged_parents,
                         &target,
+                        released.as_deref(),
                         &window.identity,
                     ))
             {

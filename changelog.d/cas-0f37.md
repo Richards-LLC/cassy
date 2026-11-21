@@ -1,11 +1,17 @@
-### Fixed — Task close
+### Added — Task close
 
-- **One supervisor close recovers an integrated historical delivery** — a
-  delivery already on its target with no reusable pre-merge verdict, and with
-  a path a later target commit superseded, could not close: the
-  `reviewed-drop:` reason passed the content check and then failed the
-  missing-approval check, and the reason that check suggested failed the
-  content check. A live supervisor's `supervisor_override=true` close whose
-  `commit_receipt` is on the target now records the recovery decision, so one
-  close satisfies both. Unintegrated receipts and unreviewed content loss
-  still refuse, and Tier 2 deliveries keep their adversarial review (GH #2270).
+- **Operator recovery decisions for contained historical deliveries** — a
+  delivery already on its target with no reusable pre-merge verdict could not
+  close, and when a later target commit had superseded one of its paths, the
+  `reviewed-drop:` reason and the missing-approval check each refused the
+  other (GH #2270). The operator now runs one command per epic,
+  `cas task recovery-decision --scope <epic-id> --note "..."`. It prints and
+  records the checks it waives: G-56 reviewed drop (the named commits must
+  still cover every dropped path), G-64 independent QA and G-70 missing
+  approval. A live supervisor then closes each contained delivery with
+  `operator_decision=<id>` and `commit_receipt=<containment commit>`, without
+  `supervisor_override`. G-164 refuses an unknown decision, a decision for
+  another epic, a combined `supervisor_override` and a delivery the decision
+  cannot close. Tier 2 deliveries, and deliveries whose tier cannot be
+  measured, keep every check. Agents cannot run the command or write its
+  record.

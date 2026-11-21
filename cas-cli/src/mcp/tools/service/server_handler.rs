@@ -2768,6 +2768,103 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn cas_108b_committed_task_actions_preserve_identity_and_recovery() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        for (action, id, status, kind) in [
+            ("start", "cas-start", cas_types::TaskStatus::InProgress, "start_context"),
+            ("notes", "cas-notes", cas_types::TaskStatus::Open, "task_notes"),
+            ("close", "cas-close", cas_types::TaskStatus::Closed, "close_outcome"),
+        ] {
+            tasks.add(&cas_types::Task::new(id.into(), "slow task operation".into())).unwrap();
+            let args = serde_json::json!({"action":action, "id":id});
+            let store = tasks.clone();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            let (finished, continued) = tokio::sync::oneshot::channel();
+            let answer = service.call_with_deadline_and_grace(
+                "task", args.as_object(), std::time::Duration::from_secs(55),
+                std::time::Duration::ZERO, async move {
+                    let mut task = store.get(id).unwrap();
+                    task.status = status;
+                    store.update(&task).unwrap();
+                    mutation_receipt::task_terminal_committed(id);
+                    held.await.unwrap();
+                    store.append_note(id, "caller-provided follow-up payload").unwrap();
+                    finished.send(()).unwrap();
+                    Ok(rmcp::model::CallToolResult::success(vec![]))
+                },
+            ).await.unwrap();
+            let data = answer.structured_content.as_ref().expect("machine recovery receipt");
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
+            assert_eq!(data["action"], action);
+            assert_eq!(data["task_id"], id);
+            assert_eq!(data["recovery"]["kind"], kind);
+            assert_eq!(data["recovery"]["tool"], "task");
+            assert_eq!(data["recovery"]["arguments"], serde_json::json!({
+                "action":"notes", "id":id, "offset":0, "limit":1600,
+            }));
+            assert_eq!(tasks.get(id).unwrap().status, status);
+            assert!(tasks.get(id).unwrap().notes.is_empty());
+            resume.send(()).unwrap();
+            continued.await.unwrap();
+            // Recovery uses the real task dispatcher and reads the one durable payload.
+            use rmcp::handler::server::wrapper::Parameters;
+            let read = service.task(Parameters(serde_json::from_value(
+                data["recovery"]["arguments"].clone(),
+            ).unwrap())).await.unwrap();
+            assert_eq!(read.is_error, Some(false));
+            assert_eq!(tasks.get(id).unwrap().notes.matches("caller-provided follow-up payload").count(), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cas_108b_slow_task_reads_return_executable_pagination() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let mut task = cas_types::Task::new("cas-slow-read".into(), "large task".into());
+        task.notes = "caller supplied history\n".repeat(1000);
+        tasks.add(&task).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        for action in ["show", "get", "notes"] {
+            let args = serde_json::json!({"action":action, "id":task.id, "full":true});
+            let sender = service.clone();
+            let request = serde_json::from_value(args.clone()).unwrap();
+            let error = service.call_with_deadline(
+                "task", args.as_object(), std::time::Duration::from_secs(55), async move {
+                    let read = sender.task(Parameters(request)).await.unwrap();
+                    assert_eq!(read.is_error, Some(false));
+                    std::future::pending().await
+                },
+            ).await.unwrap_err();
+            let data = error.data.unwrap();
+            assert_eq!(data["mutation_outcome"], "NOT_APPLICABLE");
+            assert_eq!(data["code"], "task_read_paginate");
+            assert_eq!(data["recovery"]["tool"], "task");
+            assert_eq!(data["recovery"]["arguments"], serde_json::json!({
+                "action":action, "id":task.id, "full":false, "offset":0, "limit":1600,
+            }));
+            let read = service.task(Parameters(serde_json::from_value(
+                data["recovery"]["arguments"].clone(),
+            ).unwrap())).await.unwrap();
+            assert_eq!(read.is_error, Some(false));
+            assert!(super::first_tool_text(&read).unwrap().len() < 1800);
+            assert_eq!(tasks.get(&task.id).unwrap().notes, task.notes);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn read_only_search_deadline_cas_533a() {
         use crate::mcp::server::CasCore;
         use crate::mcp::tools::service::CasService;

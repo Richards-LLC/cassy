@@ -865,10 +865,40 @@ async fn recover_dead_worker_branch_uses_successor_authority_cas_790e() {
     successor.factory_session = Some("factory-after-reboot".into());
     agents.update(&successor).unwrap();
     let claim = agents.try_claim(&task.id, &dead.id, 3600, Some("retained before host crash")).unwrap();
-    let cas_types::ClaimResult::Success(predecessor_lease) = claim else { panic!("{claim:?}") };
+    let cas_types::ClaimResult::Success(_) = claim else { panic!("{claim:?}") };
     predecessor.kill().unwrap();
     predecessor.wait().unwrap();
     assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, dead.id);
+    for mode in ["unknown-source-process", "remote-source", "foreign-holder", "live-holder"] {
+        let mut observed = dead.clone();
+        let foreign = matches!(mode, "foreign-holder" | "live-holder");
+        if foreign {
+            agents.release_lease(&task.id, &dead.id).unwrap();
+            let mut holder = Agent::new_with_role("other-lease-id".into(), "lease-stranger".into(), AgentRole::Worker);
+            holder.status = AgentStatus::Shutdown;
+            if mode == "live-holder" { holder.pid = Some(std::process::id()); }
+            agents.register(&holder).unwrap();
+            assert!(matches!(agents.try_claim(&task.id, &holder.id, 3600, None).unwrap(), cas_types::ClaimResult::Success(_)));
+        } else if mode == "unknown-source-process" {
+            observed.pid = None;
+        } else {
+            observed.machine_id = Some("unverifiable-remote-machine".into());
+        }
+        agents.update(&observed).unwrap();
+        let held = agents.get_lease(&task.id).unwrap().unwrap();
+        let request = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":payload.to_string()})).unwrap();
+        assert!(service.factory(Parameters(request)).await.is_err(), "{mode} must keep the holder protected");
+        let unchanged = agents.get_lease(&task.id).unwrap().unwrap();
+        assert_eq!((unchanged.agent_id, unchanged.epoch), (held.agent_id.clone(), held.epoch), "{mode}");
+        assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee, "{mode}");
+        assert!(git(remote.path(), &["for-each-ref", "--format=%(refname)"]).is_empty());
+        agents.update(&dead).unwrap();
+        if foreign {
+            agents.release_lease(&task.id, &held.agent_id).unwrap();
+            assert!(matches!(agents.try_claim(&task.id, &dead.id, 3600, None).unwrap(), cas_types::ClaimResult::Success(_)));
+        }
+    }
+    let predecessor_lease = agents.get_lease(&task.id).unwrap().unwrap();
     let request = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":payload.to_string()})).unwrap();
     let result = service
         .factory(Parameters(request))
@@ -903,6 +933,28 @@ async fn recover_dead_worker_branch_uses_successor_authority_cas_790e() {
         receipt,
         "same exact recovery is idempotent"
     );
+    // Reassign through the ordinary authenticated adoption path, retaining
+    // the recovered source and copying the same delivery into the receiver.
+    let receiver_path = service.inner.cas_root.join("worktrees/rescued-worker");
+    std::fs::create_dir_all(receiver_path.parent().unwrap()).unwrap();
+    git(root, &["worktree", "add", "-b", "factory/rescued-worker", receiver_path.to_str().unwrap(), &tip]);
+    let mut receiver = Agent::new_with_role("rescued-worker-id".into(), "rescued-worker".into(), AgentRole::Worker);
+    receiver.parent_id = Some(successor.id.clone());
+    receiver.factory_session = successor.factory_session.clone();
+    receiver.metadata.insert("clone_path".into(), receiver_path.display().to_string());
+    agents.register(&receiver).unwrap();
+    let transfer = serde_json::from_value(serde_json::json!({
+        "action":"transfer", "id":task.id, "to_agent":receiver.id,
+        "adopt_branch":true, "supervisor_override":true,
+        "reason":"Continue crash-retained delivery on a live worker",
+    })).unwrap();
+    let transfer = service.task(Parameters(transfer)).await.unwrap();
+    assert_ne!(transfer.is_error, Some(true), "{transfer:?}");
+    let reassigned = tasks.get(&task.id).unwrap();
+    assert_eq!(reassigned.assignee.as_deref(), Some(receiver.name.as_str()));
+    assert_eq!(reassigned.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+    assert_eq!(git(&receiver_path, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(git(root, &["rev-parse", source]), tip);
     // The real private pre-push guard still refuses a supervisor's ordinary
     // push from the dead worker's checkout. Recovery has no foreign-ref bypass.
     let hooks = tempfile::TempDir::new().unwrap();

@@ -802,12 +802,14 @@ esac
         self.assertEqual(command(self.repo, "git", "merge-base", "--is-ancestor", checkpoint, repair).returncode, 0)
         with sqlite3.connect(root / "cas.db") as db:
             db.execute("CREATE TABLE tasks (status TEXT, deliverables TEXT)")
-            for branch, expected in [("factory/other", 1), ("factory/lane", 0)]:
-                with self.subTest(branch=branch):
+            for branch, start, expected in [("factory/other", target, 1),
+                                            ("factory/lane", repair, 1),
+                                            ("factory/lane", target, 0)]:
+                with self.subTest(branch=branch, start=start):
                     db.execute("DELETE FROM tasks")
                     db.execute("INSERT INTO tasks VALUES (?, ?)", ("in_progress", json.dumps({
                         "work_target": {"target_branch": "target"},
-                        "factory_branch_start": {"branch": branch, "base_sha": target},
+                        "factory_branch_start": {"branch": branch, "base_sha": start},
                     })))
                     db.commit()
                     pushed = self.push(CAS_BIN="/nonexistent/cas")

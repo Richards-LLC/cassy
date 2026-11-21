@@ -4836,6 +4836,10 @@ files imported only by a released-trunk sync merge are excluded, while task
 edits before and after that merge remain checked. As with task attribution,
 every side parent must belong to `origin/<trunk>` (or local trunk when the
 remote ref is absent); other merges stay in scope.
+For an active factory branch, files restored byte-for-byte to its unique recorded
+task start base are also excluded, provided that base precedes the comparison
+base. Missing, ambiguous or invalid task bindings retain the ordinary checks;
+any remaining file change still receives them, including working edits.
 the release fast rows and Scoped Validation run this form. Intentional external
 wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does

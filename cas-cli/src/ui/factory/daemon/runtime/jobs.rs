@@ -79,6 +79,11 @@ pub(crate) enum Criticality {
     /// message to an idle pane never queues behind a write backlog
     /// (cas-9594c).
     Delivery,
+    /// Never dropped by a full lane, but a later submit for its busy key
+    /// replaces the one waiting behind it: each run reads current state, so
+    /// only the newest waiting request is worth running (cas-55e9: a slow
+    /// delivery read had 20 resubmits queued behind it, one per 30 s).
+    Latest,
 }
 
 /// What to run and how it may be coalesced or dropped.
@@ -169,6 +174,7 @@ pub(crate) struct RunningJob {
     pub(crate) waiting_for_writer: bool,
     /// Write lane: time spent waiting for the StoreWorker, so far or in total.
     pub(crate) writer_wait: Duration,
+    pub(crate) criticality: Criticality,
 }
 
 impl RunningJob {
@@ -408,6 +414,7 @@ struct Running {
     /// When the lane took the job.
     taken_at: Instant,
     budget: Duration,
+    criticality: Criticality,
     /// When the job itself started: at once on most lanes, on the
     /// StoreWorker thread for the write lane.
     started: Arc<OnceLock<Instant>>,
@@ -608,7 +615,7 @@ impl<T: Send + 'static> JobRuntime<T> {
                         followups.critical.push_back(queued);
                         Submitted::QueuedBehindKey
                     }
-                    Criticality::Refresh => {
+                    Criticality::Refresh | Criticality::Latest => {
                         let replaced_generation = followups
                             .rerun
                             .replace(queued)
@@ -709,6 +716,7 @@ impl<T: Send + 'static> JobRuntime<T> {
                 writer_wait: started
                     .unwrap_or(now)
                     .saturating_duration_since(running.taken_at),
+                criticality: running.criticality,
             }
         });
         stats
@@ -937,6 +945,7 @@ fn run_lane<T: Send + 'static>(
                         key: queued.spec.key.clone(),
                         taken_at: Instant::now(),
                         budget: queued.spec.budget,
+                        criticality: queued.spec.criticality,
                         started: Arc::clone(&started),
                     });
                     break Some((queued, started));

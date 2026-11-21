@@ -1924,6 +1924,9 @@ impl QueueJobs {
             self.apply_completions();
             // Idle is decided per lane from one snapshot of its running job
             // and its queue, so a job moving between them is never missed.
+            // cas-55e9: refresh jobs are replaceable and rerun after reexec,
+            // so only non-refresh work holds it; a backlog of refreshes behind
+            // a slow one refused every reexec.
             let idle = match &self.exec {
                 Exec::Inline(done) => done.is_empty(),
                 Exec::Lanes(runtime) => lanes.iter().all(|lane| {

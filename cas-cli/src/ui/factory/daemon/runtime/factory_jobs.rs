@@ -64,7 +64,9 @@ pub(crate) fn director_snapshot_spec(generation: u64) -> JobSpec {
     }
 }
 
-/// The delivery read carries detected events, so it is never dropped.
+/// The delivery read carries detected events, so it is never dropped. A
+/// resubmit after a timeout carries those events too, so it replaces any read
+/// still waiting.
 pub(crate) fn delivery_read_spec(generation: u64) -> JobSpec {
     JobSpec {
         kind: REVALIDATE_FRESH,

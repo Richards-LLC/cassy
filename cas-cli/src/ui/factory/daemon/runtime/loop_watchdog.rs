@@ -1672,6 +1672,7 @@ mod tests {
             budget: Duration::from_millis(100),
             waiting_for_writer,
             writer_wait: Duration::from_millis(writer_wait_ms),
+            criticality: super::super::jobs::Criticality::Critical,
         })
     }
 

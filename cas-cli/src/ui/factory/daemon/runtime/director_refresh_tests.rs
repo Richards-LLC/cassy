@@ -1843,6 +1843,16 @@ async fn c2_expired_delivery_read_requeues_and_ignores_the_late_result() {
     assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
     assert!(!refresh.delivery_busy(), "the timed-out read freed its slot");
     assert_eq!(refresh.delivery_backlog.len(), 1, "its event waits for the next read");
+    // cas-55e9: each pass resubmits the timed-out read while the first one is
+    // still running. 20 resubmits (prowl gabber: one per 30 s for 10 min)
+    // leave one read and one liveness job waiting, not 40.
+    for _ in 0..20 {
+        refresh.start_delivery_backlog(&daemon.app, &mut daemon.queue_jobs).unwrap();
+        assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
+    }
+    let lanes = daemon.queue_jobs.job_lanes().unwrap();
+    let waiting: usize = lanes.lane_stats().iter().map(|lane| lane.queued).sum();
+    assert_eq!(waiting, 2, "{:?}", lanes.lane_stats());
     refresh.timeout_override = Some(Duration::from_secs(30));
     gate.open();
     // The read and the liveness job beside it both report late.

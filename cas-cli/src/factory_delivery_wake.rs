@@ -58,9 +58,21 @@ pub(crate) fn arm_event(
     Ok(())
 }
 
-pub(crate) fn arm_task(root: &Path, task: &Task, actor: &str) -> Result<()> {
-    if task.status != TaskStatus::AwaitingMerge { return Ok(()); }
-    let Some(supervisor) = owner(root, task, actor)? else { return Ok(()) };
+/// cas-e37f: a parked delivery's completion edges, decided from store reads
+/// and git; [`arm_plan`] only persists them, so a caller on the store writer
+/// can decide off it.
+#[derive(Debug, Clone)]
+pub(crate) struct ArmPlan {
+    supervisor: Agent,
+    pub(crate) task: String,
+    sha: String,
+    target: String,
+    ci: bool,
+}
+
+pub(crate) fn plan_task(root: &Path, task: &Task, actor: &str) -> Result<Option<ArmPlan>> {
+    if task.status != TaskStatus::AwaitingMerge { return Ok(None); }
+    let Some(supervisor) = owner(root, task, actor)? else { return Ok(None) };
     let sha = task.deliverables.factory_branch_anchor.as_deref()
         .filter(|sha| full_sha(sha)).context("parked delivery has no full commit SHA")?;
     let tasks = crate::store::open_task_store_local(root)?;
@@ -76,18 +88,28 @@ pub(crate) fn arm_task(root: &Path, task: &Task, actor: &str) -> Result<()> {
             root.parent().unwrap_or(root),
         ).map_err(anyhow::Error::msg)?
     };
-    let target = ci_watch::normalize_external_target_branch(&target);
-    arm_event(root, &supervisor, &task.id, "branch_contained_in",
-        &json!({"commit": sha, "target_branch": target}), false)?;
+    let target = ci_watch::normalize_external_target_branch(&target).to_string();
     // cas-be96: a CI watch on a commit already in its target, or for a
     // workflow the repository does not define, polls GitHub forever. The
-    // containment watch above still reports the landing.
+    // containment watch still reports the landing.
     let project = root.parent().unwrap_or(root);
-    if contained(project, sha, target) || !ci_watch::local_workflow_defined(project, "CI") {
-        return Ok(());
+    let ci = !contained(project, sha, &target) && ci_watch::local_workflow_defined(project, "CI");
+    Ok(Some(ArmPlan { supervisor, task: task.id.clone(), sha: sha.to_string(), target, ci }))
+}
+
+pub(crate) fn arm_plan(root: &Path, plan: &ArmPlan) -> Result<()> {
+    arm_event(root, &plan.supervisor, &plan.task, "branch_contained_in",
+        &json!({"commit": plan.sha, "target_branch": plan.target}), false)?;
+    if !plan.ci { return Ok(()); }
+    arm_event(root, &plan.supervisor, &plan.task, "ci_completed",
+        &json!({"sha": plan.sha, "workflow": "CI"}), false)
+}
+
+pub(crate) fn arm_task(root: &Path, task: &Task, actor: &str) -> Result<()> {
+    match plan_task(root, task, actor)? {
+        Some(plan) => arm_plan(root, &plan),
+        None => Ok(()),
     }
-    arm_event(root, &supervisor, &task.id, "ci_completed",
-        &json!({"sha": sha, "workflow": "CI"}), false)
 }
 
 /// The commit is already on the target, locally or on its fetched remote.

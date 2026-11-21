@@ -1,0 +1,10 @@
+title: Peer review closes after supervisor ownership changes
+statement: >-
+  An approved Open review with an unchanged or missing recorded source can
+  close through an explicit supervisor no-delivery declaration after proving
+  its base is integrated and no reachable branch holds task-attributed commits.
+  Approval alone cannot erase named or recorded delivery. Refusals identify
+  the task commit SHAs and containing refs. The recorded start stays unchanged.
+tasks: [cas-e0ee]
+journeys: []
+invariants: []

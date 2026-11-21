@@ -8,6 +8,7 @@ mod notifications;
 pub(super) mod operator_credentials;
 mod pre_tool;
 mod slack_transport;
+mod supervisor_foreground;
 mod worker_denied_tools;
 #[cfg(test)]
 pub(crate) use worker_denied_tools::blocker_steps;

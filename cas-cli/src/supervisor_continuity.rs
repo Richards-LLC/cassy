@@ -8,20 +8,39 @@ use cas_types::{Agent, AgentRole};
 const SOURCE: &str = "supervisor-handoff";
 const RECOVERY_SOURCE: &str = "integrated-delivery-recovery";
 
+/// cas-27e3: each parked delivery costs a git integration check plus the
+/// close merge/content guard, 2-21 s apiece on a 202-delivery store, which held
+/// one supervisor SessionStart for 21 minutes. Past this budget the remaining
+/// deliveries are listed unchecked; close still checks each one.
+const RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+/// Time past the budget for the delivery already being checked to finish.
+const RECOVERY_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Project facts, rather than a predecessor's session membership, determine
 /// recovery. This is an actionable list, not the bounded historical preview.
 /// Close remains the authority: startup never adopts, resolves or closes work.
-fn integrated_recovery(root: &Path, agent_id: &str) -> anyhow::Result<String> {
+fn integrated_recovery(root: &Path, agent_id: &str, deadline: std::time::Instant) -> anyhow::Result<String> {
     use crate::mcp::tools::core::task::{lifecycle::review_tier, task_owned_by_project};
     use cas_types::{TaskStatus, VerificationStatus};
     let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(String::new()) };
     let tasks = crate::store::open_task_store(root)?;
+    // Replays the incidents: recovery stalled in a subprocess (git) while it
+    // holds its store access.
+    #[cfg(test)]
+    let stall = STALL_HOLDING_STORE.lock().unwrap().clone();
+    #[cfg(test)]
+    if let Some((stalled, wait)) = stall.filter(|(path, _)| path.as_path() == root) {
+        let conn = cas_store::shared_db::shared_connection(&stalled.join("cas.db"))?;
+        let _held = conn.lock().unwrap();
+        std::process::Command::new("sleep").arg(wait.as_secs().to_string()).status()?;
+    }
     let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
     let verifications = crate::store::open_verification_store(root)?;
     let mut parked = tasks.list(Some(TaskStatus::AwaitingMerge))?;
     parked.sort_by(|a, b| a.id.cmp(&b.id));
     let mut rows = Vec::new();
     let mut skipped = Vec::new();
+    let mut unchecked = Vec::new();
     for task in parked {
         if !task_owned_by_project(&task, root, Some(&project))
             || task.deliverables.merge_conflicted
@@ -29,6 +48,10 @@ fn integrated_recovery(root: &Path, agent_id: &str) -> anyhow::Result<String> {
             continue;
         }
         let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else { continue };
+        if std::time::Instant::now() >= deadline {
+            unchecked.push(format!("- {}: commit_receipt={anchor}\n", task.id));
+            continue;
+        }
         let Ok((repo, target)) = crate::qa_batch::task_context(root, &task) else { continue };
         if crate::qa_batch::integration_state(&repo, anchor, &target) != Some(true)
             || core.guard_direct_update_close_merge_state(tasks.as_ref(), &task, None).is_err()
@@ -72,10 +95,16 @@ fn integrated_recovery(root: &Path, agent_id: &str) -> anyhow::Result<String> {
         };
         rows.push(format!("- {}: merged into {target}; hold: {hold}; review path: {review}; next: task action=close id={} commit_receipt={anchor} reason=\"Recover integrated delivery\"\n", task.id, task.id));
     }
-    if rows.is_empty() && skipped.is_empty() { return Ok(String::new()) }
+    if rows.is_empty() && skipped.is_empty() && unchecked.is_empty() { return Ok(String::new()) }
     let mut body = rows.concat();
     if !skipped.is_empty() {
         body.push_str(&format!("Skipped recovery rows ({}):\n{}", skipped.len(), skipped.concat()));
+    }
+    if !unchecked.is_empty() {
+        body.push_str(&format!(
+            "Not checked within the {} s SessionStart budget ({}); `task action=close id=<id> commit_receipt=<sha> reason=\"Recover integrated delivery\"` checks merge state and every gate:\n{}",
+            RECOVERY_BUDGET.as_secs(), unchecked.len(), unchecked.concat()
+        ));
     }
     let text = format!(
         "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Close still checks branch attribution, upkeep, ledger format and evidence, QA and verification; legacy receipts may need repair. Adopt only rows you own and use the immutable commit_receipt below to recheck those gates. Tier 2 still needs its own verifier and adversarial probe.\n{body}",
@@ -311,23 +340,69 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs recovery off-thread on its own store connections, so neither the task
+/// scan nor one delivery's guard can hold startup: the scan stops listing at
+/// `budget`, and past `budget` plus grace startup goes on without it. `Err` is
+/// that timeout's one line, shown inline and not queued, so the next startup
+/// for this registration retries.
+pub(crate) fn bounded_recovery(root: &Path, agent_id: &str, budget: std::time::Duration) -> Result<String, String> {
+    let limit = budget + RECOVERY_GRACE;
+    let deadline = std::time::Instant::now() + budget;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let (root_path, id) = (root.to_path_buf(), agent_id.to_string());
+    let spawned = std::thread::Builder::new().name("integrated-recovery".into()).spawn(move || {
+        let result = cas_store::shared_db::with_private_connections(|| integrated_recovery(&root_path, &id, deadline));
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+    let result = match spawned {
+        Ok(_) => match receiver.recv_timeout(limit) {
+            Ok(result) => result,
+            Err(_) => return Err(format!(
+                "Integrated delivery recovery did not finish within {} s of SessionStart; the next startup retries. \
+                 `task action=list status=awaiting_merge` lists parked deliveries and close checks each.\n",
+                limit.as_secs()
+            )),
+        },
+        Err(error) => Err(error.to_string()),
+    };
+    Ok(result.unwrap_or_else(|error| format!(
+        "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
+    )))
+}
+
+#[cfg(test)]
+pub(crate) static STALL_HOLDING_STORE: std::sync::Mutex<Option<(std::path::PathBuf, std::time::Duration)>> =
+    std::sync::Mutex::new(None);
+
 pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
+    startup_context_within(root, id, RECOVERY_BUDGET)
+}
+
+pub(crate) fn startup_context_within(root: &Path, id: &str, budget: std::time::Duration) -> anyhow::Result<String> {
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(id)?;
     resume(root, &agent)?;
     let queue = crate::store::open_prompt_queue_store(root)?;
     let held = cas_store::project_hold::is_held(root);
-    if agent.role == AgentRole::Supervisor && !held {
-        let recovery = integrated_recovery(root, &agent.id).unwrap_or_else(|error| format!(
-            "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
-        ));
-        if !recovery.is_empty() {
-            queue.enqueue_idempotent(
-                RECOVERY_SOURCE, &agent.name, &recovery, agent.factory_session.as_deref(),
-                Some(RECOVERY_SOURCE), Some(NotificationPriority::High),
-                &format!("{RECOVERY_SOURCE}:{}:{}", agent.id, agent.registered_at.to_rfc3339()),
-                Some(&QueueOrigin::Daemon),
-            )?;
+    // cas-27e3: a compact keeps the registration, so its recovery row is
+    // already queued; the marker skips recomputing what the dedupe key drops.
+    let key = format!("{RECOVERY_SOURCE}:{}:{}", agent.id, agent.registered_at.to_rfc3339());
+    let marker = root.join("supervisor-recovery").join(format!("{}.queued", agent.id));
+    let mut inline = None;
+    if agent.role == AgentRole::Supervisor && !held
+        && std::fs::read_to_string(&marker).ok().as_deref() != Some(key.as_str())
+    {
+        match bounded_recovery(root, &agent.id, budget) {
+            Ok(recovery) if !recovery.is_empty() => {
+                queue.enqueue_idempotent(
+                    RECOVERY_SOURCE, &agent.name, &recovery, agent.factory_session.as_deref(),
+                    Some(RECOVERY_SOURCE), Some(NotificationPriority::High), &key,
+                    Some(&QueueOrigin::Daemon),
+                )?;
+                let _ = std::fs::write(&marker, &key);
+            }
+            Ok(_) => {}
+            Err(timed_out) => inline = Some(timed_out),
         }
     }
     let mut messages = queue
@@ -345,6 +420,7 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     Ok(messages
         .into_iter()
         .map(|row| row.prompt)
+        .chain(inline)
         .collect::<Vec<_>>()
         .join("\n"))
 }

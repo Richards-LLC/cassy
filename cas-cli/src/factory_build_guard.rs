@@ -1207,6 +1207,20 @@ mod tests {
     }
 
     #[test]
+    fn cas_546d_macos_cpu_ticks_wrap_at_u32_max() {
+        let max_tick = 0xffff_ffff;
+        assert_eq!(
+            cpu_busy_from_ticks(
+                [max_tick - 9, max_tick - 9, max_tick - 9, max_tick],
+                [30, 28, 11, 0],
+            ),
+            Some(79.0),
+        );
+        // Four full-width deltas must not overflow the accumulated total.
+        assert_eq!(cpu_busy_from_ticks([0; 4], [max_tick; 4]), Some(75.0));
+    }
+
+    #[test]
     fn cas_234d_macos_gates_on_measured_cpu_busy_not_io_inflated_load() {
         // Prowl, Nov 14: load 113 on 18 cores, 1 rustc, 21% idle. Ticks are
         // [user, system, idle, nice] deltas between two samples.

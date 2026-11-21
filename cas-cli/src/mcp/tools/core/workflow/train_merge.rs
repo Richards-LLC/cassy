@@ -1067,8 +1067,10 @@ mod tests {
             // Retain the historical long-lived flock, just as the incident's
             // blocked daemon does. New queue metadata operations must not wait
             // for this unrelated, unbounded legacy operation to return.
-            let legacy = driver_lock(&fixture.root, fixture._repo.path(), "epic/train")
-                .unwrap().unwrap();
+            let common = GitOperations::new(fixture._repo.path().to_path_buf()).canonical_repo_key().unwrap();
+            let legacy = target_lock::try_lock_delivery_target(
+                &fixture.root, &common, "train-merge-driver/epic/train",
+            ).unwrap().unwrap();
             let mut exited = std::process::Command::new("true").spawn().unwrap();
             let dead_pid = exited.id();
             exited.wait().unwrap();

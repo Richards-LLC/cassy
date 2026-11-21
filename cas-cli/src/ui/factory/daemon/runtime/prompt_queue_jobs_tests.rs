@@ -1090,6 +1090,46 @@ fn a_drop_after_a_finished_uncollected_job_is_attributed_by_generation() {
     assert!(jobs.job_owners.get(probe).is_none(), "nothing is left outstanding for the key");
 }
 
+/// cas-b355 (soundwave gabber, Nov 20): QueueSelect held the store writer up
+/// to 4.1 s while it read its rows' facts. A selection stuck in a facts read
+/// (git, held at its trace FIFO) must leave the writer free.
+#[test]
+fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
+    let (root, cas_dir) = project();
+    assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(root.path())
+        .status().unwrap().success());
+    let sha = "a".repeat(40);
+    enqueue(&cas_dir, "lead", &format!("<cas-merge-request>{{\"task_id\":\"cas-held\",\"branch_tip\":\"{sha}\",\"target_branch\":\"main\",\"target_branch_tip\":\"{sha}\"}}</cas-merge-request>"));
+    // Git opens its trace before it does anything; a FIFO nobody reads holds it there.
+    let trace = tempfile::tempdir().unwrap();
+    let fifo = trace.path().join("git.trace");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("GIT_TRACE", &fifo);
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    jobs.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !writer.ran().iter().any(|(label, _)| *label == "QueueSelect") {
+        assert!(Instant::now() < deadline, "the selection never wrote");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (ran, probe) = mpsc::channel();
+    assert!(SharedWriter(Arc::clone(&writer)).execute("probe", Box::new(move || {
+        let _ = ran.send(());
+    })));
+    let free = probe.recv_timeout(Duration::from_secs(2)).is_ok();
+    // Release every git for the rest of the test.
+    let drain = fifo.clone();
+    std::thread::spawn(move || {
+        while let Ok(mut trace) = std::fs::File::open(&drain) {
+            let _ = std::io::copy(&mut trace, &mut std::io::sink());
+        }
+    });
+    assert!(free, "a selection reading its rows' facts held the store writer");
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+}
+
 /// cas-4272 review L3, cas-9594c: a queued Retry stamp holds its row out of
 /// delivery without holding QueueSelect; a selection submitted before the
 /// stamp landed skips the row.

@@ -779,6 +779,32 @@ fn cas_7b6b_held_writer_does_not_block_control_or_duplicate_spawn_requests() {
     assert_eq!(wait_budget::store_access_violations(), before);
 }
 
+/// cas-b355 (soundwave gabber, Nov 20): SpawnQueuePoll held the store writer
+/// up to 3.0 s on every 100 ms poll. A poll with nothing to dequeue for this
+/// session reads, and reports a stalled row, while the writer is held.
+#[test]
+fn cas_b355_spawn_poll_reads_while_the_writer_is_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&root);
+    let writer = super::super::prompt_queue_jobs::tests::TestWriter::start(true);
+    daemon.queue_jobs = super::super::prompt_queue_jobs::tests::jobs_on(&writer);
+    let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+    let id = queue
+        .enqueue_spawn(1, &["elsewhere".into()], false, None, Some("other-session"), None)
+        .unwrap();
+    let queued_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    rusqlite::Connection::open(root.join("cas.db")).unwrap()
+        .execute("UPDATE spawn_queue SET created_at=?1 WHERE id=?2", rusqlite::params![queued_at, id])
+        .unwrap();
+    settle_until(|| {
+        daemon.enqueue_spawn_requests().unwrap();
+        daemon.reported_stalled_spawn_requests.contains(&id)
+    });
+    writer.open();
+    assert_eq!(queue.peek(10).unwrap().len(), 1, "another session's row stays queued");
+}
+
 #[test]
 fn cas_7b6b_reset_before_writer_runs_preserves_durable_rows() {
     let temp = tempfile::tempdir().unwrap();

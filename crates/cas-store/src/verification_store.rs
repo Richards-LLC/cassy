@@ -4638,6 +4638,7 @@ mod tests {
             reach: cas_types::FindingReach::Main,
             journey: Some("save".into()),
             repro: Some("Saving an idea charged twice".into()),
+            failing_tests: vec!["billing::charges_once".into()],
         };
         let expected = issues[0].triage.clone();
         let verification = Verification::rejected(

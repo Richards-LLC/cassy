@@ -60,6 +60,7 @@ pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>, notes: &st
             .unwrap_or(if reproduced { FindingReach::Secondary } else { FindingReach::Theoretical }),
         journey: label_value(labels, "journey:"),
         repro,
+        ..Default::default()
     };
     let main = normalize_finding(root, &mut triage);
     let priority = triage.priority(main);

@@ -18,25 +18,58 @@ pub(crate) fn record_failing_tests(root: &Path, task_id: &str, names: &[String])
         return;
     }
     if let Err(error) = crate::store::open_task_store(root)
-        .and_then(|store| {
-            let state = store.get_execution_state(task_id)?.unwrap_or_else(|| json!({}));
-            let mut merged = Vec::new();
-            for name in state_list(&state, "failing_tests").into_iter().chain(names.iter().cloned()) {
-                if !merged.contains(&name) {
-                    merged.push(name);
-                }
-            }
-            let omitted = merged.len().saturating_sub(MAX_RECORDED);
-            merged.truncate(MAX_RECORDED);
-            let result = store.patch_execution_state(task_id, &json!({"failing_tests": merged}))?;
-            if omitted > 0 {
-                tracing::warn!(%task_id, omitted, limit = MAX_RECORDED, "truncated failing tests for the repair class audit");
-            }
-            Ok(result)
+        .and_then(|_store| {
+            let connection = cas_store::shared_db::shared_connection(&root.join("cas.db"))?;
+            cas_store::shared_db::with_write_retry(|| {
+                let mut connection = cas_store::shared_db::lock_connection(&connection)?;
+                let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                record_failing_tests_with_conn(&tx, task_id, names)?;
+                tx.commit()?;
+                Ok(())
+            }).map_err(Into::into)
         })
     {
         tracing::warn!(%task_id, %error, "could not record failing tests for the repair class audit");
     }
+}
+
+fn merged_names(task_id: &str, state: &Value, names: &[String]) -> Vec<String> {
+    let mut merged = Vec::new();
+    for name in state_list(state, "failing_tests").into_iter().chain(names.iter().cloned()) {
+        if !merged.contains(&name) { merged.push(name); }
+    }
+    let omitted = merged.len().saturating_sub(MAX_RECORDED);
+    merged.truncate(MAX_RECORDED);
+    if omitted > 0 {
+        tracing::warn!(%task_id, omitted, limit = MAX_RECORDED, "truncated failing tests for the repair class audit");
+    }
+    merged
+}
+
+/// Join the verdict transaction without reopening its shared connection.
+pub(crate) fn record_failing_tests_with_conn(conn: &rusqlite::Connection, task_id: &str, names: &[String]) -> cas_store::Result<()> {
+    use rusqlite::OptionalExtension;
+    if names.is_empty() { return Ok(()); }
+    let state = conn.query_row("SELECT state FROM task_execution_states WHERE task_id=?1",
+        [task_id], |row| row.get::<_, String>(0)).optional()?
+        .map(|encoded| serde_json::from_str::<Value>(&encoded)).transpose()?
+        .unwrap_or_else(|| json!({}));
+    let patch = json!({"failing_tests": merged_names(task_id, &state, names)});
+    let state = cas_types::merge_task_execution_state_patch(&state, &patch)
+        .map_err(cas_store::StoreError::Parse)?;
+    conn.execute("INSERT INTO task_execution_states (task_id,state,updated_at) VALUES (?1,?2,?3)
+        ON CONFLICT(task_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
+        rusqlite::params![task_id, serde_json::to_string(&state)?, chrono::Utc::now().to_rfc3339()])?;
+    Ok(())
+}
+
+/// Qualified Rust test identifiers consumed by the class-audit selector.
+pub(crate) fn is_test_identifier(name: &str) -> bool {
+    name.split("::").all(|part| {
+        let mut chars = part.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 fn state_list(state: &Value, field: &str) -> Vec<String> {

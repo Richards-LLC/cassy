@@ -935,6 +935,9 @@ pub struct FindingTriage {
     pub reach: FindingReach,
     pub journey: Option<String>,
     pub repro: Option<String>,
+    /// Concrete test identifiers reproduced by the finding; older verdicts omit them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failing_tests: Vec<String>,
 }
 
 impl FindingTriage {

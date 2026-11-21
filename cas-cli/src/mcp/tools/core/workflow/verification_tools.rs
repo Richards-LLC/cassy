@@ -31,6 +31,27 @@ fn parse_verification_issues(issues_json: &str) -> Result<Vec<VerificationIssue>
             )));
         };
 
+        // Invalid test names must not reject an otherwise actionable verdict.
+        if let Some(names) = object.get_mut("triage").and_then(serde_json::Value::as_object_mut)
+            .and_then(|triage| triage.get_mut("failing_tests"))
+        {
+            if let Some(entries) = names.as_array_mut() {
+                let mut position = 0;
+                entries.retain(|entry| {
+                    let valid = entry.as_str().is_some_and(
+                        crate::mcp::tools::core::task::repair_class::is_test_identifier);
+                    if !valid {
+                        tracing::warn!(issue = index, test_index = position, "dropping invalid failing test identifier");
+                    }
+                    position += 1;
+                    valid
+                });
+            } else {
+                tracing::warn!(issue = index, "dropping non-list failing_tests from verifier finding");
+                *names = serde_json::json!([]);
+            }
+        }
+
         if !object.contains_key("problem") {
             for alias in ["description", "message"] {
                 if let Some(value) = object.get(alias).cloned() {
@@ -1076,6 +1097,16 @@ impl CasCore {
                 data: None,
             })?;
 
+            if verification.status == VerificationStatus::Rejected {
+                let failing: Vec<String> = verification.issues.iter()
+                    .filter(|issue| issue.severity == cas_types::IssueSeverity::Blocking)
+                    .flat_map(|issue| issue.triage.failing_tests.iter().cloned()).collect();
+                crate::mcp::tools::core::task::repair_class::record_failing_tests_with_conn(
+                    &tx, &req.task_id, &failing,
+                ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to record verification failing tests: {error}")))?;
+            }
+
             if let Some(question) = answered_question.as_deref() {
                 // cas-d5bb: the question spent the child's authority. Release
                 // only that exact claim, atomically with its supervisor answer;
@@ -2064,33 +2095,55 @@ mod lifecycle_friction_tests {
         let mut env = TestEnvGuard::temp_home();
         // One verdict/request_changes contract, including legacy JSON, empty
         // findings, invalid names and union with names another producer saved.
-        for (triage, severity, seeded, expected) in [
+        for (case, (triage, severity, seeded, expected)) in [
             (Some(json!({"failing_tests":["gates::case_one", "gates::case_one"]})), "blocking", false, vec!["gates::case_one"]),
             (Some(json!({"failing_tests":[]})), "blocking", false, vec![]),
-            (None, "blocking", false, vec![]),
-            (Some(json!({"failing_tests":["gates::case_one", "not a test", "", "bad:::name"]})), "blocking", false, vec!["gates::case_one"]),
+            (Some(json!({"failing_tests":"gates::case_one"})), "blocking", false, vec![]),
+            (Some(json!({"severity":"awkward", "reach":"secondary", "repro":"fixture reproduction"})), "blocking", false, vec![]),
+            (Some(json!({"failing_tests":["gates::case_one", "not a test", "", "bad:::name", 123, null]})), "blocking", false, vec!["gates::case_one"]),
             (Some(json!({"failing_tests":["gates::case_one"]})), "warning", false, vec![]),
             (Some(json!({"failing_tests":["gates::case_one"]})), "blocking", true, vec!["gates::older_case", "gates::case_one"]),
-        ] {
+        ].into_iter().enumerate() {
             let (_dir, core, task, dispatch) = fixture(&mut env);
             let tasks = core.open_task_store().unwrap();
             if seeded {
+                tasks.patch_execution_state(&task.id, &json!({"phase":"implement"})).unwrap();
                 crate::mcp::tools::core::task::repair_class::record_failing_tests(
                     &core.cas_root, &task.id, &["gates::older_case".into()]);
             }
             let mut issue = json!({"file":"src/lib.rs", "severity":severity,
                 "category":"correctness", "problem":"Recorded failing behavior"});
             if let Some(triage) = triage { issue["triage"] = triage; }
-            let verdict = core.cas_verification_add(Parameters(serde_json::from_value(json!({
+            let legacy = issue.get("triage").and_then(|t| t.as_object())
+                .filter(|t| !t.contains_key("failing_tests")).cloned();
+            let payload = json!({
                 "task_id":task.id, "dispatch_id":dispatch.id, "status":"rejected",
                 "summary":"Correct the reviewed behavior", "issues":json!([issue]).to_string(),
-            })).unwrap())).await.unwrap();
+            });
+            let verdict_request = || Parameters(serde_json::from_value(payload.clone()).unwrap());
+            if case == 0 {
+                // Abort after fact insertion to prove the verdict and its fact
+                // roll back together on the real transaction/consumer path.
+                let conn = rusqlite::Connection::open(core.cas_root.join("cas.db")).unwrap();
+                conn.execute_batch("CREATE TRIGGER reject_verdict_resolution BEFORE UPDATE ON verification_dispatches
+                    WHEN NEW.state='resolved' BEGIN SELECT RAISE(ABORT,'injected rollback'); END;").unwrap();
+                assert!(core.cas_verification_add(verdict_request()).await.is_err());
+                assert!(cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).unwrap().is_none());
+                assert!(tasks.get_execution_state(&task.id).unwrap().is_none());
+                conn.execute_batch("DROP TRIGGER reject_verdict_resolution").unwrap();
+            }
+            let verdict = core.cas_verification_add(verdict_request()).await.unwrap();
             assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
             let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id)
                 .unwrap().unwrap();
             assert_eq!(recorded.status, VerificationStatus::Rejected);
-            assert_eq!(recorded.issues.len(), 1); // Old verdicts load through the real store.
+            assert_eq!(recorded.issues.len(), 1);
+            if let Some(fields) = legacy {
+                let loaded = serde_json::to_value(&recorded.issues[0].triage).unwrap();
+                for (key, value) in fields { assert_eq!(loaded[&key], value); }
+            }
             let state = tasks.get_execution_state(&task.id).unwrap();
+            if seeded { assert_eq!(state.as_ref().unwrap()["phase"], "implement"); }
             if expected.is_empty() {
                 assert!(state.as_ref().is_none_or(|s| s.get("failing_tests").is_none()), "{state:?}");
             } else {

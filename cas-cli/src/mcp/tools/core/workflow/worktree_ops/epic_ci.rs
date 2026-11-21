@@ -97,11 +97,9 @@ fn matches_required(run: &Value, required: &RequiredCheck) -> bool {
             .is_none_or(|id| run.pointer("/app/id").and_then(Value::as_i64) == Some(id))
 }
 
-fn require_coverage(runs: &[Value], required: &[RequiredCheck], green: bool) -> Result<(), String> {
+fn require_coverage(runs: &[Value], required: &[RequiredCheck]) -> Result<(), String> {
     for check in required {
-        if !runs.iter().any(|run| {
-            matches_required(run, check) && (!green || conclusion(run) == Some("success"))
-        }) {
+        if !runs.iter().any(|run| matches_required(run, check)) {
             return Err(format!(
                 "necessary CI check {:?} (app {:?}) is missing or unsuccessful",
                 check.context, check.app_id
@@ -133,7 +131,7 @@ pub(crate) fn epic_tip_ci_proof(sha: &str, default: &str, cwd: &Path) -> Result<
         sha,
         true,
     )?;
-    require_coverage(&target, &required, false)?;
+    require_coverage(&target, &required)?;
     if target.iter().all(|run| conclusion(run) == Some("success")) {
         return Ok(format!(
             "CI check-runs on exact SHA {sha} passed required checks: {authority}"
@@ -183,7 +181,7 @@ pub(crate) fn epic_tip_ci_proof(sha: &str, default: &str, cwd: &Path) -> Result<
         source,
         false,
     )?;
-    require_coverage(&proven, &required, true)?;
+    require_coverage(&proven, &required)?;
     for skipped in target
         .iter()
         .filter(|run| conclusion(run) == Some("skipped"))

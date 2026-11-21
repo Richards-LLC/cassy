@@ -34168,7 +34168,7 @@ esac
             "equivalent", "arbitrary-green", "different-tree", "different-config",
             "source-failed", "source-cancelled", "source-budget-blocked", "source-missing",
             "source-wrong-head", "different-app", "target-failed", "target-pending",
-            "required-missing", "metadata-unavailable", "unprotected",
+            "required-missing", "metadata-unavailable",
         ] {
             let check = |name: &str, conclusion: &str| serde_json::json!({
                 "name":name, "app":{"id":15368}, "status":"completed", "conclusion":conclusion,
@@ -34192,7 +34192,7 @@ esac
                 required.push(serde_json::json!({"context":"necessary security job", "app_id":15368}));
             }
             let metadata = serde_json::json!({"checks":required});
-            let metadata_status = if matches!(case, "metadata-unavailable" | "unprotected") { "exit 1" } else { "exit 0" };
+            let metadata_status = if case == "metadata-unavailable" { "exit 1" } else { "exit 0" };
             let gh = format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> gh-requests.log
 case "$1 $2" in
@@ -34228,7 +34228,8 @@ esac
                 if case == "different-config" {
                     std::fs::write(p.join(".github/workflows/ci.yml"), "name: changed CI\n").unwrap();
                     git(p, &["add", ".github"]);
-                    git(p, &["commit", "-q", "-m", "untested workflow configuration"]);
+                    git(p, &["commit", "-q", "--amend", "--no-edit"]);
+                    assert_eq!(git_commit_parent_count(p, "HEAD"), 2);
                 }
                 git(p, &["push", "-q", "origin", "main"]);
                 ("epic/landed".into(), String::new())

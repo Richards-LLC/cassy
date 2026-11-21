@@ -11,8 +11,7 @@
   leaves the checkout as it is, such as resuming a task on its own branch,
   is not held. A queued start proceeds on a later queue pass once the
   checkout is clear.
-- **Journey runs, pre-push rows and foreground checks hold the checkout too** —
-  Was: only a backgrounded (`&`) capped check recorded a run, so a start could
+- **Journey runs, pre-push rows and foreground checks hold the checkout too** — Was: only a backgrounded (`&`) capped check recorded a run, so a start could
   still switch the checkout under `scripts/journey-eval.sh` (the GH #2286
   incident), the worker pre-push fast rows, or a capped check started in the
   foreground or by a harness background call. Now: each records a run bound

@@ -606,7 +606,9 @@ pub(crate) fn publish_routed_evidence(
                 cited_names.insert(name.clone());
             } else {
                 let leaf = path.file_name().and_then(|name| name.to_str()).unwrap_or("proof.log");
-                paths.push((format!("cited/{leaf}"), path));
+                let name = format!("cited/{leaf}");
+                cited_names.insert(name.clone());
+                paths.push((name, path));
             }
         }
     }
@@ -617,8 +619,7 @@ pub(crate) fn publish_routed_evidence(
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let ledger_required = required_evidence(&dir);
-    let required = |name: &str| name.starts_with("cited/") || cited_names.contains(name)
-        || (routed && ledger_required(name));
+    let required = |name: &str| cited_names.contains(name) || (routed && ledger_required(name));
     // A stalled uncited copy must not spend the budget needed by the ledger.
     paths.sort_by_key(|(name, _)| !required(name));
     let deadline = std::time::Instant::now() + PUBLISH_BUDGET;

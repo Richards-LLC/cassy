@@ -27635,14 +27635,14 @@ fn shipped_delivery_content_target(
     }
     let recorded_ref = preferred_diff_target_ref(repo, branch);
     let recorded = resolve_branch_sha(repo, &recorded_ref)?;
-    if !git_commit_is_ancestor(repo, anchor, &recorded) {
-        return None;
-    }
     let mut target = recorded.clone();
     for integration in ["staging", "main"] {
         let reference = preferred_diff_target_ref(repo, integration);
         let Some(tip) = resolve_branch_sha(repo, &reference) else { continue };
-        if tip != target && git_commit_is_ancestor(repo, &target, &tip) {
+        if tip != target
+            && git_commit_is_ancestor(repo, &target, &tip)
+            && git_commit_is_ancestor(repo, anchor, &tip)
+        {
             target = tip;
         }
     }

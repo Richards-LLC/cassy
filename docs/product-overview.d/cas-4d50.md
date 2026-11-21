@@ -1,4 +1,4 @@
-## Delivery recovery
+## Core Concepts
 
 Parked review corrections retain their task identity across later worker
 assignments when the pushed recorded source, task-identified authored subjects,

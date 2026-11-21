@@ -817,7 +817,11 @@ fn cas_b355_spawn_poll_reads_while_the_writer_is_held() {
         std::thread::sleep(Duration::from_millis(5));
     }
     let held = writer.max_held("SpawnQueuePoll");
-    eprintln!("cas-b355 SpawnQueuePoll max writer hold: {} ms (500 rows)", held.as_millis());
+    // The measurement, for the replay receipt (nextest hides passing output).
+    let line = format!("cas-b355 SpawnQueuePoll max writer hold: {} ms (500 rows)\n", held.as_millis());
+    eprint!("{line}");
+    let _ = std::io::Write::write_all(&mut std::fs::OpenOptions::new().create(true).append(true)
+        .open(std::env::temp_dir().join("cas-b355-writer-holds.log")).unwrap(), line.as_bytes());
     assert!(read_while_held, "the spawn poll needed the held writer to read");
     assert!(held < Duration::from_secs(1), "SpawnQueuePoll held the writer {held:?}");
     assert_eq!(queue.peek(10).unwrap().len(), 10, "another session's rows stay queued");

@@ -1146,7 +1146,11 @@ fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
     });
     settle(&mut jobs, |jobs| !jobs.select_in_flight());
     let held = writer.max_held("QueueSelect");
-    eprintln!("cas-b355 QueueSelect max writer hold: {} ms (500 rows)", held.as_millis());
+    // The measurement, for the replay receipt (nextest hides passing output).
+    let line = format!("cas-b355 QueueSelect max writer hold: {} ms (500 rows)\n", held.as_millis());
+    eprint!("{line}");
+    let _ = std::io::Write::write_all(&mut std::fs::OpenOptions::new().create(true).append(true)
+        .open(std::env::temp_dir().join("cas-b355-writer-holds.log")).unwrap(), line.as_bytes());
     assert!(free, "a selection reading its rows' facts held the store writer");
     assert!(held < Duration::from_secs(1), "QueueSelect held the writer {held:?}");
 }

@@ -92,6 +92,7 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
         .open(locks.join("shared-queue-checkout.lock")).map_err(|_| refused())?;
     lock.try_lock_exclusive().map_err(|_| refused())?;
+    admit_checkout_switch(root, worker, task_id)?;
     let git = |args: &[&str]| std::process::Command::new("git").current_dir(checkout)
         .args(args).output().map_err(|_| refused());
     let status = git(&["status", "--porcelain"])?;
@@ -111,7 +112,21 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
     crate::factory_isolation::verify_worker_worktree_binding(&worker.name, checkout, None).map_err(error)
 }
 
-/// cas-22c6: why a queued start must not switch `worker`'s checkout yet,
+/// cas-22c6 (GH #2286): the one admission for every start that may switch a
+/// worker's checkout: queue advancement, a direct start of the queued
+/// successor, and a plain start that cuts a task branch beside a parked
+/// delivery. A detached proof run still reading the checkout, or
+/// uncommitted work in it, would lose its tree mid-run.
+pub(crate) fn admit_checkout_switch(root: &Path, worker: &Agent, task_id: &str) -> Result<(), McpError> {
+    let Some(busy) = queue_checkout_busy(root, worker) else { return Ok(()) };
+    // gate[G-161 start]: Task start waits while the worker's checkout is busy
+    Err(error(crate::gates::tag("G-161", format!(
+        "Cannot start {task_id} yet: {busy}. A queued start resumes on its own once that clears; \
+         finish or stop it, then retry `task action=start id={task_id}`."
+    ))))
+}
+
+/// cas-22c6: why a start must not switch `worker`'s checkout yet,
 /// using the worker's registered detached runs and its checkout's status.
 fn queue_checkout_busy(root: &Path, worker: &Agent) -> Option<&'static str> {
     if crate::factory_worker_runs::snapshot(root, &worker.name, None, chrono::Utc::now())
@@ -755,21 +770,8 @@ impl CasCore {
                 return Ok(Some(format!("Task queue waiting for context recycle completion before {id}")));
             }
         }
-        // cas-22c6 (GH #2286): the start below switches the worker's checkout.
-        // A detached proof run still reading it, or uncommitted work in it,
-        // would lose its tree mid-run. Wait; queue repair retries the start.
-        if let Some(busy) = queue_checkout_busy(&self.cas_root, &worker) {
-            // gate[G-161 start]: Queued start waits while the worker's checkout is busy
-            let note = crate::gates::tag("G-161", format!(
-                "Task queue waiting before {id}: {busy}. The start resumes once that clears; \
-                 finish or stop it to start sooner."
-            ));
-            if queue.notes.last() != Some(&note) {
-                queue.notes.push(note.clone());
-                queues.save(session, &worker.name, &mut queue).map_err(error)?;
-            }
-            return Ok(Some(note));
-        }
+        // cas-22c6: a busy checkout refuses inside the start below
+        // (admit_checkout_switch, G-161); the cursor stays due for repair.
         let mut reserved_epoch = None;
         let result = async {
             let mut task = tasks.get(&id).map_err(error)?;

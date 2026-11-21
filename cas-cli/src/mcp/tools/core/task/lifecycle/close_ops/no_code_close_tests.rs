@@ -3272,7 +3272,8 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
 /// cas-22c6 (GH #2286): strong-cheetah-31 at 12:06 PM ET. A detached proof run
 /// was reading the worker's checkout when its park advanced the queue, and the
 /// auto-start switched that checkout to the next task's branch mid-run. The
-/// start waits, with a code, until the run ends, and then proceeds.
+/// auto-start and a direct start both wait, with a code, until the run ends,
+/// and then the queued start proceeds.
 #[tokio::test]
 async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
     let mut env = TestEnvGuard::temp_home();
@@ -3325,6 +3326,13 @@ async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
     let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
         .unwrap().get("queue-session", WORKER).unwrap();
     assert!(queue.notes.iter().any(|note| crate::gates::codes_in(note).contains(&"G-161")), "{:?}", queue.notes);
+    // A direct start of the deferred successor takes the same admission.
+    let direct = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":next.id,
+    })).unwrap())).await.unwrap_err();
+    assert!(crate::gates::codes_in(&direct.message).contains(&"G-161"), "{direct:?}");
+    assert_eq!(f.task(&next.id).status, TaskStatus::Open);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "a direct start moved the checkout mid-run");
     crate::factory_worker_runs::finish(&f.cas_dir(), &run, 0, chrono::Utc::now()).unwrap();
     crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
     assert_eq!(f.task(&next.id).status, TaskStatus::InProgress, "the start proceeds once the run ends");

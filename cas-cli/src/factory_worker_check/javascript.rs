@@ -10,7 +10,10 @@ use tree_sitter::{Node, Parser};
 
 use super::stability::{Identity, Proof};
 
+mod importers;
 mod web_attribution;
+
+pub(crate) use importers::playwright_importers;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
@@ -1521,6 +1524,16 @@ fn execute_tests(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
+        // GH #2146: a helper runs through the specs importing it.
+        let importers = match widened {
+            Some((super::widened::Scope::Related(helper), _, _)) if runner == "playwright" => {
+                let specs = playwright_importers(repo, helper);
+                if specs.is_empty() { bail!(crate::gates::tag("G-61", format!("no Playwright spec imports {helper}"))); }
+                eprintln!("Running {helper} through its importing specs: {}", specs.join(" "));
+                specs
+            }
+            _ => Vec::new(),
+        };
         let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
@@ -1603,7 +1616,9 @@ fn execute_tests(
                         "--findRelatedTests"
                     } else { "--runTestsByPath" });
                 }
-                if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
+                if runner == "playwright" && !importers.is_empty() {
+                    command.args(importers.iter().map(|spec| regex::escape(&repo.join(spec).to_string_lossy())));
+                } else if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
@@ -2357,6 +2372,58 @@ mod tests {
             super::super::widened::scope(repo.path(), spec),
             super::super::widened::Scope::File(spec.into())
         );
+    }
+
+    /// GH #2146: hub-web's responsive-goals.ts helper holds no tests; its
+    /// assertions run through pair-link.journey.ts. The gate widened it to the
+    /// whole package. It now runs through the Playwright specs importing it,
+    /// directly or through other helpers; a helper no spec imports, or one a
+    /// unit test also imports, keeps its previous proof.
+    #[test]
+    fn playwright_helper_runs_through_its_importing_specs_gh2146() {
+        use super::super::widened::{self, Scope};
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let files = [
+            ("package.json", "{}"),
+            ("playwright.config.ts", "export default {};"),
+            ("vitest.config.ts", "export default {};"),
+            ("e2e/journeys/world.ts", "export const world = 1;"),
+            ("e2e/journeys/journey.ts", "import { test } from \"@playwright/test\";\nimport { world } from \"./world\";\nexport { test, world };"),
+            ("e2e/journeys/responsive-goals.ts", "import { expect } from \"@playwright/test\";\nexport const goals = () => expect(1).toBe(1);"),
+            ("e2e/journeys/orphan.ts", "import { expect } from \"@playwright/test\";\nexport const unused = 1;"),
+            ("e2e/journeys/pair-link.journey.ts", "import { test } from \"./journey\";\nimport { goals } from \"./responsive-goals.js\";\nimport { shared } from \"../../src/shared\";\ntest(\"pairs\", goals);"),
+            ("e2e/journeys/read-history.journey.ts", "import { test } from \"./journey\";\ntest(\"reads\", () => {});"),
+            ("src/shared.ts", "export const shared = 1;"),
+            ("src/shared.test.ts", "import { test } from 'vitest';\nimport { shared } from './shared';\ntest('shared', () => {});"),
+        ];
+        for (path, body) in files {
+            std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.path().join(path), body).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let helper = "e2e/journeys/responsive-goals.ts";
+        std::fs::write(repo.path().join(helper), "import { expect } from \"@playwright/test\";\nexport const goals = () => expect(2).toBe(2);").unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let (tests, scopes) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &[helper.into()], None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [Scope::Related(helper.into())]);
+        assert_eq!(playwright_importers(repo.path(), helper), ["e2e/journeys/pair-link.journey.ts"]);
+        assert_eq!(playwright_importers(repo.path(), "e2e/journeys/world.ts"),
+            ["e2e/journeys/pair-link.journey.ts", "e2e/journeys/read-history.journey.ts"]);
+        let command = widened::commands(Path::new("/cas"), repo.path(), &[helper.into()], &scopes);
+        assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
+        assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new() }));
+        assert_eq!(widened::scope(repo.path(), "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
+        assert!(playwright_importers(repo.path(), "src/shared.ts").is_empty());
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid

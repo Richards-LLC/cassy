@@ -141,6 +141,8 @@ impl FactoryDaemon {
             record.receipt.phase = Phase::Refused;
             record.receipt.detail = "Command not sent: the supervisor ended before it could be typed.".into();
             record.receipt.interactive = false;
+            record.at = Utc::now();
+            record.started = Instant::now();
         }
         self.persist_supervisor_commands()
     }
@@ -204,6 +206,8 @@ impl FactoryDaemon {
                         record.receipt.interactive = false;
                         record.receipt.detail = if queued { "Command not sent: the supervisor restarted before it could be typed." }
                             else { "The supervisor restarted before this command was confirmed. Do not resend automatically." }.into();
+                        record.at = Utc::now();
+                        record.started = Instant::now();
                     }
                 }
                 if let Err(error) = self.persist_supervisor_commands() { tracing::warn!(%error, "could not persist command restart receipts"); }
@@ -659,6 +663,7 @@ impl FactoryDaemon {
                 record.receipt.phase = Phase::Cancelled;
                 record.receipt.interactive = false;
                 record.started = Instant::now();
+                record.at = Utc::now();
                 if let Some(job) = record.hook.take() { job.abort(); }
                 if let Some(job) = self.supervisor_commands.readiness.take() { job.abort(); }
                 self.supervisor_commands.readiness_polled = None;
@@ -821,8 +826,9 @@ mod tests {
         assert!(daemon.dispatch_supervisor_command(Request::Status, "restart-queue".into(), foreign).await.is_err());
         daemon.dispatch_supervisor_command(run.clone(), "restart-queue".into(), owner.clone()).await.unwrap();
         assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
-        let end = serde_json::json!({"type":"assistant","timestamp":Utc::now(),"message":{"stop_reason":"end_turn"}});
+        let end = serde_json::json!({"type":"assistant","timestamp":Utc::now(),"message":{"role":"assistant","stop_reason":"end_turn"}});
         std::fs::write(&transcript, format!("{open}\n{end}\n")).unwrap();
+        assert_eq!(command_turn_idle(daemon.app.cas_dir(), &daemon.session_name, &name, cas_mux::SupervisorCli::Claude), Some(true));
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 // Recovery and delivery must work without browser polling.
@@ -839,6 +845,10 @@ mod tests {
         assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯ draft".as_bytes()).unwrap();
         daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "never-sent".into(), owner.clone()).await.unwrap();
+        // A long-running turn must not expire its fresh terminal refusal.
+        let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "never-sent".into())).unwrap();
+        record.at -= chrono::Duration::minutes(11);
+        record.started -= Duration::from_secs(11 * 60);
         daemon.app.mux.get_mut(&name).unwrap().mark_exited(Some(0));
         let abandoned = daemon.dispatch_supervisor_command(Request::Status, "never-sent".into(), owner.clone()).await.unwrap();
         assert!(matches!(abandoned, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));

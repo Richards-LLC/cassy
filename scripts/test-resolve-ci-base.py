@@ -191,7 +191,7 @@ class LaneBaseTests(unittest.TestCase):
                  '-m', 'Release-Version: 9.99.7',
                  '-m', f'Prepared by scripts/release.sh on {shipped} from main 9.99.6.')
         cut = self.git('rev-parse', 'HEAD')
-        self.git('checkout', '-q', 'main')
+        self.git('checkout', '-q', '-B', 'main', self.main)
         self.git('merge', '--no-ff', '-qm', 'land the prepared release', cut)
         released = self.git('rev-parse', 'HEAD')
         remote = self.repo / '.git' / 'origin.git'

@@ -1386,16 +1386,26 @@ pub(crate) fn resolve_merge_target_for_task(
     (epic_id, epic_branch, false)
 }
 
-/// cas-6db4: a merge target that is the repository's protected default branch
-/// (`main` or `master`, with or without an `origin/` prefix). Factory repos
-/// protect it: it accepts only pull requests through the merge queue, so the
-/// MERGE REQUIRED relay must not tell the supervisor to merge and push it.
+/// Default branch names select the PR route rather than a local merge/push.
+/// This routing policy is not evidence of GitHub protection or a merge queue.
 pub(crate) fn target_is_protected_default(target: &str) -> bool {
     matches!(
         target.trim().trim_start_matches("origin/"),
         "main" | "master"
     )
 }
+
+/// PR routing does not establish hosted protection or a queue. Both active
+/// readiness and parked relays require the repository's current-head policy.
+pub(crate) fn pr_publication_guidance(task: &str, source: &str, target: &str, head: &str) -> String {
+    format!(
+        "Generate the body: `cas worktree pr-body --task {task} --base origin/{target} --head {source} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
+         Open a pull request: `gh pr create --base {target} --head {source} --title \"Review {source}\" --body-file pr-body.md`. Do not merge into or push {target} locally.\n\
+         Read `gh pr view <number> --json headRefOid,statusCheckRollup`. Wait for the repository's configured PR gates on that exact head to succeed. Use its gate-backed queue or automerge label when configured; establish that policy from repository evidence. `--auto` alone does not guarantee CI will finish before publication.\n\
+         Once eligible, merge with `gh pr merge <number> --merge --match-head-commit {head}`, or use the configured gate-backed queue/label."
+    )
+}
+
 
 /// The AwaitingMerge idle relay while an independent QA round is still open
 /// for the delivery (cas-38d7). Parking dispatched the round, and the merge
@@ -1528,27 +1538,27 @@ fn merge_required_idle_prompt_text(
     let evidence_line = evidence
         .map(|e| merge_alert_evidence_line(e, target))
         .unwrap_or_default();
-    // cas-6db4: a protected default branch only takes pull requests through
-    // the merge queue; merging into it locally and pushing is refused. The
-    // worker's push hook already lets a push_branch delivery publish its
-    // factory branch, so the relay names the PR path instead.
+    // Default targets use the PR route. Repository CI/queue evidence, not
+    // the target's spelling, determines when GitHub may publish the merge.
     if target_is_protected_default(target) {
+        let pr_path = pr_publication_guidance(
+            &task.task_id, &factory_branch, target,
+            evidence.map(|e| e.factory_tip.as_str()).unwrap_or("<approved-head>"),
+        );
         return format!(
             "⚠️ MERGE REQUIRED — supervisor action needed (not a task completion).\n\
              Worker {worker} is idle while task {} ({}) is {} (close rejected: {rejection}).\n\
              {evidence_line}\
              Source branch: {factory_branch}\n\
-             Merge target: {target} (protected: pull requests through the merge queue only)\n\
+             Merge target: {target} (use the repository's PR admission path)\n\
              Next action:\n\
              1. Confirm: {epic_status} and/or {list_awaiting}, and that {factory_branch} is on origin\n\
-             2. Generate the body: `cas worktree pr-body --task {} --base origin/{target} --head {factory_branch} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
-             Open a pull request: `gh pr create --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`, \
-             then queue it with `gh pr merge <number> --auto`. Do not merge into or push {target} locally.\n\
+             2. {pr_path}\n\
              3. The merge verdict closes or reopens the task; wait for its result.\n\
              4. Then clear context / hand the worker their next task if more work is ready\n\
              Live task state: {show}\n\
              This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
-            task.task_id, task.task_title, task.task_status, task.task_id
+            task.task_id, task.task_title, task.task_status
         );
     }
     let merge_step = merge_alert_action_line(

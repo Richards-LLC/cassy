@@ -183,6 +183,17 @@ pub(crate) fn residue_overlapping_merge(
         .collect()
 }
 
+/// What proves a parked delivery's source before an isolated merge
+/// (GH #2151): a pushed branch's fresh origin ref, or a local_merge
+/// delivery's local ref alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceProof {
+    /// `refs/remotes/origin/<branch>` after a fresh fetch matches the anchor.
+    PushedRef,
+    /// The local branch at the anchor is the delivery; there is no origin ref.
+    LocalAnchor,
+}
+
 impl WorktreeManager {
     pub(crate) fn handoff_config(&self) -> WorktreeConfig { self.config.clone() }
 
@@ -626,17 +637,25 @@ impl WorktreeManager {
     }
 
     /// Integrate an exact parked delivery independently of a reused worker's
-    /// checkout. The local branch and a fresh origin fetch must both agree
-    /// with the anchor; the isolated merge consumes the immutable SHA. This
-    /// operation deliberately has no cleanup option.
-    pub(crate) fn merge_pushed_delivery_preserving_worktree(
+    /// checkout. The local branch must agree with the anchor; a pushed
+    /// delivery also needs a fresh origin fetch that agrees. A local_merge
+    /// delivery has no origin source ref to prove (GH #2151). The isolated
+    /// merge consumes the immutable SHA. This operation deliberately has no
+    /// cleanup option.
+    // gate-audit[selector]: SourceProof is the delivery mode's source identity, not a waiver; both variants require the local ref at the exact anchor.
+    pub(crate) fn merge_parked_delivery_preserving_worktree(
         &self,
         worktree: &mut Worktree,
         anchor: &str,
+        source_proof: SourceProof,
         publication: Option<&mut crate::worktree::git::MergePublication<'_>>,
     ) -> WorktreeResult<Option<String>> {
+        let proof = match source_proof {
+            SourceProof::PushedRef => "pushed delivery proof",
+            SourceProof::LocalAnchor => "local delivery proof",
+        };
         let refuse = |detail: String| WorktreeError::UncommittedChanges(format!(
-            "dirty source checkout retained: pushed delivery proof required; {detail}. No merge was attempted"
+            "dirty source checkout retained: {proof} required; {detail}. No merge was attempted"
         ));
         let anchor = self.git.resolve_commit(anchor)
             .ok_or_else(|| refuse("parked anchor cannot be resolved".into()))?;
@@ -644,14 +663,16 @@ impl WorktreeManager {
         if self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str()) {
             return Err(refuse("source tip does not match the parked anchor".into()));
         }
-        let pushed_ref = format!("refs/remotes/origin/{}", worktree.branch);
-        let refspec = format!("+refs/heads/{}:{pushed_ref}", worktree.branch);
-        self.git.fetch_branch(&refspec)
-            .map_err(|error| refuse(format!("could not verify pushed ref: {error}")))?;
-        if self.git.resolve_commit(&pushed_ref).as_deref() != Some(anchor.as_str())
-            || self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str())
-        {
-            return Err(refuse("pushed ref or local source tip does not match the parked anchor".into()));
+        if source_proof == SourceProof::PushedRef {
+            let pushed_ref = format!("refs/remotes/origin/{}", worktree.branch);
+            let refspec = format!("+refs/heads/{}:{pushed_ref}", worktree.branch);
+            self.git.fetch_branch(&refspec)
+                .map_err(|error| refuse(format!("could not verify pushed ref: {error}")))?;
+            if self.git.resolve_commit(&pushed_ref).as_deref() != Some(anchor.as_str())
+                || self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str())
+            {
+                return Err(refuse("pushed ref or local source tip does not match the parked anchor".into()));
+            }
         }
         if publication.is_some() {
             return self.merge_preserving_worktree_at_with_publication(worktree, true, false, &anchor, publication);

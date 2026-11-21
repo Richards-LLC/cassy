@@ -73,7 +73,9 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         await expect(page.locator(".composer-uploads")).toBeVisible();
         await expect(page.locator("#message-status")).toBeHidden();
         await expect(page.getByRole("button", { name: "Remove screenshot.png", exact: true })).toBeVisible();
-        expect(uploads.size).toBe(1);
+        // The route records the interrupted upload after the page has already
+        // shown the retained files: wait for it rather than read it once.
+        await expect.poll(() => uploads.size).toBe(1);
         const next = hub.nextSend();
         await send.click();
         const message = await next;

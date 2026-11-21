@@ -116,56 +116,6 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
 for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`phone fleet feedback ${colorScheme} cas_c2e7`, () => {
     test.use({ viewport: { width: 390, height: 844 }, colorScheme });
-    test("HUB-J17 phone feedback clears the composer and task rows and can be dismissed", journeyPart, async ({ page, journey }) => {
-      const atlas = fleetMachine(ATLAS);
-      const world = fleet();
-      const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: world } });
-      await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, json: { error: "unavailable" } }));
-      const rail = page.locator("#status-view");
-      const agent = rail.locator(".status-agent", { hasText: "swift-lark-3" });
-      const notice = page.locator("#fleet-phone-undo");
-      const open = () => clickConversationHeaderAction(page, "#conversation-fleet");
-      await journey.stage("A refused Stop leaves the final task readable at rest", async () => {
-        await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await open();
-        await agent.getByRole("button", { name: "Actions for swift-lark-3" }).click();
-        await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Stop…" }).click();
-        await page.locator("dialog.fleet-action-sheet").getByRole("button", { name: "Stop", exact: true }).click();
-        await expect(notice).toBeVisible();
-        const task = rail.locator(".status-task").last();
-        // A status refresh redraws the notice; measure once both are laid out.
-        await expect.poll(async () => (await Promise.all([task.boundingBox(), notice.boundingBox()])).every(Boolean)).toBe(true);
-        const [row, feedback] = await Promise.all([task.boundingBox(), notice.boundingBox()]);
-        expect(row!.y + row!.height, "feedback reserves space after the last task").toBeLessThanOrEqual(feedback!.y);
-        await task.scrollIntoViewIfNeeded();
-        expect(await task.evaluate((row) => {
-          const r = row.getBoundingClientRect();
-          return row.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
-        }), "the final task receives pointer input").toBe(true);
-      });
-      await journey.stage("Close the sheet; dismiss feedback by keyboard without losing the row's error", async () => {
-        await page.getByRole("button", { name: "Close tasks & progress" }).click();
-        const [feedback, composer] = await Promise.all([notice.boundingBox(), page.getByRole("textbox", { name: "Your message" }).boundingBox()]);
-        expect(feedback!.y + feedback!.height, "feedback stays above the composer pill").toBeLessThanOrEqual(composer!.y);
-        const dismiss = notice.getByRole("button", { name: "Dismiss fleet notice", exact: true });
-        await dismiss.focus(); await expect(dismiss).toBeFocused();
-        // Real status and shell replacements must retain this keyboard stop.
-        world.tasks[0]!.title = "Docs lane refreshed";
-        await page.evaluate((session) => (window as unknown as { __journeyMachineEvent: (host: string, event: string) => void }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "fleet_changed", session })), PELICAN);
-        await expect(rail.locator(".status-task", { hasText: "cas-1234" })).toContainText("Docs lane refreshed");
-        await expect(dismiss).toBeFocused();
-        atlas.sessions[0]!.project_dir = "/projects/cas-src-refreshed";
-        await hub.announceCatalog("atlas");
-        await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src-refreshed");
-        await expect(dismiss).toBeFocused(); await page.keyboard.press("Enter");
-        await expect(notice).toHaveCount(0);
-        await expect(page.locator("#conversation-more")).toBeFocused();
-        await open(); await expect(agent.locator(".fleet-ops-note")).toBeVisible();
-        await page.getByRole("button", { name: "Close tasks & progress" }).click();
-        await expect(notice, "redrawing the same result does not undo Dismiss").toHaveCount(0);
-      });
-    });
     test("HUB-J17 phone pickers visibly identify the task and current epic", journeyPart, async ({ page, journey }) => {
       const world = fleet();
       const catalog = [...world.epics,

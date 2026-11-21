@@ -1,6 +1,0 @@
-title: Older evidence manifests preserve newer published local ledgers
-statement: Publication time orders conflicting evidence revisions; ordinary sync preserves newer published local bytes, while sealed train parks refuse the stale manifest and identify the newer artifact without overwriting it.
-tasks: [cas-5f96]
-fixed_by: [cas-5f96]
-journeys: [FACTORY-QA-RECEIPT]
-invariants: [FACTORY-QA-EVIDENCE-IDENTITY, FACTORY-ARTIFACT-METADATA]

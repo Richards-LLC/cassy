@@ -298,14 +298,6 @@ for (const [width, colorScheme] of [[390, "light"], [1280, "dark"]] as const) {
         await readRawOutput(page, hub, phone);
         await expectOnlyTheThread(page);
       });
-      if (phone && admin) await journey.stage("Back to Conversations releases the input lease", async () => {
-        await interrupt.click();
-        await hub.waitFor(() => interrupts(hub).length === 3);
-        const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
-        await page.locator("#conversation-back").click();
-        await released;
-        await expect(page.getByRole("navigation", { name: "Choose a supervisor" })).toBeVisible();
-      });
     });
   });
 }

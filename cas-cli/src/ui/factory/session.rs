@@ -459,6 +459,18 @@ impl SessionManager {
         write_end_receipt(&self.sessions_dir, &EndedSession { metadata, ended })
     }
 
+    /// Every recorded birth of one name, without creating session state: the
+    /// active metadata (a crashed daemon leaves only this), then the retained
+    /// end receipt.
+    pub(crate) fn recorded_births(&self, name: &str) -> Vec<SessionMetadata> {
+        if !valid_session_name(name) { return Vec::new(); }
+        let active = self.load_metadata(&self.sessions_dir.join(format!("{name}.json"))).ok();
+        let ended = fs::read(self.sessions_dir.join("ended").join(format!("{name}.json"))).ok()
+            .and_then(|bytes| serde_json::from_slice::<EndedSession>(&bytes).ok())
+            .map(|receipt| receipt.metadata);
+        active.into_iter().chain(ended).filter(|metadata| metadata.name == name).collect()
+    }
+
     pub(crate) fn ended_sessions(&self) -> std::io::Result<Vec<EndedSession>> {
         let entries = match fs::read_dir(self.sessions_dir.join("ended")) {
             Ok(entries) => entries,

@@ -5271,18 +5271,40 @@ mod tests {
 
     /// cas-73b8: while `factory/<name>` is frozen for a parked delivery, the
     /// worker commits and pushes its next task on `factory/<name>-<task-id>`.
-    /// The hooks allow exactly that branch, pushed to its own name, and still
-    /// refuse advancing the frozen branch, another worker's task branch, or a
-    /// suffix that is not a task id.
+    /// Temporary suffixes are also owned, unless a longer registered worker
+    /// owns that namespace. Frozen-lane and destination protections remain.
     #[test]
     fn worker_hooks_allow_the_own_per_task_branch_cas_73b8() {
+        use clap::Parser;
+        if let Ok(branch) = std::env::var("CAS_TEST_BRANCH_OWNERSHIP_CHILD") {
+            let result = crate::cli::Cli::try_parse_from(["cas", "hook", "WorkerBranchOwned", &branch])
+                .map_err(anyhow::Error::from).and_then(|cli| {
+                    let Some(crate::cli::Commands::Hook(args)) = &cli.command else { unreachable!() };
+                    crate::cli::hook::execute(args, &cli)
+                });
+            if let Err(error) = &result { eprintln!("{error:#}"); }
+            std::process::exit(if result.is_ok() { 0 } else { 1 });
+        }
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let tmp = make_git_repo_for_hook_test();
         let repo = tmp.path();
         // cas-1829: the pre-push hook runs `cas hook WorkerPushRejected`, which
         // records into $CAS_ROOT under $CAS_SESSION_ID. Inherited from a factory
         // shell, each run wrote fake 'credit-repairs' push blocks into the live
         // project, attributed to the supervisor. Pushes use a throwaway root.
-        let hook_cas_root = tempfile::tempdir().unwrap();
+        let hook_project = tempfile::tempdir().unwrap();
+        let hook_cas_root = crate::store::init_cas_dir(hook_project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&hook_cas_root).unwrap();
+        for name in ["credit-repairs", "credit-repairs-staging", "support-triage"] {
+            agents.register(&cas_types::Agent::new_with_role(name.into(), name.into(), cas_types::AgentRole::Worker)).unwrap();
+        }
+        let bin = hook_project.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let exe = std::env::current_exe().unwrap().to_string_lossy().replace('\'', "'\"'\"'");
+        crate::test_paths::warm_stub(&bin.join("cas"), &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = \"hook WorkerBranchOwned\" ]; then\nCAS_TEST_BRANCH_OWNERSHIP_CHILD=\"$3\" exec '{exe}' --exact ui::factory::daemon::runtime::teams::tests::worker_hooks_allow_the_own_per_task_branch_cas_73b8 --nocapture\nfi\nexit 0\n"
+        ));
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
         let remote = repo.join("remote.git");
         assert!(
             std::process::Command::new("git")
@@ -5322,7 +5344,8 @@ mod tests {
             std::process::Command::new("git")
                 .args(args)
                 .env("CAS_AGENT_NAME", "credit-repairs")
-                .env("CAS_ROOT", hook_cas_root.path())
+                .env("CAS_ROOT", &hook_cas_root)
+                .env("PATH", &path)
                 .env_remove("CAS_SESSION_ID")
                 .env_remove("CAS_FACTORY_SESSION")
                 .current_dir(&wt_path)
@@ -5359,21 +5382,33 @@ mod tests {
         assert!(!onto_frozen.status.success(), "the frozen branch must not move");
         let stderr = String::from_utf8_lossy(&onto_frozen.stderr);
 
-        // Another worker's task branch, and a suffix that is not a task id,
-        // stay refused at commit time.
-        for foreign in ["factory/support-triage-cas-1185", "factory/credit-repairs-scratch"] {
-            assert!(git(&["switch", "-c", foreign]).status.success(), "{foreign}");
-            std::fs::write(wt_path.join("foreign.txt"), foreign).unwrap();
-            assert!(git(&["add", "foreign.txt"]).status.success());
-            let refused = git(&["commit", "-m", "foreign"]);
-            assert!(!refused.status.success(), "{foreign} must be refused");
-            let stderr = String::from_utf8_lossy(&refused.stderr);
+        let mut failures = Vec::new();
+        let sibling_archive = "factory/credit-repairs-staging-cas-parked";
+        assert!(git(&["branch", sibling_archive]).status.success());
+        assert!(git(&["switch", "factory/credit-repairs"]).status.success());
+        if git(&["push", "origin", sibling_archive]).status.success() {
+            failures.push((sibling_archive, "preservation push"));
+        }
+        for (branch, allowed) in [
+            ("factory/credit-repairs-01ea", true),
+            ("factory/credit-repairs-review", true),
+            ("factory/credit-repairs-scratch", true),
+            ("factory/credit-repairs-staging", false),
+            ("factory/credit-repairs-staging-cas-1185", false),
+            ("factory/support-triage-cas-1185", false),
+        ] {
+            assert!(git(&["switch", "-c", branch]).status.success(), "{branch}");
+            let commit = git(&["commit", "--allow-empty", "-m", "ownership fixture"]);
+            if commit.status.success() != allowed { failures.push((branch, "commit")); }
+            let push = git(&["push", "origin", branch]);
+            if push.status.success() != allowed { failures.push((branch, "push")); }
         }
 
         let _ = std::process::Command::new("git")
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
             .current_dir(repo)
             .output();
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     /// Migration regression test for cas-2491 fix round 2: a repo that ran an

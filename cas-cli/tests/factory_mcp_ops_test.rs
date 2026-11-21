@@ -12541,6 +12541,11 @@ async fn test_start_rejects_commit_guard_factory_misbinding_cas_b153() {
         })).unwrap();
         serde_json::to_value(cas::hooks::handle_pre_tool_use(&input, Some(&env.cas_root)).unwrap()).unwrap()
     };
+    // Temporary suffixes are owned unless a registered longer worker owns
+    // that namespace. Model an actual overlapping sibling, not a spelling.
+    let mut sibling = Agent::new("sibling-f1f5".into(), "watchful-hawk-30-f1f5".into());
+    sibling.role = AgentRole::Worker;
+    env.agent_store().register(&sibling).unwrap();
     // Missing WorkTarget must not hide a factory identity mismatch either.
     for (branch, declared) in [
         ("factory/watchful-hawk-30-f1f5", false),

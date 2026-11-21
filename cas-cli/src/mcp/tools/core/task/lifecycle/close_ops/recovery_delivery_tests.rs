@@ -576,7 +576,7 @@ esac
         .arg(producer)
         .args(["lane", "--phase", "plan", "--base-sha", &f.predecessor, "--out"])
         .arg(&lane_path)
-        .current_dir(repo)
+        .current_dir(&f.worker_path)
         .output()
         .unwrap();
     assert!(output.status.success(), "lane plan: {}", String::from_utf8_lossy(&output.stderr));
@@ -626,6 +626,14 @@ esac
     assert_eq!(poll().failures.len(), 1);
     assert_eq!(tasks.get_execution_state(TASK).unwrap().unwrap_or_default()["failing_tests"],
         serde_json::json!(["ui::list::sorts", "ui::list::filters"]));
+    // The merge-queue producer uses this same sink. Its distinct name and a
+    // repeated lane name must survive another lane poll without duplicates.
+    crate::mcp::tools::core::task::repair_class::record_failing_tests(&root, TASK,
+        &["ui::grid::renders".into(), "ui::list::sorts".into()]);
+    let expected = serde_json::json!(["ui::list::sorts", "ui::list::filters", "ui::grid::renders"]);
+    assert_eq!(tasks.get_execution_state(TASK).unwrap().unwrap()["failing_tests"], expected);
+    assert_eq!(poll().failures.len(), 1);
+    assert_eq!(tasks.get_execution_state(TASK).unwrap().unwrap()["failing_tests"], expected);
     let supervisor = CasCore::with_daemon(root.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -643,6 +651,7 @@ esac
         None,
         Some("not a filter"),
         Some("test(gates::)"),
+        Some("test(ui::list::)"),
         Some("test(=ui::list::sorts) | test(=ui::list::filters)"),
         Some("test(ui::list::) & test(sorts)"),
     ] {
@@ -699,6 +708,14 @@ esac
     supervisor.cas_task_request_changes(request(None)).await.unwrap();
     let state = tasks.get_execution_state(TASK).unwrap().unwrap();
     assert_eq!(state["class_audit"], "test(ui::list::) | test(ui::grid::)");
+    // Cap the combined identities, after deduplication, preserving earlier
+    // producer names when more than twenty distinct failures are reported.
+    let mut overflow = vec!["ui::list::sorts".to_string()];
+    overflow.extend((0..21).map(|index| format!("ui::grid::case_{index}")));
+    crate::mcp::tools::core::task::repair_class::record_failing_tests(&root, TASK, &overflow);
+    let mut expected = vec!["ui::list::sorts".to_string(), "ui::list::filters".into(), "ui::grid::renders".into()];
+    expected.extend((0..17).map(|index| format!("ui::grid::case_{index}")));
+    assert_eq!(tasks.get_execution_state(TASK).unwrap().unwrap()["failing_tests"], serde_json::json!(expected));
 }
 
 /// GH #1543/#1548: a supervisor-required release import may itself contain

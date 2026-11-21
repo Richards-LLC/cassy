@@ -630,7 +630,19 @@ pub(crate) fn publish_routed_evidence(
         cloud: super::cloud_client(cas_root).map(|client| client
             .with_timeout(PUBLISH_REQUEST_TIMEOUT).with_deadline(deadline)),
     };
-    let published = store.list_for_task(&task.id).map_err(|error| fail(error.to_string()))?;
+    let mut published = store.list_for_task(&task.id).map_err(|error| fail(error.to_string()))?;
+    // cas-1797 (GH #2267): proof another machine already committed for this
+    // task reaches here as synced notes. Its exact bytes are already fetchable
+    // by the peer, so a transient upload failure must not refuse the park. A
+    // conflicting or locally revoked record is never reused.
+    for json in task.notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
+        let Ok(record) = serde_json::from_str::<PublishedArtifact>(json) else { continue };
+        if published.iter().any(|known| known.id == record.id)
+            || !from_notes(&task.notes, &record.id, &task.id).is_ok_and(|found| found.is_some())
+            || store.get(&record.id).ok().flatten().is_some_and(|local| super::require_available(&local).is_err())
+        { continue; }
+        published.push(record);
+    }
     let upload = |path: &Path| -> Result<String, String> {
         let outcome = super::publish(&context, path).map_err(|error| error.to_string())?;
         if outcome.disposition.storage_disposition() != super::StorageDisposition::Committed {

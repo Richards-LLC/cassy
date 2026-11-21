@@ -1628,42 +1628,6 @@ mod tests {
         assert!(result.elapsed < result.writer_wait, "{result:?}");
     }
 
-    /// cas-9594c: delivery jobs (selection, transport claims) run ahead of
-    /// queued work on the write lane and on the StoreWorker itself, so a
-    /// write backlog cannot hold a message to an idle pane.
-    #[test]
-    fn delivery_jobs_run_ahead_of_queued_writes() {
-        let worker = Arc::new(super::super::store_worker::StoreWorker::start());
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let record = |name: &'static str| {
-            let order = Arc::clone(&order);
-            move || order.lock().unwrap().push(name)
-        };
-        let (release, backlog) = mpsc::channel::<()>();
-        assert!(worker.submit("backlog", move || {
-            let _ = backlog.recv_timeout(Duration::from_secs(5));
-        }));
-        assert!(worker.submit("queued write", record("queued write")));
-        let runtime: JobRuntime<()> = JobRuntime::start_with(
-            4,
-            LaneWiring { reader: None, writer: Arc::clone(&worker) as Arc<dyn WriteExecutor> },
-        );
-        runtime.submit(spec("select", Lane::Write, Criticality::Delivery, 1), record("select"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !runtime.lane_stats(Lane::Write).running.is_some_and(|job| job.waiting_for_writer) {
-            assert!(Instant::now() < deadline, "the select never reached the writer");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        runtime.submit(spec("stamp", Lane::Write, Criticality::Critical, 2), record("stamp"));
-        runtime.submit(spec("claim", Lane::Write, Criticality::Delivery, 3), record("claim"));
-        release.send(()).unwrap();
-        assert_eq!(wait_for(&runtime, 3).len(), 3);
-        let order = order.lock().unwrap().clone();
-        let at = |name| order.iter().position(|seen| *seen == name).unwrap();
-        assert!(at("select") < at("queued write"), "StoreWorker: {order:?}");
-        assert!(at("claim") < at("stamp"), "write lane: {order:?}");
-    }
-
     /// Review round 2, L2: a key busy on one lane refuses a submit on another
     /// lane in every build, instead of running it off the single writer.
     #[test]

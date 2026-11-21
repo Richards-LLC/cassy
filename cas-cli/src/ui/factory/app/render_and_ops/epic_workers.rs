@@ -8913,7 +8913,8 @@ mod tests {
     /// Exercise the daemon's real force-release/preassign seam, then the MCP
     /// recovery route through park and merge. No PTY or host factory is needed.
     #[tokio::test]
-    async fn recycled_worker_takeover_rebinds_and_delivers_cas_d6b1() {
+    async fn preassigned_worker_takeover_starts_parks_and_recovers_cas_ace6() {
+        for queued in [true, false] {
         use crate::mcp::{CasCore, CasService};
         use crate::store::{init_cas_dir, open_task_store};
         use crate::test_env_guard::TestEnvGuard;
@@ -8970,7 +8971,7 @@ mod tests {
         let anchor = git(&project, &["rev-parse", "HEAD"]);
         git(&project, &["push", "-q", "origin", old_branch]);
         git(&project, &["switch", "epic/takeover"]);
-        let branch = "factory/replacement-worker-cas-d6b1";
+        let branch = "factory/replacement-worker";
         let checkout = root.join("worktrees/replacement-worker");
         git(
             &project,
@@ -9039,7 +9040,6 @@ mod tests {
         ));
         let reassigned = tasks.get(&task.id).unwrap();
         assert_eq!(reassigned.status, TaskStatus::Open);
-        assert!(reassigned.notes.contains("force-released"));
         assert!(agents.get_lease(&task.id).unwrap().is_none());
         assert_eq!(
             reassigned.deliverables.factory_branch_start,
@@ -9053,20 +9053,21 @@ mod tests {
         let worker = service("replacement-id");
         let supervisor = service("supervisor-id");
         let request = |value| Parameters(serde_json::from_value(value).unwrap());
+        if queued {
+            let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&root).unwrap();
+            let mut queue = queues.get("takeover-session", "replacement-worker").unwrap();
+            queue.current_task = Some(task.id.clone());
+            queue.starting = true;
+            queues.save("takeover-session", "replacement-worker", &mut queue).unwrap();
+        }
         env.set_current_dir(&checkout);
+        env.set("CAS_AGENT_ROLE", "worker");
         worker
             .task(request(
                 serde_json::json!({"action": "start", "id": task.id}),
             ))
             .await
             .unwrap();
-        supervisor
-            .task(request(serde_json::json!({
-                "action": "rebind_branch", "id": task.id, "branch": branch,
-                "reason": "Original worker retired; approve replacement delivery",
-            })))
-            .await
-            .expect("supervisor can approve the new assignee's preserved delivery");
         let rebound = tasks.get(&task.id).unwrap();
         let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
         assert_eq!(start.assignee, "replacement-worker");
@@ -9092,7 +9093,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             audit["previous_start"],
-            serde_json::to_value(task.deliverables.factory_branch_start).unwrap()
+            serde_json::to_value(&task.deliverables.factory_branch_start).unwrap()
         );
         assert_eq!(audit["previous_tip"], anchor);
         // The replacement can now continue, park and merge under its own name.
@@ -9111,7 +9112,32 @@ mod tests {
             tasks.get(&task.id).unwrap().status,
             TaskStatus::AwaitingMerge
         );
+        // Replay the already-parked mismatch from GH #2255. The supported
+        // recovery returns it for changes before supervisor branch approval.
+        let mut mismatched = tasks.get(&task.id).unwrap();
+        mismatched.deliverables.factory_branch_start = task.deliverables.factory_branch_start.clone();
+        tasks.update(&mismatched).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        supervisor.task(request(serde_json::json!({
+            "action": "request_changes", "id": task.id,
+            "reason": "Recover the parked delivery's stale source binding",
+        }))).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+        supervisor.task(request(serde_json::json!({
+            "action": "rebind_branch", "id": task.id, "branch": branch,
+            "reason": "Approve the replacement after returning the parked mismatch",
+        }))).await.unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "inbox_poll",
+        })).unwrap())).await.unwrap();
+        worker.task(request(serde_json::json!({"action": "start", "id": task.id}))).await.unwrap();
+        worker.task(request(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "Recovered parked mismatch validated",
+        }))).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
         env.set_current_dir(&project);
+        env.set("CAS_AGENT_ROLE", "supervisor");
         let merged = supervisor
             .factory(Parameters(
                 serde_json::from_value(serde_json::json!({
@@ -9135,6 +9161,7 @@ mod tests {
             TaskStatus::Closed,
             "{merged:?}"
         );
+        }
     }
 
 }

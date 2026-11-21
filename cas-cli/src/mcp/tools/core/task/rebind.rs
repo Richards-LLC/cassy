@@ -281,7 +281,11 @@ pub(super) fn reassigned_branch_start(
             return None;
         }
     }
-    if (queued_start || previous.work_target != *target) && !empty_successor {
+    // An inherited start base alone can belong to the predecessor's other
+    // task. Only actual work beyond that base may keep a queued takeover lane;
+    // an untouched successor still starts freshly at its target.
+    let inherited_delivery = previous_tips.iter().any(|tip| tip != &previous.base_sha);
+    if (previous.work_target != *target || queued_start && !inherited_delivery) && !empty_successor {
         return None;
     }
     let base_sha = git.text(&["merge-base", "--all", &tip, &target_tip]).ok()?;

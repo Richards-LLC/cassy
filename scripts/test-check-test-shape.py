@@ -88,6 +88,9 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             ('example.test.ts', 'expect(error.code).toBe("forbidden");', False),
             ('test_example.py', 'self.assertIn("[rule: scope_denied]", result.stderr)', False),
             ('test_example.py', 'self.assertIn("FAIL test-shape", result.stdout)', False),
+            # cas-0223: release_freeze.rs:1038 pinned only its machine code and delimiter.
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.starts_with("TRAIN_OWNER_TRANSFER_REQUIRED:")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.starts_with("TRAIN_OWNER_TRANSFER_REQUIRED: the train owner moved")); }', True),
             ('test_example.py', 'self.assertEqual(saved_payload, "hello from the operator")', False),
             ('src/example.rs', '#[test] fn check() { assert!(error.contains("please try later")); }', True),
             ('src/example.rs', 'fn validate(error: &str) { assert!(error.contains("required input phrase")); }', False),

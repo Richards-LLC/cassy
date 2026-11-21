@@ -186,6 +186,7 @@ impl CasCore {
         authored_content.issues = issues;
         authored_content.files_reviewed = files_reviewed;
         authored_content.sanitize_verifier_authored_content();
+        let submitted_summary = authored_content.summary.clone();
 
         let verification_store = self.open_verification_store()?;
         let task_store = self.open_task_store()?;
@@ -306,9 +307,18 @@ impl CasCore {
             });
         }
 
+        let mut delegated_answer = false;
         if caller.role == cas_types::AgentRole::Supervisor {
-            crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&caller)
-                .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
+            if let Err(error) = crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&caller) {
+                let delegated = crate::cloud::peer_mailbox::verification_answers::authorized(
+                    &self.cas_root, &task, &caller, &req, &authored_content.summary,
+                ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
+                if !delegated {
+                    return Err(Self::error(ErrorCode::INVALID_REQUEST,
+                        crate::gates::tag("G-113", error.trim_end_matches("\n\n[G-113]"))));
+                }
+                delegated_answer = true;
+            }
         }
         let uses_verifier_capability = req.verifier_capability.is_some();
         let supervisor_direct = caller.role == cas_types::AgentRole::Supervisor
@@ -568,20 +578,6 @@ impl CasCore {
         // child-handoff authority, but let a direct supervisor verdict follow
         // an unchanged proof boundary to the current pending dispatch.
         let mut answered_question = None;
-        if supervisor_direct {
-            requested_dispatch_id = cas_store::resolve_verification_dispatch_for_add(
-                &self.cas_root,
-                &requested_dispatch_id,
-            )
-            .map_err(|_| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    "Supervisor-direct verification rejected: named dispatch is unavailable.",
-                ),
-                data: None,
-            })?
-            .id;
-        }
 
         // cas-b269: urgent stop halt blocks verification MCP.
         //
@@ -645,6 +641,18 @@ impl CasCore {
                 ),
                 data: None,
             });
+        }
+
+        if supervisor_direct {
+            if let Some(receipt) = crate::cloud::peer_mailbox::verification_answers::queue_answer(
+                &self.cas_root, &task, &caller, &req, &authored_content.summary,
+            ).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))? {
+                return Ok(Self::success(receipt));
+            }
+            requested_dispatch_id = cas_store::resolve_verification_dispatch_for_add(
+                &self.cas_root, &requested_dispatch_id,
+            ).map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                "Supervisor-direct verification rejected: named dispatch is unavailable."))?.id;
         }
 
         // Legacy task-only verification is authorized against the exact Git
@@ -910,6 +918,14 @@ impl CasCore {
                     message: Cow::from(format!("Failed to begin transaction: {e}")),
                     data: None,
                 })?;
+            if delegated_answer {
+                if !crate::cloud::peer_mailbox::verification_answers::recheck(
+                    &self.cas_root, &tx, &task, &caller, &req, &submitted_summary,
+                ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))? {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        crate::gates::tag("G-154", "Peer answer authorization changed before recording; inspect the current owner and question.")));
+                }
+            }
 
             // Historical exact-dispatch verdicts remain recordable (including
             // epic timeout recovery). Only the current cycle owns task flags
@@ -1236,6 +1252,9 @@ impl CasCore {
                 != cas_types::MergeCiAdmission::Override;
         let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        let peer_guidance = crate::cloud::peer_mailbox::verification_answers::publish(
+            &self.cas_root, &task, &proof_dispatch, &verification,
+        ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
         let close_retry = if resume_verifier {
             let current = cas_store::get_verification_dispatch(&self.cas_root, &requested_dispatch_id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
@@ -1249,12 +1268,12 @@ impl CasCore {
             );
             self.continue_premerge_after_verdict(&proof_dispatch, verification.status).await.unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
         } else if verification.status == VerificationStatus::SupervisorCall {
-            format!(
+            peer_guidance.clone().map(|guidance| format!("\n{guidance}")).unwrap_or_else(|| format!(
                 "\nSupervisor decision required. Answer on this dispatch: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<answer and final verdict>\". No re-dispatch is needed.",
                 crate::mcp::tools::core::guidance::caller_prefix(),
                 req.task_id,
                 requested_dispatch_id,
-            )
+            ))
         } else if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
             && (task.pending_verification || cassy_merged)
@@ -1316,7 +1335,7 @@ impl CasCore {
             req.task_id,
             truncate_str(&task.title, 120),
             verification_receipt_summary(&verification),
-            close_retry
+            format!("{close_retry}{}", if candidate.is_some() { peer_guidance.map(|guidance| format!("\n{guidance}")).unwrap_or_default() } else { String::new() })
         )))
     }
 
@@ -1730,6 +1749,173 @@ mod lifecycle_friction_tests {
         )
         .unwrap();
         (dir, core, task, dispatch)
+    }
+
+    #[tokio::test]
+    async fn train_owner_answers_peer_dispatch_without_publisher_takeover_cas_9e52() {
+        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (_builder_dir, builder, mut task, dispatch) = fixture(&mut env);
+        let builder_agents = builder.open_agent_store().unwrap();
+        let mut delegate = builder_agents.get("review-supervisor").unwrap();
+        delegate.machine_id = Some("builder-machine".into());
+        delegate.factory_session = Some("builder-session".into());
+        builder_agents.update(&delegate).unwrap();
+        let project = "peer-verification-fixture";
+        std::fs::write(builder.cas_root.join("config.toml"), format!("[project]\ncanonical_id='{project}'\n")).unwrap();
+        let mut train = Task::new("cas-9e52-train".into(), "Peer-owned train".into());
+        train.task_type = cas_types::TaskType::Epic;
+        train.origin_project = Some(project.into());
+        train.epic_verification_owner = Some("train-owner".into());
+        task.origin_project = Some(project.into());
+        let tasks = builder.open_task_store().unwrap();
+        tasks.add(&train).unwrap();
+        tasks.update(&task).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(task.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let mut child = Agent::new_sub_agent("peer-verifier".into(), "task-verifier".into(), "review-supervisor".into());
+        child.machine_id = Some("builder-machine".into());
+        cas_store::issue_and_bind_server_verifier_handoff(&builder.cas_root, &task.id, &dispatch.id, "peer-review", &child).unwrap();
+        let verifier = CasCore::with_daemon(builder.cas_root.clone(), None, None);
+        verifier.set_agent_id_for_testing(child.id.clone());
+        let question = serde_json::json!({
+            "task_id":task.id, "dispatch_id":dispatch.id, "status":"supervisor_call",
+            "summary":"May release batch QA own the remaining installed journey?",
+        });
+        verifier.cas_verification_add(Parameters(serde_json::from_value(question).unwrap())).await.unwrap();
+        let call = builder.open_verification_store().unwrap().get_for_task(&task.id).unwrap().into_iter()
+            .find(|v| v.status == VerificationStatus::SupervisorCall).unwrap();
+        assert_eq!(call.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+
+        let request = serde_json::json!({
+            "task_id":task.id, "dispatch_id":dispatch.id, "status":"supervisor_call",
+            "summary":"Release batch QA owns the installed journey; continue the independent review.",
+        });
+        let local_refusal = builder.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
+        assert!(local_refusal.message.contains("[G-113]"));
+
+        // Real Cloud task reconciliation between separate stores. Dispatch and
+        // child bearer authority stay on the builder; no row is hand-copied.
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/sync/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks":[tasks.get(&train.id).unwrap(), tasks.get(&task.id).unwrap()],
+                "pulled_at":"2026-11-21T15:00:00Z", "status":"ok",
+            }))).mount(&server).await;
+        let owner_dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(owner_dir.path()).unwrap();
+        std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id='{project}'\n")).unwrap();
+        let queue = std::sync::Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
+            endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
+        }, CloudSyncerConfig::default(), project.into(), &root);
+        let owner = CasCore::with_daemon(root.clone(), None, None);
+        let owner_tasks = owner.open_task_store().unwrap();
+        let pull = syncer.pull(&*crate::store::open_store_local(&root).unwrap(), &*owner_tasks,
+            &*crate::store::open_rule_store_local(&root).unwrap(), &*crate::store::open_skill_store_local(&root).unwrap(),
+            &*crate::store::open_spec_store(&root).unwrap(), &*crate::store::open_event_store(&root).unwrap(),
+            &*crate::store::open_prompt_store(&root).unwrap(), &*crate::store::open_file_change_store(&root).unwrap(),
+            &*crate::store::open_commit_link_store(&root).unwrap()).unwrap();
+        assert!(pull.errors.is_empty(), "{:?}", pull.errors);
+        assert_eq!(owner_tasks.get(&task.id).unwrap().id, task.id);
+        owner_tasks.add_dependency(&cas_types::Dependency::new(task.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let mut owner_agent = Agent::new_with_role("train-owner".into(), "train-owner".into(), AgentRole::Supervisor);
+        owner_agent.machine_id = Some("owner-machine".into());
+        owner.open_agent_store().unwrap().register(&owner_agent).unwrap();
+        owner.set_agent_id_for_testing(owner_agent.id.clone());
+        assert!(cas_store::get_verification_dispatch(&root, &dispatch.id).is_err());
+        let response = owner.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await;
+        assert!(response.is_ok(), "authorized train owner could not answer the exact peer question: {response:?}");
+        assert!(owner.open_verification_store().unwrap().get_for_task(&task.id).unwrap().is_empty());
+        // Lost-response retry must reuse the same logical authorization.
+        owner.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let payload: String = conn.query_row("SELECT payload FROM peer_message_outbox", [], |row| row.get(0)).unwrap();
+        let count: i64 = conn.query_row("SELECT count(*) FROM peer_message_outbox", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        let sent: crate::cloud::peer_mailbox::PeerSend = serde_json::from_str(&payload).unwrap();
+        let mail_json = serde_json::json!({
+            "id":"owner-answer", "project_id":project, "recipient_agent_id":delegate.id,
+            "sender_agent_id":owner_agent.id, "sender_name":owner_agent.name,
+            "sender_machine_id":"owner-machine", "sender_session":"owner-session",
+            "created_at":chrono::Utc::now().to_rfc3339(), "body":sent.body,
+        });
+        let mail: crate::cloud::peer_mailbox::ClaimedPeerMessage = serde_json::from_value(mail_json.clone()).unwrap();
+        let (_, body) = crate::cloud::peer_mailbox::split_message_intent(&mail.body);
+        let (tag, encoded) = body.lines().next().unwrap().split_once(' ').unwrap();
+        let encoded: serde_json::Value = serde_json::from_str(encoded).unwrap();
+        // Authenticated identity and exact question/boundary are independent
+        // constraints. None of these altered claims may admit authority.
+        for (field, value) in [
+            ("owner", "another-owner"), ("generation", "stale-generation"),
+            ("dispatch", "another-dispatch"), ("task", "another-task"),
+            ("question", "another-question"), ("summary", "another-question-body"),
+            ("boundary", "another-boundary"), ("responder", "another-supervisor"),
+        ] {
+            let mut altered = mail.clone();
+            let mut content = encoded.clone();
+            content["question"][field] = value.into();
+            altered.body = format!("{tag} {content}");
+            let outcome = crate::cloud::peer_mailbox::verification_answers::ingest(&builder.cas_root, &delegate, &altered);
+            assert!(!matches!(outcome, Ok(None)), "accepted altered {field}");
+        }
+        let mut foreign = mail.clone();
+        foreign.sender_agent_id = "another-supervisor".into();
+        assert!(matches!(crate::cloud::peer_mailbox::verification_answers::ingest(&builder.cas_root, &delegate, &foreign).unwrap(),
+            Some(crate::cloud::peer_mailbox::PeerAckOutcome::Rejected)));
+        let mut changed_train = train.clone();
+        changed_train.epic_verification_owner = Some("new-owner".into());
+        tasks.update(&changed_train).unwrap();
+        assert!(matches!(crate::cloud::peer_mailbox::verification_answers::ingest(&builder.cas_root, &delegate, &mail).unwrap(),
+            Some(crate::cloud::peer_mailbox::PeerAckOutcome::Rejected)));
+        tasks.update(&train).unwrap();
+        let builder_conn = rusqlite::Connection::open(builder.cas_root.join("cas.db")).unwrap();
+        builder_conn.execute("UPDATE verification_dispatches SET state='invalidated' WHERE id=?1", [&dispatch.id]).unwrap();
+        assert!(matches!(crate::cloud::peer_mailbox::verification_answers::ingest(&builder.cas_root, &delegate, &mail).unwrap(),
+            Some(crate::cloud::peer_mailbox::PeerAckOutcome::Rejected)));
+        builder_conn.execute("UPDATE verification_dispatches SET state='claimed' WHERE id=?1", [&dispatch.id]).unwrap();
+        assert!(builder.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await.is_err());
+
+        // Exercise the production polling duty and HTTP mailbox contract, not
+        // a hand-copied dispatch or a direct call that skips mailbox admission.
+        Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":[mail_json],"status":"ok"}))).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[{"id":"owner-answer","status":200}]}))).mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[],"status":"ok"}))).mount(&server).await;
+        std::fs::write(builder.cas_root.join("cloud.json"), serde_json::to_vec(&CloudConfig {
+            endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
+        }).unwrap()).unwrap();
+        let builder_root = builder.cas_root.clone();
+        let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(
+            &builder_root, "builder-session").unwrap().tick_blocking()).await.unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.delivered, 1);
+        let mut altered_request = request.clone();
+        altered_request["summary"] = "Not the owner's authorized answer".into();
+        assert!(builder.cas_verification_add(Parameters(serde_json::from_value(altered_request).unwrap())).await.is_err());
+        let mut terminal_request = request.clone();
+        terminal_request["status"] = "approved".into();
+        assert!(builder.cas_verification_add(Parameters(serde_json::from_value(terminal_request).unwrap())).await.is_err());
+        builder.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap();
+        builder.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap();
+        let answer = cas_store::get_verification_for_dispatch(&builder.cas_root, &dispatch.id).unwrap().unwrap();
+        assert_eq!(answer.summary, request["summary"].as_str().unwrap());
+        assert_eq!(answer.provenance, cas_types::VerificationProvenance::SupervisorDirect);
+        let continued = cas_store::get_verification_dispatch(&builder.cas_root, &dispatch.id).unwrap();
+        assert_eq!(continued.state, cas_types::VerificationDispatchState::Pending);
+        assert!(continued.verifier_agent_id.is_none());
+        assert!(continued.capability_id.is_none());
+        assert!(verifier.cas_verification_add(Parameters(serde_json::from_value(request).unwrap())).await.is_err());
+        assert!(crate::cloud::peer_mailbox::train_parks::authorize(&builder.cas_root, &tasks.get(&task.id).unwrap(), &delegate).is_err());
+        let history = builder.open_verification_store().unwrap().get_for_task(&task.id).unwrap();
+        assert_eq!(history.iter().filter(|v| v.status == VerificationStatus::SupervisorCall).count(), 2);
+        assert_eq!(owner_tasks.get(&train.id).unwrap().epic_verification_owner, Some(owner_agent.id));
+        assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some("train-owner"));
     }
 
     #[tokio::test]

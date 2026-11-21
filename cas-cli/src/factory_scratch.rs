@@ -71,6 +71,18 @@ fn owned_test_tmp(cas_dir: &Path, worktree: &Path) -> io::Result<Option<PathBuf>
 
 pub(crate) fn prepare_test_tmp(cas_dir: &Path, worktree: &Path) -> io::Result<PathBuf> {
     let path = test_tmp_dir(cas_dir, worktree);
+    let existing = existing_ancestor(&path)
+        .ok_or_else(|| io::Error::other("capped temporary directory has no existing ancestor"))?
+        .canonicalize()?;
+    // gate[H-50 worker-check]: Capped temporary directory excludes Git ancestry
+    for ancestor in existing.ancestors() {
+        match std::fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => return Err(io::Error::new(io::ErrorKind::PermissionDenied, crate::gates::tag("H-50",
+                format!("Capped TMPDIR {} is inside a Git work tree ({}). Set factory.scratch_root outside every checkout.", path.display(), ancestor.display())))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
+    }
     std::fs::create_dir_all(path.parent().unwrap())?;
     if path.parent().unwrap().canonicalize()?
         != path.parent().unwrap().parent().unwrap().canonicalize()?.join("t") {

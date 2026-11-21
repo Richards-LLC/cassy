@@ -296,7 +296,7 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
     successor.pid = Some(std::process::id());
     successor.metadata.insert(
         "clone_path".into(),
-        root.join("worktrees/live-worker").display().to_string(),
+        alias.join("live-worker").display().to_string(),
     );
     agents.register(&successor).unwrap();
     let before = git(repo, &["for-each-ref", "--format=%(refname) %(objectname)"]);

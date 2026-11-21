@@ -4725,7 +4725,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             ],
         )
         .unwrap();
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CAS_FACTORY_BUILD_GUARD", "off"),
             ("CAS_HOOK_HARNESS", "claude"),
             ("CAS_CLONE_PATH", repo.to_str().unwrap()),
@@ -4775,6 +4775,60 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let args = vec!["-p".into(), "cas".into(), "--tests".into()];
         execute_at(&root, &args, &repo, &fake).unwrap();
         assert!(passing_receipt(&root, &repo, &head).is_some());
+        let canonical = repo.canonicalize().unwrap();
+        let default_path = receipt_path(&root, &canonical, &head);
+        let default_bytes = std::fs::read(&default_path).unwrap();
+        let no_default = ["-p", "cas", "--lib", "--no-default-features"].map(str::to_string);
+        fake_cargo(&fake, "printf '%s\\n' \"$@\" > target/forwarded-check; exit 0");
+        for harness in ["claude", "codex"] {
+            env.set("CAS_HOOK_HARNESS", harness);
+            let mut request = request.clone();
+            request.tool_input = Some(serde_json::json!({
+                "command":"cargo check -p cas --lib --no-default-features > target/no-default.log 2>&1 &"
+            }));
+            let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            let command = value.pointer("/hookSpecificOutput/updatedInput/command").and_then(|value| value.as_str());
+            assert!(command.is_some(), "{harness}: {value}");
+            assert!(command.unwrap().contains("-- -p cas --lib --no-default-features"));
+            execute_at(&root, &no_default, &repo, &fake).unwrap();
+            assert_eq!(std::fs::read_to_string(repo.join("target/forwarded-check")).unwrap().lines().collect::<Vec<_>>(),
+                ["check", "-p", "cas", "--lib", "--no-default-features"]);
+            assert_eq!(std::fs::read(&default_path).unwrap(), default_bytes);
+            let records: Vec<serde_json::Value> = std::fs::read_dir(default_path.parent().unwrap()).unwrap()
+                .flatten().filter_map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()).collect();
+            assert_eq!(records.len(), 2);
+            assert!(records.iter().any(|record| record["no_default_features"] == false));
+            assert!(records.iter().any(|record| record["no_default_features"] == true));
+            assert_eq!(passing_receipt(&root, &repo, &head).unwrap().lines().count(), 2);
+            // The exact reader used by close also accepts the explicitly
+            // identified non-default proof alone, without relabelling it.
+            std::fs::remove_file(&default_path).unwrap();
+            assert!(passing_receipt(&root, &repo, &head).is_some());
+            std::fs::write(&default_path, &default_bytes).unwrap();
+        }
+        for command in [
+            "cargo check -p cas --tests --no-default-features",
+            "cargo check -p cas --lib --no-default-features --no-default-features",
+            "cargo check -p cas --lib --no-default-features --features mcp-proxy",
+            "cargo check -p cas --lib --no-default-features --all-features",
+            "cargo check -p cas --lib --no-default-features --workspace",
+            "cargo check -p cas --lib --no-default-features --config build.jobs=64",
+            "CARGO_BUILD_JOBS=64 cargo check -p cas --lib --no-default-features",
+            "CAS_AGENT_ROLE=supervisor cargo check -p cas --lib --no-default-features",
+        ] {
+            let mut denied = request.clone();
+            denied.tool_input = Some(serde_json::json!({"command":command}));
+            let output = crate::hooks::handlers::handle_pre_tool_use(&denied, Some(&root)).unwrap();
+            assert_eq!(serde_json::to_value(output).unwrap().pointer("/hookSpecificOutput/permissionDecision").and_then(|value| value.as_str()),
+                Some("deny"), "{command}");
+            assert!(!allowed_args(&command.split_whitespace().skip(2).map(str::to_string).collect::<Vec<_>>()));
+        }
+        // A failed no-default retry invalidates only that configuration.
+        fake_cargo(&fake, "exit 1");
+        assert!(execute_at(&root, &no_default, &repo, &fake).is_err());
+        assert_eq!(std::fs::read(&default_path).unwrap(), default_bytes);
+        assert_eq!(passing_receipt(&root, &repo, &head).unwrap().lines().count(), 1);
         for path in ["untracked.rs", "source.rs"] {
             std::fs::write(repo.join(path), "// dirt\n").unwrap();
             let _ = execute_at(&root, &args, &repo, &fake)

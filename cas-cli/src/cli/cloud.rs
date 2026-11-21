@@ -2039,6 +2039,10 @@ struct KnowledgeSyncSummary {
     pushed: usize,
     pulled: usize,
     embedded: usize,
+    /// cas-2c75: another round held the knowledge lock; nothing ran.
+    knowledge_deferred: bool,
+    /// Another round held the quality lock (or the knowledge lock it rides in).
+    quality_deferred: bool,
 }
 
 /// Count local knowledge pages, or `None` when this project has no knowledge
@@ -2085,8 +2089,9 @@ fn sync_project_knowledge_with_output(
     }
 
     let Some(_lease) = crate::cloud::sync_lease::SyncLease::try_acquire_knowledge(cas_root)? else {
-        tracing::debug!("knowledge sync deferred: another round is active");
-        return Ok(KnowledgeSyncSummary::default());
+        // cas-2c75: the caller's summary says so; silence would read as
+        // "nothing new". Quality events ride in this round, so they wait too.
+        return Ok(KnowledgeSyncSummary { knowledge_deferred: true, quality_deferred: true, ..Default::default() });
     };
 
     let store = match SqliteKnowledgeStore::open(cas_root) {
@@ -2116,10 +2121,16 @@ fn sync_project_knowledge_with_output(
             0
         }
     };
-    match syncer.sync_quality_events(true) {
-        Ok(summary) => tracing::debug!(?summary, "quality events synced"),
-        Err(e) => tracing::warn!(error = %e, "quality events sync failed (non-fatal)"),
-    }
+    let quality_deferred = match syncer.sync_quality_events(true) {
+        Ok(summary) => {
+            tracing::debug!(?summary, "quality events synced");
+            summary.deferred
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "quality events sync failed (non-fatal)");
+            false
+        }
+    };
     let pulled = match syncer.pull_knowledge_pages(&store) {
         Ok(report) => {
             for (rel_path, message) in &report.errors {
@@ -2256,6 +2267,8 @@ fn sync_project_knowledge_with_output(
         pushed,
         pulled: pulled.applied,
         embedded,
+        knowledge_deferred: false,
+        quality_deferred,
     })
 }
 
@@ -3280,6 +3293,10 @@ pub struct SyncSummary {
     pub knowledge_pushed: usize,
     pub knowledge_pulled: usize,
     pub knowledge_embedded: usize,
+    /// cas-2c75: knowledge sync did not run; another round held its lock.
+    pub knowledge_deferred: bool,
+    /// Quality events did not sync; another round held their lock.
+    pub quality_deferred: bool,
     pub conflicts_resolved: usize,
     pub conflicts_resolved_local: usize,
     pub conflicts_resolved_remote: usize,
@@ -3365,6 +3382,8 @@ impl SyncSummary {
             knowledge_pushed: result.pushed_knowledge_pages,
             knowledge_pulled: result.pulled_knowledge_pages,
             knowledge_embedded: 0,
+            knowledge_deferred: false,
+            quality_deferred: false,
             conflicts_resolved: result.conflicts_resolved,
             conflicts_resolved_local: result.conflicts_resolved_local,
             conflicts_resolved_remote: result.conflicts_resolved_remote,
@@ -3426,6 +3445,8 @@ impl SyncSummary {
             knowledge_pushed: result.pushed_knowledge_pages,
             knowledge_pulled: result.pulled_knowledge_pages,
             knowledge_embedded: 0,
+            knowledge_deferred: false,
+            quality_deferred: false,
             conflicts_resolved: result.conflicts_resolved,
             conflicts_resolved_local: result.conflicts_resolved_local,
             conflicts_resolved_remote: result.conflicts_resolved_remote,
@@ -3465,6 +3486,8 @@ impl SyncSummary {
         self.knowledge_pushed = knowledge.pushed;
         self.knowledge_pulled = knowledge.pulled;
         self.knowledge_embedded = knowledge.embedded;
+        self.knowledge_deferred = knowledge.knowledge_deferred;
+        self.quality_deferred = knowledge.quality_deferred;
         self
     }
 
@@ -3714,6 +3737,13 @@ pub(crate) fn render_sync_summary(
                     knowledge.push(format!("{} embedded", summary.knowledge_embedded));
                 }
                 details.push(format!("knowledge {}", knowledge.join(", ")));
+            }
+            // cas-2c75: a deferred round is stale data, not "nothing new".
+            if summary.knowledge_deferred {
+                details.push("knowledge deferred (another sync is running)".to_string());
+            }
+            if summary.quality_deferred {
+                details.push("quality events deferred (another sync is running)".to_string());
             }
             if let Some(transition) = &summary.task_transition {
                 if !verbose {
@@ -7996,6 +8026,59 @@ mod team_cmd_tests {
                 .starts_with(&format!("/api/teams/{team}/"))
         }));
         server.verify().await;
+    }
+
+    /// cas-2c75: `cas cloud sync` while another round holds the knowledge
+    /// sidecar lease reports knowledge and quality events as deferred in the
+    /// summary it returns and prints; an empty result read as "nothing new".
+    #[tokio::test]
+    async fn sync_reports_a_held_knowledge_round_as_deferred_cas_2c75() {
+        use clap::Parser;
+        let server = MockServer::start().await;
+        let team = "550e8400-e29b-41d4-a716-446655440000";
+        Mock::given(method("POST"))
+            .and(path(format!("/api/teams/{team}/sync/push")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced": {}})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{team}/sync/pull")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [], "pulled_at": "2026-11-21T12:00:00Z",
+            })))
+            .mount(&server)
+            .await;
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "cli-deferred").unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.endpoint = server.uri();
+        cloud.token = Some("synthetic-test-token".into());
+        cloud.set_team(team, "fixture-team");
+        cloud.save_to_cas_dir(&root).unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue
+            .set_metadata(&team_registration_metadata_key(team, "cli-deferred"), "1")
+            .unwrap();
+        let lease = crate::cloud::sync_lease::SyncLease::try_acquire_knowledge(&root).unwrap().unwrap();
+        let root_bg = root.clone();
+        let (pull, json) = tokio::task::spawn_blocking(move || {
+            let cli = crate::cli::try_parse_from_with_wordmark(["cas", "--json", "cloud", "sync"]).unwrap();
+            let args = CloudSyncArgs::try_parse_from(["sync"]).unwrap();
+            let summaries = execute_sync_with_summaries(&args, &cli, &root_bg).unwrap();
+            let mut printed = Vec::new();
+            write_sync_summaries(&mut printed, &summaries, true, false).unwrap();
+            let pull = summaries.into_iter().find(SyncSummary::is_pull).expect("a pull summary");
+            (pull, serde_json::from_slice::<serde_json::Value>(&printed).unwrap())
+        })
+        .await
+        .unwrap();
+        drop(lease);
+        assert!(pull.knowledge_deferred && pull.quality_deferred, "{pull:?}");
+        assert_eq!(json["pull"]["knowledge_deferred"], true, "{json}");
+        assert_eq!(json["pull"]["quality_deferred"], true, "{json}");
     }
 
     #[test]

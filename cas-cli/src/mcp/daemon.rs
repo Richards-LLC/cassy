@@ -1458,12 +1458,22 @@ impl EmbeddedDaemon {
             }
         }
 
-        cloud_worker.shutdown().await;
+        // cas-2c75: the worker sees the shutdown on its watch channel. Let an
+        // in-flight sync finish so its store lease is free for the final sync;
+        // aborting would leave the blocking body holding it.
+        if tokio::time::timeout(CLOUD_WORKER_STOP_WAIT, cloud_worker.join_next()).await.is_err() {
+            tracing::warn!("cloud sync worker still running after {CLOUD_WORKER_STOP_WAIT:?}; aborting it");
+            cloud_worker.shutdown().await;
+        }
 
         // Final cloud sync: drain any pending items before shutdown
         if self.fresh_cloud_syncer().is_some() {
             eprintln!("[Cassy] Running final cloud sync before shutdown...");
-            match tokio::time::timeout(Duration::from_secs(10), self.trigger_cloud_sync()).await {
+            // Quality telemetry runs after, outside this bound, so a slow
+            // telemetry round cannot discard a finished entity sync.
+            let entity = tokio::time::timeout(Duration::from_secs(10), self.run_cloud_sync()).await;
+            self.run_cloud_quality_sync().await;
+            match entity {
                 Ok(Ok(result)) => {
                     let pushed = result.total_pushed();
                     let pulled = result.total_pulled();
@@ -2615,6 +2625,9 @@ impl EmbeddedDaemon {
         result
     }
 }
+
+/// How long shutdown waits for the entity-sync worker's in-flight cycle.
+const CLOUD_WORKER_STOP_WAIT: Duration = Duration::from_secs(15);
 
 /// Check whether a PID corresponds to a live process.
 ///

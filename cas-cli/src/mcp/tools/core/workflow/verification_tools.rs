@@ -1733,6 +1733,83 @@ mod lifecycle_friction_tests {
     }
 
     #[tokio::test]
+    async fn train_owner_answers_peer_dispatch_without_publisher_takeover_cas_9e52() {
+        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (_builder_dir, builder, mut task, dispatch) = fixture(&mut env);
+        let project = "peer-verification-fixture";
+        std::fs::write(builder.cas_root.join("config.toml"), format!("[project]\ncanonical_id='{project}'\n")).unwrap();
+        let mut train = Task::new("cas-9e52-train".into(), "Peer-owned train".into());
+        train.task_type = cas_types::TaskType::Epic;
+        train.origin_project = Some(project.into());
+        train.epic_verification_owner = Some("train-owner".into());
+        task.origin_project = Some(project.into());
+        let tasks = builder.open_task_store().unwrap();
+        tasks.add(&train).unwrap();
+        tasks.update(&task).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(task.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let mut child = Agent::new_sub_agent("peer-verifier".into(), "task-verifier".into(), "review-supervisor".into());
+        child.machine_id = Some("builder-machine".into());
+        cas_store::issue_and_bind_server_verifier_handoff(&builder.cas_root, &task.id, &dispatch.id, "peer-review", &child).unwrap();
+        let verifier = CasCore::with_daemon(builder.cas_root.clone(), None, None);
+        verifier.set_agent_id_for_testing(child.id.clone());
+        let question = serde_json::json!({
+            "task_id":task.id, "dispatch_id":dispatch.id, "status":"supervisor_call",
+            "summary":"May release batch QA own the remaining installed journey?",
+        });
+        verifier.cas_verification_add(Parameters(serde_json::from_value(question).unwrap())).await.unwrap();
+        let call = builder.open_verification_store().unwrap().get_for_task(&task.id).unwrap().into_iter()
+            .find(|v| v.status == VerificationStatus::SupervisorCall).unwrap();
+        assert_eq!(call.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+
+        let request = serde_json::json!({
+            "task_id":task.id, "dispatch_id":dispatch.id, "status":"supervisor_call",
+            "summary":"Release batch QA owns the installed journey; continue the independent review.",
+        });
+        let local_refusal = builder.cas_verification_add(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
+        assert!(local_refusal.message.contains("[G-113]"));
+
+        // Real Cloud task reconciliation between separate stores. Dispatch and
+        // child bearer authority stay on the builder; no row is hand-copied.
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/sync/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks":[tasks.get(&train.id).unwrap(), tasks.get(&task.id).unwrap()],
+                "pulled_at":"2026-11-21T15:00:00Z", "status":"ok",
+            }))).mount(&server).await;
+        let owner_dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(owner_dir.path()).unwrap();
+        std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id='{project}'\n")).unwrap();
+        let queue = std::sync::Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
+            endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
+        }, CloudSyncerConfig::default(), project.into(), &root);
+        let owner = CasCore::with_daemon(root.clone(), None, None);
+        let owner_tasks = owner.open_task_store().unwrap();
+        let pull = syncer.pull(&*crate::store::open_store_local(&root).unwrap(), &*owner_tasks,
+            &*crate::store::open_rule_store_local(&root).unwrap(), &*crate::store::open_skill_store_local(&root).unwrap(),
+            &*crate::store::open_spec_store(&root).unwrap(), &*crate::store::open_event_store(&root).unwrap(),
+            &*crate::store::open_prompt_store(&root).unwrap(), &*crate::store::open_file_change_store(&root).unwrap(),
+            &*crate::store::open_commit_link_store(&root).unwrap()).unwrap();
+        assert!(pull.errors.is_empty(), "{:?}", pull.errors);
+        assert_eq!(owner_tasks.get(&task.id).unwrap().id, task.id);
+        owner_tasks.add_dependency(&cas_types::Dependency::new(task.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let mut owner_agent = Agent::new_with_role("train-owner".into(), "train-owner".into(), AgentRole::Supervisor);
+        owner_agent.machine_id = Some("owner-machine".into());
+        owner.open_agent_store().unwrap().register(&owner_agent).unwrap();
+        owner.set_agent_id_for_testing(owner_agent.id.clone());
+        assert!(cas_store::get_verification_dispatch(&root, &dispatch.id).is_err());
+        let response = owner.cas_verification_add(Parameters(serde_json::from_value(request).unwrap())).await;
+        assert!(response.is_ok(), "authorized train owner could not answer the exact peer question: {response:?}");
+        assert_eq!(owner_tasks.get(&train.id).unwrap().epic_verification_owner, Some(owner_agent.id));
+        assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some("train-owner"));
+    }
+
+    #[tokio::test]
     async fn cas_ce3e_dead_active_verifier_allows_supervisor_verdict() {
         let mut env = TestEnvGuard::temp_home();
         let (_dir, core, task, dispatch) = fixture(&mut env);

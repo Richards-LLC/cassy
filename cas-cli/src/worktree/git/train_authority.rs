@@ -129,6 +129,22 @@ impl Snapshot {
             .ok_or_else(|| "TRAIN_TRANSFER_FENCE_UNAVAILABLE: target missing".into())
     }
 
+    pub(crate) fn read_optional(repo: &Path, train: &str) -> Result<Option<Self>, String> {
+        let reference = reference(train)?;
+        let remote = command(repo, &["ls-remote", "--refs", "origin", &reference], None)?;
+        if remote.trim().is_empty() { return Ok(None); }
+        Self::read(repo, train).map(Some)
+    }
+
+    pub(crate) fn validate_admission(&self, repo: &Path, actor: &Identity) -> Result<(), String> {
+        let live = self.coherent(repo)?;
+        live.require_actor(actor)?;
+        if live.record.phase != Phase::Active {
+            return Err("TRAIN_OWNER_DRAINING: admissions are held".into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn read(repo: &Path, train: &str) -> Result<Self, String> {
         let reference = reference(train)?;
         let remote = command(repo, &["ls-remote", "--refs", "origin", &reference], None)?;

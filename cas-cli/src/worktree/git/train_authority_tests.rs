@@ -63,10 +63,7 @@ impl Fixture {
         )
         .unwrap();
         let base = command(&left, &["rev-parse", "HEAD"], None).unwrap();
-        let actor = Identity {
-            owner: "owner-a".into(),
-            incarnation: "session-a/process-a".into(),
-        };
+        let actor = crate::train_owner::identity(&Self::service_actor(), "owner-a").unwrap();
         command(
             env.home(),
             &["clone", origin.to_str().unwrap(), right.to_str().unwrap()],
@@ -81,6 +78,19 @@ impl Fixture {
             actor,
             base,
         }
+    }
+
+    fn service_actor() -> crate::types::Agent {
+        let mut actor = crate::types::Agent::new_with_role(
+            "owner-a".into(),
+            "owner-a".into(),
+            crate::types::AgentRole::Supervisor,
+        );
+        actor.machine_id = Some("fixture-machine".into());
+        actor.factory_session = Some("session-a".into());
+        actor.cc_session_id = Some("harness-a".into());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut actor, std::process::id());
+        actor
     }
 
     fn candidate(&self, repo: &Path, name: &str) -> String {
@@ -268,6 +278,46 @@ fn train_authority_stale_owner_publication_cas_6456() {
     let fixture = Fixture::new();
     let admitted = Snapshot::read(&fixture.left, "cas-6456").unwrap();
     let candidate = fixture.candidate(&fixture.left, "old-owner-candidate");
+    let root = fixture.left.join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        "[project]\ncanonical_id = \"fixture\"\n",
+    )
+    .unwrap();
+    let mut train = crate::types::Task::new("cas-6456".into(), "Train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.labels = vec!["release-train".into(), crate::train_owner::ENROLLED.into()];
+    train.branch = Some(admitted.record.target.clone());
+    train.epic_verification_owner = Some(fixture.actor.owner.clone());
+    let actor = Fixture::service_actor();
+    assert_eq!(
+        crate::factory_session_scope::train_owner_generation(&root, &train).unwrap(),
+        admitted.record.generation
+    );
+    assert_eq!(
+        crate::factory_session_scope::require_train_owner(&root, &train, &actor).unwrap(),
+        admitted.record.generation
+    );
+    assert!(
+        !crate::train_owner::generation_matches(&root, &train, "", &admitted.record.generation)
+            .unwrap()
+    );
+    assert!(
+        !crate::train_owner::generation_matches(&root, &train, "old", &admitted.record.generation)
+            .unwrap()
+    );
+    let mut worker = actor.clone();
+    worker.role = crate::types::AgentRole::Worker;
+    assert!(crate::factory_session_scope::require_train_owner(&root, &train, &worker).is_err());
+    let mut reused = actor.clone();
+    reused.pid_starttime = Some(actor.pid_starttime.unwrap() + 1);
+    let error =
+        crate::factory_session_scope::require_train_owner(&root, &train, &reused).unwrap_err();
+    assert_eq!(
+        error.split(':').next(),
+        Some("TRAIN_OWNER_GENERATION_CHANGED")
+    );
     // Another clone completes the transfer after A's admission, before its
     // delayed publication resumes. The remote state, not a roster, fences A.
     let restarted = Identity {
@@ -297,6 +347,8 @@ fn train_authority_stale_owner_publication_cas_6456() {
     let draining = refreshed
         .prepare(&fixture.right, &restarted, &successor, "transfer-stale")
         .unwrap();
+    let error = crate::train_owner::require_active(&root, &train).unwrap_err();
+    assert_eq!(error.split(':').next(), Some("TRAIN_OWNER_DRAINING"));
     let quiesced = draining
         .quiesce(&fixture.right, &restarted, &settled)
         .unwrap();

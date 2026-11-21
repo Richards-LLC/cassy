@@ -81,6 +81,7 @@ pub(crate) mod supervisor_branch_recovery;
 pub(crate) mod train_guardrails;
 pub(crate) mod train_ci;
 pub(crate) mod train_main_sync;
+pub(crate) mod train_owner;
 pub(crate) mod gh_budget;
 pub(crate) mod supervisor_message_wakes;
 pub(crate) mod factory_scratch;

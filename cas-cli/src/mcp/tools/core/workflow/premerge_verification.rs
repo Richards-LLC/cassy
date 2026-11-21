@@ -566,7 +566,7 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     hash.update(b"cas-premerge-candidate-v2-regenerated\0");
     hash_plan_context(root, task, &mut hash)?;
     if let Some(train) = crate::cloud::peer_mailbox::train_parks::owner_train(root,task)? {
-        hash.update(crate::factory_session_scope::train_owner_generation(&train)?.as_bytes());
+        hash.update(crate::factory_session_scope::train_owner_generation(root, &train)?.as_bytes());
     }
     crate::cloud::peer_mailbox::train_parks::require_admitted(root,task)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;

@@ -31,18 +31,23 @@ use chrono::{DateTime, Utc};
 use crate::factory_supervisor_overlap::live_supervisor_sessions;
 use crate::types::{Agent, AgentRole, Task};
 
-/// The canonical owner identity is also the train's authority generation.
-/// Restart keeps that pinned identity through authenticated predecessor claims;
-/// assigning a different owner invalidates queued admissions.
-pub(crate) fn train_owner_generation(epic: &Task) -> Result<String, String> {
+/// Enrolled trains read their fresh nonce from Git. Legacy unenrolled epics
+/// retain the earlier owner-derived generation.
+pub(crate) fn train_owner_generation(root: &Path, epic: &Task) -> Result<String, String> {
     use sha2::{Digest, Sha256};
+    if let Some(authority) = crate::train_owner::authority(root, epic)? {
+        return Ok(authority.record.generation);
+    }
     let owner = epic.epic_verification_owner.as_deref().filter(|id| !id.trim().is_empty())
         .ok_or_else(|| crate::gates::tag("G-113", format!("Train {} has no owner; assign epic_verification_owner before merging", epic.id)))?;
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&(&epic.id, owner)).unwrap())))
 }
 
 pub(crate) fn require_train_owner(root: &Path, epic: &Task, actor: &Agent) -> Result<String, String> {
-    let generation = train_owner_generation(epic)?;
+    if let Some(authority) = crate::train_owner::authority(root, epic)? {
+        return crate::train_owner::require_owner(root, epic, actor, &authority);
+    }
+    let generation = train_owner_generation(root, epic)?;
     let owner = epic.epic_verification_owner.as_deref().unwrap();
     if actor.role != AgentRole::Supervisor
         || !crate::cloud::peer_mailbox::owns_recipient(root, actor, owner)
@@ -72,7 +77,7 @@ impl WorkerHost {
         if epic.task_type != crate::types::TaskType::Epic || epic.is_terminal() {
             return Err("Worker-host startup requires an open train".into());
         }
-        let generation = train_owner_generation(&epic)?;
+        let generation = train_owner_generation(root, &epic)?;
         let owner = epic.epic_verification_owner.as_deref().unwrap();
         let PeerDiscovery::Found { peers, ended, .. } = discover_peers(root, None).map_err(|e| e.to_string())?
             else { return Err("Train owner directory is unavailable".into()) };
@@ -100,7 +105,7 @@ impl WorkerHost {
         let epic = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
             .get(&host.train).map_err(|e| e.to_string())?;
         if host.session != session || epic.epic_verification_owner.as_deref() != Some(host.owner.as_str())
-            || train_owner_generation(&epic)? != host.generation {
+            || train_owner_generation(root, &epic)? != host.generation {
             return Err("Worker host owner generation changed; restart it for the current train owner".into());
         }
         Ok(Some(host))

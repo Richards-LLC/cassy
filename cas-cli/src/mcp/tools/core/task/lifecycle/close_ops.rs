@@ -8995,7 +8995,7 @@ impl CasCore {
             );
             // GH #2270: an operator recovery decision authorizes only a
             // reviewed drop; the drop proof itself still runs.
-            if supervisor_override || operator_recovery.is_some()
+            if supervisor_override || operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-56"))
                 && req.reason.as_deref().is_some_and(|reason| reviewed_delivery_drop_reason(Some(reason)).is_some())
             {
                 window.supervisor_override_reason = req.reason.clone();
@@ -10177,13 +10177,17 @@ impl CasCore {
             // cas-5ea7: a passed fast-lane receipt is this delivery's QA walk.
             // GH #2270: the operator's recovery decision for this epic is the
             // same waiver for a contained historical delivery (D1: no per-task
-            // review), recorded against the cited commit.
+            // review), recorded against the cited commit. Tier 2 keeps its QA.
+            let operator_qa_waiver = operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-64"))
+                && !super::review_tier::tier_for_delivery(&task, &close_project_root).is_some_and(|decision| {
+                    decision.tier == super::review_tier::VerificationTier::Adversarial
+                });
             match if fast_lane_receipt_passed { super::qa_dispatch::QaCloseGate::Clear } else { self.independent_qa_close_gate(
                 &task,
                 &close_project_root,
                 &resolved_parent_branch,
                 req.commit_receipt.as_deref(),
-                (supervisor_override || operator_recovery.is_some()).then(|| req.reason.as_deref().unwrap_or("")),
+                (supervisor_override || operator_qa_waiver).then(|| req.reason.as_deref().unwrap_or("")),
             ) } {
                 super::qa_dispatch::QaCloseGate::Clear => {}
                 super::qa_dispatch::QaCloseGate::Refuse(refusal) => {
@@ -10574,7 +10578,8 @@ impl CasCore {
                 // Tier 2 keeps its retained adversarial review. The cited commit
                 // may be the containing merge, so the recorded delivery anchor
                 // itself must also be on the target.
-                let contained_recovery = (operator_recovery.is_some() && !tier_two && !is_epic
+                let contained_recovery = (operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-70"))
+                    && !tier_two && !is_epic
                     && !in_cassy_merge_close()
                     && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor|
                         commit_is_merged_into_parent(&close_project_root, anchor, &resolved_parent_branch))

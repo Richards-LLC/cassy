@@ -3,7 +3,9 @@
 //! A delivery already contained in its target can never gain a pre-merge
 //! verdict. The operator authorizes closing a batch of them with one
 //! `cas task recovery-decision --scope <epic-id> --note "..."`; each close
-//! then cites the printed decision ID and its containment commit. The CLI
+//! then cites the printed decision ID and its containment commit. The record
+//! and the command's output name the exact checks it waives ([`WAIVES`]);
+//! Tier 2 (guard, hook, CI, release or close-gate) deliveries keep them. The CLI
 //! refuses an agent context, the PreToolUse hook refuses agent shells running
 //! it (`operator_only_cas_invocation`), and the record lives under
 //! `.cas/operator/`, which agents may not write. A task note never counts.
@@ -23,6 +25,14 @@ struct Decisions {
     decisions: Vec<RecoveryDecision>,
 }
 
+/// The checks a decision waives for its scope's contained, non-Tier-2
+/// deliveries, recorded with the decision and shown to the operator.
+pub const WAIVES: &[(&str, &str)] = &[
+    ("G-56", "a reviewed-drop: reason; the named target commits must still cover every dropped path"),
+    ("G-64", "the independent QA pass for the cited contained commit"),
+    ("G-70", "the missing pre-merge approval"),
+];
+
 /// One operator decision covering the deliveries of one epic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryDecision {
@@ -30,6 +40,15 @@ pub struct RecoveryDecision {
     pub scope: String,
     pub recorded_at: DateTime<Utc>,
     pub note: String,
+    /// Gate codes this decision waives; a decision without the list waives nothing.
+    #[serde(default)]
+    pub waives: Vec<String>,
+}
+
+impl RecoveryDecision {
+    pub fn waives(&self, code: &str) -> bool {
+        self.waives.iter().any(|waived| waived == code)
+    }
 }
 
 fn path(cas_root: &Path) -> PathBuf {
@@ -91,6 +110,7 @@ pub fn record(
         scope: epic.id.clone(),
         recorded_at: now,
         note: note.to_string(),
+        waives: WAIVES.iter().map(|(code, _)| code.to_string()).collect(),
     };
     state.decisions.push(decision.clone());
     let path = path(cas_root);

@@ -34,8 +34,15 @@ pub fn execute(command: &TaskCommands, cas_root: Option<&Path>) -> anyhow::Resul
             let decision =
                 crate::recovery_decision::record(root, store.as_ref(), scope, note, chrono::Utc::now())?;
             println!(
-                "Recovery decision {} recorded for {}. Each close cites operator_decision={} and commit_receipt=<containment commit>.",
-                decision.id, decision.scope, decision.id
+                "Recovery decision {} recorded for {}. For each delivery in {} already contained in its target, except Tier 2 (guard, hook, CI, release or close-gate) deliveries, it waives:",
+                decision.id, decision.scope, decision.scope
+            );
+            for (code, what) in crate::recovery_decision::WAIVES {
+                println!("  {code}: {what}");
+            }
+            println!(
+                "A live supervisor closes each one with operator_decision={} and commit_receipt=<containment commit>.",
+                decision.id
             );
             Ok(())
         }

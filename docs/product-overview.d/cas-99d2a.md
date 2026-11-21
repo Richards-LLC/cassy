@@ -1,3 +1,5 @@
+## Core Concepts
+
 ### Verification against rulings and real output contracts
 
 Delivery review discovers applicable stakeholder and operator rulings even when

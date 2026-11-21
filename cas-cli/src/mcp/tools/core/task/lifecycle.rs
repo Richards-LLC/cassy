@@ -2696,14 +2696,6 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        // cas-22c6 (GH #2286): every start of an Open task may cut or switch
-        // the worker's branch (checkout_task_beside_parked_delivery), queued
-        // or direct. Admit it before any task, lease or checkout mutation.
-        if task.status == TaskStatus::Open
-            && let Some(worker) = worker.as_ref().filter(|worker| worker.metadata.contains_key("clone_path"))
-        {
-            crate::worker_task_queue::admit_checkout_switch(&self.cas_root, worker, &task.id)?;
-        }
 
         crate::task_assignment::ensure_review_assignment(
             task.review_dispatch_id.as_deref(),
@@ -2770,6 +2762,16 @@ impl CasCore {
                     checkout.canonicalize().is_ok_and(|root| root == context.repo_root)
                 })
             });
+        // cas-22c6 (GH #2286): every start of an Open task may cut or switch
+        // the worker's branch (checkout_task_beside_parked_delivery), queued
+        // or direct. Admit it before any task, lease or checkout mutation;
+        // artifact-only work in the shared checkout never moves it (GH #2022).
+        if task.status == TaskStatus::Open
+            && !shared_no_code_start
+            && let Some(worker) = worker.as_ref().filter(|worker| worker.metadata.contains_key("clone_path"))
+        {
+            crate::worker_task_queue::admit_checkout_switch(&self.cas_root, worker, &task.id)?;
+        }
 
         // Use the commit guard's identity predicate before claiming QA or
         // mutating the task, lease or checkout. A foreign factory ref must not

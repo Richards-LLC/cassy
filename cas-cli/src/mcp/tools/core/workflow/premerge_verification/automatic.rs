@@ -105,8 +105,9 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
     ))
 }
 
-/// The verifier command, plus a notice when it fell back to Claude.
-fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), String> {
+/// The verifier command, plus a notice when it fell back to Claude. A
+/// provider-policy `refusal` (GH #2141) skips the refusing Codex lane.
+fn command(root: &Path, output: &Path, refusal: Option<&str>) -> Result<(Command, Option<String>), String> {
     let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
         .map_err(|e| e.to_string())?;
     let mut cli = route.spec.cli;
@@ -119,9 +120,9 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
     // Codex home, the same verifier runs on an eligible Claude account
     // (cas-bdde); only when neither has one is the supervisor asked.
     let mut notice = None;
-    let account = match launch_account(cli, root) {
+    let account = match refusal.map_or_else(|| launch_account(cli, root), |refusal| Err(refusal.to_owned())) {
         Ok(account) => account,
-        Err(codex) if cli == cas_mux::SupervisorCli::Codex => {
+        Err(codex) if cli == cas_mux::SupervisorCli::Codex || refusal.is_some() => {
             match launch_account(cas_mux::SupervisorCli::Claude, root) {
                 Ok(Some(account)) => {
                     let recipe = cas_factory::routing::registry()
@@ -474,19 +475,62 @@ pub(super) fn launch_local(
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
     let root = core.cas_root.clone();
-    launch_with_preparation(core, task, dispatch, output, move |output| {
-        let (mut command, notice) = command(&root, output)?;
+    let lane_root = root.clone();
+    let lane_worktree = worktree.clone();
+    let policy_lane: PolicyLane = Box::new(move |refusal: String| -> Prepare {
+        Box::new(move |output: &Path| {
+            let (mut command, notice) = command(&lane_root, output, Some(&refusal))?;
+            command.current_dir(lane_worktree);
+            Ok((command, notice))
+        })
+    });
+    launch_attempt(core, task, dispatch, output, Box::new(move |output: &Path| {
+        let (mut command, notice) = command(&root, output, None)?;
         command.current_dir(worktree);
         Ok((command, notice))
-    })
+    }), Some(policy_lane))
 }
 
+type Prepare = Box<dyn FnOnce(&Path) -> Result<(Command, Option<String>), String> + Send>;
+/// GH #2141: the one other review lane a provider-policy refusal may take.
+type PolicyLane = Box<dyn FnOnce(String) -> Prepare + Send>;
+
+/// The provider's safety filter refused the review prompt itself (GH #2141,
+/// Codex `exec`). It is the provider's wording, not a Cassy code, and only
+/// decides whether the run is infrastructure; it never becomes a verdict.
+const PROVIDER_POLICY_REFUSAL: &str = "flagged for possible cybersecurity risk";
+const PROVIDER_POLICY_CODE: &str = "verifier_provider_policy";
+
+fn provider_policy_refusal(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).lines()
+        .any(|line| line.trim_start().starts_with("ERROR:") && line.contains(PROVIDER_POLICY_REFUSAL))
+}
+
+/// What a finished harness run left on its dispatch.
+enum Reviewed {
+    Verdict,
+    /// An infrastructure ERROR was recorded; the dispatch is pending again.
+    ProviderRefused(String),
+}
+
+#[cfg(test)]
 fn launch_with_preparation(
     core: &CasCore,
     task: &Task,
     dispatch: &VerificationDispatch,
     output: PathBuf,
     prepare: impl FnOnce(&Path) -> Result<(Command, Option<String>), String> + Send + 'static,
+) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    launch_attempt(core, task, dispatch, output, Box::new(prepare), None)
+}
+
+fn launch_attempt(
+    core: &CasCore,
+    task: &Task,
+    dispatch: &VerificationDispatch,
+    output: PathBuf,
+    prepare: Prepare,
+    policy_lane: Option<PolicyLane>,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
         .map_err(|e| store_refusal(&e))?;
@@ -541,6 +585,25 @@ fn launch_with_preparation(
             }
             review(&worker, &live, &child.id, &mut command, &input, &output)
         })();
+        if let Ok(Reviewed::ProviderRefused(refusal)) = &result {
+            // The refused run spent this child; the other lane claims afresh.
+            if let Ok(agents) = worker.open_agent_store() {
+                let _ = agents.graceful_shutdown(&child.id);
+            }
+            let attempt = output.with_file_name("provider-lane").join("verdict.json");
+            let next = match policy_lane {
+                Some(lane) => std::fs::create_dir_all(attempt.parent().unwrap()).map_err(|e| e.to_string())
+                    .and_then(|()| launch_attempt(&worker, &task, &live, attempt, lane(refusal.clone()), None))
+                    .map(|handle| if let Some(handle) = handle { let _ = handle.join(); }),
+                None => Err("no other review lane remains".into()),
+            };
+            if let Err(error) = next {
+                let _ = attention(&worker, &live, &format!(
+                    "Automatic verifier recorded an infrastructure ERROR, not a code verdict: {refusal}. The other review lane did not start: {error}. {}",
+                    direct_verdict(&live),
+                ));
+            }
+        }
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
         if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
@@ -632,7 +695,7 @@ fn review(
     command: &mut Command,
     input: &Path,
     output: &Path,
-) -> Result<(), String> {
+) -> Result<Reviewed, String> {
     let remaining = (dispatch.deadline_at - chrono::Utc::now())
         .to_std()
         .map_err(|_| "dispatch expired")?;
@@ -651,6 +714,15 @@ fn review(
     // diagnosed from the dispatch audit instead of rerunning the review.
     std::fs::write(&stdout_log, &result.stdout).map_err(|e| e.to_string())?;
     if !result.status.success() {
+        if provider_policy_refusal(&result.stderr) || provider_policy_refusal(&result.stdout) {
+            let refusal = format!(
+                "{PROVIDER_POLICY_CODE}: the provider's safety filter refused this review before any verdict; refused output kept at {}",
+                stderr_log.display(),
+            );
+            let arguments = serde_json::json!({"status": "error", "summary": refusal});
+            submit(core, dispatch, child, arguments.as_object().unwrap().clone(), false)?;
+            return Ok(Reviewed::ProviderRefused(refusal));
+        }
         return Err(format!(
             "harness exited {}; stderr tail ({}):\n{}",
             result.status,
@@ -663,7 +735,7 @@ fn review(
     } else {
         result.stdout
     };
-    let mut arguments = final_json_object(&bytes).ok_or_else(|| {
+    let arguments = final_json_object(&bytes).ok_or_else(|| {
         format!(
             "invalid verifier response: no JSON object in {} bytes; stdout tail ({}):\n{}\nstderr tail ({}):\n{}",
             bytes.len(),
@@ -673,6 +745,19 @@ fn review(
             tail(&result.stderr),
         )
     })?;
+    std::fs::write(output, &bytes).map_err(|e| e.to_string())?;
+    submit(core, dispatch, child, arguments, true)?;
+    Ok(Reviewed::Verdict)
+}
+
+/// Record a verdict as the bound verifier child, on this exact dispatch.
+fn submit(
+    core: &CasCore,
+    dispatch: &VerificationDispatch,
+    child: &str,
+    mut arguments: serde_json::Map<String, serde_json::Value>,
+    notify: bool,
+) -> Result<(), String> {
     arguments.insert("task_id".into(), serde_json::json!(dispatch.task_id));
     arguments.insert("dispatch_id".into(), serde_json::json!(dispatch.id));
     arguments.insert("verifier_capability".into(), serde_json::Value::Null);
@@ -687,8 +772,7 @@ fn review(
     ) {
         return Err("invalid terminal verifier status".into());
     }
-    std::fs::write(output, &bytes).map_err(|e| e.to_string())?;
-    let held = (request.status != "approved").then(|| format!(
+    let held = (notify && request.status != "approved").then(|| format!(
         "Automatic verifier recorded {}: {}. Findings: {}. The close stays held; answer or resolve this exact verdict on dispatch {}.",
         request.status, request.summary, request.issues.as_deref().unwrap_or("[]"), dispatch.id,
     ));
@@ -1424,6 +1508,63 @@ mod tests {
         assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
     }
 
+    /// GH #2141: Codex's safety filter refused a review of a credential-read
+    /// guard mid-run; the harness exited 1 and the dispatch was released with
+    /// no review. The refusal is now the dispatch's infrastructure ERROR, its
+    /// output stays on disk, and the one other lane reviews the same dispatch.
+    #[test]
+    fn provider_policy_refusal_is_an_infrastructure_error_reviewed_on_the_other_lane_gh_2141() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let daemon = crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
+            cas_root: root.clone(),
+            ..Default::default()
+        });
+        let core = CasCore::with_daemon(root.clone(), None, Some(std::sync::Arc::new(daemon)));
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-2141-guard".into(), "Credential-read guard".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("verdict.json");
+        // The captured provider failure from the incident.
+        let mut refused = Command::new("sh");
+        refused.args(["-c", "echo 'ERROR: This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.' >&2; exit 1"]);
+        let mut other = Command::new("sh");
+        let verdict = serde_json::json!({"status": "rejected", "summary": "guard reviewed on the other lane",
+            "confidence": 0.9, "files_reviewed": "guard.rs", "issues": "[]"});
+        other.args(["-c", "printf '%s\\n' \"$1\"", "verdict", &verdict.to_string()]);
+        let (lanes, taken) = std::sync::mpsc::channel();
+        let lane: PolicyLane = Box::new(move |refusal: String| -> Prepare {
+            lanes.send(refusal).unwrap();
+            Box::new(move |_: &Path| Ok((other, None)))
+        });
+        launch_attempt(&core, &task, &dispatch, output.clone(), Box::new(move |_: &Path| Ok((refused, None))), Some(lane))
+            .unwrap().unwrap().join().unwrap();
+
+        let refusal = taken.try_recv().expect("the other lane was offered the refusal");
+        assert!(taken.try_recv().is_err(), "exactly one other lane");
+        assert!(refusal.starts_with(PROVIDER_POLICY_CODE), "{refusal}");
+        let rows = crate::store::open_verification_store(&root).unwrap().get_for_task(&task.id).unwrap();
+        let statuses = rows.iter().map(|row| row.status).collect::<Vec<_>>();
+        assert!(statuses.contains(&VerificationStatus::Error), "{statuses:?}");
+        let latest = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+        assert_eq!(latest.status, VerificationStatus::Rejected);
+        assert_eq!(latest.provenance, cas_types::VerificationProvenance::TaskVerifier);
+        // The refused output is kept as infrastructure evidence.
+        assert!(std::fs::read_to_string(output.with_file_name("harness.log")).unwrap().contains(PROVIDER_POLICY_REFUSAL));
+    }
+
     #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
@@ -2017,7 +2158,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             .to_string(),
         )
         .unwrap();
-        let refused = command(env.home(), &env.home().join("verdict.json")).unwrap_err();
+        let refused = command(env.home(), &env.home().join("verdict.json"), None).unwrap_err();
         for needle in [".codex-review", "100%", " ET", "not logged in"] {
             assert!(refused.contains(needle), "{needle}: {refused}");
         }
@@ -2035,7 +2176,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             .to_string(),
         )
         .unwrap();
-        let (fallback, notice) = command(env.home(), &env.home().join("verdict.json")).unwrap();
+        let (fallback, notice) = command(env.home(), &env.home().join("verdict.json"), None).unwrap();
         assert!(fallback.get_args().any(|arg| arg == "-p"), "{fallback:?}");
         assert!(
             // HOME is the short socket alias (cas-3f0a); compare the directories.

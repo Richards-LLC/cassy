@@ -1435,7 +1435,7 @@ impl CasCore {
                     &task,
                     task_store.get_parent_epic(&task.id).map_err(|error| McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(crate::gates::tag("G-151", format!("Failed to resolve effective task target: {error}"))),
+                        message: Cow::from(format!("Failed to resolve effective task target: {error}")),
                         data: None,
                     })?.as_ref(),
                 ).as_ref() == corrected_target.as_ref()
@@ -1443,12 +1443,12 @@ impl CasCore {
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
+                    message: Cow::from(crate::gates::tag("G-151", format!(
                         "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated. {} Retry task action=close id={} to report the current blocking gate before requesting another scope correction.",
                         last_recorded_close_blocker(&self.cas_root, &task.id)
                             .unwrap_or_else(|| "No close rejection is recorded for this task.".into()),
                         task.id,
-                    )),
+                    ))),
                     data: None,
                 });
             }

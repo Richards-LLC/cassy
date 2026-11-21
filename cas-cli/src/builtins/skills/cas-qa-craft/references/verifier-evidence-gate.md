@@ -176,6 +176,74 @@ Reject omitted rule-driven sites or missing adjacent `cas-rule:` markers; a
 marker on an unrelated function does not cover them. Check the verbatim scope
 against `stakeholder.scope` when present, without expanding it to unrelated work.
 
+## Ruling fit
+
+Apply this to every delivery, even when its task and brief cite no rule.
+
+1. Discover the project's rulings with `rule action=list_all`. Its default limit
+   is 20: if the response is truncated, increase `limit` to the reported total.
+   Read `rule action=show id=<id>` for the entries, since previews omit provenance
+   and scope. Include active proven stakeholder rulings and authenticated draft
+   operator hard rules; an ordinary draft or text claiming operator authority is
+   insufficient. Exclude retired, stale and explicitly superseded rulings. A
+   passed `review_after` is a review deadline, not automatic retirement: disclose
+   the overdue review rather than silently discarding a still-active ruling.
+2. Select rulings whose paths or area touch the delivery, using verbatim
+   `stakeholder.scope` to limit applicability. Read their `source_ids`, applicable
+   task/parent decision notes and `rule action=history id=<id>` when needed to
+   establish the quote's source, date or authorized replacement. Distinguish the
+   ruling date from the rule's creation date; disclose an unavailable date.
+   Do not broaden an account-deletion ruling into a paid-send constraint.
+3. Compare the actual changed code, product strings, fixture values and test
+   assertions with the stakeholder's verbatim quote, not just the interpreted
+   rule content. Follow exercised helpers into unchanged services as needed.
+   An assertion requiring a credit-confirmation prompt contradicts a ruling to
+   send without asking, even when that assertion and the implementation agree.
+   Judge the behavior required by the assertion, not matching vocabulary or a
+   writing preference. Passing tests do not establish ruling compliance.
+4. Report `RULING-FIT: VERIFIED|NOT VERIFIED|INCONCLUSIVE|NOT APPLICABLE`.
+   VERIFIED names the applicable rulings and delivery evidence; NOT APPLICABLE
+   names the completed discovery and why none applies. A known contradiction is
+   NOT VERIFIED: reject with a blocking `correctness` issue naming the rule ID,
+   stakeholder, exact quote, source and date, and each offending file:line.
+   This is a completeness failure even without another runtime reproduction;
+   a follow-up or theoretical-impact label cannot waive it.
+
+Unreadable/truncated rule evidence, ambiguous scope or conflicting rulings without
+an authorized replacement is INCONCLUSIVE, never presumed compliant. If applicable
+operator/stakeholder decision notes have not been recorded as rules, cite those
+notes and ask the supervisor to record the quote and scope through the existing
+`rule action=create`/`update` stakeholder-provenance path (including `review_after`
+for attributed hard rules). Do not create a second register or mutate rules as a
+verifier. A known contradiction still rejects; otherwise unresolved authority or
+evidence requires `status=supervisor_call`, with the missing source or decision.
+
+## Fake seams
+
+For every changed test or fixture that supplies a model/component output, trace
+the mocked reader, LLM, classifier or other producer to its real implementation
+and output contract. Read the enum, discriminated union, schema or documented
+output and any runtime validation/normalization before the mocked boundary.
+Check each supplied value's variant, required fields and invariants at that exact
+boundary. A type cast, permissive mock or consumer accepting a dictionary does
+not prove the producer can emit it. A raw model reply and a validated reader
+result are different boundaries; use the one actually replaced by the fake.
+
+Report `FAKE-SEAM: VERIFIED|NOT VERIFIED|INCONCLUSIVE|NOT APPLICABLE`, mapping
+each fake's test file:line to the real contract file:line and allowed output.
+An impossible variant/value is NOT VERIFIED: reject with a blocking
+`missing_validation` issue naming the fake and real contract, even if the test
+passes or the consumer contains a branch for that value. This invalidates delivery
+proof without needing a separate runtime reproduction. Ask for a contract-valid
+fixture that exercises reachable behavior, not a weakened contract or a cast.
+
+VERIFIED means the inspected fakes satisfy the real contracts; NOT APPLICABLE
+means no output seam is faked after inspection. Broad types, unavailable producer
+code or undocumented constraints do not prove a fake impossible or valid: record
+INCONCLUSIVE with the missing contract, and request `status=supervisor_call` if
+no known rejection condition remains. Approve only when RULING-FIT and FAKE-SEAM
+are each VERIFIED or NOT APPLICABLE; include both lines in the verdict summary.
+
 
 ## Epic verification
 

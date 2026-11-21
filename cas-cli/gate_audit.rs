@@ -892,7 +892,9 @@ fn scanned(path: &str) -> bool {
 /// items with codes, tags, declarations, result producers, bypass candidates
 /// or authority refusals. Scripts have no item structure, so an audited
 /// script counts whole. A source the scan cannot parse is a gap: all of it.
-fn audited_lines(path: &str, source: &str, policy_files: &BTreeSet<String>) -> Vec<(usize, usize)> {
+/// `tree` is every scanned function at HEAD, so authority helpers resolve
+/// across files as in `scan_against`; it is parsed only when a refusal site needs it.
+fn audited_lines(root: &Path, path: &str, source: &str, policy_files: &BTreeSet<String>, tree: &std::cell::OnceCell<Vec<Function>>) -> Vec<(usize, usize)> {
     let whole = vec![(1, usize::MAX)];
     if !path.ends_with(".rs") {
         let mut sites = Vec::new();
@@ -908,13 +910,34 @@ fn audited_lines(path: &str, source: &str, policy_files: &BTreeSet<String>) -> V
     if refusals::policy_module(path, policy_files) {
         refusals::rust(path, source, &file, &mut sites);
     }
-    let authority = refusals::authority_lines(&sites, &functions);
+    let authority = if sites.is_empty() { Vec::new() } else {
+        // This revision's own items stand in for the tree's copy of this file.
+        let others = tree.get_or_init(|| tree_functions(root)).iter()
+            .filter(|f| f.site.rsplit_once(':').is_none_or(|(site, _)| site != path));
+        refusals::authority_lines(&sites, others.chain(&functions))
+    };
     functions.iter().filter(|f| {
         f.policy || f.script_sink || f.producer.is_some() || !f.annotations.is_empty() || !f.emissions.is_empty()
             || !f.refused.is_empty() || !f.overridden.is_empty() || !f.conditional.is_empty()
             || f.flags.iter().any(|flag| candidate(flag))
             || authority.iter().any(|line| (f.lines.0..=f.lines.1).contains(line))
     }).map(|f| f.lines).collect()
+}
+
+/// Every function `scan_against` collects, for cross-file helper resolution.
+fn tree_functions(root: &Path) -> Vec<Function> {
+    let mut paths = Vec::new();
+    for dir in ["cas-cli/src", "crates", "scripts"] {
+        files(&root.join(dir), &mut paths);
+    }
+    let mut functions = Vec::new();
+    for path in paths.iter().filter(|path| path.extension().is_some_and(|e| e == "rs")) {
+        let relative = path.strip_prefix(root).unwrap().to_string_lossy();
+        if let Ok(source) = fs::read_to_string(path) && let Ok(file) = syn::parse_file(&source) {
+            Functions { path: &relative, lines: source.lines().collect(), output: &mut functions }.visit_file(&file);
+        }
+    }
+    functions
 }
 
 /// Whether the commits after `base` change anything `scan_against` audits, so
@@ -936,6 +959,7 @@ pub fn touches_audited(root: &Path, base: &str, registry: &[(String, String, Str
     let diff = git(&["diff", "--unified=0", "--no-color", "--no-renames", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", base, "HEAD", "--", "cas-cli", "crates", "scripts"])?;
     let mut changed = BTreeMap::<String, [Vec<usize>; 2]>::new();
     let mut path = None::<String>;
+    let mut declarations = BTreeSet::new();
     for line in diff.lines() {
         if let Some(header) = line.strip_prefix("diff --git ") {
             path = header.rsplit_once(" b/").map(|(_, path)| path.to_owned());
@@ -951,14 +975,17 @@ pub fn touches_audited(root: &Path, base: &str, registry: &[(String, String, Str
                 };
                 entry[side].extend(start..start + count);
             }
-        } else if line.starts_with(['+', '-']) && !line.starts_with("+++") && !line.starts_with("---") {
-            // gate[...] and gate-audit[...] comments are registry declarations wherever they sit.
+        } else if let Some(path) = &path
+            && line.starts_with(['+', '-']) && !line.starts_with("+++") && !line.starts_with("---")
+        {
+            // gate[...] and gate-audit[...] comments are declarations anywhere in a scanned file.
             let text = line[1..].trim_start();
             if (text.starts_with("//") || text.starts_with('#')) && (text.contains("gate[") || text.contains("gate-audit[")) {
-                return Ok(true);
+                declarations.insert(path.clone());
             }
         }
     }
+    let tree = std::cell::OnceCell::new();
     for (path, [old, new]) in &changed {
         if AUDIT_INPUTS.contains(&path.as_str()) || path.starts_with("cas-cli/src/gates/") {
             return Ok(true);
@@ -966,13 +993,16 @@ pub fn touches_audited(root: &Path, base: &str, registry: &[(String, String, Str
         if !scanned(path) {
             continue;
         }
+        if declarations.contains(path) {
+            return Ok(true);
+        }
         for (revision, lines) in [(base, old), ("HEAD", new)] {
             if lines.is_empty() {
                 continue;
             }
             let object = format!("{revision}:{path}");
             let source = git(&["show", object.as_str()])?;
-            if audited_lines(path, &source, &policy_files).iter().any(|(first, last)| lines.iter().any(|line| first <= line && line <= last)) {
+            if audited_lines(root, path, &source, &policy_files, &tree).iter().any(|(first, last)| lines.iter().any(|line| first <= line && line <= last)) {
                 return Ok(true);
             }
         }

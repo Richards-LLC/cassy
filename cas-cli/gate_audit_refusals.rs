@@ -537,7 +537,7 @@ fn baseline(root: &Path, target: &str, audit: &mut Audit) -> Counts {
     current
 }
 
-fn names(functions: &[Function]) -> BTreeMap<String, Vec<&Function>> {
+fn names<'a>(functions: impl IntoIterator<Item = &'a Function>) -> BTreeMap<String, Vec<&'a Function>> {
     let mut names = BTreeMap::<String, Vec<&Function>>::new();
     for f in functions { names.entry(f.name.clone()).or_default().push(f); }
     names
@@ -557,8 +557,8 @@ fn helpers(names: &BTreeMap<String, Vec<&Function>>) -> BTreeSet<String> {
 }
 
 /// Lines of `sites` whose condition reads caller authority, resolved through
-/// `functions` exactly as `finish` resolves them.
-pub(super) fn authority_lines(sites: &[Site], functions: &[Function]) -> Vec<usize> {
+/// the whole tree's `functions` exactly as `finish` resolves them.
+pub(super) fn authority_lines<'a>(sites: &[Site], functions: impl IntoIterator<Item = &'a Function>) -> Vec<usize> {
     let helpers = helpers(&names(functions));
     sites.iter().filter(|site| site.condition.reads_authority(&helpers)).map(|site| site.line).collect()
 }

@@ -549,8 +549,10 @@ fn delivery_selection_follows_the_scan_inventory_cas_19792() {
         .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]).args(args)
         .status().unwrap().success(), "{args:?}");
     let src = repo.join("cas-cli/src");
-    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(src.join("factory")).unwrap();
     std::fs::write(src.join("guard.rs"), "pub fn guard() {\n    tag(\"G-01\", \"denied\");\n}\n").unwrap();
+    // An unchanged authority helper resolves across files, as in the full scan.
+    std::fs::write(src.join("role.rs"), "pub fn is_boss() -> bool { std::env::var(\"CAS_AGENT_ROLE\") == Ok(\"supervisor\".into()) }\n").unwrap();
     git(&["init", "-q"]);
     git(&["add", "."]);
     git(&["commit", "-qm", "base"]);
@@ -562,6 +564,10 @@ fn delivery_selection_follows_the_scan_inventory_cas_19792() {
         ("parse.rs", "pub fn parse(s: &str) -> Result<u32, String> { if s.is_empty() { return Err(\"empty\".into()); } s.parse().map_err(|_| \"bad\".into()) }\n", false),
         ("probe.rs", "pub fn ok() {}\n#[cfg(test)]\nmod probe { fn refuse(force: bool) -> Result<(), String> { if force { return Err(\"x\".into()); } Ok(()) } }\n", false),
         ("flags.rs", "pub const ENABLED: bool = true;\npub struct Options { pub force: bool }\n", false),
+        ("factory/deny.rs", "pub fn deny() -> Result<(), String> { if is_boss() { return Err(\"x\".into()); } Ok(()) }\n", true),
+        ("declared.rs", "// gate-audit[force]: fixture\npub fn ok() {}\n", true),
+        // The scan excludes *_tests.rs, so its declarations cannot move the verdict.
+        ("probe_tests.rs", "// gate-audit[force]: fixture\npub fn ok() {}\n", false),
     ] {
         std::fs::write(src.join(file), source).unwrap();
         git(&["add", "."]);

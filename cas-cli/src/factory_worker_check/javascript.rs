@@ -2973,6 +2973,11 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             let rows = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed", "assertionResults":[
                 {"fullName":"row a","status":"passed"}, {"fullName":"row b","status":"passed"}]}]});
             validate_report(runner, repo, &rows, &template, 1).unwrap();
+            let indexed = [Identity { parameterized: true, ..id("a.test.js", "row $#") }];
+            let mut index_rows = rows.clone();
+            index_rows["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"row 0","status":"passed"}, {"fullName":"row 1","status":"passed"}]);
+            validate_report(runner, repo, &index_rows, &indexed, 1).unwrap();
             // GH #2138: two passing rows with one static title prove it and count as two.
             let mut shared = rows.clone();
             shared["testResults"][0]["assertionResults"] = json!([

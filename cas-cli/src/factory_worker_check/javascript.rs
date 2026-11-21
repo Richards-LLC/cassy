@@ -1932,8 +1932,31 @@ fn validate_report_with_inherited(
             &mut projects,
             inherited,
         )?;
-        for ((identity, _project), count) in projects {
+        // GH #2207: Playwright applies --repeat-each only to the projects the
+        // run selects; a dependency (setup) project keeps its own repeatEach.
+        let declared: BTreeMap<&str, u64> = report.pointer("/config/projects").and_then(Value::as_array)
+            .into_iter().flatten().filter_map(|project| Some((project.get("repeatEach")?.as_u64()?, project)))
+            .flat_map(|(each, project)| ["id", "name"].into_iter()
+                .filter_map(move |key| Some((project.get(key)?.as_str()?, each))))
+            .collect();
+        for ((identity, project), count) in projects {
+            let dependency = declared.get(project.as_str()).copied()
+                .filter(|each| *each != repeats as u64);
+            if let Some(each) = dependency && !tests.iter().any(|test| test.selects(&identity)) {
+                // Every scheduled run of an unchanged dependency passed.
+                if count as u64 != each {
+                    bail!("playwright dependency {project} requires {each} passing runs: {} :: {}",
+                        identity.path, identity.name);
+                }
+                continue;
+            }
             if count != repeats {
+                if dependency.is_some() {
+                    bail!(
+                        "playwright requires {repeats} passing repeats per project: {} :: {}. A changed dependency test needs its own capped run: worker-check -- playwright {}",
+                        identity.path, identity.name, identity.path
+                    );
+                }
                 bail!(
                     "playwright requires {repeats} passing repeats per project: {} :: {}",
                     identity.path,

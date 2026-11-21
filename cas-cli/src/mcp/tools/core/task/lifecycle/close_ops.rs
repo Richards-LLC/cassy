@@ -9970,24 +9970,16 @@ impl CasCore {
                         }
                         gate_refusals.extend(receipt_refusals);
                     }
-                    // Publish ordinary local proof too, without adding a gate.
-                    // Routed builds retain their existing strict publication rule.
-                    let mut publication_warning = String::new();
+                    // Every park must make cited proof portable before a peer
+                    // verifier can be asked to review the delivery (cas-dae1).
                     if gate_refusals.is_empty() {
                         let mut evidence_task = task.clone();
                         evidence_task.deliverables.parked_close_reason = req.reason.clone();
-                        if let Err(warning) = crate::artifacts::proof::publish_routed_evidence(
+                        if let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(
                             &self.cas_root, &evidence_task,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                         ) {
-                            if crate::factory_build_routing::routed_from(&task)
-                                .is_some_and(|source| source != cas_types::Agent::get_or_generate_machine_id())
-                                || crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task).is_some()
-                            { gate_refusals.push(warning); }
-                            else {
-                                publication_warning = format!("\nWARNING (non-blocking): {warning}");
-                                let _ = task_store.append_note(&task.id, &warning);
-                            }
+                            gate_refusals.push(refusal);
                         }
                     }
                     if !gate_refusals.is_empty() {
@@ -10096,7 +10088,7 @@ impl CasCore {
                     } else {
                         msg
                     };
-                    let msg = format!("{msg}{impact_warning}{publication_warning}");
+                    let msg = format!("{msg}{impact_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,

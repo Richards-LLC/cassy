@@ -953,6 +953,77 @@ async fn recycle_under_a_spent_budget_keeps_an_unlaunchable_worker_running_cas_0
     );
 }
 
+/// A director snapshot holding the shared connection must defer a recycle,
+/// preserving its request and running pane until the next daemon pass.
+#[tokio::test(flavor = "current_thread")]
+async fn recycle_retries_shared_connection_contention_cas_aea9() {
+    if run_hermetic_recycle_child("recycle_retries_shared_connection_contention_cas_aea9") {
+        return;
+    }
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    env.set("CAS_ROOT", &cas_dir);
+    let mut daemon = daemon(&cas_dir);
+    daemon.app.set_factory_session_name_for_test(SESSION);
+    let name = "contended-recycle";
+    register_idle_worker(&cas_dir, name);
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let mut old = agents.get(&format!("agent-{name}")).unwrap();
+    old.factory_session = Some(SESSION.into());
+    agents.update(&old).unwrap();
+    let pane = idle_worker_pane(name, cas_mux::SupervisorCli::Codex);
+    let old_pid = pane.process_group_id().unwrap();
+    daemon.app.adopt_worker_pane_for_test(pane);
+    let spec = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Codex,
+        model: Some("gpt-6.1-sol".into()),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    let request = open_spawn_queue_store(&cas_dir).unwrap().enqueue_recycle(
+        name, Some(&serde_json::to_string(&spec).unwrap()), Some(SESSION),
+    ).unwrap();
+    daemon.enqueue_spawn_requests().unwrap();
+
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _connection = shared.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    {
+        let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
+        daemon.process_pending_spawns().await;
+    }
+    // Release by event, rather than guessing when the daemon reached the read.
+    release_tx.send(()).unwrap();
+    blocker.join().unwrap();
+    assert!(alive(old_pid), "contention leaves the old worker running");
+    assert!(matches!(daemon.pending_spawns.front(),
+        Some(super::super::PendingSpawn::Recycle { request_id, stopped: false, .. })
+            if *request_id == request), "the same request survives for the next pass");
+    assert_eq!(shutdown_row_state(&cas_dir, request).0.as_deref(),
+        Some(SpawnLifecycleState::Provisioning.as_str()));
+
+    daemon.process_pending_spawns().await;
+    assert!(!alive(old_pid), "the next pass stops the predecessor");
+    assert_ne!(daemon.app.mux.pane_process_group_id(name), Some(old_pid));
+    assert_eq!(daemon.spawn_verifications.get(name).unwrap().request_id, Some(request));
+    let mut replacement = cas_types::Agent::new_with_role(
+        daemon.app.mux.get(name).unwrap().harness_session_id().unwrap(),
+        name.into(), cas_types::AgentRole::Worker,
+    );
+    replacement.factory_session = Some(SESSION.into());
+    agents.register(&replacement).unwrap();
+    daemon.reconcile_spawn_verifications().await;
+    assert!(wait_until(Duration::from_secs(15), ||
+        shutdown_row_state(&cas_dir, request).0.as_deref()
+            == Some(SpawnLifecycleState::Registered.as_str())));
+}
+
 /// cas-033a: a recycle whose recipe routing policy refuses never stops the
 /// worker. The row still ends `failed` and the supervisor still hears why,
 /// even under a spent pass budget.

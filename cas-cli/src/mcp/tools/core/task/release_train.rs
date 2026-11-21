@@ -297,29 +297,16 @@ fn ensure_successor(repo: &Path, store: &dyn cas_store::TaskStore, train: &Task,
         }
         previous = next;
     }
-    // GH #2181: work filed while this train was frozen lazily opened a train
-    // that already is the successor. Adopt the oldest such open train.
-    let repo_of = |task: &Task| task.deliverables.work_target.as_ref().map(|target| target.repo_selector.clone());
-    let lazy = open_trains(store, integration).into_iter().find(|other| {
-        other.created_at > train.created_at && !seen.contains(&other.id) && other.id != previous.id
-            && !accepts_no_work(other) && repo_of(other) == repo_of(&previous)
-    });
-    let next = match lazy {
-        Some(next) => next,
-        None => {
-            let id = store.generate_id().map_err(|error| error.to_string())?;
-            let mut next = Task::new(id, RELEASE_TRAIN_TITLE.into());
-            next.task_type = TaskType::Epic;
-            next.labels.push(RELEASE_TRAIN_LABEL.into());
-            next.branch = Some(format!("epic/release-train-vnext-{}", next.id));
-            next.origin_project = previous.origin_project.clone();
-            next.epic_verification_owner = previous.epic_verification_owner.clone();
-            next.deliverables.work_target = previous.deliverables.work_target.clone();
-            store.add(&next).map_err(|error| error.to_string())?;
-            next
-        }
-    };
-    previous.labels.push(format!("{SUCCESSOR_LABEL}{}", next.id));
+    let id = store.generate_id().map_err(|error| error.to_string())?;
+    let mut next = Task::new(id.clone(), RELEASE_TRAIN_TITLE.into());
+    next.task_type = TaskType::Epic;
+    next.labels.push(RELEASE_TRAIN_LABEL.into());
+    next.branch = Some(format!("epic/release-train-vnext-{id}"));
+    next.origin_project = previous.origin_project.clone();
+    next.epic_verification_owner = previous.epic_verification_owner.clone();
+    next.deliverables.work_target = previous.deliverables.work_target.clone();
+    store.add(&next).map_err(|error| error.to_string())?;
+    previous.labels.push(format!("{SUCCESSOR_LABEL}{id}"));
     previous.updated_at = chrono::Utc::now();
     store.update(&previous).map_err(|error| error.to_string())?;
     publish_train_branch(repo, next.effective_epic_branch().unwrap(), integration)?;

@@ -6716,9 +6716,20 @@ mod retained_command_receipts {
     }
 
     fn command(f: &Fixture, name: &str, client_ref: &str, phase: &str, birth: serde_json::Value) {
-        let row = serde_json::json!({"receipt":{"device_id":f.devices[0].id,"client_ref":client_ref,"command":"compact","phase":phase,"detail":"stored","output":"","interactive":false},
+        command_as(f, name, "lead", client_ref, phase, false, birth);
+    }
+
+    fn command_as(f: &Fixture, name: &str, supervisor: &str, client_ref: &str, phase: &str, interactive: bool, birth: serde_json::Value) {
+        let row = serde_json::json!({"receipt":{"device_id":f.devices[0].id,"client_ref":client_ref,"command":"model","phase":phase,"detail":"stored","output":"","interactive":interactive},
             "at":Utc::now(),"before":"","before_command":"","reload_before":null,"birth":birth});
-        assert!(write(&f.root, name, "lead", &row, Write::Reserve).unwrap());
+        assert!(write(&f.root, name, supervisor, &row, Write::Reserve).unwrap());
+    }
+
+    fn dead_pid() -> u32 {
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let pid = gone.id();
+        gone.wait().unwrap();
+        pid
     }
 
     async fn get(f: &Fixture, device: usize, path: &str) -> (StatusCode, serde_json::Value) {
@@ -6767,5 +6778,50 @@ mod retained_command_receipts {
         let path = "/v1/sessions/live/commands/cmd-queued";
         assert_eq!(get(&f, 1, path).await, (StatusCode::NOT_FOUND, serde_json::json!({"error":"not_found"})));
         assert_eq!(get(&f, 0, path).await.0, StatusCode::CONFLICT);
+    }
+
+    /// DESIGN-v2 §5: a stored terminal outcome is final even while its daemon
+    /// runs, and every miss, including unreadable bytes, is the same 404.
+    #[tokio::test]
+    async fn terminal_rows_return_as_stored_and_every_miss_is_not_found() {
+        let f = fixture();
+        let pid = std::process::id();
+        let birth = birth(&f, "live", pid, crate::mcp::daemon::read_pid_starttime(pid), false);
+        command_as(&f, "live", "lead", "cmd-observed", "observed", true, birth.clone());
+        command(&f, "live", "cmd-unreadable", "refused", birth);
+        rusqlite::Connection::open(f.root.join("cas.db")).unwrap().execute(
+            "UPDATE metadata SET value = '{not json' WHERE json_extract(value, '$.receipt.client_ref') = 'cmd-unreadable'", []).unwrap();
+        let (status, receipt) = get(&f, 0, "/v1/sessions/live/commands/cmd-observed").await;
+        assert_eq!((status, receipt["phase"].as_str(), receipt["interactive"].as_bool()), (StatusCode::OK, Some("observed"), Some(false)));
+        let missing = (StatusCode::NOT_FOUND, serde_json::json!({"error":"not_found"}));
+        for path in ["/v1/sessions/live/commands/cmd-unreadable", "/v1/sessions/live/commands/cmd-absent", "/v1/sessions/../commands/cmd-observed"] {
+            assert_eq!(get(&f, 0, path).await, missing, "{path}");
+        }
+    }
+
+    /// DESIGN-v2 §3-§4: one recorded birth decides an open row. A queued row
+    /// of a foreign birth, or without a start time to prove its birth, is
+    /// uncertain; a newer same-name birth owns the name, so the older birth's
+    /// rows are not consulted.
+    #[tokio::test]
+    async fn one_recorded_birth_decides_queued_rows() {
+        let f = fixture();
+        let foreign = birth(&f, "foreign", dead_pid(), Some(42), false);
+        let mut other = foreign.clone();
+        other["daemon_pid_starttime"] = serde_json::json!(43);
+        command(&f, "foreign", "cmd-queued", "queued", other);
+        let unproven = birth(&f, "unproven", dead_pid(), None, false);
+        command(&f, "unproven", "cmd-queued", "queued", unproven);
+        for name in ["foreign", "unproven"] {
+            let (status, receipt) = get(&f, 0, &format!("/v1/sessions/{name}/commands/cmd-queued")).await;
+            assert_eq!((status, receipt["phase"].as_str()), (StatusCode::OK, Some("unconfirmed")), "{name}");
+        }
+        let earlier = birth(&f, "reused", dead_pid(), Some(7), true);
+        command(&f, "reused", "cmd-earlier", "refused", earlier);
+        let pid = std::process::id();
+        let mut replacement = crate::ui::factory::create_metadata("reused", pid, "lead-2", &[], None, f.project.to_str(), None);
+        replacement.daemon_pid_starttime = crate::mcp::daemon::read_pid_starttime(pid);
+        SessionManager::new().save_daemon_metadata(replacement, &f.root).unwrap();
+        assert_eq!(get(&f, 0, "/v1/sessions/reused/commands/cmd-earlier").await.0, StatusCode::NOT_FOUND);
     }
 }

@@ -635,6 +635,22 @@ path="tests/builtin_archive_portability_test.rs"
         unresolved = json.loads(destination.read_text())
         self.assertEqual((unresolved["status"], unresolved["unresolved"]), ("unresolved", [failure]))
 
+    def test_web_results_maps_symlinked_root_spec_paths_into_the_checkout(self):
+        # cas-6c9e: macOS /var -> private/var. Playwright's rootDir keeps the
+        # symlinked spelling while spec files are relative to the real path.
+        (self.root / "private/var/checkout/hub-web/e2e").mkdir(parents=True)
+        (self.root / "var").symlink_to("private/var")
+        checkout = self.root / "var/checkout"
+        spec_file = self.root.resolve() / "private/var/checkout/hub-web/e2e/a.journey.ts"
+        spec_file.touch()
+        root_dir = checkout / "hub-web/e2e"
+        report = {"config": {"rootDir": str(root_dir)}, "suites": [{"title": "a.journey.ts", "specs": [{
+            "file": os.path.relpath(spec_file, root_dir), "title": "works", "tests": [{
+                "expectedStatus": "passed", "projectId": "journeys",
+                "results": [{"status": "failed", "errors": [{"message": "boom"}]}]}]}]}]}
+        [row] = impact.web_results(checkout, report)
+        self.assertEqual(row["binary"], "hub-web/e2e/a.journey.ts")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,6 @@
   the one already waiting, so at most one waits behind a running read.
 - **In-place upgrade works on a busy daemon** — Was: `cas factory reexec`
   refused whenever any background job was queued or running, so a
-  backlogged daemon could never load the fix. Now: refresh jobs, which rerun
-  after the reexec, no longer hold it; it still waits for delivery and
-  durable work.
+  backlogged daemon could never load the fix. Now: replaceable reads, including a
+  slow running delivery read, no longer hold it; the new daemon reruns them,
+  and reexec still waits for durable work.

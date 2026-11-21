@@ -79,3 +79,36 @@ fn train_authority_atomic_publication_cas_6456() {
     assert_eq!(authority.record.target_sha, fixture.target());
     assert!([left_head, right_head].contains(&fixture.target()));
 }
+
+#[test]
+fn train_authority_stale_owner_publication_cas_6456() {
+    let fixture = Fixture::new();
+    let admitted = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+    let candidate = fixture.candidate(&fixture.left, "old-owner-candidate");
+    // Another clone completes the transfer after A's admission, before its
+    // delayed publication resumes. The remote state, not a roster, fences A.
+    let mut next = admitted.record.clone();
+    next.identity = Identity { owner: "owner-b".into(), incarnation: "session-b/process-b".into() };
+    next.generation = "generation-b".into();
+    next.epoch += 1;
+    next.operation = "accept-transfer".into();
+    let tip = record_commit(&fixture.right, Some(&admitted.tip), &next).unwrap();
+    command(&fixture.right, &["push", "origin", &format!("{tip}:{}", admitted.reference)], None).unwrap();
+    let error = admitted.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &candidate).unwrap_err();
+    assert_eq!(error.split(':').next(), Some("TRAIN_OWNER_GENERATION_CHANGED"));
+    assert_eq!(fixture.target(), fixture.base);
+    assert_eq!(Snapshot::read(&fixture.left, "cas-6456").unwrap().tip, tip);
+}
+
+#[test]
+fn train_authority_raw_writer_divergence_cas_6456() {
+    let fixture = Fixture::new();
+    let admitted = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+    let candidate = fixture.candidate(&fixture.left, "owner-candidate");
+    let raw = fixture.candidate(&fixture.right, "raw-writer");
+    command(&fixture.right, &["push", "origin", &format!("{raw}:refs/heads/{}", admitted.record.target)], None).unwrap();
+    let error = admitted.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &candidate).unwrap_err();
+    assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_TARGET_DIVERGED"));
+    assert_eq!(fixture.target(), raw);
+    assert_eq!(Snapshot::read(&fixture.left, "cas-6456").unwrap().tip, admitted.tip);
+}

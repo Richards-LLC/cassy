@@ -25,8 +25,8 @@ now_epoch="$WATCHDOG_NOW_EPOCH"
 # a queued job's labels proves an eligible runner is online and busy. The
 # label sets of running jobs are read once, on the first stale candidate.
 busy_labels=""
-busy_labels_json() {
-    [[ -z "$busy_labels" ]] || { printf '%s\n' "$busy_labels"; return 0; }
+load_busy_labels() {
+    [[ -z "$busy_labels" ]] || return 0
     local runs run_id jobs sets="[]"
     runs="$(watchdog_api_read "repos/$repository/actions/runs?status=in_progress&per_page=100")" || return 1
     for run_id in $(jq -r '.workflow_runs[].id' <<<"$runs"); do
@@ -36,7 +36,6 @@ busy_labels_json() {
             | [.labels[] | ascii_downcase]]' <<<"$jobs")"
     done
     busy_labels="$sets"
-    printf '%s\n' "$busy_labels"
 }
 
 selected=0 cancel_accepted=0 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0 unverified=0
@@ -75,12 +74,12 @@ while IFS=$'\t' read -r run_id attempt_started_at event head_branch; do
     fi
 
     jobs_call="repos/$repository/actions/runs/$run_id/jobs?filter=latest&per_page=100"
-    if ! busy="$(busy_labels_json)" || ! run_jobs="$(watchdog_api_read "$jobs_call")"; then
+    if ! load_busy_labels || ! run_jobs="$(watchdog_api_read "$jobs_call")"; then
         printf 'warning: runner backlog read failed run=%s; skipping run\n' "$run_id" >&2
         status_failed=$((status_failed + 1))
         continue
     fi
-    if jq -e --argjson busy "$busy" 'any(.jobs[] | select(.status == "queued");
+    if jq -e --argjson busy "$busy_labels" 'any(.jobs[] | select(.status == "queued");
             [.labels[] | ascii_downcase] as $want | any($busy[]; ($want - .) == []))' \
             <<<"$run_jobs" >/dev/null; then
         printf 'skipping backlogged run=%s age_seconds=%s: a runner for its labels is online and busy\n' "$run_id" "$age_seconds"

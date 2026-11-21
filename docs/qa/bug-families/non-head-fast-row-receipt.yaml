@@ -1,0 +1,11 @@
+title: Non-HEAD cut-marker pushes consult matching fast-row receipts before checkout admission
+tasks: [cas-a267]
+journeys: [CLI-RELEASE]
+statement: >-
+  Push an earlier commit to an epic ref while another commit is checked out.
+  Matching commit and comparison-base PASS receipts admit the push without
+  rerunning checks on the current checkout. Missing, failed, wrong-SHA and
+  wrong-base receipts refuse. Changes requiring web output also require the
+  same-range web receipt. Missing-proof advice requires a clean checkout and
+  retry so the hook can perform every required check.
+fixed_by: [cas-a267]

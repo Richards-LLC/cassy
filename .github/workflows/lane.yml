@@ -77,7 +77,7 @@ jobs:
     steps:
       # Classification needs the merge base with the epic parent, so history
       # stays complete; a warm self-hosted workspace fetches incrementally.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -169,7 +169,7 @@ jobs:
     runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
 
@@ -212,7 +212,7 @@ jobs:
     env:
       LEGACY_SCOPED: ${{ vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -299,7 +299,7 @@ jobs:
     runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -403,7 +403,7 @@ jobs:
       ring-shards: ${{ steps.own.outputs.ring-shards }}
       ring-total: ${{ steps.own.outputs.ring-total }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -455,7 +455,7 @@ jobs:
       # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
       - name: Publish own failure receipt before attribution
         if: always() && steps.own.outputs.failed == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lane-impact-${{ github.run_id }}-own-failures
           path: target/ci-impact/
@@ -475,7 +475,7 @@ jobs:
 
       - name: Upload the selection archive
         if: steps.own.outputs.ring-shards != '' && steps.own.outputs.ring-shards != '[]'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lane-impact-archive
           path: |
@@ -498,7 +498,7 @@ jobs:
       # other plan through failure history.
       - name: Publish lane impact evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lane-impact-${{ github.run_id }}-own
           path: target/ci-impact/
@@ -518,7 +518,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -544,7 +544,7 @@ jobs:
         shard: ${{ fromJSON(needs.lane-impact.outputs.ring-shards) }}
     env: *lane-impact-env
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -555,7 +555,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Download the selection archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: lane-impact-archive
           path: .
@@ -576,7 +576,7 @@ jobs:
       # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
       - name: Publish ring failure receipt before attribution
         if: always() && steps.ring.outputs.failed == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lane-impact-${{ github.run_id }}-ring-${{ matrix.shard }}-failures
           path: lane-impact/
@@ -597,7 +597,7 @@ jobs:
 
       - name: Publish lane impact evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lane-impact-${{ github.run_id }}-ring-${{ matrix.shard }}
           path: lane-impact/
@@ -619,7 +619,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.ci-diff.outputs.journey-shards) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           ref: ${{ github.sha }}
@@ -663,7 +663,7 @@ jobs:
 
       - name: Upload Commander journey evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lane-journeys-${{ matrix.shard }}
           path: hub-web/e2e/.results/

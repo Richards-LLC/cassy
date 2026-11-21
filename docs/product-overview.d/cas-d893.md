@@ -1,3 +1,5 @@
+## Core Concepts
+
 ### Parked close ownership during worker shutdown
 
 A committed park can answer before evidence, owner publication and its outcome note finish. Worker shutdown, forced shutdown and recycle refuse while that close still owns its process. Queued shutdown rechecks at the actual teardown boundary and preserves task bindings and live mail on refusal.

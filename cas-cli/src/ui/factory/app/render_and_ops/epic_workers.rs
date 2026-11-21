@@ -3605,6 +3605,10 @@ impl FactoryApp {
             )
         })?;
 
+        let _close_guards = crate::mcp::tools::service::close_continuation::shutdown_guards(
+            &cas_dir, matching_agents.iter().map(|agent| agent.id.as_str()),
+        ).map_err(anyhow::Error::msg)?;
+
         if preserve_worktree {
             crate::factory_worker_runs::stop_before_recycle(
                 &cas_dir, matching_agents.iter().map(|agent| agent.id.clone()).collect(),

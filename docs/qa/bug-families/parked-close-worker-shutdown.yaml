@@ -1,0 +1,10 @@
+title: Parked close retains publication through worker shutdown
+statement: >-
+  A clean pushed worker can answer COMMITTED after AwaitingMerge is stored
+  while its close publication and outcome writer still run. Shutdown,
+  forced shutdown and recycle preserve that process until its final outcome
+  is durable. Failed owner publication remains actionable and daemon-owned
+  without another task close, and recovery does not duplicate outcomes.
+tasks: [cas-d893]
+journeys: []
+invariants: []

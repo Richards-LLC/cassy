@@ -1,0 +1,10 @@
+title: Shipped epic delivery content follows integration history
+statement: >-
+  Content checks and reviewed supersession follow staging/main descendants
+  containing the delivery anchor and the recorded epic tip. Remote integration
+  refs take precedence over unpublished local work. Frozen epic records remain
+  unchanged; true drops, arbitrary side branches and immutable review snapshots
+  cannot borrow later replacement proof.
+tasks: [cas-161f]
+journeys: []
+invariants: []

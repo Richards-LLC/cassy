@@ -1,0 +1,10 @@
+title: Parked review correction retains recorded source task
+statement: >-
+  An identified pushed review correction on parked task A's recorded source
+  branch remains A's delivery after task B has parked or started without a
+  commit, including a declared-target sync. Foreign and unnamed continuations
+  cannot move A's anchor; B's state and anchor remain unchanged. Clean parked
+  restart still requires supervisor request_changes and a hold on unfinished B.
+tasks: [cas-4d50]
+journeys: []
+invariants: []

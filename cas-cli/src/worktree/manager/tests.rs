@@ -626,6 +626,41 @@ fn merge_force_dirty_does_not_remove_when_cleanup_false() {
     assert!(wt_path.exists(), "force must not imply cleanup");
 }
 
+/// GH #2151: a parked delivery whose reused worker checkout is dirty, with no
+/// reachable origin. A pushed delivery still needs origin proof; a
+/// local_merge delivery integrates its exact local anchor without it.
+#[test]
+fn parked_local_delivery_merges_without_origin_proof_gh2151() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut manager = WorktreeManager::new(&repo_path, WorktreeConfig::default()).unwrap();
+    let epic_branch = manager.create_epic_branch("Local Merge").unwrap();
+    let mut worktree = manager.create_for_worker("local-merge-worker").unwrap();
+    let path = worktree.path.clone();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&path).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    std::fs::write(path.join("delivered.txt"), "delivered").unwrap();
+    git(&["add", "delivered.txt"]);
+    git(&["commit", "-m", "delivered work"]);
+    let anchor = git(&["rev-parse", "HEAD"]);
+    // The worker's next task already edited the retained checkout.
+    std::fs::write(path.join("delivered.txt"), "next task in progress").unwrap();
+    worktree.parent_branch = epic_branch.clone();
+
+    let pushed = manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, SourceProof::PushedRef, None);
+    assert!(matches!(pushed, Err(WorktreeError::UncommittedChanges(_))), "{pushed:?}");
+    manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, SourceProof::LocalAnchor, None)
+        .expect("a local_merge delivery needs no origin source ref");
+    let contained = Command::new("git").args(["merge-base", "--is-ancestor", &anchor, &epic_branch])
+        .current_dir(&repo_path).status().unwrap();
+    assert!(contained.success(), "the exact local anchor is integrated");
+    let untouched = Command::new("git").args(["diff", "--quiet"]).current_dir(&path).status().unwrap();
+    assert!(!untouched.success(), "the worker's in-progress edit is retained");
+    assert_eq!(git(&["rev-parse", "HEAD"]), anchor);
+}
+
 #[test]
 fn test_cleanup_worker_branches_after_merge() {
     let (_temp, repo_path) = create_test_repo();

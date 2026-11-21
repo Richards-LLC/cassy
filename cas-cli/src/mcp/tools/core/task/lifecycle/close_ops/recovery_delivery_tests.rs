@@ -2660,7 +2660,15 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
         error.status = VerificationStatus::Error;
         error.summary = "Reviewer sandbox startup failed before review".into();
         error.dispatch_id = dispatch.as_ref().map(|dispatch| dispatch.id.clone());
-        verifications.add(&error).unwrap();
+        if dispatch.is_some() {
+            error.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+            error.agent_id = Some("supervisor-session".into());
+            error.issuer_agent_id = error.agent_id.clone();
+            verifications.add(&error).unwrap();
+        } else {
+            error.provenance = cas_types::VerificationProvenance::System;
+            cas_store::add_system_verification(&root, &error).unwrap();
+        }
         if let Some(dispatch) = dispatch {
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
             cas_store::resolve_verification_dispatch_with_conn(

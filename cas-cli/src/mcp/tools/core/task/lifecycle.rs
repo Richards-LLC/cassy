@@ -2696,14 +2696,6 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        // cas-22c6 (GH #2286): every start of an Open task may cut or switch
-        // the worker's branch (checkout_task_beside_parked_delivery), queued
-        // or direct. Admit it before any task, lease or checkout mutation.
-        if task.status == TaskStatus::Open
-            && let Some(worker) = worker.as_ref().filter(|worker| worker.metadata.contains_key("clone_path"))
-        {
-            crate::worker_task_queue::admit_checkout_switch(&self.cas_root, worker, &task.id)?;
-        }
 
         crate::task_assignment::ensure_review_assignment(
             task.review_dispatch_id.as_deref(),

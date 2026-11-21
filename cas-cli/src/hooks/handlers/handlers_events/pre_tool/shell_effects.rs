@@ -172,6 +172,78 @@ fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Where a byte of a script sits, for [`numeric_locals`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lexeme {
+    /// Shell code, including `$(...)` opened inside double quotes.
+    Code,
+    /// Text inside double quotes, where only expansions are live.
+    Double,
+    /// Inert text: single or `$'...'` quotes, escapes, quote marks and comments.
+    Literal,
+}
+
+/// Classify every byte of `source` (heredoc bodies already projected out).
+fn lexeme_map(source: &str) -> Vec<Lexeme> {
+    let bytes = source.as_bytes();
+    let mut map = vec![Lexeme::Literal; bytes.len()];
+    // Open contexts: `true` is a double-quoted string, `false` a parenthesis
+    // of code nested inside one.
+    let mut stack: Vec<bool> = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if stack.last() == Some(&true) {
+            match ch {
+                b'\\' => index += 2,
+                b'"' => {
+                    stack.pop();
+                    index += 1;
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'(') => {
+                    map[index] = Lexeme::Code;
+                    map[index + 1] = Lexeme::Code;
+                    stack.push(false);
+                    index += 2;
+                }
+                _ => {
+                    map[index] = Lexeme::Double;
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        match ch {
+            b'\\' => index += 2,
+            b'\'' => index = source[index + 1..].find('\'').map_or(bytes.len(), |end| index + end + 2),
+            b'$' if bytes.get(index + 1) == Some(&b'\'') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\'' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index += 1;
+            }
+            b'"' => {
+                stack.push(true);
+                index += 1;
+            }
+            b'#' if index == 0 || b" \t\n;&|()".contains(&bytes[index - 1]) => {
+                index = source[index..].find('\n').map_or(bytes.len(), |end| index + end);
+            }
+            _ => {
+                map[index] = Lexeme::Code;
+                if ch == b'(' && !stack.is_empty() {
+                    stack.push(false);
+                } else if ch == b')' && stack.last() == Some(&false) {
+                    stack.pop();
+                }
+                index += 1;
+            }
+        }
+    }
+    map
+}
+
 /// Shell-local names a script keeps numeric, so arithmetic over them cannot
 /// evaluate injected source (GH #1866). A name qualifies only when its first
 /// occurrence is a literal-integer assignment that runs unconditionally (no
@@ -205,14 +277,24 @@ fn numeric_locals(source: &str) -> HashSet<String> {
     }
     let bytes = source.as_bytes();
     let ident = |ch: u8| ch.is_ascii_alphanumeric() || ch == b'_';
+    let lexemes = lexeme_map(source);
+    let code = |position: usize| lexemes.get(position) == Some(&Lexeme::Code);
     // Spans inside `((...))` and `$((...))`, which the arithmetic checks validate.
+    // Quoted, escaped or commented parens are text, never part of a span.
     let mut arithmetic = Vec::new();
     let mut at = 0;
     while let Some(found) = source[at..].find("((") {
         let open = at + found;
+        if !code(open) || !code(open + 1) {
+            at = open + 1;
+            continue;
+        }
         let mut depth = 0usize;
         let mut close = None;
         for (offset, &ch) in bytes.iter().enumerate().skip(open) {
+            if !code(offset) {
+                continue;
+            }
             match ch {
                 b'(' => depth += 1,
                 b')' => {
@@ -275,7 +357,11 @@ fn numeric_locals(source: &str) -> HashSet<String> {
             let assignment_head = before.is_empty()
                 || before.ends_with([' ', '\t', '\n', ';', '&', '|', '(']);
             let assigns = bytes.get(end) == Some(&b'=') && bytes.get(end + 1) != Some(&b'=') && assignment_head;
-            let use_ok = if first {
+            // Outside shell code only a double-quoted `$name`/`${name}` read is inert.
+            let use_ok = if !code(start) {
+                !first && lexemes[start] == Lexeme::Double
+                    && (before.ends_with('$') || (before.ends_with("${") && bytes.get(end) == Some(&b'}')))
+            } else if first {
                 assigns && unconditional(before) && bytes[end + 1..].first().is_some_and(u8::is_ascii_digit)
                     && numeric_value(end + 1).is_some_and(ends_word)
             } else if in_arithmetic(start) {

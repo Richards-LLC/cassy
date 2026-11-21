@@ -570,7 +570,8 @@ esac
     crate::test_paths::warm_stub(&gh, &script);
     env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
     // Consume the producer's output so this seam cannot invent a lane schema.
-    let producer = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/ci-test-impact.py");
+    let producer = root.join("ci-test-impact.py");
+    std::fs::write(&producer, include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/ci-test-impact.py"))).unwrap();
     let lane_path = root.join("lane.json");
     let output = std::process::Command::new("python3")
         .arg(producer)

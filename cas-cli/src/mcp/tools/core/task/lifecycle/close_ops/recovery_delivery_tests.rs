@@ -2646,7 +2646,8 @@ async fn request_changes_on_in_progress_work_names_the_replayable_alternative_ca
     })).await.expect_err("an in-progress task has no park to decline");
     assert_eq!(serde_json::to_value(tasks.get(&task.id).unwrap()).unwrap(), before);
     let payload = |tool: &str| -> serde_json::Value {
-        let line = refusal.message.lines().find_map(|line| line.strip_prefix(&format!("{tool} ")))
+        let line = refusal.message.lines()
+            .find_map(|line| line.strip_prefix(&format!("{tool} ")).filter(|rest| rest.starts_with('{')))
             .unwrap_or_else(|| panic!("no {tool} payload: {}", refusal.message));
         serde_json::from_str(line).unwrap()
     };

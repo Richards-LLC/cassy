@@ -3506,6 +3506,7 @@ exec "$@" > target/raw.log 2>&1"#);
         assert!(invocations.contains("serialized_factory_fields_have_registry_entries_cas_f7b9"), "{invocations}");
         assert!(invocations.lines().last().unwrap().ends_with("test(unrelated)"), "{invocations}");
         assert_eq!(invocations.lines().count(), 2);
+        assert!(!invocations.contains("gates::registry_tests"), "no refusal site changed: {invocations}");
         // cas-70b8: consume the ordinary runner's capture, without extracting
         // or rewriting its bytes, through the supervisor receipt handler.
         let head = fixture_head(&repo);
@@ -3586,6 +3587,18 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert_eq!(std::fs::read(&selected).unwrap(), b"\x1b[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\x1b[0m\n", "failed retries must preserve earlier capture bytes");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+        // cas-19792: cas-978ed's unclassified bool parameter went red only in
+        // lane CI. A delivery changing a refusal site gets the registry scan
+        // in its ordinary guarded run.
+        std::fs::write(repo.join("cas-cli/src/merge.rs"),
+            "pub fn merge(pushed_proof: bool) -> Result<(), String> { if pushed_proof { return Err(\"x\".into()); } Ok(()) }\n").unwrap();
+        fixture_commit_as(&repo, "bool parameter on a refusal site");
+        fake_cargo(&fake, r#"printf '%s\n' "$*" >> target/invocations
+printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
+        std::fs::remove_file(repo.join("target/invocations")).ok();
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        let invocations = std::fs::read_to_string(repo.join("target/invocations")).unwrap();
+        assert!(invocations.lines().next().unwrap().contains("test(gates::registry_tests)"), "{invocations}");
     }
 
     /// cas-2bdf: merging the moved target into a parked delivery voided its

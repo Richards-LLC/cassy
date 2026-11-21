@@ -3566,6 +3566,8 @@ for line in sys.stdin:
                         body["error"] = {"code": "outcome_unknown", "retryable": False}
                     if "request_id" in args:
                         body = {"ok": False, "error": {"code": "invalid_params", "retryable": False}}
+            elif name == "violet_reconcile_reply" and not os.path.exists(state_path):
+                body = {"ok": True, "request_id": request_id, "state": "not_posted", "reason": "request_not_found"}
             elif name == "violet_reconcile_reply":
                 with open(state_path) as handle:
                     state = json.load(handle)
@@ -3582,6 +3584,8 @@ for line in sys.stdin:
                 body = {"ok": True}
             result = {"content": [{"type": "text", "text": json.dumps(body)}], "isError": not body["ok"]}
             send({"jsonrpc": "2.0", "id": ident, "result": result})
+            if name == "violet_read" and args.get("channel") == "idle_close":
+                os._exit(0)
             continue
         if name == "drop":
             os._exit(0)
@@ -3745,6 +3749,35 @@ for line in sys.stdin:
                 assert!(engine.call_tool(&caller, "violet", "violet_reconcile_reply",
                     Some(serde_json::json!({"request_id": request_id}).as_object().unwrap().clone())).await.is_err());
             }
+            engine.shutdown().await;
+        }
+    }
+
+    /// cas-71bf (GH #2259): the first managed reply after an idle spell went
+    /// out on a transport the hub had already closed. Violet never saw it
+    /// (request_not_found), so the same request_id is sent once more. A post
+    /// that did reach Violet before the drop is reconciled, never resent.
+    #[tokio::test]
+    async fn violet_post_on_a_closed_transport_is_resent_once_cas_71bf() {
+        for (before, text) in [("idle_close", "posted"), ("open", "transport")] {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = ProxyEngine::from_configs(HashMap::from([(
+                "violet".into(), fake_upstream_mode(dir.path(), true),
+            )])).await.unwrap();
+            let caller = registered_worker_caller();
+            engine.call_tool(&caller, "violet", "violet_read",
+                Some(serde_json::json!({"channel": before}).as_object().unwrap().clone())).await.unwrap();
+            let request_id = "00000071-2222-4222-8222-0000000071bf";
+            let result = engine.call_tool(&caller, "violet", "violet_post", Some(serde_json::json!({
+                "channel": "C123", "kind": "message", "text": text, "request_id": request_id,
+            }).as_object().unwrap().clone())).await.unwrap();
+            let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!((body["state"].as_str(), body["request_id"].as_str()), (Some("posted"), Some(request_id)), "{before}: {body}");
+            let posts: Vec<Value> = std::fs::read_to_string(dir.path().join("calls.log.requests")).unwrap().lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|call| call["name"] == "violet_post").collect();
+            assert_eq!(posts.len(), 1, "{before}: Violet received exactly one post: {posts:?}");
+            assert_eq!(posts[0]["request_id"], request_id);
             engine.shutdown().await;
         }
     }

@@ -2078,6 +2078,9 @@ impl CasCore {
             } else {
                 task.deliverables.work_target = branch_only_target;
             }
+            // cas-7305: a supervisor's explicit target is the task's delivery
+            // authority, not an inherited epic default (repo_context pins).
+            task.deliverables.work_target_pinned = task.deliverables.work_target.is_some();
             refresh_epic_lane_binding(&mut task);
             changes.push("work_target");
         }

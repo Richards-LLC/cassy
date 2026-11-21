@@ -13933,13 +13933,34 @@ impl CasCore {
                         format!("merge_source could not inspect delivery boundary: {error}")))?
                     .is_none()));
         if !grant_only && !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
-                    task.id, task.status
-                ),
-            ));
+            // cas-7305: an in-progress task has no park to decline. Its proof
+            // invalidation, anchor clearing and repair round all bind to one,
+            // and the worker already holds the task. Returning the findings
+            // is a decision note plus a wake to the assignee; a pushed PR is
+            // closed on its host. Both calls are replayable lines.
+            let mut message = format!(
+                "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
+                task.id, task.status
+            );
+            if task.status == TaskStatus::InProgress {
+                let note = serde_json::json!({
+                    "action": "notes", "id": task.id, "note_type": "decision",
+                    "notes": format!("Changes requested: {}", req.reason.trim()),
+                });
+                message.push_str(&format!(
+                    " To return review findings while it is in progress, record them on the task, then wake its worker \
+                     (close any open PR for the pushed branch on its host):\ntask {note}"
+                ));
+                if let Some(assignee) = task.assignee.as_deref() {
+                    let wake = serde_json::json!({
+                        "action": "message", "target": assignee, "kind": "status",
+                        "summary": format!("Changes requested: {}", task.id),
+                        "message": format!("Changes requested on {}: {}", task.id, req.reason.trim()),
+                    });
+                    message.push_str(&format!("\ncoordination {wake}"));
+                }
+            }
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
         // cas-bc25: a decline over recorded failing tests must name their class.
         let mut effective_class: Option<String> = None;

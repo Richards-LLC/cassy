@@ -2867,6 +2867,21 @@ fn resolve_system_b_merge_target(
                 if let Some(lane) =
                     epic_lane_bypassed_by_trunk_target(&task, epic, &target.branch, &trunk)
                 {
+                    // cas-7305: `task update target_branch=<trunk>` pins the
+                    // target, so it is the supervisor's choice, not a stale
+                    // standalone default. The merge still reports its trunk push.
+                    if task.deliverables.work_target_pinned {
+                        return Ok(ResolvedSystemBMergeTarget {
+                            branch: trunk.clone(),
+                            reason: format!(
+                                "trunk {trunk} (task {task_id}'s explicit WorkTarget retarget off parent \
+                                 epic {} lane {lane}; authorized for worker {assignee})",
+                                epic.id
+                            ),
+                            trunk_fallback: true,
+                            epic_lane: false,
+                        });
+                    }
                     if !allow_trunk {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
@@ -2874,7 +2889,8 @@ fn resolve_system_b_merge_target(
                                 "task {task_id} belongs to epic {} (delivery lane {lane}) but its \
                                  WorkTarget resolves to trunk {trunk} — refusing to bypass the \
                                  epic lane (would merge to: {trunk}). Re-target the task to the \
-                                 epic (task update target_branch={lane}), or pass \
+                                 epic (task update target_branch={lane}), retarget it to trunk \
+                                 explicitly (task update target_branch={trunk}), or pass \
                                  allow_trunk=true only if {trunk} is truly intended.\n\n{}",
                                 epic.id,
                                 merge_target_remediation(assignee)
@@ -2945,7 +2961,8 @@ fn resolve_system_b_merge_target(
     let trunk = trunk();
     let mut assignee_epic_branches: Vec<(String, String, String)> = Vec::new(); // epic, branch, task
     // cas-c85e: epic children whose declared target is trunk, not the epic lane.
-    let mut trunk_pinned_children: Vec<(String, String, String)> = Vec::new(); // task, epic, lane
+    // task, epic, lane, and whether a supervisor explicitly retargeted it (cas-7305)
+    let mut trunk_pinned_children: Vec<(String, String, String, bool)> = Vec::new();
     // Branches reached through an epic's own lane; only these may be receipted
     // as "epic branch" (cas-c85e).
     let mut epic_lane_branches: std::collections::BTreeSet<String> =
@@ -2980,7 +2997,9 @@ fn resolve_system_b_merge_target(
                     if let Some(lane) =
                         epic_lane_bypassed_by_trunk_target(task, &epic, &branch, &trunk)
                     {
-                        trunk_pinned_children.push((task.id.clone(), epic.id.clone(), lane));
+                        trunk_pinned_children.push((
+                            task.id.clone(), epic.id.clone(), lane, task.deliverables.work_target_pinned,
+                        ));
                     }
                     if target.epic_lane {
                         epic_lane_branches.insert(branch.clone());
@@ -3070,10 +3089,12 @@ fn resolve_system_b_merge_target(
 
     // cas-c85e (GH #997): an epic child that still declares trunk would
     // bypass its epic's lane (and its PR/CI gate). Never take that silently.
-    if !trunk_pinned_children.is_empty() && !allow_trunk {
+    // cas-7305: a supervisor's explicit retarget to trunk is not stale.
+    if trunk_pinned_children.iter().any(|(_, _, _, explicit)| !explicit) && !allow_trunk {
         let list = trunk_pinned_children
             .iter()
-            .map(|(task, epic, lane)| format!("task {task}→epic {epic} lane {lane}"))
+            .filter(|(_, _, _, explicit)| !explicit)
+            .map(|(task, epic, lane, _)| format!("task {task}→epic {epic} lane {lane}"))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(McpError {
@@ -3115,13 +3136,16 @@ fn resolve_system_b_merge_target(
         // "epic branch", and a task-declared lane is a task WorkTarget.
         let pinned = trunk_pinned_children
             .iter()
-            .filter(|(task, _, _)| task_ids.split(", ").any(|id| id == task))
-            .map(|(task, epic, lane)| format!("task {task}→epic {epic} lane {lane}"))
+            .filter(|(task, _, _, _)| task_ids.split(", ").any(|id| id == task))
+            .map(|(task, epic, lane, explicit)| format!(
+                "task {task}→epic {epic} lane {lane}{}",
+                if *explicit { " (explicit task retarget)" } else { "" }
+            ))
             .collect::<Vec<_>>();
         let (reason, trunk_fallback) = if branch == trunk && !pinned.is_empty() {
             (
                 format!(
-                    "trunk {trunk} (explicit allow_trunk=true; assignee {assignee}'s current \
+                    "trunk {trunk} (allow_trunk=true or an explicit task retarget; assignee {assignee}'s current \
                      task(s) [{task_ids}] pin trunk although their parent epic delivers on its \
                      own lane ({}); no task_id given)",
                     pinned.join(", ")
@@ -8835,6 +8859,58 @@ mod tests {
                 .branch,
             "release/operator-selected"
         );
+    }
+
+    /// cas-7305: an epic child that a supervisor retargets with `task update
+    /// target_branch=main` merges to trunk without allow_trunk, and the merge
+    /// still reports its trunk push. A trunk target the child merely carried
+    /// into the epic stays refused (GH #997).
+    #[tokio::test]
+    async fn explicit_trunk_retarget_of_an_epic_child_merges_without_allow_trunk_cas_7305() {
+        use cas_store::{AgentStore, TaskStore};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").current_dir(repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"]).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        git(&["branch", "epic/lane"]);
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"merge-7305\"\n").unwrap();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        let target = |branch: &str| cas_types::WorkTarget { repo_selector: "project:merge-7305".into(), target_branch: branch.into() };
+        let mut epic = cas_types::Task::new("cas-7305-epic".into(), "epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/lane".into());
+        epic.deliverables.work_target = Some(target("epic/lane"));
+        tasks.add(&epic).unwrap();
+        let mut child = cas_types::Task::new("cas-7305-child".into(), "child".into());
+        child.assignee = Some("worker-a".into());
+        child.deliverables.work_target = Some(target("main"));
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(child.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let resolve = || super::resolve_system_b_merge_target(
+            tasks.as_ref() as &dyn TaskStore, agents.as_ref() as &dyn AgentStore,
+            Some("cas-7305-child"), "worker-a", false, || "main".to_string(),
+        );
+
+        let stale = resolve().err().expect("a carried trunk target is refused");
+        assert_eq!(crate::gates::codes_in(&stale.message), vec!["G-140"]);
+        let request = serde_json::from_value(serde_json::json!({"id": "cas-7305-child"})).unwrap();
+        core.cas_task_update_with_target(request, None, Some("main"), false, None, None).await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let explicit = resolve().unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(explicit.branch, "main");
+        assert!(explicit.trunk_fallback, "the trunk push is still reported");
     }
 }
 

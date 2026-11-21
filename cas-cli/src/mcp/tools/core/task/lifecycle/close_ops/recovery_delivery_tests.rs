@@ -2774,6 +2774,46 @@ async fn peer_lane_no_delivery_close_binds_target_not_checkout_head_cas_6c33() {
     assert_eq!(proof.head_commit, target, "{proof:?}");
 }
 
+/// cas-6c33 review: the closer's cached view of a peer lane (its local branch
+/// and `origin/` ref) is older than what the peer pushed. The review binds
+/// the refreshed pushed tip, never the stale cache.
+#[tokio::test]
+async fn peer_lane_review_binds_the_refreshed_pushed_tip_not_a_stale_cache_cas_6c33() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let base = git(repo, &["rev-parse", "main"]);
+    let mut task = start_on_lane(tasks.as_ref(), &base);
+    task.notes = "no changelog: disposable fixture".into();
+    tasks.update(&task).unwrap();
+    let origin = tempfile::tempdir().unwrap();
+    git(origin.path(), &["init", "-q", "--bare"]);
+    git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    git(repo, &["push", "-q", "origin", "main", &format!("{BRANCH}:{BRANCH}")]);
+    git(repo, &["worktree", "remove", "--force", f.worker_path.to_str().unwrap()]);
+    git(repo, &["branch", "-q", "-f", BRANCH, &f.predecessor]);
+    git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.predecessor]);
+    let config = root.join("config.toml");
+    std::fs::write(&config, std::fs::read_to_string(&config).unwrap()
+        .replace("enabled=false", "enabled=true")
+        .replace("independent_pass=true", "independent_pass=false")).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(root.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let pending = text(supervisor.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Reviewed the peer delivery".into()),
+        commit_receipt: None, supervisor_override: None,
+        no_delivery: None, stranded_branch_override: None, search_manifest: None,
+    })).await.unwrap());
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, TASK).unwrap()
+        .unwrap_or_else(|| panic!("close must open a review cycle: {pending}"));
+    let proof = dispatch.repository.as_ref().unwrap();
+    assert_eq!(proof.head_commit, f.final_tip, "{proof:?}");
+    assert_eq!(proof.anchor_commits, vec![f.final_tip.clone()]);
+}
+
 /// cas-6c33 (GH2280): an approved review recorded before the fix bound the
 /// supervisor's unrelated checkout commit, while the peer's delivery merged.
 /// The supervisor's recovery close with the merged receipt must retire that

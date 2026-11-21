@@ -83,3 +83,26 @@ payload; compare `status`, summary verdict and issue severity with the table.
 This is a policy fixture, not an authenticated dispatch: do not record its
 synthetic verdict against a production task. No live PostgreSQL, credentials,
 or target deletion is needed to supply the stated reviewer evidence.
+
+## Ruling and output-seam cases (cas-99d2a)
+
+Use `verifier_ruling_seams.json` beside this file as three read-only policy
+fixtures. Supply `common`, `review_date` and each case's `delivery` to the
+canonical verifier body and evidence-gate reference, hiding `expected`.
+Capture proposed verdicts without submitting them to Cassy. Compare structured
+status, gate identifiers/results, rule IDs, contract paths and offending source
+locations; do not assert explanation wording.
+
+- `paid_test`: reject, RULING-FIT NOT VERIFIED, naming `rule-credit`, Ben's
+  verbatim quote, decision source and date, and `tests/test_send.py:4`.
+- `impossible_reader_fake`: reject, FAKE-SEAM NOT VERIFIED, mapping
+  `tests/test_pick.py:5` to `src/reader.py:4`; the real reader emits only summary
+  or clarify, while the fake supplies pick.
+- `compliant`: approve with both gates VERIFIED. The retired confirmation rule
+  and active account-deletion rule cannot override the paid-send ruling; the
+  summary fake satisfies the real reader contract.
+
+These fixtures model the reported incidents; they are not Gabber runtime proof.
+The supplied catalog represents rule-tool responses, so this evaluation tests
+policy judgment, not live discovery or MCP authorization. The existing
+`verifier_mirrors_document_the_current_close_contract` test owns the 15 KB cap.

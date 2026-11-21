@@ -2736,7 +2736,7 @@ fn epic_build_proof_basis(
                     "its tip {short} is already contained in {target}; the supervisor's {line} proves exact default-branch SHA {sha}"
                 ));
             }
-            let ci = crate::mcp::tools::core::workflow::epic_tip_ci_proof(&sha, repo)?;
+            let ci = crate::mcp::tools::core::workflow::epic_tip_ci_proof(&sha, &default, repo)?;
             Ok(format!(
                 "its tip {short} is already contained in {target}; {ci}"
             ))

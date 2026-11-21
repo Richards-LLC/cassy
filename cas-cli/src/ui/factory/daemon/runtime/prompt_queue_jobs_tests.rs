@@ -20,6 +20,8 @@ type WriterJob = Box<dyn FnOnce() + Send + 'static>;
 pub(in super::super) struct TestWriter {
     sender: Mutex<mpsc::Sender<(&'static str, WriterJob)>>,
     ran: Arc<Mutex<Vec<(&'static str, String)>>>,
+    /// How long each job held the writer (cas-b355).
+    held: Arc<Mutex<Vec<(&'static str, Duration)>>>,
     gate: Arc<(Mutex<bool>, Condvar)>,
 }
 
@@ -29,6 +31,8 @@ impl TestWriter {
         let ran = Arc::new(Mutex::new(Vec::new()));
         let gate = Arc::new((Mutex::new(!gated), Condvar::new()));
         let thread_ran = Arc::clone(&ran);
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let thread_held = Arc::clone(&held);
         let thread_gate = Arc::clone(&gate);
         std::thread::Builder::new()
             .name("test-store-writer".into())
@@ -43,13 +47,16 @@ impl TestWriter {
                     }
                     let thread = std::thread::current().name().unwrap_or("").to_string();
                     thread_ran.lock().unwrap().push((label, thread));
+                    let started = Instant::now();
                     job();
+                    thread_held.lock().unwrap().push((label, started.elapsed()));
                 }
             })
             .unwrap();
         Arc::new(Self {
             sender: Mutex::new(sender),
             ran,
+            held,
             gate,
         })
     }
@@ -62,6 +69,12 @@ impl TestWriter {
 
     pub(in super::super) fn ran(&self) -> Vec<(&'static str, String)> {
         self.ran.lock().unwrap().clone()
+    }
+
+    /// The longest any `label` job held the writer.
+    pub(in super::super) fn max_held(&self, label: &str) -> Duration {
+        self.held.lock().unwrap().iter().filter(|(ran, _)| *ran == label)
+            .map(|(_, held)| *held).max().unwrap_or_default()
     }
 }
 
@@ -1092,8 +1105,9 @@ fn a_drop_after_a_finished_uncollected_job_is_attributed_by_generation() {
 }
 
 /// cas-b355 (soundwave gabber, Nov 20): QueueSelect held the store writer up
-/// to 4.1 s while it read its rows' facts. A selection stuck in a facts read
-/// (git, held at its trace FIFO) must leave the writer free.
+/// to 4.1 s while it read its rows' facts. With a 500-row queue and a facts
+/// read stuck (git, held at its trace FIFO), the writer stays free and no
+/// QueueSelect write holds it for 1 s.
 #[test]
 fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
     let (root, cas_dir) = project();
@@ -1101,6 +1115,9 @@ fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
         .status().unwrap().success());
     let sha = "a".repeat(40);
     enqueue(&cas_dir, "lead", &format!("<cas-merge-request>{{\"task_id\":\"cas-held\",\"branch_tip\":\"{sha}\",\"target_branch\":\"main\",\"target_branch_tip\":\"{sha}\"}}</cas-merge-request>"));
+    for n in 1..500 {
+        enqueue(&cas_dir, "lead", &format!("queued message {n}"));
+    }
     // Git opens its trace before it does anything; a FIFO nobody reads holds it there.
     let trace = tempfile::tempdir().unwrap();
     let fifo = trace.path().join("git.trace");
@@ -1119,7 +1136,7 @@ fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
     assert!(SharedWriter(Arc::clone(&writer)).execute("probe", Box::new(move || {
         let _ = ran.send(());
     })));
-    let free = probe.recv_timeout(Duration::from_secs(2)).is_ok();
+    let free = probe.recv_timeout(Duration::from_secs(1)).is_ok();
     // Release every git for the rest of the test.
     let drain = fifo.clone();
     std::thread::spawn(move || {
@@ -1127,8 +1144,11 @@ fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
             let _ = std::io::copy(&mut trace, &mut std::io::sink());
         }
     });
-    assert!(free, "a selection reading its rows' facts held the store writer");
     settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    let held = writer.max_held("QueueSelect");
+    eprintln!("cas-b355 QueueSelect max writer hold: {} ms (500 rows)", held.as_millis());
+    assert!(free, "a selection reading its rows' facts held the store writer");
+    assert!(held < Duration::from_secs(1), "QueueSelect held the writer {held:?}");
 }
 
 /// cas-4272 review L3, cas-9594c: a queued Retry stamp holds its row out of

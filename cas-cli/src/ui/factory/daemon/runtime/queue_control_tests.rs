@@ -780,8 +780,9 @@ fn cas_7b6b_held_writer_does_not_block_control_or_duplicate_spawn_requests() {
 }
 
 /// cas-b355 (soundwave gabber, Nov 20): SpawnQueuePoll held the store writer
-/// up to 3.0 s on every 100 ms poll. A poll with nothing to dequeue for this
-/// session reads, and reports a stalled row, while the writer is held.
+/// up to 3.0 s on every 100 ms poll. With 500 stalled rows for another session
+/// a poll reads, and reports a stalled row, while the writer is held, and no
+/// poll holds the writer for 1 s.
 #[test]
 fn cas_b355_spawn_poll_reads_while_the_writer_is_held() {
     let temp = tempfile::tempdir().unwrap();
@@ -790,19 +791,36 @@ fn cas_b355_spawn_poll_reads_while_the_writer_is_held() {
     let writer = super::super::prompt_queue_jobs::tests::TestWriter::start(true);
     daemon.queue_jobs = super::super::prompt_queue_jobs::tests::jobs_on(&writer);
     let queue = crate::store::open_spawn_queue_store(&root).unwrap();
-    let id = queue
-        .enqueue_spawn(1, &["elsewhere".into()], false, None, Some("other-session"), None)
-        .unwrap();
+    let ids: Vec<i64> = (0..500)
+        .map(|n| queue.enqueue_spawn(1, &[format!("elsewhere-{n}")], false, None, Some("other-session"), None).unwrap())
+        .collect();
     let queued_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
     rusqlite::Connection::open(root.join("cas.db")).unwrap()
-        .execute("UPDATE spawn_queue SET created_at=?1 WHERE id=?2", rusqlite::params![queued_at, id])
+        .execute("UPDATE spawn_queue SET created_at=?1", rusqlite::params![queued_at])
         .unwrap();
-    settle_until(|| {
+    let reported = |daemon: &mut FactoryDaemon| {
         daemon.enqueue_spawn_requests().unwrap();
-        daemon.reported_stalled_spawn_requests.contains(&id)
-    });
+        daemon.reported_stalled_spawn_requests.contains(&ids[0])
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut read_while_held = false;
+    while !read_while_held && Instant::now() < deadline {
+        read_while_held = reported(&mut daemon);
+        std::thread::sleep(Duration::from_millis(5));
+    }
     writer.open();
-    assert_eq!(queue.peek(10).unwrap().len(), 1, "another session's row stays queued");
+    settle_until(|| reported(&mut daemon));
+    // Several polls with the writer open, each measured.
+    let polls = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < polls {
+        daemon.enqueue_spawn_requests().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let held = writer.max_held("SpawnQueuePoll");
+    eprintln!("cas-b355 SpawnQueuePoll max writer hold: {} ms (500 rows)", held.as_millis());
+    assert!(read_while_held, "the spawn poll needed the held writer to read");
+    assert!(held < Duration::from_secs(1), "SpawnQueuePoll held the writer {held:?}");
+    assert_eq!(queue.peek(10).unwrap().len(), 10, "another session's rows stay queued");
 }
 
 #[test]

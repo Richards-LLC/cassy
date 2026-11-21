@@ -2002,8 +2002,11 @@ impl SqlitePromptQueueStore {
                             let text = detail.split_whitespace().collect::<Vec<_>>().join(" ");
                             let mut bounded = text.chars().take(160).collect::<String>();
                             if text.chars().count() > 160 { bounded.push('…'); }
-                            let _ = unrecorded_secs;
-                            format!("held: {bounded}")
+                            if unrecorded_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
+                                format!("cause unrecorded for {}m, then held: {bounded}", unrecorded_secs / 60)
+                            } else {
+                                format!("held: {bounded}")
+                            }
                         }).unwrap_or_else(|| "cause unrecorded".into());
                         let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
                         summary.push_str(&format!(" [delayed {}m; {cause}]", age_secs / 60));

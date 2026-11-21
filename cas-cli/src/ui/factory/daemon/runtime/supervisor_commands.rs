@@ -819,9 +819,22 @@ mod tests {
         let run = Request::Run { command: Command::Compact, confirmed: false };
         let queued = daemon.dispatch_supervisor_command(run.clone(), "restart-queue".into(), owner.clone()).await.unwrap();
         assert!(matches!(queued, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        // A same-named earlier birth (reused PID, different start) left a queued
+        // row, and a malformed row exists. Neither may be typed or block restore.
+        let earlier = serde_json::json!({"receipt":{"device_id":"device-a","client_ref":"earlier-birth","command":"compact","phase":"queued","detail":"","output":"","interactive":false},
+            "at":Utc::now(),"before":"","before_command":"","reload_before":null,"birth":{"daemon_pid":std::process::id(),"daemon_pid_starttime":0}});
+        let malformed = serde_json::json!({"receipt":{"device_id":"device-a","client_ref":"malformed"}});
+        for row in [earlier, malformed] {
+            assert!(durable::write(daemon.app.cas_dir(), &daemon.session_name, &name, &row, durable::Write::Reserve).unwrap());
+        }
         daemon = restart(daemon);
         let restored = daemon.dispatch_supervisor_command(Request::Status, "restart-queue".into(), owner.clone()).await.unwrap();
         assert!(matches!(restored, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        let earlier = daemon.dispatch_supervisor_command(Request::Status, "earlier-birth".into(), owner.clone()).await.unwrap();
+        assert!(matches!(earlier, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Refused));
+        // Stored terminal, so retention can collect it.
+        assert!(durable::load(daemon.app.cas_dir(), &daemon.session_name, &name).unwrap().iter()
+            .any(|row| row["receipt"]["client_ref"] == "earlier-birth" && row["receipt"]["phase"] == "refused"));
         let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
         assert!(daemon.dispatch_supervisor_command(Request::Status, "restart-queue".into(), foreign).await.is_err());
         daemon.dispatch_supervisor_command(run.clone(), "restart-queue".into(), owner.clone()).await.unwrap();

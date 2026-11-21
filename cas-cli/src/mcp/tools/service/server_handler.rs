@@ -1924,6 +1924,7 @@ mod tests {
             #[cfg(feature = "mcp-proxy")]
             None,
         );
+        std::fs::create_dir_all(&service.inner.cas_root).unwrap();
         let tasks = service.inner.open_task_store().unwrap();
         for (id, intermediate, committed) in [
             ("cas-preflight", false, false),

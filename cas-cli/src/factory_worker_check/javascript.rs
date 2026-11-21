@@ -3010,53 +3010,80 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         }
     }
 
-    /// GH #2172: a failed capped Playwright run printed trace.zip under its
-    /// temporary reports directory, which was gone once worker-check returned.
-    /// The failure now names a durable copy of that output.
+    /// GH #2172/cas-7b09: producer exit must leave readable traces or assertion
+    /// reports, without retaining credentials from a JSON failure payload.
     #[cfg(unix)]
     #[test]
-    fn failed_playwright_traces_outlive_worker_check_gh_2172() {
+    fn failed_javascript_reports_outlive_worker_check_cas_7b09() {
         use std::os::unix::fs::PermissionsExt;
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let repo = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let output = Command::new("git").current_dir(repo.path())
-                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
-                .args(args).output().unwrap();
-            assert!(output.status.success(), "{output:?}");
-            String::from_utf8(output.stdout).unwrap().trim().to_string()
-        };
-        git(&["init", "--quiet"]);
-        std::fs::write(repo.path().join(".gitignore"), "node_modules/\n").unwrap();
-        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
-        let file = "e2e/retry.spec.ts";
-        std::fs::create_dir_all(repo.path().join("e2e")).unwrap();
-        std::fs::write(repo.path().join(file), "test('fails', async () => { expect(1).toBe(2); });\n").unwrap();
-        // A deterministic failure that writes a trace, as Playwright does.
-        let bin = repo.path().join("node_modules/.bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("playwright"), "#!/bin/sh\nout=; prev=\nfor arg in \"$@\"; do [ \"$prev\" = --output ] && out=$arg; prev=$arg; done\n\
-            mkdir -p \"$out/retry-fails-chromium\" && printf trace > \"$out/retry-fails-chromium/trace.zip\"\n\
-            printf '{\"errors\":[],\"suites\":[]}' > \"$PLAYWRIGHT_JSON_OUTPUT_FILE\"\nexit 1\n").unwrap();
-        std::fs::set_permissions(bin.join("playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        git(&["add", "."]);
-        git(&["commit", "--quiet", "-m", "failing spec"]);
-        let head = git(&["rev-parse", "HEAD"]);
-        let cas_root = tempfile::tempdir().unwrap();
-        let artifacts = tempfile::tempdir().unwrap();
-        std::fs::write(cas_root.path().join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", artifacts.path().display().to_string())).unwrap();
+        for runner in ["playwright", "vitest"] {
+            let repo = tempfile::tempdir().unwrap();
+            let git = |args: &[&str]| {
+                let output = Command::new("git").current_dir(repo.path())
+                    .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                    .args(args).output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            git(&["init", "--quiet"]);
+            std::fs::write(repo.path().join(".gitignore"), "node_modules/\nsource-report.txt\n").unwrap();
+            std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+            let file = "e2e/retry.spec.ts";
+            std::fs::create_dir_all(repo.path().join("e2e")).unwrap();
+            std::fs::write(repo.path().join(file), "test('fails', async () => { expect(1).toBe(2); });\n").unwrap();
+            // A deterministic failure that writes a trace, as Playwright does.
+            let bin = repo.path().join("node_modules/.bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let secret = "fixture-credential-7b09";
+            let payload = json!({"success":false,"testResults":[{
+                "name":repo.path().join(file),"status":"failed","assertionResults":[{
+                    "fullName":"fails","status":"failed",
+                    "failureMessages":["AssertionError: expected 1 to be 2\n at retry.spec.ts:1:32"],
+                    "apiKey":secret
+                }]
+            }]});
+            std::fs::write(repo.path().join("failure.json"), payload.to_string()).unwrap();
+            let script = if runner == "playwright" {
+                "#!/bin/sh\nout=; prev=\nfor arg in \"$@\"; do [ \"$prev\" = --output ] && out=$arg; prev=$arg; done\n\
+                mkdir -p \"$out/retry-fails-chromium\" && printf trace > \"$out/retry-fails-chromium/trace.zip\"\n\
+                printf '{\"errors\":[],\"suites\":[]}' > \"$PLAYWRIGHT_JSON_OUTPUT_FILE\"\nexit 1\n"
+            } else {
+                "#!/bin/sh\nreport=; prev=\nfor arg in \"$@\"; do [ \"$prev\" = --outputFile ] && report=$arg; prev=$arg; done\n\
+                cp failure.json \"$report\"\nprintf '%s\\n' \"$report\" > source-report.txt\nexit 1\n"
+            };
+            std::fs::write(bin.join(runner), script).unwrap();
+            std::fs::set_permissions(bin.join(runner), std::fs::Permissions::from_mode(0o755)).unwrap();
+            git(&["add", "."]);
+            git(&["commit", "--quiet", "-m", "failing spec"]);
+            let head = git(&["rev-parse", "HEAD"]);
+            let cas_root = tempfile::tempdir().unwrap();
+            let artifacts = tempfile::tempdir().unwrap();
+            std::fs::write(cas_root.path().join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", artifacts.path().display().to_string())).unwrap();
 
-        let error = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &[id(file, "fails")], None, &[])
-            .unwrap_err();
-        let message = format!("{error:#}");
-        // One durable copy under the artifacts root, named by the failure.
-        let kept: Vec<PathBuf> = walkdir::WalkDir::new(artifacts.path()).into_iter().filter_map(Result::ok)
-            .filter(|entry| entry.file_name() == "report-0.json").map(|entry| entry.path().parent().unwrap().to_path_buf())
-            .collect();
-        assert_eq!(kept.len(), 1, "{message}");
-        assert!(message.contains(&kept[0].display().to_string()), "{message}");
-        assert_eq!(std::fs::read(kept[0].join("playwright-output/retry-fails-chromium/trace.zip")).unwrap(), b"trace");
+            let error = execute_tests(cas_root.path(), repo.path(), &head, runner, None, &[id(file, "fails")], None, &[])
+                .unwrap_err();
+            let message = format!("{error:#}");
+            // One durable copy under the artifacts root, named by the failure.
+            let kept: Vec<PathBuf> = walkdir::WalkDir::new(artifacts.path()).into_iter().filter_map(Result::ok)
+                .filter(|entry| entry.file_name() == "report-0.json").map(|entry| entry.path().parent().unwrap().to_path_buf())
+                .collect();
+            assert_eq!(kept.len(), 1, "{message}");
+            assert!(message.contains(&kept[0].display().to_string()), "{message}");
+            if runner == "playwright" {
+                assert_eq!(std::fs::read(kept[0].join("playwright-output/retry-fails-chromium/trace.zip")).unwrap(), b"trace");
+            } else {
+                let temporary = std::fs::read_to_string(repo.path().join("source-report.txt")).unwrap();
+                assert!(!Path::new(temporary.trim()).exists());
+                let retained = std::fs::read_to_string(kept[0].join("report-0.json")).unwrap();
+                let report: Value = serde_json::from_str(&retained).unwrap();
+                // Preserve the runner-supplied diagnostic protocol payload exactly.
+                assert_eq!(report["testResults"][0]["assertionResults"][0]["failureMessages"],
+                    payload["testResults"][0]["assertionResults"][0]["failureMessages"]);
+                assert!(!retained.contains(secret));
+            }
+        }
     }
 
     #[test]

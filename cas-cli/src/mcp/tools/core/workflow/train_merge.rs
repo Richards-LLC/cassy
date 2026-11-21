@@ -1166,6 +1166,77 @@ mod tests {
         assert_eq!(tasks.get(&fixture.ids[0]).unwrap().status, TaskStatus::AwaitingMerge);
     }
 
+    /// The MCP acknowledgement must not wait for origin while starting a
+    /// queued review. Hold the real upload-pack until the append has returned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_append_returns_before_slow_advancement_cas_7f934() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let mut fixture = Fixture::build(false);
+        fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        std::fs::write(fixture.root.join("config.toml"),
+            "[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut appended = tasks.get(&fixture.ids[1]).unwrap();
+        appended.depth = TaskDepth::Deep;
+        tasks.update(&appended).unwrap();
+        fixture.start_with(&fixture.ids[..1]).await;
+        let queue_path = path(&fixture.root, fixture._repo.path(), "epic/train").unwrap();
+        let before = read(&queue_path).unwrap().unwrap();
+
+        let release = fixture.root.join("release-upload-pack");
+        assert!(std::process::Command::new("mkfifo").arg(&release).status().unwrap().success());
+        // O_RDWR opens without waiting for the child and retains a release
+        // token even when the fixed path has not yet contacted origin.
+        let mut release = std::fs::OpenOptions::new().read(true).write(true).open(&release).unwrap();
+        let started = fixture.root.join("upload-pack-started");
+        let gate = fixture.root.join("gated-upload-pack");
+        std::fs::write(&gate, format!(
+            "#!/bin/sh\nif mkdir '{}' 2>/dev/null; then read -r release < '{}'; fi\nexec git upload-pack \"$@\"\n",
+            started.display(), fixture.root.join("release-upload-pack").display(),
+        )).unwrap();
+        std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", gate.to_str().unwrap()]);
+
+        let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action":"train_merge", "id":"cas-train", "task_ids":[appended.id],
+        })).unwrap();
+        let start = Instant::now();
+        let mut append = tokio::spawn(async move { service.factory(Parameters(request)).await });
+        let response = tokio::time::timeout(Duration::from_secs(10), &mut append).await;
+        let elapsed = start.elapsed();
+        let contacted_origin = started.exists();
+        // Always release and join the real subprocess path before asserting,
+        // including the deliberately failing baseline.
+        writeln!(release, "continue").unwrap();
+        let timely = response.is_ok();
+        let result = match response {
+            Ok(result) => result,
+            Err(_) => append.await,
+        }.unwrap().unwrap();
+        let queued = read(&queue_path).unwrap().unwrap();
+        assert!(queued.revision > before.revision);
+        assert_eq!(queued.next, before.next);
+        assert_eq!(queued.entries.len(), 2);
+        assert_eq!(queued.entries[1].task, appended.id);
+        assert_eq!(queued.entries[1].sha, fixture.shas[1]);
+        eprintln!("append elapsed={elapsed:?}; contacted_origin={contacted_origin}; revision={}; position=2", queued.revision);
+        assert!(timely && !contacted_origin, "append waited on advancement: {elapsed:?}");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        assert!(cas_store::get_latest_verification_dispatch(&fixture.root, &appended.id).unwrap().is_none());
+
+        // The durable queue still starts the appended review on its existing
+        // daemon pass; no follow-up supervisor request is required.
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        assert!(started.exists());
+        assert!(cas_store::get_latest_verification_dispatch(&fixture.root, &appended.id).unwrap().is_some());
+    }
+
     /// A stalled later review must not reserve the entire train indefinitely.
     /// Replay publication, a held dispatch, its approval, an append and resume
     /// while the retired driver's OS handle still exists.

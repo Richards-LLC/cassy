@@ -1724,36 +1724,57 @@ pub(super) mod tests {
 
     /// cas-8e1b: a candidate one additive column ahead of the live store, as in
     /// the 4.28 cut, previews exactly what it previews on a current store and
-    /// leaves the live store byte-identical.
+    /// leaves the live store byte-identical, with pinned or derived identity.
     #[test]
     fn candidate_preview_of_a_lagging_store_leaves_it_unchanged_cas_8e1b() {
         use sha2::{Digest, Sha256};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let (temp, root, train, _owner, track) = fixture();
-        let mut child = Task::new("cas-a002".into(), "Child".into());
-        child.status = TaskStatus::AwaitingMerge;
-        child.deliverables.factory_branch_anchor = Some(track.commit.clone());
-        let tasks = open_task_store(&root).unwrap();
-        tasks.add(&child).unwrap();
-        tasks.add_dependency(&Dependency::new(child.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
-        let args = PreviewArgs { scope: None, commit: Some(track.commit.clone()),
-            version: Some(track.version.clone()), inputs: None, train: Some(train.id.clone()) };
-        let _cwd = env.enter_dir(temp.path());
-        let current = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
-        lag_one_column(&root);
-        let live = || {
-            let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-            let schema: Vec<String> = conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
-                .unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
-            (schema, format!("{:x}", Sha256::digest(fs::read(root.join("cas.db")).unwrap())))
-        };
-        let before = live();
-        assert!(!before.0.iter().any(|sql| sql.contains("review_dispatch_id")));
-        let lagging = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
-        assert_eq!(lagging, current);
-        assert_eq!(live(), before);
+        for config in [
+            Some("[project]\ncanonical_id='release-fixture'\n"),
+            None,
+            Some("[factory]\nrelease_train=true\nmax_concurrent_builders=2\n"),
+        ] {
+            let (temp, root, train, _owner, track) = fixture();
+            match config {
+                Some(contents) => fs::write(root.join("config.toml"), contents).unwrap(),
+                None => fs::remove_file(root.join("config.toml")).unwrap(),
+            }
+            let identity = crate::cloud::resolve_canonical_id(&root).unwrap();
+            let policy = crate::config::Config::load(&root).unwrap().factory();
+            let config_before = fs::read(root.join("config.toml")).ok();
+            let mut child = Task::new("cas-a002".into(), "Child".into());
+            child.status = TaskStatus::AwaitingMerge;
+            child.deliverables.factory_branch_anchor = Some(track.commit.clone());
+            let tasks = open_task_store(&root).unwrap();
+            tasks.add(&child).unwrap();
+            tasks.add_dependency(&Dependency::new(child.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
+            let args = PreviewArgs { scope: None, commit: Some(track.commit.clone()),
+                version: Some(track.version.clone()), inputs: None, train: Some(train.id.clone()) };
+            let _cwd = env.enter_dir(temp.path());
+            let current = preview_release_close(&args, &root).unwrap();
+            assert_eq!(current.scope.project_id, identity);
+            let current = serde_json::to_value(current).unwrap();
+            lag_one_column(&root);
+            let live = || {
+                let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+                let schema: Vec<String> = conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+                    .unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+                (schema, format!("{:x}", Sha256::digest(fs::read(root.join("cas.db")).unwrap())))
+            };
+            let before = live();
+            assert!(!before.0.iter().any(|sql| sql.contains("review_dispatch_id")));
+            let lagging = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
+            assert_eq!(lagging, current);
+            let snapshot = PreviewStore::open(&root).unwrap();
+            assert_eq!(crate::cloud::resolve_canonical_id(&snapshot.root).as_deref(), Some(identity.as_str()));
+            let snapshot_policy = crate::config::Config::load(&snapshot.root).unwrap().factory();
+            assert_eq!(snapshot_policy.release_train, policy.release_train);
+            assert_eq!(snapshot_policy.max_concurrent_builders, policy.max_concurrent_builders);
+            assert_eq!(fs::read(root.join("config.toml")).ok(), config_before);
+            assert_eq!(live(), before);
+        }
     }
 
     /// The store as the installed 4.27 CLI left it: m299's column not yet added.

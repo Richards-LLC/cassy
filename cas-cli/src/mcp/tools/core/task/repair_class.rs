@@ -14,12 +14,26 @@ const MAX_RECORDED: usize = 20;
 
 /// Remember the failing tests a CI run or merge-queue ejection named.
 pub(crate) fn record_failing_tests(root: &Path, task_id: &str, names: &[String]) {
-    let names: Vec<&String> = names.iter().take(MAX_RECORDED).collect();
     if names.is_empty() {
         return;
     }
     if let Err(error) = crate::store::open_task_store(root)
-        .and_then(|store| store.patch_execution_state(task_id, &json!({"failing_tests": names})).map_err(Into::into))
+        .and_then(|store| {
+            let state = store.get_execution_state(task_id)?.unwrap_or_else(|| json!({}));
+            let mut merged = Vec::new();
+            for name in state_list(&state, "failing_tests").into_iter().chain(names.iter().cloned()) {
+                if !merged.contains(&name) {
+                    merged.push(name);
+                }
+            }
+            let omitted = merged.len().saturating_sub(MAX_RECORDED);
+            merged.truncate(MAX_RECORDED);
+            let result = store.patch_execution_state(task_id, &json!({"failing_tests": merged}))?;
+            if omitted > 0 {
+                tracing::warn!(%task_id, omitted, limit = MAX_RECORDED, "truncated failing tests for the repair class audit");
+            }
+            Ok(result)
+        })
     {
         tracing::warn!(%task_id, %error, "could not record failing tests for the repair class audit");
     }

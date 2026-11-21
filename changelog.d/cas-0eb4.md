@@ -5,5 +5,7 @@
   the existing lane-impact attribution receipts for exact parked delivery
   heads, including train targets, and records only their `caused` test names.
   Inherited failures, stale receipts and log wording do not trigger the gate.
+  Lane and merge-queue names are combined without duplicates, preserving
+  earlier names up to the twenty-name limit and logging truncation.
   A decline still requires a covering class selector and passing class proof
   before re-park. Verifier findings remain a separate follow-up.

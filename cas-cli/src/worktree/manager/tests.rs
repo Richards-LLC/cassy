@@ -650,13 +650,15 @@ fn parked_local_delivery_merges_without_origin_proof_gh2151() {
     worktree.parent_branch = epic_branch.clone();
 
     let pushed = manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, true, None);
-    assert!(pushed.unwrap_err().to_string().contains("pushed delivery proof required"));
+    assert!(matches!(pushed, Err(WorktreeError::UncommittedChanges(_))), "{pushed:?}");
     manager.merge_parked_delivery_preserving_worktree(&mut worktree, &anchor, false, None)
         .expect("a local_merge delivery needs no origin source ref");
     let contained = Command::new("git").args(["merge-base", "--is-ancestor", &anchor, &epic_branch])
         .current_dir(&repo_path).status().unwrap();
     assert!(contained.success(), "the exact local anchor is integrated");
-    assert_eq!(std::fs::read_to_string(path.join("delivered.txt")).unwrap(), "next task in progress");
+    let untouched = Command::new("git").args(["diff", "--quiet"]).current_dir(&path).status().unwrap();
+    assert!(!untouched.success(), "the worker's in-progress edit is retained");
+    assert_eq!(git(&["rev-parse", "HEAD"]), anchor);
 }
 
 #[test]

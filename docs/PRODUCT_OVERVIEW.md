@@ -683,6 +683,18 @@ Remote parks bind the project, owner generation, worker identity and lease epoch
 - **Bounded supervisor startup** - Supervisor startup checks parked integrated deliveries for 10 seconds and never waits more than 12; deliveries it did not reach are listed with their commit receipts, and close still checks each one. A compacted session keeps its registration and does not repeat the check.
 - **Claude supervisor context window** - Claude's status line input reports the session's context window, which Claude transcripts omit. Cassy records it for supervisor sessions, so the automatic handoff and clear start at 80% of that window, below Claude's own compaction point.
 
+For uncertain Jest source changes, focused proof selects the source's dependent
+tests with `--findRelatedTests` from the owning Jest config root. Close consumes
+that source-specific receipt; unrelated package tests no longer hold the run.
+
+- **Supervisors stay reachable** — the supervisor's Bash hook (gate H-49) refuses a foreground call expected to run past a minute: Cargo builds and tests, release scripts, npm/pnpm test or build, loops with sleep, ssh running any of those, `timeout` above 60 seconds, an explicit tool timeout above 60 seconds, and the other commands in one known-long list. The remedy is `run_in_background: true` or delegation to a worker. Short commands, backgrounded calls, subagents and Codex or Grok shells are not affected.
+
+- **Review completion across supervisors.** Was: an approved review could remain
+  open because its original source belonged to another supervisor. Now: a
+  registered supervisor can declare no delivery and close after Cassy verifies
+  the integrated source base and absence of reachable task commits. The source
+  audit remains intact; any recorded delivery still follows the delivery gates.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -812,6 +824,10 @@ Capped tests use short scratch paths outside a checkout and protected `.cas` anc
 No-code factory workers can start artifact work while a shared checkout remains on another worker's branch with pending edits. Isolated worker checkouts keep their normal source attribution. An artifact-only task can sync published trunk for report tooling and close using portable proof; an unpublished source commit still requires delivery handling.
 
 When repository discovery is incomplete, the lifecycle receipt names the requested selector and branch, the roots that failed or were not reached, and the identities successfully read. It retains the declared work target and does not infer a storage outage or select a different branch from incidental Git history.
+
+When a replacement worker inherits a departed worker’s task delivery, task start records the replacement’s owned source branch after proving that it contains the previous source tips. Queued spawns preserve that resumed lane. An already parked source mismatch can be returned with `request_changes`, then approved through `rebind_branch` before the worker starts and parks again.
+
+Train merges accept added deliveries while a review waits. Advancement uses a bounded lease, so a stalled or departed driver cannot indefinitely hold an approved queue. Recovery records the retired owner and retains normal supervisor authority, verification, CI and publication checks.
 
 ## Authoritative Sources
 

@@ -42,6 +42,8 @@ const RELAY_WRITE_BUDGET: Duration = Duration::from_millis(100);
 /// cas-58a3: a crashed worker's reap (up to 0.5 s) and worktree check (git).
 const CRASH_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const EXTERNAL_WORK_RECONCILE_KEY: &str = "RelayRead:external-work-reconcile";
+/// cas-e37f: a busy factory's progress-watchdog scan measured up to 8 s.
+const PROGRESS_WATCHDOG_READ_BUDGET: Duration = Duration::from_secs(10);
 
 /// One relay's read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,6 +58,8 @@ pub(crate) enum Relay {
     Escalation,
     /// cas-26c8: recorded worker deaths whose prompt no live hold covers.
     DeathSweep,
+    /// cas-e37f: the progress watchdog's task scans and git calls.
+    ProgressWatchdog,
 }
 
 impl Relay {
@@ -70,6 +74,7 @@ impl Relay {
             Self::Permission => "permission",
             Self::Escalation => "escalation",
             Self::DeathSweep => "death-sweep",
+            Self::ProgressWatchdog => "progress-watchdog",
         }
     }
 
@@ -203,6 +208,11 @@ pub(crate) enum RelayOutput {
     /// A bounded request-journal reconciliation batch ran on the external lane.
     ExternalWorkReconciled(Result<usize, String>),
     WorkerTaskQueuesReconciled(Result<usize, String>),
+    /// cas-e37f: one progress-watchdog sample's reads, taken at `at`.
+    ProgressObserved {
+        at: chrono::DateTime<chrono::Utc>,
+        observation: Option<Box<super::progress_watchdog::Observation>>,
+    },
 }
 
 /// A finished relay job: its output, and the generation it ran under.
@@ -323,6 +333,29 @@ impl RelayJobs {
             criticality: Criticality::Refresh,
             generation: self.next_generation(),
             budget: RELAY_READ_BUDGET,
+        };
+        self.submit(jobs, spec, read)
+    }
+
+    /// cas-e37f: run the progress watchdog's read (full task scans and git)
+    /// on the External lane, unless it is in flight, so it never holds the
+    /// store writer; its writes follow as a write job.
+    pub(crate) fn submit_progress_watchdog_read(
+        &mut self,
+        jobs: &mut QueueJobs,
+        read: impl FnOnce() -> RelayOutput + Send + 'static,
+    ) -> bool {
+        let key = Relay::ProgressWatchdog.key();
+        if self.in_flight.contains_key(&key) {
+            return false;
+        }
+        let spec = JobSpec {
+            kind: RELAY_READ,
+            key,
+            lane: Lane::External,
+            criticality: Criticality::Refresh,
+            generation: self.next_generation(),
+            budget: PROGRESS_WATCHDOG_READ_BUDGET,
         };
         self.submit(jobs, spec, read)
     }

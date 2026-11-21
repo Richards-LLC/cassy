@@ -7,6 +7,46 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.45.0] - 2026-11-21
+
+### Fixed — Factory
+
+- **Bound Jest source proof to related tests** — Was: G-61 suggested a plain
+  source path, and worker-check silently ran the whole backend package, which
+  could time out without proof. Now: it suggests `jest --findRelatedTests`,
+  runs the source's dependent tests from the Jest config root, and accepts the
+  resulting source-specific receipt at close.
+- **The long-command guard covers the supervisor and skips its verifiers** — Was: the new guard for long foreground commands skipped any supervisor whose hooks carry its own team identity, which every Agent Teams supervisor does, and refused task verifiers' Cargo runs before they reached the capped verifier lane. Now: it applies to the supervisor's own pane, and verifiers and other subagents keep their usual routing.
+- **Replacement worker source binding** — A worker spawned onto a departed worker’s task can start and park inherited work under its own branch without a manual rebind, including queued spawns. Parked mismatches can be returned with `request_changes` before supervisor branch approval. Untouched queued successors keep their fresh target start instead of adopting unrelated history inherited in a former worker’s start base.
+- **Stalled train advancement recovery** — Train merges reclaim expired or orphaned advancement leases, preserve the ordered delivery queue, and accept additional deliveries while an earlier review waits. Recovery records the retired lease and prevents stale drivers from overwriting current queue state.
+- **Close approved peer reviews without a supervisor branch** — Was: an
+  unchanged review source could be rejected after supervisor ownership changed.
+  Now: an explicit no-delivery close by a registered supervisor can prove the
+  original source is empty without creating a branch or changing its audit
+  record. Reachable task commits still refuse close, with their SHAs and refs.
+
+### Fixed — Factory daemon
+
+- **A slow delivery read no longer backs up the daemon** — Was: when the
+  supervisor delivery read ran longer than its 30-second wait, every later
+  pass queued another one behind it, about twenty in ten minutes, and
+  messages to the supervisor waited behind them. Now: a new request replaces
+  the one already waiting, so at most one waits behind a running read.
+- **In-place upgrade works on a busy daemon** — Was: `cas factory reexec`
+  refused whenever any background job was queued or running, so a
+  backlogged daemon could never load the fix. Now: replaceable reads, including a
+  slow running delivery read, no longer hold it; the new daemon reruns them,
+  and reexec still waits for durable work.
+- **The progress watchdog no longer holds the store writer while it scans** — Was:
+  every watchdog sample listed all tasks and ran git while holding the daemon's
+  single store writer, up to 8 s at a time, so Commander sends and other writes
+  waited behind it. Now: the scan runs on the external lane, and only the
+  watchdog's notices and wake edges take the writer.
+
+### Added — Factory
+
+- **Supervisors stay reachable during long commands** — Was: a supervisor could sit in a foreground Cargo build, release script, npm/pnpm test or build, sleep loop or ssh wait for minutes, and operator and Commander messages waited until it returned. Now: the supervisor's Bash hook refuses such a call unless it runs with `run_in_background: true`, and names the remedy: run it in the background or delegate it to a worker. Calls with an explicit timeout above 60 seconds count as long; short commands pass untouched.
+
 ## [4.44.0] - 2026-11-20
 
 ### Fixed — Factory supervisor

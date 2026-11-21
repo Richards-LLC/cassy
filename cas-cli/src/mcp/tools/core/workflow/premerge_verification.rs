@@ -1112,10 +1112,13 @@ impl CasCore {
             }
             Some("hold_escalate")
         } else { None };
-        let action = match rejection {
-            Some(_) => "Hold this unpublished delivery for the supervisor. Automatic repair is unavailable: findings are behavioural or incomplete, the worker is unavailable, or the repair round is exhausted. Unrelated deliveries may continue.",
-            None if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; an unchanged candidate reuses this verdict. Changed delivery code or review context requires a new review. No worker close retry is needed.",
-            _ => "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue.",
+        let class_gap = rejection.and_then(|_|
+            crate::mcp::tools::core::task::repair_class::class_audit_gap(&self.cas_root, &task.id));
+        let action = match (rejection, class_gap) {
+            (Some(_), Some(gap)) => format!("Hold this unpublished delivery for the supervisor. Automatic repair is unavailable: {gap} Unrelated deliveries may continue."),
+            (Some(_), None) => "Hold this unpublished delivery for the supervisor. Automatic repair is unavailable: findings are behavioural or incomplete, the worker is unavailable, or the repair round is exhausted. Unrelated deliveries may continue.".into(),
+            (None, _) if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; an unchanged candidate reuses this verdict. Changed delivery code or review context requires a new review. No worker close retry is needed.".into(),
+            _ => "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue.".into(),
         };
         crate::supervisor_notices::enqueue_with_context(
             &self.cas_root,
@@ -1153,6 +1156,11 @@ impl CasCore {
                 return Ok(Some("\nThe automatic repair was already returned to the assigned worker.".into()));
             }
             if receipt.repair_cycle == task.deliverables.delivery_cycle { return Ok(None); }
+        }
+        // cas-fd7b: recorded failing tests need a class audit, which only the
+        // supervisor's request_changes can name; the hold notice says so.
+        if crate::mcp::tools::core::task::repair_class::class_audit_gap(&self.cas_root, &task.id).is_some() {
+            return Ok(None);
         }
         let eligible = verdict.is_some_and(|row| row.status == VerificationStatus::Rejected
             && row.issues.iter().any(|issue| issue.severity == IssueSeverity::Blocking)
@@ -2251,6 +2259,9 @@ mod tests {
             ("empty", vec![], false),
             ("unavailable", vec![simplicity.clone()], false),
             ("blocked", vec![simplicity.clone()], false),
+            // cas-fd7b: recorded failing tests with no class audit hold for the
+            // supervisor even on an otherwise eligible paperwork finding.
+            ("failing_tests", vec![simplicity.clone()], false),
         ];
         // Only explicit proof, paperwork, documentation and simplicity
         // categories qualify. Runtime validation and duplication are ambiguous.
@@ -2298,6 +2309,9 @@ mod tests {
                 task.deliverables.work_target = task.deliverables.factory_branch_start.as_ref().map(|start| start.work_target.clone());
             }
             core.open_task_store().unwrap().add(&task).unwrap();
+            if name == "failing_tests" {
+                crate::mcp::tools::core::task::repair_class::record_failing_tests(&root, &task.id, &["ui::list::sorts".into()]);
+            }
             let candidate = core.build_verification_candidate_sync(&task, repo, "factory/w", "main",
                 context_digest(&root, &task).unwrap(), None).unwrap();
             let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
@@ -2394,6 +2408,7 @@ mod tests {
             assert_eq!(notices.len(), 1, "{name}");
             let payload: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
             assert_eq!(payload["context"]["rejection_action"], "hold_escalate", "{name}");
+            assert_eq!(notices[0].payload.contains("CLASS_AUDIT_REQUIRED"), name == "failing_tests", "{name}");
         }
     }
 

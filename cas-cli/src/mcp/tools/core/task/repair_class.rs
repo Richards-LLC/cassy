@@ -76,6 +76,14 @@ pub(crate) fn require_class(store: &dyn TaskStore, task_id: &str, offered: Optio
     }
 }
 
+/// The CLASS_AUDIT_REQUIRED refusal a repair of this task would meet with no
+/// class offered, or `None` when no failing tests are recorded or a recorded
+/// class covers them. An unreadable store reads as no gap, as `require_class`.
+pub(crate) fn class_audit_gap(root: &Path, task_id: &str) -> Option<String> {
+    let store = crate::store::open_task_store(root).ok()?;
+    require_class(store.as_ref(), task_id, None).err()
+}
+
 /// Whether passing receipts at the tip (given as their filters) run every
 /// operand of the class. Uses the capped runner's own filter matcher, probed
 /// with names the operand selects, so exact `test(=name)` and substring

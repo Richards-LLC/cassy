@@ -1153,7 +1153,7 @@ impl GhCiTransport {
         let mut names = Vec::new();
         for artifact in response.artifacts.into_iter().filter(|artifact| {
             !artifact.expired && artifact.size_in_bytes <= 64 * 1024 * 1024
-                && artifact.name.strip_prefix(&prefix).is_some_and(|suffix|
+                && artifact.name.strip_prefix(prefix.as_str()).is_some_and(|suffix|
                     suffix == "own" || suffix.strip_prefix("ring-")
                         .is_some_and(|shard| shard.parse::<u32>().is_ok()))
         }).take(8) {
@@ -1521,6 +1521,8 @@ pub(crate) fn read_github(
             Err(error) => tracing::debug!(run = failure.run_id, %error, "lane class-audit evidence unavailable"),
         }
     }
+    // Parked branches augment evidence collection, not the caller's relay scope.
+    let failures = failures.into_iter().filter(|failure| watched_branches.contains(&failure.branch)).collect();
     let mut queue_poll = collect_tracked_merge_queue_ejections(
         &transport,
         &deliveries,

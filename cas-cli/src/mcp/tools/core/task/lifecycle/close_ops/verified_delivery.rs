@@ -269,6 +269,33 @@ impl ReviewedDelivery {
                     .is_ok_and(|receipt| receipt.is_some()))
     }
 
+    /// cas-6c33 (GH2254, GH2280): an older dispatch bound the closer's own
+    /// checkout HEAD. When that head is off the target and none of its
+    /// unlanded commits is this task's, the verdict reviewed no part of this
+    /// delivery: it can neither authorize close nor demand that head merge.
+    pub(super) fn bound_foreign_head(&self, repo: &std::path::Path, task: &Task, target: &str) -> bool {
+        if self.candidate.is_some() || self.repository.peer_premerge.is_some() {
+            return false;
+        }
+        let reference = if !origin_remote_configured(repo) {
+            target.to_string()
+        } else {
+            preferred_live_target_ref_for_delivery(repo, target, task.delivery_mode).0
+        };
+        let head = &self.repository.head_commit;
+        if git_commit_is_ancestor(repo, head, &reference) {
+            return false;
+        }
+        let Ok(unlanded) = git_stdout_lines(
+            repo, &["rev-list", "--max-count=500", &format!("{reference}..{head}"), "--"],
+        ) else {
+            return false;
+        };
+        let identity = task_commit_identity(task, None);
+        !unlanded.is_empty()
+            && !unlanded.iter().any(|commit| commit_is_task_attributable(repo, commit, &identity))
+    }
+
     pub(super) fn merge_refusal(
         &self,
         repo: &std::path::Path,

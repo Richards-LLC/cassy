@@ -1734,7 +1734,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
         run_git(&["merge", "--no-ff", &fixture.receipt.source_branch, "-m", "local delivery awaiting publication"], &fixture.repo.root);
     }
     let origin = fixture.repo.root.join(".git/test-origin.git");
-    let remote_before = git_stdout(&origin, &["rev-parse", "refs/heads/main"]);
+    let remote_before = locally_merged.then(|| git_stdout(&origin, &["rev-parse", "refs/heads/main"]));
     // A concurrent actor commits on the reviewed target after approval.
     std::fs::write(fixture.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();
     run_git(&["add", "concurrent.txt"], &fixture.repo.root);
@@ -1750,7 +1750,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
 
     if locally_merged {
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), drifted);
-        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]), remote_before);
+        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]), remote_before.unwrap());
         assert_no_delivery_projection(&fixture, delivery_state(&fixture));
         continue;
     }

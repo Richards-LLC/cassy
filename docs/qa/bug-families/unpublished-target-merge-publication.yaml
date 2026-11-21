@@ -1,0 +1,10 @@
+title: Delivery merge preserves unpublished target history
+statement: >-
+  An unrelated local-ahead target commit cannot silently ride out with a worker
+  delivery. Refusal names local-only commits and fetched origin, preserving
+  local/remote target and source. Equal and behind ordinary targets still
+  merge; transactional execution and local-merge reconciliation cannot publish
+  unrelated target work.
+tasks: [cas-76da]
+journeys: []
+invariants: []

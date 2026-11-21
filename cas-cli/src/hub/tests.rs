@@ -6664,3 +6664,108 @@ async fn preview_origin_reads_but_every_mutation_class_is_refused_until_its_wind
     assert_eq!(auth.live_previews(now).unwrap().iter().map(|window| (window.origin.as_str(), window.task.as_deref())).collect::<Vec<_>>(), [(preview, Some("cas-93d1"))]);
     assert!(auth.live_previews(after).unwrap().is_empty());
 }
+
+/// cas-b521: Commander reads a command's retained receipt after its daemon is gone.
+mod retained_command_receipts {
+    use super::*;
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    use crate::store::supervisor_commands::{Write, write};
+
+    struct Device { signing: SigningKey, credential: String, id: String }
+    struct Fixture { _env: crate::test_support::TestEnvGuard, _hub: tempfile::TempDir, app: axum::Router, root: std::path::PathBuf, project: std::path::PathBuf, devices: [Device; 2] }
+
+    fn fixture() -> Fixture {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let hub = private_tempdir();
+        let auth = AuthStore::open(hub.path().join("hub"), "machine-test").unwrap();
+        let devices = [0, 1].map(|_| {
+            let signing = SigningKey::random(&mut OsRng);
+            let invitation = auth.mint_pairing("https://controller.example", Scope::default_read_only(), Utc::now()).unwrap();
+            let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", Scope::default_read_only());
+            exchange.public_key_jwk = public_jwk(&signing);
+            let paired = auth.exchange_pairing(exchange, Utc::now()).unwrap();
+            Device { signing, credential: paired.credential, id: paired.device_id }
+        });
+        let events = MachineEventBus::new(16);
+        let app = router(HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![])), Arc::new(PreAuthAuthorizer),
+            MachineIdentity { id: "machine-test".into() }, DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+        ).with_auth(auth));
+        Fixture { _env: env, _hub: hub, app, root, project, devices }
+    }
+
+    /// Record one birth of `name`. An orderly teardown keeps its end receipt
+    /// and unlinks metadata while its PID still runs; a crash leaves metadata.
+    fn birth(f: &Fixture, name: &str, pid: u32, starttime: Option<u64>, ended: bool) -> serde_json::Value {
+        let manager = SessionManager::new();
+        let mut metadata = crate::ui::factory::create_metadata(name, pid, "lead", &[], None, f.project.to_str(), None);
+        metadata.daemon_pid_starttime = starttime;
+        manager.save_daemon_metadata(metadata, &f.root).unwrap();
+        if ended {
+            manager.record_ended(name, crate::ui::factory::SessionEndOutcome {
+                at: Utc::now().to_rfc3339(), reason: "prompt_input_exit".into(), workers_stopped: vec![],
+                worker_states: vec![], orphans: vec![], unverified: vec![],
+            }).unwrap();
+            manager.remove_metadata(name).unwrap();
+        }
+        serde_json::json!({"daemon_pid": pid, "daemon_pid_starttime": starttime})
+    }
+
+    fn command(f: &Fixture, name: &str, client_ref: &str, phase: &str, birth: serde_json::Value) {
+        let row = serde_json::json!({"receipt":{"device_id":f.devices[0].id,"client_ref":client_ref,"command":"compact","phase":phase,"detail":"stored","output":"","interactive":false},
+            "at":Utc::now(),"before":"","before_command":"","reload_before":null,"birth":birth});
+        assert!(write(&f.root, name, "lead", &row, Write::Reserve).unwrap());
+    }
+
+    async fn get(f: &Fixture, device: usize, path: &str) -> (StatusCode, serde_json::Value) {
+        let device = &f.devices[device];
+        let request = Request::get(path)
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", device.credential))
+            .header("dpop", sign_dpop(&device.signing, &device.credential, "GET", path, Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .body(Body::empty()).unwrap();
+        let response = f.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 65536).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn orderly_exit_shows_refused_while_the_daemon_pid_is_alive() {
+        let f = fixture();
+        let pid = std::process::id();
+        let birth = birth(&f, "orderly", pid, crate::mcp::daemon::read_pid_starttime(pid), true);
+        command(&f, "orderly", "cmd-abandoned", "refused", birth);
+        let before = std::fs::read(f.root.join("cas.db")).unwrap();
+        let (status, receipt) = get(&f, 0, "/v1/sessions/orderly/commands/cmd-abandoned").await;
+        assert_eq!((status, receipt["phase"].as_str()), (StatusCode::OK, Some("refused")));
+        assert_eq!(std::fs::read(f.root.join("cas.db")).unwrap(), before, "the reader never writes the project store");
+    }
+
+    #[tokio::test]
+    async fn crashed_daemon_queued_command_of_its_birth_shows_not_sent() {
+        let f = fixture();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let pid = gone.id();
+        gone.wait().unwrap();
+        let birth = birth(&f, "crashed", pid, Some(42), false);
+        command(&f, "crashed", "cmd-queued", "queued", birth);
+        let (status, receipt) = get(&f, 0, "/v1/sessions/crashed/commands/cmd-queued").await;
+        assert_eq!((status, receipt["phase"].as_str()), (StatusCode::OK, Some("refused")));
+    }
+
+    #[tokio::test]
+    async fn other_device_gets_not_found_and_a_live_queued_command_is_a_conflict() {
+        let f = fixture();
+        let pid = std::process::id();
+        let birth = birth(&f, "live", pid, crate::mcp::daemon::read_pid_starttime(pid), false);
+        command(&f, "live", "cmd-queued", "queued", birth);
+        let path = "/v1/sessions/live/commands/cmd-queued";
+        assert_eq!(get(&f, 1, path).await, (StatusCode::NOT_FOUND, serde_json::json!({"error":"not_found"})));
+        assert_eq!(get(&f, 0, path).await.0, StatusCode::CONFLICT);
+    }
+}

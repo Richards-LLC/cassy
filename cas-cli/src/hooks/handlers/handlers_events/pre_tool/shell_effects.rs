@@ -172,99 +172,88 @@ fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Where a byte of a script sits, for [`numeric_locals`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Lexeme {
-    /// Shell code, including `$(...)` opened inside double quotes.
-    Code,
-    /// Text inside double quotes, where only expansions are live.
-    Double,
-    /// Inert text: single-quoted text, escaped characters and quote marks.
-    Literal,
+/// Arithmetic source this proof trusts: digits, names, operators and the
+/// `$`/`${}` of a name read. Anything else (quotes, escapes, a substitution,
+/// a statement break) leaves the text unproven.
+fn arithmetic_text(text: &str) -> bool {
+    text.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b' ' || ch == b'\t'
+        || b"()+-*/%<>=!&|^~?:,${}".contains(&ch))
 }
 
-/// Classify every byte of `source` (heredoc bodies already projected out) by
-/// Bash's quoting rules: a backslash quotes the next character (manual
-/// 3.1.2.1), single quotes preserve every character up to the next single
-/// quote (3.1.2.2), and double quotes keep text literal except `$`, backtick
-/// and backslash (3.1.2.3), where `$(` opens code again. `None` for a script
-/// using what this map does not model, so no counter is proved: a comment
-/// (3.1.3), ANSI-C `$'...'` quoting (3.1.2.4) or a backslash-newline line
-/// continuation, which Bash removes before splitting words.
-fn lexeme_map(source: &str) -> Option<Vec<Lexeme>> {
-    let bytes = source.as_bytes();
-    if source.contains("\\\n") || source.contains("$'") {
+/// The value assigned after a name inside arithmetic text, from `after`
+/// (`=`, `+=`, `<<=` and the rest; never `==`), or `None` for a read.
+fn arithmetic_assigned_value(text: &str, after: usize) -> Option<&str> {
+    let rest = text[after..].trim_start();
+    let at = text.len() - rest.len();
+    let bytes = rest.as_bytes();
+    let operator = if rest.starts_with("<<=") || rest.starts_with(">>=") {
+        3
+    } else if bytes.first() == Some(&b'=') && bytes.get(1) != Some(&b'=') {
+        1
+    } else if bytes.first().is_some_and(|ch| b"+-*/%&^|".contains(ch)) && bytes.get(1) == Some(&b'=') {
+        2
+    } else {
         return None;
+    };
+    Some(&text[at + operator..])
+}
+
+/// Identifier-bounded offsets of `name` in `text`.
+fn name_offsets(text: &str, name: &str) -> Vec<usize> {
+    let ident = |ch: u8| ch.is_ascii_alphanumeric() || ch == b'_';
+    let bytes = text.as_bytes();
+    text.match_indices(name).map(|(at, _)| at).filter(|&at| {
+        (at == 0 || !ident(bytes[at - 1])) && bytes.get(at + name.len()).is_none_or(|ch| !ident(*ch))
+    }).collect()
+}
+
+/// `$((...))` spans in one word, as the range of their inner text.
+fn word_arithmetic_spans(word: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = word.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while let Some(found) = word[at..].find("$((") {
+        let open = at + found + 3;
+        let mut depth = 2usize;
+        let close = (open..bytes.len()).find(|&index| {
+            match bytes[index] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            depth == 0
+        });
+        let Some(close) = close else { break };
+        spans.push(open..close - 1);
+        at = close + 1;
     }
-    let mut map = vec![Lexeme::Literal; bytes.len()];
-    // Open contexts: `true` is a double-quoted string, `false` a parenthesis
-    // of code nested inside one.
-    let mut stack: Vec<bool> = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let ch = bytes[index];
-        if stack.last() == Some(&true) {
-            match ch {
-                b'\\' => index += 2,
-                b'"' => {
-                    stack.pop();
-                    index += 1;
-                }
-                b'$' if bytes.get(index + 1) == Some(&b'(') => {
-                    map[index] = Lexeme::Code;
-                    map[index + 1] = Lexeme::Code;
-                    stack.push(false);
-                    index += 2;
-                }
-                _ => {
-                    map[index] = Lexeme::Double;
-                    index += 1;
-                }
-            }
-            continue;
-        }
-        match ch {
-            b'\\' => index += 2,
-            b'\'' => index = source[index + 1..].find('\'').map_or(bytes.len(), |end| index + end + 2),
-            b'"' => {
-                stack.push(true);
-                index += 1;
-            }
-            // Any `#` that could start a comment (a word's first character).
-            b'#' if index == 0 || !bytes[index - 1].is_ascii_alphanumeric() && !b"$_{".contains(&bytes[index - 1]) => {
-                return None;
-            }
-            _ => {
-                map[index] = Lexeme::Code;
-                if ch == b'(' && !stack.is_empty() {
-                    stack.push(false);
-                } else if ch == b')' && stack.last() == Some(&false) {
-                    stack.pop();
-                }
-                index += 1;
-            }
-        }
-    }
-    Some(map)
+    spans
 }
 
 /// Shell-local names a script keeps numeric, so arithmetic over them cannot
-/// evaluate injected source (GH #1866). A name qualifies only when its first
-/// occurrence is a literal-integer assignment statement of its own that runs
-/// unconditionally (no control construct, pipe, group or substitution before
-/// it; not an argument or a prefix assignment), and every later occurrence is
-/// another such statement assigning an integer or `$((...))`, a plain
-/// `$name`/`${name}` read, or an operand inside an arithmetic span. Any other
-/// use (`read`, `for name in`, `declare`, `${name:=...}`, quoted text, ...)
-/// disqualifies it.
+/// evaluate injected source (GH #1866). Every fact comes from
+/// [`factory_shell_lex`] tokens, never raw text, and a script the lexer cannot
+/// resolve proves nothing.
+///
+/// A name qualifies when its first occurrence is a standalone assignment
+/// statement of a decimal literal that runs unconditionally, and every later
+/// occurrence is one of: a standalone assignment of a decimal literal or of
+/// exactly one `$((...))` over numeric names; a `$name`/`${name}` read; or an
+/// operand inside trusted arithmetic (`$((...))` in a word, or a `((...))`
+/// command), where an assignment's value must again be arithmetic over
+/// numeric names. A standalone assignment is one plain (unquoted, unescaped)
+/// word forming its own statement, after the start, a `;`, a newline, `&&`,
+/// `||`, or a statement-leading `then`, `do`, `else` or `{`. Any other
+/// occurrence (an argument, a prefix assignment, `read`, `for name in`,
+/// `${name:=...}`, `name+=`, ...) disqualifies the name.
 fn numeric_locals(source: &str) -> HashSet<String> {
-    // A builtin can assign a name spelled through quoting (`printf -v "mis"sing`)
-    // or a computed command can be one; then no textual proof holds.
     let lexed = factory_shell_lex(source, false, 0);
     if lexed.unresolved_at.is_some() {
         return HashSet::new();
     }
-    let assigning = shell_statements_from_tokens(lexed.tokens).iter().any(|words| {
+    // A builtin can assign a name spelled through quoting (`printf -v "mis"sing`)
+    // or a computed command can be one; then no occurrence proof holds.
+    let assigning = shell_statements_from_tokens(lexed.tokens.clone()).iter().any(|words| {
         let mut words = words.iter().map(String::as_str).skip_while(|word| {
             matches!(*word, "!" | "{" | "}" | "if" | "then" | "elif" | "else" | "fi" | "do" | "done"
                 | "while" | "until" | "for" | "select" | "case" | "esac" | "in" | "time" | "function")
@@ -280,121 +269,112 @@ fn numeric_locals(source: &str) -> HashSet<String> {
     if assigning {
         return HashSet::new();
     }
+    let ShellLexed { tokens, literals, ends, .. } = lexed;
     let bytes = source.as_bytes();
-    let ident = |ch: u8| ch.is_ascii_alphanumeric() || ch == b'_';
-    let Some(lexemes) = lexeme_map(source) else {
-        return HashSet::new();
+    let word = |index: usize| match tokens.get(index) {
+        Some(ShellToken::Word(word)) => Some(word.as_str()),
+        _ => None,
     };
-    let code = |position: usize| lexemes.get(position) == Some(&Lexeme::Code);
-    // Spans inside `((...))` and `$((...))`, which the arithmetic checks validate.
-    // Quoted, escaped or commented parens are text, never part of a span.
-    let mut arithmetic = Vec::new();
-    let mut at = 0;
-    while let Some(found) = source[at..].find("((") {
-        let open = at + found;
-        if !code(open) || !code(open + 1) {
-            at = open + 1;
+    // Spelled exactly as in the source, starting at a token boundary: the
+    // lexer removed no quote, escape or line continuation from it.
+    let plain = |index: usize| word(index).is_some_and(|text| {
+        let end = ends[index];
+        end >= text.len() && source.get(end - text.len()..end) == Some(text)
+            && (end == text.len() || b" \t\n;&|()<>".contains(&bytes[end - text.len() - 1]))
+    });
+    let operator_char = |index: usize| bytes[ends[index] - 1];
+    // A run of operators that only separates sequential statements: one `;`
+    // or newlines, or `&&`/`||` (optionally followed by newlines).
+    let separator = |run: std::ops::Range<usize>| {
+        let chars: Vec<u8> = run.clone().map(operator_char).collect();
+        let breaks = |chars: &[u8]| chars.iter().all(|ch| matches!(ch, b'\n' | b'\r'));
+        match chars.as_slice() {
+            [b'&', b'&', rest @ ..] | [b'|', b'|', rest @ ..] => {
+                ends[run.start + 1] == ends[run.start] + 1 && breaks(rest)
+            }
+            chars => chars.iter().all(|ch| matches!(ch, b';' | b'\n' | b'\r'))
+                && chars.iter().filter(|ch| **ch == b';').count() <= 1,
+        }
+    };
+    let run_before = |index: usize| {
+        let start = (0..index).rev().take_while(|&at| word(at).is_none()).last().unwrap_or(index);
+        start..index
+    };
+    let run_after = |index: usize| {
+        let end = (index + 1..tokens.len()).take_while(|&at| word(at).is_none()).last().map_or(index + 1, |at| at + 1);
+        index + 1..end
+    };
+    let statement_start = |index: usize| index == 0 || {
+        let run = run_before(index);
+        !run.is_empty() && separator(run)
+    };
+    let standalone = |index: usize| {
+        plain(index)
+            && (statement_start(index)
+                || (index > 0 && plain(index - 1) && matches!(word(index - 1), Some("then" | "do" | "else" | "{"))
+                    && statement_start(index - 1)))
+            && (index + 1 == tokens.len() || {
+                let run = run_after(index);
+                !run.is_empty() && separator(run)
+            })
+    };
+    // Before a counter's first assignment: only plain sequential commands.
+    let unconditional = |index: usize| (0..index).all(|at| match word(at) {
+        Some(text) => literals[at] && !matches!(text, "if" | "then" | "elif" | "else" | "fi" | "while" | "until"
+            | "for" | "do" | "done" | "case" | "esac" | "select" | "function" | "{" | "}" | "!" | "time" | "coproc"),
+        None => matches!(operator_char(at), b';' | b'\n' | b'\r'),
+    });
+    // `((...))` commands: two adjacent `(` tokens closed by two adjacent `)`
+    // at the same depth. Trusted only when every word between them is plain
+    // and their source is arithmetic text.
+    let mut groups: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    let mut index = 0;
+    while index + 1 < tokens.len() {
+        let paren = |at: usize, ch: char| tokens.get(at) == Some(&ShellToken::Operator(ch));
+        if !(paren(index, '(') && paren(index + 1, '(') && ends[index + 1] == ends[index] + 1) {
+            index += 1;
             continue;
         }
         let mut depth = 0usize;
         let mut close = None;
-        for (offset, &ch) in bytes.iter().enumerate().skip(open) {
-            if !code(offset) {
-                continue;
-            }
-            match ch {
-                b'(' => depth += 1,
-                b')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(offset);
-                        break;
-                    }
+        for at in index + 2..tokens.len() {
+            if paren(at, '(') {
+                depth += 1;
+            } else if paren(at, ')') && depth > 0 {
+                depth -= 1;
+            } else if paren(at, ')') {
+                if paren(at + 1, ')') && ends[at + 1] == ends[at] + 1 {
+                    close = Some(at);
                 }
-                _ => {}
+                break;
             }
         }
         let Some(close) = close else { break };
-        // A span holding anything but arithmetic (quotes, a statement break,
-        // a substitution) is not trusted to keep a counter numeric.
-        if !source[open..=close].bytes().all(|ch| ident(ch) || ch == b' ' || ch == b'\t'
-            || b"()+-*/%<>=!&|^~?:,${}".contains(&ch))
-        {
-            at = open + 1;
-            continue;
-        }
-        arithmetic.push(open..close);
-        at = close;
+        let text = &source[ends[index + 1]..ends[close] - 1];
+        let trusted = (index + 2..close).all(|at| word(at).is_none() || plain(at)) && arithmetic_text(text);
+        groups.push((index + 2..close, trusted));
+        index = close + 2;
     }
-    let in_arithmetic = |position: usize| arithmetic.iter().any(|span| span.contains(&position));
-    // The value of an assignment starting at `value`: an integer or one `$((...))`.
-    let numeric_value = |value: usize| -> Option<usize> {
-        let digits = bytes[value..].iter().take_while(|ch| ch.is_ascii_digit()).count();
-        if digits > 0 {
-            return Some(value + digits);
-        }
-        let span = arithmetic.iter().find(|span| span.start == value + 1 && bytes.get(value) == Some(&b'$'))?;
-        Some(span.end + 1)
-    };
-    let ends_word = |position: usize| bytes.get(position).is_none_or(|ch| b" \t\n;&|)".contains(ch));
-    let unconditional = |prefix: &str| {
-        !prefix.contains(['|', '&', '(', '{', '`', '$', '<', '>'])
-            && !prefix.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|word| matches!(word,
-                "if" | "then" | "elif" | "else" | "while" | "until" | "for" | "do" | "case" | "select" | "function"))
-    };
     let mut candidates: Vec<&str> = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if ident(bytes[index]) && (index == 0 || !ident(bytes[index - 1])) {
-            let end = index + bytes[index..].iter().take_while(|ch| ident(**ch)).count();
-            let name = &source[index..end];
-            if bytes.get(end) == Some(&b'=') && is_shell_variable_name(name) && !candidates.contains(&name) {
-                candidates.push(name);
-            }
-            index = end;
-        } else {
-            index += 1;
+    for at in 0..tokens.len() {
+        let Some((name, value)) = word(at).and_then(|text| text.split_once('=')) else { continue };
+        if is_shell_variable_name(name) && !value.is_empty() && value.bytes().all(|ch| ch.is_ascii_digit())
+            && standalone(at) && unconditional(at) && !candidates.contains(&name)
+        {
+            candidates.push(name);
         }
     }
-    // Arithmetic source that may only be digits, operators and names; the
-    // names must themselves be numeric locals (checked once all are known).
-    let arithmetic_source = |text: &str| -> Option<String> {
-        text.bytes().all(|ch| ident(ch) || ch.is_ascii_whitespace() || b"()+-*/%<>=!&|^~?:,${}".contains(&ch))
-            .then(|| text.to_string())
-    };
-    // An assignment operator after a name inside arithmetic: its end, if any.
-    let arithmetic_assignment = |after: usize| -> Option<usize> {
-        let at = after + bytes[after..].iter().take_while(|ch| ch.is_ascii_whitespace()).count();
-        let rest = &bytes[at..];
-        if rest.starts_with(b"<<=") || rest.starts_with(b">>=") {
-            Some(at + 3)
-        } else if rest.first() == Some(&b'=') && rest.get(1) != Some(&b'=') {
-            Some(at + 1)
-        } else if rest.first().is_some_and(|ch| b"+-*/%&^|".contains(ch)) && rest.get(1) == Some(&b'=') {
-            Some(at + 2)
-        } else {
-            None
+    // An arithmetic occurrence: a read, or an assignment whose value is
+    // arithmetic text (its names are checked once all are known).
+    let arithmetic_use = |text: &str, offset: usize, name: &str, sources: &mut Vec<String>| {
+        match arithmetic_assigned_value(text, offset + name.len()) {
+            Some(value) if arithmetic_text(value) => {
+                sources.push(value.to_string());
+                true
+            }
+            Some(_) => false,
+            None => true,
         }
-    };
-    // A counter's origin and every reassignment must be an assignment
-    // statement of its own, at command position: never an argument
-    // (`echo n=0`), a prefix assignment for one command (`n=0 true`), a
-    // background or pipeline element, or a value inherited from outside.
-    let command_position = |prefix: &str| {
-        let prefix = prefix.trim_end_matches([' ', '\t']);
-        prefix.is_empty()
-            || (prefix.ends_with([';', '\n', '{']) && !prefix.ends_with(";;"))
-            || prefix.ends_with("&&")
-            || prefix.ends_with("||")
-            || prefix.rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').next()
-                .is_some_and(|word| matches!(word, "then" | "do" | "else"))
-    };
-    let statement_ends = |at: usize| {
-        let rest = source[at..].trim_start_matches([' ', '\t']);
-        rest.is_empty()
-            || (rest.starts_with([';', '\n']) && !rest.starts_with(";&"))
-            || rest.starts_with("&&")
-            || rest.starts_with("||")
     };
     let mut names = HashSet::new();
     let mut sources: Vec<(&str, String)> = Vec::new();
@@ -402,51 +382,53 @@ fn numeric_locals(source: &str) -> HashSet<String> {
         let mut name_sources = Vec::new();
         let mut first = true;
         let mut keeps_numeric = true;
-        let mut from = 0;
-        while let Some(found) = source[from..].find(name) {
-            let start = from + found;
-            let end = start + name.len();
-            from = end;
-            if (start > 0 && ident(bytes[start - 1])) || bytes.get(end).is_some_and(|ch| ident(*ch)) {
+        'tokens: for at in 0..tokens.len() {
+            if let Some((span, true)) = groups.iter().find(|(span, _)| span.start == at) {
+                let text = &source[ends[span.start - 1]..ends[span.end] - 1];
+                for offset in name_offsets(text, name) {
+                    if first || !arithmetic_use(text, offset, name, &mut name_sources) {
+                        keeps_numeric = false;
+                        break 'tokens;
+                    }
+                }
+            }
+            if groups.iter().any(|(span, trusted)| *trusted && span.contains(&at)) {
                 continue;
             }
-            let before = &source[..start];
-            let assignment_head = before.is_empty()
-                || before.ends_with([' ', '\t', '\n', ';', '&', '|', '(']);
-            let assigns = bytes.get(end) == Some(&b'=') && bytes.get(end + 1) != Some(&b'=') && assignment_head;
-            // Outside shell code only a double-quoted `$name`/`${name}` read is inert.
-            let use_ok = if !code(start) {
-                !first && lexemes[start] == Lexeme::Double
-                    && (before.ends_with('$') || (before.ends_with("${") && bytes.get(end) == Some(&b'}')))
-            } else if first {
-                assigns && unconditional(before) && command_position(before)
-                    && bytes[end + 1..].first().is_some_and(u8::is_ascii_digit)
-                    && numeric_value(end + 1).is_some_and(|value_end| ends_word(value_end) && statement_ends(value_end))
-            } else if let Some(span) = arithmetic.iter().find(|span| span.contains(&start)) {
-                // An assignment inside arithmetic keeps the name numeric only
-                // when its value is arithmetic over numeric locals.
-                match arithmetic_assignment(end) {
-                    Some(value) => arithmetic_source(&source[value.min(span.end)..span.end])
-                        .map(|text| name_sources.push(text)).is_some(),
-                    None => true,
+            let Some(text) = word(at) else { continue };
+            let spans = word_arithmetic_spans(text);
+            for offset in name_offsets(text, name) {
+                let after = &text[offset + name.len()..];
+                let ok = if offset == 0 && after.starts_with('=') && standalone(at) {
+                    let value = &after[1..];
+                    if !value.is_empty() && value.bytes().all(|ch| ch.is_ascii_digit()) {
+                        !first || unconditional(at)
+                    } else {
+                        // Exactly one `$((...))` spanning the whole value.
+                        let inner = name.len() + 4..text.len() - 2;
+                        let whole = value.starts_with("$((") && spans.first() == Some(&inner) && spans.len() == 1;
+                        if whole && !first && arithmetic_text(&text[inner.clone()]) {
+                            name_sources.push(text[inner].to_string());
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                } else if first {
+                    false
+                } else if let Some(span) = spans.iter().find(|span| span.contains(&offset)) {
+                    let inner = &text[span.clone()];
+                    arithmetic_text(inner) && arithmetic_use(inner, offset - span.start, name, &mut name_sources)
+                } else {
+                    let before = &text[..offset];
+                    (before.ends_with('$') && !before.ends_with("$$"))
+                        || (before.ends_with("${") && after.starts_with('}'))
+                };
+                first = false;
+                if !ok {
+                    keeps_numeric = false;
+                    break 'tokens;
                 }
-            } else if assigns {
-                command_position(before)
-                    && numeric_value(end + 1).is_some_and(|value_end| ends_word(value_end) && statement_ends(value_end))
-                    && arithmetic.iter().find(|span| span.start == end + 2)
-                        .is_none_or(|span| arithmetic_source(&source[span.start + 2..span.end])
-                            .map(|text| name_sources.push(text)).is_some())
-            } else if before.ends_with('$') {
-                true
-            } else if before.ends_with("${") {
-                bytes.get(end) == Some(&b'}')
-            } else {
-                in_arithmetic(start)
-            };
-            first = false;
-            if !use_ok {
-                keeps_numeric = false;
-                break;
             }
         }
         if keeps_numeric && !first {

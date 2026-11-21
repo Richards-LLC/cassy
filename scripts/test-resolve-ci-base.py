@@ -214,6 +214,22 @@ class LaneBaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f'{self.epic}\trefs/heads/epic/live', self.git('ls-remote', '--heads', 'origin'))
 
+        # Later main progress does not authorize pruning beyond the released SHA.
+        self.git('push', '-q', 'origin', f'{self.epic}:refs/heads/main',
+                 f'{self.main}:refs/heads/epic/raced')
+        # Advance an eligible remote branch after fetch, just before deletion.
+        hook = self.repo / '.git' / 'hooks' / 'pre-push'
+        hook.write_text(f'#!/bin/sh\ngit --git-dir={shlex.quote(str(remote))} update-ref '
+                        f'refs/heads/epic/raced {self.epic} {self.main}\n')
+        hook.chmod(0o755)
+        result = subprocess.run(['bash', str(ROOT / 'scripts/cleanup-merged-epics.sh'),
+                                 self.main, 'origin/main'], cwd=self.repo,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        refs = self.git('ls-remote', '--heads', 'origin')
+        for branch in ('live', 'raced'):
+            self.assertIn(f'{self.epic}\trefs/heads/epic/{branch}', refs)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,6 @@
+title: Merged epic refs do not accumulate task-parent comparison work
+statement: Factory CI filters merged epic refs, bounds live-parent comparisons, and release publication safely prunes merged remote epic branches.
+tasks: [cas-066a3]
+fixed_by: [cas-066a3]
+journeys: [FACTORY-MERGE, CLI-RELEASE]
+invariants: [FACTORY-CI-BASE-BOUNDED, RELEASE-EPIC-CLEANUP-LEASE]

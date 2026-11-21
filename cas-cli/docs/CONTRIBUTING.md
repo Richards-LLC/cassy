@@ -845,6 +845,14 @@ OS sandbox (cas-3751a):
   `cas-mux` completes at launch with the checkout's exact git paths. While the
   sandbox enforces, the stage-A text guards record would-deny facts for Bash
   instead of refusing it (`cas gates report`, column `shadowed`).
+- **Grants (cas-f157):** besides the checkout, git paths, the capped runner's
+  `CAS_ROOT` directories and the operator's effective write roots, the profile
+  grants only the worker's current tasks' artifact directories
+  (`<artifacts_root>/<project-key>/<task-id>`) and the checkout's own scratch
+  (its private temporary directory and a relocated Cargo target). The settings
+  are regenerated at every spawn and recycle. Starting a task the running
+  profile does not grant queues one recycle of that worker, and a queue
+  boundary restarts a sandboxed worker before its successor starts.
 - **`off`:** workers launch without the sandbox, and those guards enforce.
 
 Linux workers and supervisors are not sandboxed. The corpus test

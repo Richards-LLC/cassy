@@ -191,6 +191,12 @@ pub(crate) fn changed_tests(
                 })
                 .collect();
         }
+        // GH #2221: tests generated from a changed JSON catalogue have no
+        // changed source line, so only a whole-spec run proves them.
+        let tip = String::from_utf8(show(repo, head, path)?.unwrap_or_default())?;
+        if let Some(data) = changed_data_import(repo, base, head, path, &tip)? {
+            bail!("{path} generates tests from changed {data}; a static selection would omit them");
+        }
         // A restored file has no delivered test change. Do not require
         // runtime identities for callbacks merely present in its final tree.
         if lines.is_empty() {
@@ -234,6 +240,31 @@ pub(crate) fn changed_tests(
         }
     }
     Ok(selected.into_iter().collect())
+}
+
+/// The changed JSON file this test source imports by relative path, if any.
+fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str) -> Result<Option<String>> {
+    let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
+    if changed.trim().is_empty() {
+        return Ok(None);
+    }
+    let changed: BTreeSet<&str> = changed.lines().collect();
+    let directory = Path::new(path).parent().unwrap_or(Path::new(""));
+    let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s]+\.json)["'`]"#)?;
+    for capture in literal.captures_iter(source) {
+        let mut resolved = PathBuf::new();
+        for part in directory.join(&capture[1]).components() {
+            match part {
+                Component::ParentDir => { resolved.pop(); }
+                Component::CurDir => {}
+                other => resolved.push(other),
+            }
+        }
+        if let Some(found) = resolved.to_str().filter(|found| changed.contains(found)) {
+            return Ok(Some(found.to_owned()));
+        }
+    }
+    Ok(None)
 }
 
 fn show(repo: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
@@ -2889,6 +2920,42 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
 
     /// GH #1977, #2000, #1971: park asks only for tests the task's own
     /// commits changed in the delivered tree.
+    /// GH #2221: a catalogue-driven spec whose JSON changed refuses static
+    /// selection, so the caller widens to the whole spec instead of omitting cases.
+    #[test]
+    fn changed_json_catalogue_refuses_static_selection_of_its_spec() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let spec = "src/__scenarios__/acceptance.spec.ts";
+        let write = |path: &str, body: &str| {
+            std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.path().join(path), body).unwrap();
+        };
+        let source = |metadata: &str| format!("import cases from './scenarios.json';\n\
+            it('the baseline lists only real scenario tests', () => {{ {metadata} }});\n\
+            for (const [channel, listed] of cases) {{ const test = listed ? it.failing : it; test(channel, async () => {{}}); }}\n");
+        git(&["init", "--quiet", "-b", "main"]);
+        write("src/__scenarios__/scenarios.json", "[[\"sms\", false]]");
+        write(spec, &source(""));
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        write("src/__scenarios__/scenarios.json", "[[\"sms\", false], [\"email\", true]]");
+        write(spec, &source("expect(1).toBe(1);"));
+        git(&["commit", "--quiet", "-am", "harness and catalogue"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let error = changed_tests(repo.path(), &base, &head, &[spec.into()], None).unwrap_err();
+        assert!(format!("{error:#}").contains("src/__scenarios__/scenarios.json"), "{error:#}");
+        assert_eq!(super::super::widened::scope(repo.path(), spec), super::super::widened::Scope::File(spec.into()));
+    }
+
     #[test]
     fn park_requires_only_tests_the_delivery_changed_at_its_tip() {
         let repo = tempfile::tempdir().unwrap();

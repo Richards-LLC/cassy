@@ -139,6 +139,7 @@ fn text(result: CallToolResult) -> String {
         .join("\n")
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
     use cas_types::{
@@ -197,6 +198,11 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
     epic.task_type = TaskType::Epic;
     epic.deliverables.work_target = Some(target.clone());
     tasks.add(&epic).unwrap();
+    // cas-55a5: on macOS a worker records its checkout under /var while Git
+    // lists /private/var. A symlinked spelling replays that on any host.
+    let alias = root.join("worktrees-alias");
+    std::fs::create_dir_all(root.join("worktrees")).unwrap();
+    std::os::unix::fs::symlink(root.join("worktrees"), &alias).unwrap();
     let mut retained = Vec::new();
     for (worker, id, dirty, live) in [
         ("warm-retired", "cas-aa11", false, false),
@@ -228,9 +234,10 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
             AgentStatus::Shutdown
         };
         owner.pid = live.then(std::process::id);
+        let recorded = if live { alias.join(worker) } else { path.clone() };
         owner
             .metadata
-            .insert("clone_path".into(), path.display().to_string());
+            .insert("clone_path".into(), recorded.display().to_string());
         agents.register(&owner).unwrap();
         if worker == "clean-retired" {
             continue;

@@ -1211,6 +1211,40 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     assert!(no_code.relay().is_empty(), "declared no-code work has no missing-CI decision");
 }
 
+/// cas-0c47 (GH #2273): a repo whose workflows run only on pull_request can
+/// never post CI for a factory push, so that unknown is not a decision. A push
+/// trigger that covers the branch keeps the bounded alert and its recovery.
+#[test]
+fn cas_0c47_unknown_ci_alerts_only_when_a_workflow_covers_the_push() {
+    let now = Utc::now();
+    for (on, covered) in [
+        ("pull_request:\n    branches: [develop, staging, main]\n  workflow_dispatch:", false),
+        ("push:\n    branches: ['factory/**', '!factory/skip-*']", true),
+    ] {
+        let mut f = Fixture::new();
+        let workflows = f.repo.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("ci.yml"), format!("name: CI\non:\n  {on}\njobs: {{}}\n")).unwrap();
+        git(f.repo.path(), &["add", "."]);
+        git(f.repo.path(), &["commit", "-qm", "cas-9efb-test workflows"]);
+        git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+        let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.deliverables.factory_branch_anchor = Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
+        store.update(&task).unwrap();
+        std::fs::write(f.app.cas_dir.join("ci.json"), "{\"check_runs\":[]}").unwrap();
+        f.app.merge_alert_retries.now = Some(now);
+        assert!(f.relay().is_empty());
+        f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+        let prompts = f.relay();
+        assert_eq!(prompts.len(), usize::from(covered), "{on}");
+        if covered {
+            f.ci(Some("success"));
+            assert!(f.relay()[0].is_merge_ready(), "covered CI recovers once it posts");
+        }
+    }
+}
+
 #[test]
 fn cas_9efb_missing_ci_retries_without_a_new_worker_idle_event() {
     let mut f = Fixture::new();

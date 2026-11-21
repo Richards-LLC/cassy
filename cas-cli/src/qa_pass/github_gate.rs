@@ -10,7 +10,9 @@
 //!    `gh pr merge`, a `PUT …/pulls/<n>/merge` through `gh api` or `curl`,
 //!    and the GraphQL merge mutations. It maps the PR to its delivery through
 //!    the recorded `delivery_pr_number` or a bounded `gh pr view`, then applies
-//!    the same [`merge_gate`] at the PR's head commit.
+//!    the same [`merge_gate`] at the PR's head commit. Raw `gh pr merge`
+//!    commands additionally refuse observed pending/failed PR-head checks,
+//!    independently of QA settings and GitHub branch protection.
 //! 2. **Repository side (opt-in, `qa.github_status`).** Cassy publishes the
 //!    commit status [`QA_STATUS_CONTEXT`] on every delivered head: pending
 //!    while a round is open, success once it passes or is waived (or when the
@@ -54,9 +56,13 @@ pub enum MergeSelector {
     Unresolvable(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeTransport { PrCommand, Api }
+
 /// One raw GitHub merge found in a shell command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubMerge {
+    transport: MergeTransport,
     pub selector: MergeSelector,
     /// `OWNER/REPO` when the command names one.
     pub repo: Option<String>,
@@ -194,6 +200,7 @@ pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
         }
         if let Some((number, repo)) = put_pull_merge(&tokens) {
             merges.push(GithubMerge {
+                transport: MergeTransport::Api,
                 selector: MergeSelector::Number(number),
                 repo,
                 match_head: None,
@@ -206,6 +213,7 @@ pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
             .any(|mutation| statement.contains(mutation))
         {
             merges.push(GithubMerge {
+                transport: MergeTransport::Api,
                 selector: MergeSelector::Unresolvable("a GraphQL merge mutation names no branch"),
                 repo: None,
                 match_head: None,
@@ -262,6 +270,7 @@ fn parse_pr_merge(args: &[&str], statement: &str) -> Option<GithubMerge> {
         index += 1;
     }
     Some(GithubMerge {
+        transport: MergeTransport::PrCommand,
         selector: selector.unwrap_or(MergeSelector::CurrentBranch),
         repo,
         match_head,
@@ -487,16 +496,68 @@ fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
         .filter(|value| !value.is_empty() && value != "HEAD")
 }
 
+/// GH #2260: --auto is not a CI gate on an unprotected target. Read the
+/// current PR head and its own rollup together, independently of QA settings.
+/// Only observed pending/failed checks refuse; missing evidence retains the
+/// existing admission policy, and API merges retain their existing QA path.
+fn pr_ci_refusal(cwd: &Path, merge: &GithubMerge) -> Option<String> {
+    if merge.transport != MergeTransport::PrCommand { return None; }
+    let selector = match &merge.selector {
+        MergeSelector::Number(number) => Some(number.to_string()),
+        MergeSelector::Branch(branch) => Some(branch.clone()),
+        MergeSelector::CurrentBranch => None,
+        MergeSelector::Unresolvable(_) => return None,
+    };
+    let mut command = Command::new(gh_bin());
+    command.args(["pr", "view"]);
+    if let Some(selector) = selector { command.arg(selector); }
+    if let Some(repo) = &merge.repo { command.args(["--repo", repo]); }
+    command.args(["--json", "headRefOid,statusCheckRollup"]).current_dir(cwd);
+    let bytes = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let head = value.get("headRefOid")?.as_str()?.trim();
+    if head.is_empty() { return None; }
+    let checks = value.get("statusCheckRollup")?.as_array()?;
+    let (mut pending, mut failed) = (Vec::new(), Vec::new());
+    for check in checks {
+        let name = check.get("name").or_else(|| check.get("context"))
+            .and_then(serde_json::Value::as_str).unwrap_or("<unnamed check>");
+        let state = check.get("status").or_else(|| check.get("state"))
+            .and_then(serde_json::Value::as_str).unwrap_or_default().to_ascii_uppercase();
+        let conclusion = check.get("conclusion").and_then(serde_json::Value::as_str)
+            .unwrap_or_default().to_ascii_uppercase();
+        if matches!(state.as_str(), "PENDING" | "EXPECTED" | "QUEUED" | "IN_PROGRESS" | "WAITING" | "REQUESTED") {
+            pending.push(name);
+        } else if matches!(state.as_str(), "FAILURE" | "ERROR")
+            || (state == "COMPLETED" && matches!(conclusion.as_str(),
+                "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "STALE"))
+        {
+            failed.push(name);
+        }
+    }
+    if pending.is_empty() && failed.is_empty() { return None; }
+    let mut reasons = Vec::new();
+    if !pending.is_empty() { reasons.push(format!("PR_CI_PENDING: {}", pending.join(", "))); }
+    if !failed.is_empty() { reasons.push(format!("PR_CI_FAILED: {}", failed.join(", "))); }
+    Some(crate::gates::tag("G-108", format!(
+        "{} (PR head {head}). Wait for this head's checks to succeed, then retry the same merge command. GitHub --auto does not guarantee waiting on an unprotected target.",
+        reasons.join("; "),
+    )))
+}
+
 /// Pre-tool guard for raw GitHub merges, for every role: the refusal when a
 /// merge would integrate a QA-bound delivery whose PR head has no passed or
-/// waived round. The PR is looked up only while some unclosed delivery has a
-/// recorded round, so ordinary merges never reach GitHub from the hook.
+/// waived round. Raw PR merge commands also read current-head CI, even when
+/// independent QA is disabled; API merges retain their existing QA policy.
 /// Unreadable Cassy state fails open to the close backstop, like the git
 /// guard; a PR that cannot be mapped while a round is open fails closed.
 pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
     let merges = github_merges_in(command);
     if merges.is_empty() {
         return None;
+    }
+    if let Some(refusal) = merges.iter().find_map(|merge| pr_ci_refusal(cwd, merge)) {
+        return Some(refusal);
     }
     let config = crate::config::Config::load(cas_root).ok()?;
     let qa = config.qa();

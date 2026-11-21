@@ -394,21 +394,18 @@ impl CasCore {
                     reason,
                 )?;
                 queue.session = session.into();
-                // A retried train_merge restarts the current entry's stopped
-                // automatic verifier; the dispatch claim prevents a second one.
-                let entry = &queue.entries[queue.next];
-                if let Some(dispatch) =
-                    cas_store::get_latest_verification_dispatch(&self.cas_root, &entry.task)?
-                        .filter(|dispatch| dispatch.state == VerificationDispatchState::Pending)
-                {
-                    self.emit_premerge_review_handoff(&tasks.get(&entry.task)?, &dispatch)
-                        .map_err(|error| anyhow::anyhow!(error.message.to_string()))?;
-                }
             }
             save(&path, &mut queue)?;
-            // GH #2169: appended entries' reviews start now, not at the next daemon scan.
-            start_queued_reviews(self, &queue, &*tasks, queue.next);
-            let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
+            // Acknowledge the durable revision before candidate preparation,
+            // origin reads or verifier handoffs. The daemon's resume pass
+            // starts appended reviews and retries a pending head (cas-7f934).
+            let positions = queue.entries.iter().enumerate()
+                .filter(|(_, entry)| ordered.is_some_and(|ids| ids.contains(&entry.task)))
+                .map(|(index, entry)| format!("{}={}", entry.task, index + 1))
+                .collect::<Vec<_>>().join(", ");
+            let receipt = format!("{} Committed revision {}. Queued positions: [{}].{}",
+                queue.render(), queue.revision, positions,
+                crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
             return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
                 crate::gates::override_tag("G-114", receipt)
             } else { receipt });
@@ -602,8 +599,8 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
 }
 
 /// GH #2169: only publication is ordered. Every delivery from `from` on gets
-/// its candidate and verifier now (enqueue and append start them all, the daemon
-/// pass starts those behind the head), through the same preparation the head uses,
+/// its candidate and verifier through the same preparation the head uses.
+/// Enqueue starts reviews immediately; active appends leave them to the daemon,
 /// so their reviews run while earlier entries publish. A publish that changes a
 /// later entry's reviewed files is re-reviewed by that preparation (G-104) when
 /// the entry reaches the head. A hold on its own dispatch is the expected
@@ -1510,13 +1507,14 @@ mod tests {
             task.depth = TaskDepth::Deep;
             tasks.update(&task).unwrap();
         }
-        // Enqueue and append start every review themselves, with no resume pass between.
+        // Enqueue starts its reviews; an active append acknowledges its saved
+        // position without preparing a candidate until the daemon resumes it.
         let dispatch_exists = |id: &String| cas_store::get_latest_verification_dispatch(&fixture.root, id).unwrap().is_some();
         fixture.start_with(&fixture.ids[..2]).await;
         assert!(fixture.ids[..2].iter().all(dispatch_exists), "enqueue starts the queued reviews");
         assert!(!dispatch_exists(&fixture.ids[2]));
         fixture.start().await;
-        assert!(dispatch_exists(&fixture.ids[2]), "an appended delivery's review starts at the append");
+        assert!(!dispatch_exists(&fixture.ids[2]));
         // The live stuck state: a daemonless pass left this exact dispatch
         // Pending and unclaimed.
         let parked = tasks.get(&fixture.ids[0]).unwrap();

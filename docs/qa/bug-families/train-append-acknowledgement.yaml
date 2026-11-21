@@ -1,0 +1,4 @@
+title: Train appends acknowledge committed positions before advancement
+statement: An active train_merge append returns its saved queue revision and requested delivery positions without waiting for origin reads or review preparation. The existing daemon subsequently prepares appended reviews and preserves ordered publication and pending-verifier recovery.
+found: 2026-11-21
+tasks: [cas-7f934]

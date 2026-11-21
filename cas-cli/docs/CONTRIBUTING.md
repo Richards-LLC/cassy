@@ -5289,6 +5289,9 @@ that observed run with `supervisor_override=true reason="<decision>"` (CLI:
 `--supervisor-override --reason "<decision>"`); Cassy records the decision on the
 train. The override never waives a later red or a delivery's own merge gates.
 
+Appending to an active queue returns its committed revision and delivery
+positions before origin reads, candidate preparation or verifier handoffs. The
+existing factory daemon starts the appended reviews on its next pass.
 The action records the queue and returns immediately. The existing factory
 daemon's CI scan resumes it through `worktree_merge`, reusing the current
 candidate approval or requesting review when context changes. Pending reviews

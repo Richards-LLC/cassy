@@ -7,6 +7,250 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.47.0] - 2026-11-21
+
+### Fixed — Developer tooling
+
+- **Test-shape guard accepts a machine error-code prefix** — Was: an assertion
+  on an uppercase error code with its colon delimiter, such as
+  `starts_with("TRAIN_OWNER_TRANSFER_REQUIRED:")`, was refused as a human prose
+  pin before compilation. Now: the code and its delimiter count as machine
+  data. Assertions that include human wording after the code are still refused.
+
+### Fixed — Commander journeys
+
+- **Release-path journey flakes removed or fixed** — deleted three Commander
+  journey tests that failed intermittently with and without the change under
+  test: HUB-J17 phone fleet feedback, HUB-J9 phone list-to-reply, and HUB-J4
+  open reports without moving the reader. Each set failed 7 of 14 at the
+  cas-b521 tip (art-c8a43a3a) and 7 of 14 at base c537ccdbf5 (art-3bac488b).
+  HUB-J24 paste content now waits web-first for the interrupted upload instead
+  of reading it once; it passed 30 of 30 in a `--repeat-each 10` named run.
+
+### Fixed — Factory repair briefs
+
+- **Lane failures require a class audit** — Was: only merge-queue ejections
+  recorded named failing tests for the repair gate. Now: the CI watcher reads
+  the existing lane-impact attribution receipts for exact parked delivery
+  heads, including train targets, and records only their `caused` test names.
+  Inherited failures, stale receipts and log wording do not trigger the gate.
+  Lane and merge-queue names are combined without duplicates, preserving
+  earlier names up to the twenty-name limit and logging truncation.
+  A decline still requires a covering class selector and passing class proof
+  before re-park. Verifier findings remain a separate follow-up.
+
+### Fixed — Factory
+
+- **Lane re-push after a train merge no longer demands a dist commit** — the
+  pre-push fast rows compared an existing lane with the tip it replaced, so a
+  train's own `hub-web/dist` rebuild merged into the lane counted as the lane's
+  change and required a lane dist commit the merge policy forbids. A re-push
+  that absorbed newer target commits now compares with the task target's
+  merge-base, as a first push does.
+- **Parks reuse evidence a peer already holds** — When a routed or cited
+  evidence file already has a committed proof record synced on the task (for
+  example one the other machine published and its reviewer fetched), the park
+  cites that exact record instead of uploading the file again. A transient
+  Cloud upload failure no longer refuses an already-reviewed delivery with
+  EVIDENCE PUBLICATION INCOMPLETE. A required file with no such record still
+  refuses the park.
+- **Parked deliveries close once their work lands on any target** — Was: a
+  delivery merged outside `worktree_merge` (a PR into develop, a manual merge
+  into an epic branch, a develop→staging promotion) stayed parked, and with no
+  pre-merge verdict it could close only through a per-task override. Now: the
+  daemon sees the delivery on its recorded target and closes it on an existing
+  approval. With no verdict, it starts the post-merge verifier (at most four at
+  once) and closes the task when that verifier approves. The PR observer now
+  watches every target branch, not only main. Deliveries not yet on their
+  target still need a pre-merge verdict.
+- **Evidence sync preserves newer published ledgers** — An older parked evidence
+  manifest no longer replaces a local ledger whose published revision is newer.
+  Sealed train parks refuse stale evidence manifests and identify the newer
+  artifact for re-parking; newer manifests still restore older local evidence.
+- **Operational reports post during release verification** — Was: a focused
+  release epic could block an unrelated support PDF, and one verified report
+  could mask a later held report in a batch. Now: each post waits only for its
+  attributed epic, resolved from its epic, task or artifact record. Release
+  announcements retain their separate post-release checks. Generated report
+  PDFs keep released-epic precedence and retain the focused release hold when
+  their attribution is ambiguous.
+- **Local-merge deliveries merge without a pushed branch** — Was: an approved
+  `local_merge` delivery whose worker checkout had moved on, merged through
+  recovery or from a reused lane, still fetched and required the worker's
+  branch on origin. With origin unavailable, the merge was refused as a dirty
+  checkout even though the delivered commit was clean. Now: it merges its exact
+  local commit with no origin check. Pushed-branch deliveries still require the
+  matching pushed ref.
+- **macOS worker kill stops a runaway worker** — `cas factory kill` on macOS
+  now verifies the Claude harness recorded beside the `cas serve` helper,
+  including the npm `claude.exe` client, instead of refusing with a PID
+  identity mismatch. It stops and kills the harness's whole process tree,
+  including Bash tool shells in their own process groups, and leaves unrelated
+  processes alone. macOS workers also start with a soft process limit below
+  the per-user ceiling, so a recursive shell runs out of process slots before
+  the operator's own shells do.
+- **Merge-queue ejections record their failing tests again** — The CI watcher
+  now strips the job, step and timestamp prefix and gh's colour codes from
+  `gh run view --log-failed` lines, and reads both libtest `test <name> ...
+  FAILED` and nextest `FAIL [..]` lines, so the class-audit gate fires after an
+  ejection.
+- **Keep parked close publication alive during shutdown** — Worker shutdown and recycle wait for active close publication and its outcome writer. Failed owner publication stays in a durable daemon retry journal, with one actionable supervisor notice, without requiring another close.
+- **Automatic premerge repair respects the class audit** — A paperwork-only
+  premerge rejection no longer returns a task to its worker automatically when
+  the task has recorded failing tests and no class audit. It holds for the
+  supervisor with the CLASS_AUDIT_REQUIRED refusal, so the repair names the
+  whole test class through request_changes.
+
+### Fixed — Delivery integrity
+
+- **Follow shipped epic history** — Delivery content checks and reviewed supersession now follow an epic's published staging/main descendants. A frozen epic no longer hides later rewrites; missing content without replacement proof still blocks close.
+
+### Fixed — Factory tests
+
+- **Release-path flake removed** — deleted
+  `supervisor_single_turn_tests::cas_1e7e2_directed_burst_debounces_into_one_body_turn`.
+  It failed in lane CI run 44933603487 attempt 2 (ring 2/3, 3.98s, panics at
+  `supervisor_single_turn_tests.rs:173` and `:1517`), was unattributed, and
+  passed on rerun and at base c537ccdbf50b.
+- **Release-path flake deleted** — removed
+  `cas_7b6b_reset_before_writer_runs_preserves_durable_rows`: lane CI run
+  44922789927, ring 3/3, it panicked at `queue_control_tests.rs:562` after
+  10.3s, then passed on rerun and at base cfe55015. Deleted per the standing
+  no-quarantine order; no production code changed.
+
+### Fixed — Factory recovery
+
+- **Recover retained work after a host crash without a release loop** — An
+  authenticated successor's `recover_branch` can retire the exact lease of a
+  provably dead local source worker, publish its unpushed commits and preserve
+  source attribution for normal reassignment. Live, foreign and unverifiable
+  holders keep their leases and work.
+
+### Fixed — Merge admission
+
+- **PR merges wait for observed CI even without branch protection** — Raw
+  `gh pr merge` calls are refused while that PR head has pending or failed
+  checks, naming the exact head and checks. Eligible green PRs keep the same
+  merge command. Merge-ready guidance now uses the repository's PR-check or
+  gate-backed queue evidence instead of treating `--auto` as a CI guarantee.
+
+### Fixed — Delivery attribution
+
+- **Review corrections stay with their recorded task** — A pushed, identified
+  review fix on a parked task's recorded source branch keeps that task's
+  delivery identity after another assignment. Foreign or unnamed continuation
+  commits still refuse; review recovery names the supervisor's request-changes
+  command before the worker resumes.
+
+### Fixed — Factory messaging
+
+- **An urgent message to a worker mid tool call reports its hold** — Was: an
+  urgent send to a Claude worker whose tool call was still running failed
+  after 8 seconds with "could not confirm interrupt delivery", although Cassy
+  was deliberately holding it for that call. Now: the send answers `held`,
+  says the message surfaces when the call ends, and gives the time Cassy
+  interrupts if the call is still running.
+
+### Fixed — Factory daemon
+
+- **A verifier still starts when the process that asked for it exits** — Was:
+  the retry for a verifier launch ran only inside the requesting worker's MCP
+  process, so if that process exited the review waited, unstarted, until its
+  deadline expired and a supervisor retried it. Now: the factory daemon starts
+  any review in its session that was never launched, once per review.
+- **Message selection and the spawn poll no longer hold the store writer while they read** — Was:
+  each prompt-queue selection and each spawn-queue poll ran whole on the daemon's
+  single store writer, including the roster, worker-death scan, notice checks and
+  the per-message director and git reads, holding it up to 4.1 s and 3.0 s on a
+  busy factory, so Commander sends and other writes waited behind them. Now: both
+  run on their own select lane and take the writer only for their writes; a poll
+  with nothing for this session never takes it.
+
+### Fixed — Peer-machine review binding
+
+- **A peer worker's review binds its delivery** — Was: when the worker's
+  checkout was on another machine and its lane was unpushed, unfetched or
+  cached at an older commit, a supervisor's close bound the review to the
+  supervisor's own checkout HEAD (a stale `main` or an unrelated branch) or
+  to that older commit. Now: close refreshes the lane and the target from
+  origin and binds the lane's pushed tip; without a verified pushed tip it
+  binds the target branch tip. A lane known only as `origin/<lane>` is
+  fetched as `<lane>`. A `local_merge` lane keeps its local branch.
+- **A review of an unrelated head is retired, not merged** — Was: an
+  approved review bound to a commit with none of the task's work made close
+  answer MERGE REQUIRED for that commit, even after the real delivery had
+  merged. Now: close retires that review, records why in the task notes and
+  handles the task as a delivery with no reusable review. A supervisor's
+  recovery close with the merged commit receipt then closes it.
+
+### Fixed — Commander
+
+- **Queued commands survive daemon restarts** — Commander command receipts now
+  persist locally by session, supervisor, device and command reference. Pending
+  commands resume at the next native turn boundary after daemon restart or
+  reexec. A durable claim prevents automatic replay of uncertain submissions;
+  commands confirmed abandoned before typing show Not sent. A stale Queued
+  status at session end remains uncertain until per-command evidence arrives.
+  Every session teardown records queued commands as Not sent without letting a
+  receipt-store failure skip the rest of teardown. A queued command left by an
+  earlier daemon under the same session and supervisor names is never typed
+  into a new one, and an unreadable receipt no longer blocks restoring the rest.
+- **Queued commands show their real outcome after the session ends** — when a
+  supervisor exits, its session is ended, or its daemon crashes with a command
+  still queued, Commander now reads the command's retained receipt from the
+  hub and shows Not sent instead of Unconfirmed. The read is authenticated,
+  limited to the device that sent the command, read-only, and waits while the
+  recording daemon may still be running.
+
+### Fixed — Task close
+
+- **Commitless spikes retain their approved no-delivery proof** — A worker's
+  `no_delivery` close now parks for the train owner without recording a factory
+  delivery branch. The owner can close the spike using its existing approval,
+  without a proof-scope correction or another verification.
+
+### Fixed — Factory verification
+
+- **Answer peer-machine verifier questions** — A train owner can read the exact question in synced task notes and authorize its answer with `verification add` on the original dispatch. Authenticated peer mail lets only the named builder supervisor record that exact answer and continue the independent review. Train publication ownership and sealed verifier authority stay enforced.
+
+### Fixed — Factory test reliability
+
+- **Remove flaky PTY stall coverage** — Deleted the prior/foreign/unattributed activity stall test after it failed on an unrelated release lane. Production delivery behavior and the module's remaining tests are unchanged.
+
+### Fixed — Factory workers
+
+- **A detached check run from a worker's package folder or its task scratch now wakes the worker** — Was:
+  a `cas factory worker-check --detach` started anywhere other than the exact
+  root of the worker's checkout, such as `hub-web` inside it or the task's own
+  scratch checkout, was not tracked, so the worker was never told it finished.
+  Now: runs inside the worker's checkout, and runs in a scratch checkout owned by
+  the worker's task, are tracked and wake the worker once when they finish.
+
+### Fixed — Verification recovery
+
+- **Recover expired reviews after verifier death** — Retrying a merge can release
+  an expired claim after registered shutdown, confirmed PID absence, or a readable
+  process fingerprint mismatch. An unreadable fingerprint keeps the claim. The retry
+  retains the exact candidate and supervisor, revokes the old verifier authority
+  with an audit event, and allows one replacement review. Live, remote and
+  unverifiable children keep their claims.
+
+### Fixed — Task delivery targets
+
+- **Explicit epic-child targets stay authoritative** — Creating a child with an explicit target branch now keeps that branch through task display, start and merge, including when it matches the epic base. Supervisor scope correction can repair an inherited effective target without changing the stored branch name. Omitted branch defaults continue to follow epic lane renames.
+
+### Fixed — Release
+
+- **Release gate runs from macOS system bash** — `scripts/release-gate.sh` started
+  under macOS `/bin/bash` 3.2 now re-runs itself once under the first bash 4 or
+  later on PATH, in `/opt/homebrew/bin` or in `/usr/local/bin`. With none
+  installed, it exits 2 with a one-line instruction to install bash instead of
+  failing on `declare -A`.
+
+### Fixed — Epic close
+
+- **Green CI survives intentional post-merge skips** — Epic close can reuse fully green required checks from the exact merge source when its entire tree matches the landed merge. Skipped jobs must match successful source checks by name and app, and missing required-check metadata, changed trees or unsuccessful checks still refuse close. Required contexts also support project-specific CI job names.
+
 ## [4.46.0] - 2026-11-21
 
 ### Fixed — CI

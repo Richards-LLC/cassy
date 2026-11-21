@@ -1840,15 +1840,13 @@ impl CasCore {
                     data: None,
                 })?;
         // A child created under an epic follows that epic's live delivery lane
-        // unless the caller explicitly selected a *different* target.  The
-        // default branch resolver stamps `main` (or the repository default)
-        // when a caller supplies only the repository, so checking only
-        // `target_branch.is_none()` lets an otherwise bare trunk target defeat
-        // the epic lane (GH #625). Treat a target equal to the epic's own
-        // WorkTarget as the implicit default too; a distinct target remains
-        // task-owned authority.
+        // unless the caller explicitly selected a branch. A repository-only
+        // declaration carries the resolver's default branch and still inherits
+        // the lane (GH #625). A supplied branch is task-owned authority, even
+        // when it equals the epic's base (GH #2210).
         let mut inherited_default_note = None;
         let mut inherited_delivery_mode = None;
+        let mut work_target_pinned = false;
         let inherited_from_epic = epic_id
             .as_deref()
             .map(|epic_id| {
@@ -1863,16 +1861,15 @@ impl CasCore {
             .and_then(|epic| {
                 inherited_delivery_mode = Some(epic.delivery_mode);
                 let inherited = super::repo_context::inherited_work_target_from_epic(&epic)?;
-                let matches_epic_default = declared_work_target.as_ref().is_some_and(|target| {
-                    epic.deliverables
-                        .work_target
-                        .as_ref()
-                        .is_some_and(|epic_target| {
-                            target.repo_selector == epic_target.repo_selector
-                                && (target_branch.is_none()
-                                    || target.target_branch == epic_target.target_branch)
-                        })
-                });
+                // An explicit selection of the live lane still follows lane
+                // renames, matching ordinary task updates. Off-lane choices
+                // must survive the shared show/start/merge default resolver.
+                work_target_pinned = target_branch.is_some()
+                    && declared_work_target.as_ref().is_some_and(|target| target != &inherited);
+                let matches_epic_default = target_branch.is_none()
+                    && declared_work_target.as_ref().is_some_and(|target| {
+                        target.repo_selector == inherited.repo_selector
+                    });
                 // An explicitly different repository binding is task-owned
                 // authority even if its branch was omitted.
                 if declared_work_target.is_none() || matches_epic_default {
@@ -2023,6 +2020,7 @@ impl CasCore {
             branch: None,
             deliverables: crate::types::TaskDeliverables {
                 work_target,
+                work_target_pinned,
                 source_claim_override: source_admission.override_grant.clone(),
                 ..Default::default()
             },
@@ -5765,89 +5763,6 @@ mod related_recall_response_tests {
                     .expect("explicit standalone choice bypasses ambiguity");
             }
         }
-    }
-
-    /// GH #625: `target_branch=main` is often the resolver's default, not a
-    /// deliberate request to bypass the focused epic. Persisting the live
-    /// epic lane at create time keeps spawn, merge, and close on one target and
-    /// records the normalization for supervisors.
-    #[tokio::test]
-    async fn child_create_normalizes_explicit_epic_default_cas_d22d() {
-        use std::process::Command;
-
-        use cas_types::WorkTarget;
-
-        let _env = TestEnvGuard::temp_home();
-        crate::store::known_repos::ensure_host_schema().expect("initialize isolated host registry");
-        let temp = TempDir::new().expect("temporary project");
-        let repo = temp.path().join("repo");
-        std::fs::create_dir(&repo).expect("create repo");
-        std::fs::create_dir(repo.join(".cas")).expect("create repo metadata");
-        std::fs::write(
-            repo.join(".cas/config.toml"),
-            "[project]\ncanonical_id = \"cas-d22d\"\n",
-        )
-        .expect("write repo metadata");
-
-        let git = |args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(&repo)
-                .output()
-                .expect("run git");
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "test@cas.test"]);
-        git(&["config", "user.name", "Cassy Test"]);
-        std::fs::write(repo.join("seed.txt"), "seed\n").expect("seed repo");
-        git(&["add", "seed.txt"]);
-        git(&["commit", "-q", "-m", "seed"]);
-        git(&["branch", "epic/live-target"]);
-
-        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
-        let store = core.open_task_store().expect("task store");
-        store.init().expect("initialize task store");
-        let mut epic = Task::new("cas-d22d-epic".into(), "target epic".into());
-        epic.task_type = TaskType::Epic;
-        epic.branch = Some("epic/live-target".into());
-        epic.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:cas-d22d".into(),
-            target_branch: "main".into(),
-        });
-        store.add(&epic).expect("add epic");
-
-        core.cas_task_create_with_target(
-            child_request("explicit default child", epic.id.clone()),
-            Some(repo.to_str().expect("repo path")),
-            Some("main"),
-            false,
-        )
-        .await
-        .expect("create child under epic");
-        let child = store
-            .list(None)
-            .expect("list tasks")
-            .into_iter()
-            .find(|task| task.title == "explicit default child")
-            .expect("created child");
-        assert_eq!(
-            child
-                .deliverables
-                .work_target
-                .expect("child target")
-                .target_branch,
-            "epic/live-target"
-        );
-        assert!(
-            child.notes.contains("matched parent epic") && child.notes.contains("epic/live-target"),
-            "normalization must be durable and visible: {}",
-            child.notes
-        );
     }
 
     /// A repo with a commit on `main` and a bare `origin`, for epic-lane

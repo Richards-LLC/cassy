@@ -329,6 +329,46 @@ fn request_with_retry(
     }
 }
 
+/// An owning supervisor's retry may release only a positively dead local child.
+/// The store fences the liveness observation against registration/claim races.
+pub(super) fn recover_expired_claim(core: &CasCore, dispatch: &VerificationDispatch) -> Result<VerificationDispatch, String> {
+    recover_expired_claim_with_probes(core, dispatch,
+        crate::mcp::daemon::pid_alive, crate::mcp::daemon::read_pid_starttime)
+}
+
+pub(super) fn recover_expired_claim_with_probes(
+    core: &CasCore, dispatch: &VerificationDispatch,
+    pid_alive: impl Fn(u32) -> bool, read_starttime: impl Fn(u32) -> Option<u64>,
+) -> Result<VerificationDispatch, String> {
+    let now = chrono::Utc::now();
+    if dispatch.deadline_at > now
+        || !matches!(dispatch.state, cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut)
+    { return Ok(dispatch.clone()); }
+    let agents = core.open_agent_store().map_err(|e| e.to_string())?;
+    let owner = agents.get(&core.get_agent_id().map_err(|e| e.to_string())?).map_err(|e| store_refusal(&e))?;
+    if owner.id != dispatch.owner_agent_id || owner.role != cas_types::AgentRole::Supervisor {
+        return Ok(dispatch.clone());
+    }
+    let Some(child) = dispatch.verifier_agent_id.as_deref().and_then(|id| agents.get(id).ok()) else {
+        return Ok(dispatch.clone());
+    };
+    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str()) {
+        return Ok(dispatch.clone());
+    }
+    // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
+    // review authority needs positive death evidence, not that ambiguity.
+    let confirmed_dead = child.status == cas_types::AgentStatus::Shutdown
+        || child.pid.is_some_and(|pid| {
+            if !pid_alive(pid) { return true; }
+            child.pid_starttime.or_else(|| child.metadata
+                .get(crate::mcp::daemon::PID_STARTTIME_KEY).and_then(|value| value.parse::<u64>().ok()))
+                .is_some_and(|expected| read_starttime(pid).is_some_and(|actual| actual != expected))
+        });
+    if !confirmed_dead { return Ok(dispatch.clone()); }
+    cas_store::recover_expired_dead_verifier_dispatch(&core.cas_root, &dispatch.id, &owner, &child, now)
+        .map_err(|e| store_refusal(&e))
+}
+
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> Result<VerificationDispatch, String> {
@@ -365,7 +405,7 @@ pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> R
     Err("verification_owner_handoff_scope: missing owner's claimed local successor is unavailable".into())
 }
 
-pub(super) fn launch(
+pub(crate) fn launch(
     core: &CasCore, task: &Task, dispatch: &VerificationDispatch,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let dispatch = launch_dispatch(&core.cas_root, &dispatch.id, None)?;

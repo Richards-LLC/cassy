@@ -489,3 +489,63 @@ fn only_a_tool_call_in_flight_counts_as_activity() {
         assert_eq!(gate_decline_activity(deny(reason), evidence), None, "{reason}");
     }
 }
+
+/// cas-5463 (GH #2275, notification 2597724): an urgent send to a Claude
+/// worker mid tool call is held by design for that call (cas-73f7), reported
+/// as stage=gated, nudge_not_attempted. The send must say it is held and
+/// when Cassy interrupts, not fail as an unconfirmed interrupt.
+#[tokio::test(flavor = "current_thread")]
+async fn urgent_send_to_a_worker_mid_tool_call_reports_the_hold_gh2275() {
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut factory = BusyWorkerFactory::new(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_AGENT_NAME", Some("supervisor")),
+        ("CAS_FACTORY_SESSION", Some(SESSION)),
+    ])
+    .await;
+    factory.tool_call_in_flight();
+    let core = crate::mcp::CasCore::with_daemon(factory.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("supervisor-id".into());
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::tools::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::tools::CasService::new(core);
+    let _socket = cas_factory::DaemonNotifier::bind(&factory.cas_dir).unwrap();
+    let request: cas_mcp::types::CoordinationRequest = serde_json::from_value(serde_json::json!({
+        "action": "message",
+        "target": WORKER,
+        "summary": "stop",
+        "message": "Stop and rebase onto the train tip.",
+        "urgent": true,
+    }))
+    .unwrap();
+    let queue = factory.queue();
+    let send = service.coordination(Parameters(request));
+    let daemon = &mut factory.daemon;
+    let passes = async {
+        for _ in 0..1500 {
+            daemon.process_prompt_queue().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::pin!(send);
+    tokio::pin!(passes);
+    let result = tokio::select! {
+        result = &mut send => result,
+        _ = &mut passes => panic!("the send never returned"),
+    };
+    let text: String = result
+        .unwrap_or_else(|error| panic!("a held interrupt is not a failed send: {error:?}"))
+        .content
+        .into_iter()
+        .filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text),
+            _ => None,
+        })
+        .collect();
+    assert!(text.starts_with("held #"), "{text}");
+    let id: i64 = text["held #".len()..].split(' ').next().unwrap().parse().unwrap();
+    let report = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient), "{report:?}");
+    assert!(report.recipient_transport_at.is_none(), "nothing was typed into the call: {report:?}");
+}

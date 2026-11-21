@@ -2365,6 +2365,54 @@ fn maybe_wrap_with_nice(command: &str, args: Vec<String>, role: &str) -> (String
     ("nice".to_string(), new_args)
 }
 
+/// macOS counts every process of a user against `kern.maxprocperuid`, so
+/// one worker's recursive shell can make fork fail host-wide (cas-9aa3). A
+/// worker starts with its soft `RLIMIT_NPROC` below that ceiling: its forks
+/// fail first, and the operator's own shells keep the reserve needed to stop
+/// it. Other roles and platforms launch unchanged.
+#[cfg(target_os = "macos")]
+fn worker_process_budget(program: String, args: Vec<String>, env: &[(String, String)]) -> (String, Vec<String>) {
+    let worker = env.iter().rev().find(|(key, _)| key == "CAS_AGENT_ROLE").is_some_and(|(_, role)| role == "worker");
+    let Some(limit) = worker.then(worker_process_limit).flatten() else {
+        return (program, args);
+    };
+    let mut wrapped = vec![
+        "-c".to_string(),
+        r#"ulimit -Su "$1" || exit 126; shift; exec "$@""#.to_string(),
+        "cas-worker".to_string(),
+        limit.to_string(),
+        program,
+    ];
+    wrapped.extend(args);
+    ("/bin/sh".to_string(), wrapped)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn worker_process_budget(program: String, args: Vec<String>, _env: &[(String, String)]) -> (String, Vec<String>) {
+    (program, args)
+}
+
+/// `kern.maxprocperuid` minus a reserve of one eighth (at least 256), never
+/// above the current soft limit.
+#[cfg(target_os = "macos")]
+fn worker_process_limit() -> Option<u64> {
+    let mut ceiling: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: sysctlbyname writes at most `size` bytes into `ceiling`.
+    let read = unsafe {
+        libc::sysctlbyname(c"kern.maxprocperuid".as_ptr(), (&mut ceiling as *mut libc::c_int).cast(), &mut size, std::ptr::null_mut(), 0)
+    };
+    let ceiling = u64::try_from(ceiling).ok().filter(|_| read == 0)?;
+    let mut current = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit writes one rlimit into `current`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut current) } != 0 {
+        return None;
+    }
+    // Never raise an operator's lower limit.
+    let limit = ceiling.checked_sub((ceiling / 8).max(256))?.min(current.rlim_cur);
+    (limit > 0).then_some(limit)
+}
+
 /// Events emitted by a PTY
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -2565,6 +2613,7 @@ impl Pty {
                 .map_err(Error::pty)?;
         let (program, args) =
             launch.unwrap_or((program, args));
+        let (program, args) = worker_process_budget(program, args, &config.env);
         let mut cmd = CommandBuilder::new(program);
         cmd.env_remove(WORKER_STARTUP_BRIEF);
         cmd.args(args);
@@ -4208,7 +4257,7 @@ mod tests {
     }
 
     /// Run `script` under `sh -c` in a PTY as `role` and return its output.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn probe_output(role: &str, script: &str, env: &[(String, String)]) -> Result<String> {
         let mut env = env.to_vec();
         env.push(("CAS_AGENT_ROLE".to_string(), role.to_string()));
@@ -4235,6 +4284,22 @@ mod tests {
         }
         pty.kill();
         Ok(String::from_utf8_lossy(&output).into_owned())
+    }
+
+    /// cas-9aa3: a macOS worker starts below the per-user process ceiling, so
+    /// its runaway tree hits fork failure while the operator keeps a reserve;
+    /// a supervisor keeps the inherited limit.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_worker_starts_below_the_per_user_process_ceiling_cas_9aa3() {
+        let limit = worker_process_limit().expect("per-user process ceiling");
+        let mut inherited = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut inherited) }, 0);
+        assert!(limit < inherited.rlim_cur, "the worker limit leaves a reserve");
+        for (role, expected) in [("worker", limit), ("supervisor", inherited.rlim_cur)] {
+            let output = probe_output(role, "ulimit -Su", &[]).await.unwrap();
+            assert!(output.lines().any(|line| line.trim() == expected.to_string()), "{role}: {output}");
+        }
     }
 
     /// cas-5b3d: a worker cannot read the operator's Neon or Vercel store by

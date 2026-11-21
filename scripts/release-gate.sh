@@ -11,6 +11,22 @@
 # Usage: scripts/release-gate.sh <version> [--reuse | --only <row,row>]
 #        scripts/release-gate.sh --fast-rows [--base <ref>]
 
+# macOS ships bash 3.2, which has no associative arrays for the row scheduler
+# (cas-eae6). Re-exec once into the first bash 4+ on PATH, then Homebrew's;
+# the marker stops a loop. This block must stay bash 3.2 syntax.
+if (( BASH_VERSINFO[0] < 4 )); then
+    if [[ -z "${CAS_RELEASE_GATE_BASH_REEXEC:-}" ]]; then
+        while IFS= read -r candidate; do
+            if [[ -x "$candidate" ]] && "$candidate" -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/null; then
+                CAS_RELEASE_GATE_BASH_REEXEC=1 exec "$candidate" "${BASH_SOURCE[0]}" "$@"
+            fi
+        done < <(type -ap bash; printf '%s\n' /opt/homebrew/bin/bash /usr/local/bin/bash)
+    fi
+    printf 'release-gate.sh needs bash 4+; install it (brew install bash)\n' >&2
+    exit 2
+fi
+unset CAS_RELEASE_GATE_BASH_REEXEC
+
 set -euo pipefail
 
 # Every failed script exit emits its registered check codes, including early

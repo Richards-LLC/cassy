@@ -1272,6 +1272,24 @@ fn jest_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> b
         && listed.iter().any(|path| Path::new(path).canonicalize().is_ok_and(|path| path == spec))
 }
 
+/// The rootDir Jest resolves for `config` (`--showConfig`), e.g. `'..'` from
+/// a config kept in `test/`.
+fn jest_root_dir(executable: &Path, package: &Path, config: &[std::ffi::OsString], environment: &[(&str, &str)]) -> Result<PathBuf> {
+    let output = Command::new(executable)
+        .current_dir(package)
+        .env("CI", "1")
+        .envs(environment.iter().copied())
+        .args(config)
+        .arg("--showConfig")
+        .output()
+        .context("start jest --showConfig")?;
+    let shown: Value = serde_json::from_slice(&output.stdout).ok().filter(|_| output.status.success())
+        .with_context(|| format!("jest --showConfig failed in {}: {}", package.display(), String::from_utf8_lossy(&output.stderr).trim()))?;
+    let root = shown.pointer("/globalConfig/rootDir").or_else(|| shown.pointer("/configs/0/rootDir"))
+        .and_then(Value::as_str).context("jest --showConfig reported no rootDir")?;
+    Ok(package.join(root))
+}
+
 /// The repository-relative Jest config that lists `path`, when Jest can be asked.
 pub(crate) fn jest_owner(repo: &Path, path: &str) -> Option<PathBuf> {
     let (dir, config) = runner_root(repo, path, "jest").ok()?;
@@ -1485,6 +1503,11 @@ fn execute_tests(
         } else {
             runner_path(repo, &package, runner)?
         };
+        // GH #2196: Jest runs from its resolved rootDir, as a raw invocation
+        // from that directory does, so fixture-relative reads resolve alike.
+        let cwd = if runner == "jest" {
+            jest_root_dir(&executable, &package, &config, &environment)?
+        } else { package.clone() };
         let source = std::fs::read_to_string(repo.join(path))?;
         let sites = if widened.is_none() { declared_sites(path, &source)? } else { Vec::new() };
         if !sites.is_empty() {
@@ -1524,7 +1547,7 @@ fn execute_tests(
         let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
-            command.current_dir(&package).env("CI", "1").envs(environment.iter().copied());
+            command.current_dir(&cwd).env("CI", "1").envs(environment.iter().copied());
             let file = repo.join(path);
             match runner {
                 "vitest" => {
@@ -2387,7 +2410,8 @@ mod tests {
 
     /// GH #2058 (and #2066, #2117, #2122): an integration spec that only a
     /// sibling Jest config selects ran under the default `.spec.ts` config and
-    /// found no tests, so no stability proof could ever be earned.
+    /// found no tests, so no stability proof could ever be earned. GH #2196:
+    /// that config's `rootDir: '..'` is the cwd its fixture reads assume.
     #[test]
     fn jest_spec_runs_under_the_config_that_selects_it_gh_2058() {
         let repo = tempfile::tempdir().unwrap();
@@ -2416,19 +2440,26 @@ mod tests {
         // The default config selects `.spec.ts`; a sibling config selects the integration spec.
         write(&backend.join("jest.config.js"),
             r"module.exports = { testRegex: '.*\\.spec\\.ts$' };");
+        // GH #2196: the sibling config's rootDir is the backend, and the spec reads
+        // its migration relative to that directory.
         let sibling = test.join("jest-inbox-tools.integration.config.js");
-        write(&sibling, r"module.exports = { testRegex: '.*\\.integration\\.ts$' };");
-        // A stand-in Jest: lists the files its config selects under its own directory and
-        // runs a spec only when its config lists it ("No tests found" otherwise).
+        write(&sibling, r"module.exports = { rootDir: '..', testRegex: '.*\\.integration\\.ts$' };");
+        write(&backend.join("prisma/migrations/20261112200000_workspace_reports/migration.sql"), "SELECT 1;");
+        // A stand-in Jest: lists the files its config selects under its rootDir and
+        // runs a spec only when its config lists it ("No tests found" otherwise) and
+        // its cwd-relative migration opens (ENOENT otherwise).
         let jest = backend.join("node_modules/.bin/jest");
         write(&jest, r#"#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
-const config = path.resolve(at('--config')), pattern = new RegExp(require(config).testRegex);
+const config = path.resolve(at('--config')), loaded = require(config), pattern = new RegExp(loaded.testRegex);
+const root = path.resolve(path.dirname(config), loaded.rootDir || '.');
+if (a.includes('--showConfig')) { console.log(JSON.stringify({ globalConfig: { rootDir: root }, configs: [{ rootDir: root }] })); process.exit(0); }
 const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
   entry.name === 'node_modules' ? [] : entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
-const listed = walk(path.dirname(config)).filter((file) => pattern.test(file));
+const listed = walk(root).filter((file) => pattern.test(file));
 if (a.includes('--listTests')) { console.log(JSON.stringify(listed)); process.exit(0); }
+fs.readFileSync('prisma/migrations/20261112200000_workspace_reports/migration.sql');
 const spec = a[a.indexOf('--runTestsByPath') + 1], ok = listed.includes(spec);
 fs.writeFileSync(at('--outputFile'), JSON.stringify({ success: ok, testResults: ok ? [{ name: spec, status: 'passed',
   assertionResults: [{ fullName: 'pool drains', status: 'passed' }] }] : [] }));

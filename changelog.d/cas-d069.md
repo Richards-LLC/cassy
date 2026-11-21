@@ -1,0 +1,3 @@
+### Fixed — Capped Jest runs from the config's rootDir
+
+- **Capped Jest stability runs start in the directory Jest resolves as the config's `rootDir`** — Before this fix, a spec owned by a config kept in `test/` with `rootDir: '..'` ran from `test/`. Fixture paths relative to the package, such as `prisma/migrations/.../migration.sql`, then failed with ENOENT before any assertion ran, even though the same raw `jest --config test/...` command passed from the package directory. Worker-check now asks Jest for the resolved rootDir (`--showConfig`), runs from that directory, and refuses with Jest's error if the config cannot be resolved.

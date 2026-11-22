@@ -338,9 +338,6 @@ impl CasCore {
                 expected.status,
                 TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
             )
-            || (expected.status == TaskStatus::Blocked
-                && (expected.deliverables.parked_branch.is_some()
-                    || expected.deliverables.factory_branch_anchor.is_some()))
         {
             return Err(refused(
                 "only an unparked active task can rebind; use request_changes before replacing a parked delivery",
@@ -356,6 +353,27 @@ impl CasCore {
             .work_target
             .as_ref()
             .ok_or_else(|| refused("the task has no declared work target"))?;
+        if expected.status == TaskStatus::Blocked {
+            // Retargeting retires the proof, but keeps its branch/anchor as
+            // history. Commit capture can also precede a refused first park.
+            // Neither is an active park; a live review or merge still is.
+            let live_review = cas_store::has_active_verification_dispatch(&self.cas_root, id)
+                .map_err(|error| refused(error.to_string()))?;
+            let delivery = cas_store::get_latest_worker_delivery(&self.cas_root, id)
+                .map_err(|error| refused(error.to_string()))?;
+            let live_delivery = delivery.as_ref().is_some_and(|(_, transaction)|
+                !transaction.state.is_recoverable_failure());
+            let retained_park = expected.deliverables.parked_close_reason.is_some()
+                && previous.work_target == *target
+                && !delivery.as_ref().is_some_and(|(_, transaction)| transaction.state.is_recoverable_failure());
+            if expected.pending_verification || expected.pending_worktree_merge
+                || live_review || live_delivery || retained_park
+            {
+                return Err(refused(
+                    "the delivery still has review or park authority; resolve that boundary with request_changes or an approved proof_scope_fix before rebinding",
+                ));
+            }
+        }
         // Reassignment preserves the old start as evidence. Explicit approval
         // binds the current assignee's lane; the prior owner stays in the audit.
         // Retargeting still cannot move the delivery to another repository.

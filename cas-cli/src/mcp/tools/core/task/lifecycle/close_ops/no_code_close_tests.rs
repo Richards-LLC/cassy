@@ -3412,13 +3412,17 @@ impl JourneyEval {
         let python = String::from_utf8(std::process::Command::new("sh").args(["-c", "command -v python3"])
             .output().unwrap().stdout).unwrap().trim().to_owned();
         // Everything but the plan (held) and the browser tooling is real Python.
+        // The held plan prints journey-receipt.py's full plan contract for the
+        // checkout's real HEAD: an affected scope with no journeys selected.
         let shim_python = format!(r#"#!/bin/sh
 case "$1" in
   */journey-receipt.py)
     if [ "$2" = plan ]; then
       : > "$J_WORK/started"
       while [ ! -e "$J_WORK/release" ]; do sleep 0.05; done
-      printf '{{"artifacts":"%s","head_sha":"fixture","workers":1,"scope":"affected","grep":""}}\n' "$J_WORK/artifacts"
+      head="$(git -C "$4" rev-parse HEAD)"
+      printf '{{"schema":1,"repo":"%s","artifacts":"%s","task_id":null,"base_sha":"%s","head_sha":"%s","scope":"affected","selection_ids":[],"journeys":[],"workers":1,"grep":null}}\n' \
+        "$4" "$J_WORK/artifacts" "$head" "$head"
     fi
     exit 0;;
   */journey_dist.py) exit 0;;

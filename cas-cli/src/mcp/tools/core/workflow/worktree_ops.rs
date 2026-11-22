@@ -9093,6 +9093,13 @@ mod cas_7ce6_parked_merge_source_tests {
         (repo, anchor)
     }
 
+    fn publish_origin(path: &Path) {
+        let origin = path.join(".git/fixture-origin.git");
+        git(path, &["init", "--bare", "-q", origin.to_str().unwrap()]);
+        git(path, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(path, &["push", "-q", "--all", "origin"]);
+    }
+
     fn rebased_lane() -> (tempfile::TempDir, cas_types::Task, String) {
         let (repo, _) = stacked_lane();
         let path = repo.path();
@@ -9102,6 +9109,7 @@ mod cas_7ce6_parked_merge_source_tests {
         git(path, &["checkout", "-q", "factory/w"]);
         git(path, &["rebase", "main"]);
         let tip = git(path, &["rev-parse", "HEAD"]);
+        publish_origin(path);
         let mut task = cas_types::Task::new("cas-park".into(), "parked rebase".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some("w".into());
@@ -9117,7 +9125,7 @@ mod cas_7ce6_parked_merge_source_tests {
         for shape in ["target-sync", "worker-on-next-task", "new-task-commit", "foreign-parent", "anchor-on-side", "unpushed"] {
             let (repo, anchor) = stacked_lane();
             let path = repo.path();
-            git(path, &["remote", "add", "origin", "unused-fixture-origin"]);
+            publish_origin(path);
             git(path, &["checkout", "-q", "main"]);
             commit(path, "target-update");
             git(path, &["update-ref", "refs/remotes/origin/main", "main"]);
@@ -9138,8 +9146,9 @@ mod cas_7ce6_parked_merge_source_tests {
                 git(path, &["merge", "--no-ff", "-m", "merge epic into parked delivery", target]);
             }
             let tip = git(path, &["rev-parse", "factory/w"]);
-            git(path, &["update-ref", "refs/remotes/origin/factory/w",
-                if shape == "unpushed" { &anchor } else { &tip }]);
+            if shape != "unpushed" {
+                git(path, &["push", "-q", "origin", "factory/w"]);
+            }
             let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
             task.status = cas_types::TaskStatus::AwaitingMerge;
             task.assignee = Some("w".into());
@@ -9228,6 +9237,7 @@ mod cas_7ce6_parked_merge_source_tests {
         let (repo, mut task, tip) = rebased_lane();
         let branch = "factory/w-cas-park";
         git(repo.path(), &["branch", branch, &tip]);
+        git(repo.path(), &["push", "-q", "origin", branch]);
         task.deliverables.parked_branch = Some(branch.into());
         let git_ops = GitOperations::new(repo.path().to_path_buf());
         let old_anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
@@ -9328,7 +9338,7 @@ mod cas_7ce6_parked_merge_source_tests {
             let ops = GitOperations::new(path.to_path_buf());
             // Parked A is published; B is local-only. Include the incident's
             // target-sync merge, which must not be rebound as a same-patch rebase.
-            git(path, &["update-ref", "refs/remotes/origin/factory/w", &anchor]);
+            publish_origin(path);
             let tip = if local_sync {
                 git(path, &["checkout", "-q", "main"]);
                 commit(path, "target-update");
@@ -9350,6 +9360,7 @@ mod cas_7ce6_parked_merge_source_tests {
             assert!(refusal.contains(&tip), "{refusal}");
             assert_eq!(git(path, &["rev-parse", "main"]), before);
             git(path, &["branch", "factory/w-cas-park", &anchor]);
+            git(path, &["push", "-q", "origin", "factory/w-cas-park"]);
             let source = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
                 .unwrap().expect("an exact delivery branch remains usable");
             assert_eq!(git(path, &["rev-parse", &source]), anchor);

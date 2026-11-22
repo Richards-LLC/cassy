@@ -52,8 +52,10 @@ pub fn generate_minion_unique(count: usize, reject: &dyn Fn(&str) -> bool) -> Ve
             if names.len() >= count {
                 return names;
             }
-            let candidate = if round == 1 { (*name).to_string() } else { format!("{name}{round}") };
-            if !reject(&candidate) {
+            // RED (cas-dc08): pre-fix overflow names and no reject.
+            let candidate = if round == 1 { (*name).to_string() } else { format!("{name}-{round}") };
+            let _ = reject;
+            {
                 names.push(candidate);
             }
         }

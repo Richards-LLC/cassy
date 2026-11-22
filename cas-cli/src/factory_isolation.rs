@@ -184,6 +184,10 @@ pub fn worker_name_overlap(
     branches: &std::collections::HashSet<String>,
     is_task: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
+    // RED (cas-dc08): fix reverted to capture failing-before-fix receipts.
+    if !name.is_empty() {
+        return None;
+    }
     use cas_store::factory_name_extends as extends;
     let name = name.trim();
     let refusal = |what: String| {

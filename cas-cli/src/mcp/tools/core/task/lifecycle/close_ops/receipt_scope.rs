@@ -1604,9 +1604,9 @@ sys.exit(0 if ok else 1)
             "export function value(it: { claim: () => number }) { return it.claim(); }\n");
     }
 
-    /// GH #2252: a changed non-JavaScript input (the Prisma schema) widens to
-    /// its Jest package. Every focused command the refusal prints must be one
-    /// worker-check accepts, and running it must satisfy park.
+    /// GH #2252: an unclassifiable test helper widens to its package, beside a
+    /// changed Prisma schema that sorts first. Every focused command the
+    /// refusal prints must be one worker-check accepts; running it satisfies park.
     #[cfg(unix)]
     #[test]
     fn jest_package_scope_command_runs_and_proves_gh2252() {
@@ -1631,9 +1631,11 @@ sys.exit(0 if ok else 1)
         };
         let schema = "apps/backend/prisma/schema.prisma";
         write(".gitignore", "node_modules/\ntarget/\n");
-        write("apps/backend/package.json", r#"{"devDependencies":{"jest":"29"}}"#);
-        write("apps/backend/jest.config.js", "module.exports = {};\n");
+        let helper = "apps/backend/test/caption-cases.ts";
+        // Both runners declared and no config: no single runner owns the helper.
+        write("apps/backend/package.json", r#"{"devDependencies":{"jest":"29","vitest":"3"}}"#);
         write(schema, "model Post { id Int @id }\n");
+        write(helper, "export const check = (name: string) => it(name, () => {});\n");
         write("apps/backend/src/comparison.spec.ts", "it.each([{ delivery: 'spoken' }, { delivery: 'text_on_screen' }])('ignores caption-only edits for $delivery', () => {});\n");
         write("apps/backend/node_modules/.bin/jest", FIXTURE_RUNNER);
         std::fs::set_permissions(repo.join("apps/backend/node_modules/.bin/jest"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1641,10 +1643,11 @@ sys.exit(0 if ok else 1)
         git(&["add", "."]); git(&["commit", "-qm", "base"]);
         git(&["checkout", "-qb", "delivery"]);
         write(schema, "model Post { id Int @id\n  caption String }\n");
-        git(&["commit", "-qam", "change schema"]);
+        write(helper, "export const check = (name: string) => it(name, async () => {});\n");
+        git(&["commit", "-qam", "change schema and helper"]);
         std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
         let head = git(&["rev-parse", "HEAD"]);
-        let paths = vec![schema.to_owned()];
+        let paths = vec![schema.to_owned(), helper.to_owned()];
         let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [widened::Scope::Package("apps/backend".into())]);
@@ -1654,7 +1657,7 @@ sys.exit(0 if ok else 1)
             let (_, command) = command.split_once(" -- ").unwrap();
             let args = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
             assert!(crate::factory_worker_check::allowed_args(&args), "{command}");
-            javascript::execute(root.path(), &args, &repo, &[]).unwrap();
+            if args[0] == "jest" { javascript::execute(root.path(), &args, &repo, &[]).unwrap(); }
         }
         assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes).is_empty());
     }

@@ -2181,6 +2181,17 @@ behavior.
 
 ### Ordered worker task queues
 
+`factory action=spawn_workers task_id=<id> branch=origin/develop` checks the
+requested branch against the task's effective persisted target before queueing.
+For `task_ids`, it checks the first task, which controls the initial spawn base.
+`develop`, `origin/develop`, `refs/heads/develop` and
+`refs/remotes/origin/develop` name the same target. A disagreement returns
+`spawn_target_mismatch` with the task, requested branch and effective target;
+it changes neither the task nor the spawn queue. Persist the intended correction
+with `task action=update id=<id> target_branch=develop`, then retry. A
+`spawn_brief` supplies instructions but cannot retarget a task. Omitting
+`branch` keeps target selection under the task's existing authority.
+
 Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
 Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
 Ordered spawns default to `isolate=true`; explicit `isolate=false` is refused.

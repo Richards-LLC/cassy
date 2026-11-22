@@ -1,0 +1,10 @@
+title: Replacement launch branch disagrees with the persisted task target
+statement: >-
+  An explicit structured spawn branch must agree with the task's effective
+  target before queueing. A stale inherited epic lane cannot silently override
+  that request. Target corrections use the supported task update operation;
+  brief prose grants no delivery authority. A correctly targeted clean
+  replacement starts, and foreign commits retain their G-10 protection.
+tasks: [cas-8758]
+journeys: [FACTORY-SPAWN]
+invariants: []

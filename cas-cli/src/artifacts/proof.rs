@@ -1245,7 +1245,9 @@ mod tests {
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "test: PASS fixture\n").unwrap();
         std::fs::create_dir_all(owner.evidence_dir()).unwrap();
-        owner.task.deliverables.parked_close_reason = Some(format!("VERIFIED `{}`", log.display()));
+        // cas-df37: prose punctuation around a cited path is not part of it.
+        owner.task.deliverables.parked_close_reason =
+            Some(format!("VERIFIED (target/runner.log). Log: {}.", log.display()));
         tokio::task::spawn_blocking(move || {
             publish_routed_evidence(&owner.root, &owner.task, &owner.repo).unwrap();
             let records = SqliteArtifactStore::open(&owner.root).unwrap().list_for_task(&owner.task.id).unwrap();

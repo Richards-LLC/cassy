@@ -2976,6 +2976,28 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         }
     }
 
+    /// GH #2216, #2258, #2138: `%s`, `$property` and static `it.each` titles
+    /// own every expanded row, including rows Vitest names identically. The
+    /// rows are Vitest 4.0.18's JSON report for this source.
+    #[test]
+    fn vitest_table_templates_own_every_expanded_row_cas_c1df() {
+        let source = "describe('creator', () => {\n  it.each([{ compact: false }, { compact: true }])('menu (compact=$compact)', () => {});\n  it.each([['Funnel Drop', 'a'], ['Funnel Drop', 'b'], ['AIDA', 'c']])('hands post chat %s to the writer', () => {});\n  it.each([{ n: 1 }, { n: 2 }])('keeps input intact', () => {});\n});";
+        let templates = source_tests("a.test.ts", source, &[(1, 5)]).unwrap();
+        assert_eq!(templates.len(), 3);
+        let rows = ["menu (compact=false)", "menu (compact=true)", "hands post chat Funnel Drop to the writer",
+            "hands post chat Funnel Drop to the writer", "hands post chat AIDA to the writer", "keeps input intact", "keeps input intact"]
+            .map(|name| json!({"fullName": format!("creator {name}"), "status": "passed"}));
+        let report = json!({"success": true, "testResults": [{"name": "/project/a.test.ts", "status": "passed", "assertionResults": rows}]});
+        validate_report("vitest", Path::new("/project"), &report, &templates, 1).unwrap();
+        // A failing duplicate row, or a template with no row, cannot be accepted.
+        let mut failed = report.clone();
+        failed["testResults"][0]["assertionResults"][3]["status"] = json!("failed");
+        assert!(validate_report("vitest", Path::new("/project"), &failed, &templates, 1).is_err());
+        let mut missing = report.clone();
+        missing["testResults"][0]["assertionResults"].as_array_mut().unwrap().truncate(5);
+        assert!(validate_report("vitest", Path::new("/project"), &missing, &templates, 1).is_err());
+    }
+
     #[test]
     fn playwright_report_requires_five_clean_attempts_without_retry() {
         let selected = [id("a.spec.ts", "group changed")];

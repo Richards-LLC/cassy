@@ -462,13 +462,22 @@ path="tests/builtin_archive_portability_test.rs"
         calls = self.root / "output/cargo.calls"
         fake.write_text('#!/bin/sh\nmkdir -p "$(dirname "$CALLS")"; printf "%s\\n" "$*" >> "$CALLS"\n'
                         'case "$*" in *" list "*|"nextest list"*) echo \'{"rust-suites":{"cas":{"testcases":{"alpha::t":{"ignored":false,"filter-match":{"status":"matches"}}}}}}\' ;;\n'
-                        '*binary_id*) case "$PWD" in *lane-impact-base*) fails="$BASE_FAILS" ;; *) fails="$HEAD_FAILS" ;; esac;'
+                        '*binary_id*) case "$PWD" in *lane-impact-base*) printf base > "$SHARED_ARTIFACT"; fails="$BASE_FAILS" ;; *) fails="$HEAD_FAILS" ;; esac;'
                         ' if [ -n "$fails" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi; echo "        PASS [   0.01s] cas::beta_test beta_test::breaks" ;;\n'
-                        '*"binary(beta_test)"*) echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; if [ -n "$RING_TIMEOUT" ]; then echo "     TIMEOUT [  60.00s] cas::beta_test beta_test::hangs"; echo "Summary [ 60.01s] 2 tests run: 0 passed, 1 failed, 1 timed out"; exit 100; fi;'
+                        '*"binary(beta_test)"*) if [ -n "$DETERMINISTIC" ]; then '
+                        ' if [ "$(cat "$SHARED_ARTIFACT")" != head ]; then echo "        PASS [   0.01s] cas::beta_test beta_test::breaks"; echo "Summary [ 0.01s] 1 test run: 1 passed"; exit 0; fi;'
+                        ' case "$*" in *"--archive-file suite.tar.zst"*"--partition count:1/1"*) ;; *) exit 42 ;; esac; fi;'
+                        ' if [ -z "$DETERMINISTIC" ] && [ -f "$SHARED_ARTIFACT.replayed" ]; then '
+                        ' if [ -n "$HEAD_FAILS" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi;'
+                        ' echo "        PASS [   0.01s] cas::beta_test beta_test::breaks"; echo "Summary [ 0.01s] 1 test run: 1 passed"; exit 0; fi;'
+                        ' touch "$SHARED_ARTIFACT.replayed"; echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; if [ -n "$RING_TIMEOUT" ]; then echo "     TIMEOUT [  60.00s] cas::beta_test beta_test::hangs"; echo "Summary [ 60.01s] 2 tests run: 0 passed, 1 failed, 1 timed out"; exit 100; fi;'
                         ' if [ -n "$RING_UNPARSED" ]; then echo "Summary [ 0.01s] 2 tests run: 0 passed, 2 failed"; exit 100; fi; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100 ;;\n'
                         '*) echo "Summary [ 0.01s] 1 test run: 1 passed" ;; esac\n')
         fake.chmod(0o755)
-        env = dict(os.environ, CARGO=str(fake), CALLS=str(calls))
+        shared = self.root / "output/shared-artifact"
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_text("head")
+        env = dict(os.environ, CARGO=str(fake), CALLS=str(calls), SHARED_ARTIFACT=str(shared))
         state, outputs = self.root / "output/lane.json", self.root / "output/github"
         def phase(name, *extra):
             command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", name, "--base-sha", self.base, "--history", str(self.history),
@@ -491,6 +500,17 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertIn(f"and not ({own})", ring_run)
         self.assertIn("binary(beta_test)", ring_run)
         self.assertIn("--partition count:1/1", ring_run)
+        # cas-c53a1: base builds overwrite the shared target dependency. A
+        # subsequent head build can reuse that newer artifact, hiding a
+        # deterministic delivery failure. Replay the original archive/filter/
+        # partition before any base build; do not replace it with failed names.
+        env["DETERMINISTIC"] = "1"
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0)
+        attribution = json.loads(state.with_name("ring-attribution.json").read_text())
+        self.assertEqual([f["test"] for f in attribution["caused"]], ["beta_test::breaks"])
+        replay_runs = [line for line in calls.read_text().splitlines()[calls.read_text().splitlines().index(ring_run) + 1:] if "nextest run" in line]
+        self.assertEqual(replay_runs[0], ring_run)
+        del env["DETERMINISTIC"]
         # cas-ae6ae: nextest printed the FAIL twice (inline and under Summary),
         # yet one run is one observation. Passing on the head rerun and at base
         # is unattributed; failing again at the head is caused. Both stay red.
@@ -507,12 +527,14 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertEqual(phase("attribute", "--receipt", "ring").returncode, 0, "fails at the base too: inherited")
         # Verifier repro: an inherited FAIL beside a new TIMEOUT stays red.
         env["RING_TIMEOUT"] = "1"
+        Path(str(shared) + ".replayed").unlink(missing_ok=True)
         self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
         self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "the new timeout is not inherited")
         unattributed = json.loads(state.with_name("ring-attribution.json").read_text())["unattributed"]
         self.assertEqual([f["test"] for f in unattributed], ["beta_test::hangs"], "the new timeout passed the head rerun")
         del env["RING_TIMEOUT"]
         env["RING_UNPARSED"] = "1"
+        Path(str(shared) + ".replayed").unlink(missing_ok=True)
         self.assertNotEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0,
                             "an unsuccessful outcome with no parsed test line stays red")
         del env["RING_UNPARSED"], env["BASE_FAILS"]

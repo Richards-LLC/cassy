@@ -93,7 +93,12 @@ pub(super) fn credential_store_access_denial(input: &HookInput, tool: &str) -> O
     if !super::operator_credentials::references_store(input, tool) {
         return None;
     }
-    Some(operator_credential_refusal())
+    let mut refusal = operator_credential_refusal();
+    if tool.eq_ignore_ascii_case("Bash") && super::operator_credentials::bash_directory_unresolved(input) {
+        // GH #2171: name the supported form for work that reads no store.
+        refusal.push_str(" If this command reads no credential store, it changes into a directory Cassy cannot resolve, so its relative and `$VAR` operands are judged as if run inside a store: `cd` to the literal project directory first, then run the command (for example a dependency audit or install that logs to an artifacts variable).");
+    }
+    Some(refusal)
 }
 
 fn operator_credential_refusal() -> String {

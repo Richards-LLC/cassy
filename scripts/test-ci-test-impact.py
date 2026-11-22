@@ -169,6 +169,18 @@ pub fn run() { nested::launch(); }
         command = self.select("cas-cli/tests/common/input.json")["commands"][0]
         self.assertEqual(set(command["stems"]), {"alpha_test", "beta_test", "gamma_test", "opaque_test", "builtin_archive_portability_test"})
 
+    def test_path_attribute_case_file_is_owned_by_its_including_suite(self):
+        # cas-2f1c: distributed_factory_test.rs includes
+        # distributed_factory_test_cases/two_machine.rs; the case directory
+        # does not share the suite stem, yet only that suite compiles it.
+        self.put("cas-cli/tests/alpha_test.rs", 'use cas::alpha::value;\n#[path = "alpha_test_cases/two_machine.rs"]\nmod two_machine;\n')
+        self.put("cas-cli/tests/alpha_test_cases/two_machine.rs", '#[test] fn runs() {}\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        selection = self.select("cas-cli/tests/alpha_test_cases/two_machine.rs")
+        self.assertEqual(selection["commands"][0]["reason"], {"alpha_test": "changed-test", "builtin_archive_portability_test": "widened:archive-contract"})
+        self.assertEqual(impact.lane_split(self.root, selection)["own"], "(package(cas) and (binary(alpha_test)))")
+
     def test_root_reexport_import_is_opaque_even_with_qualified_import(self):
         self.put("cas-cli/tests/gamma_test.rs", 'use cas::gamma::other; use cas::root_function;\n')
         self.commit()

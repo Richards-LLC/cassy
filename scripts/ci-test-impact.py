@@ -140,9 +140,9 @@ def integration_sources(root, stem):
     return sources
 
 
-def owns(stem, path, sources):
-    """A suite owns a test path it compiles (cas-2f1c) or that sits under its stem."""
-    return path in sources or path == f"cas-cli/tests/{stem}.rs" or path.startswith(f"cas-cli/tests/{stem}/")
+# A suite owns a test path it compiles (cas-2f1c) or that sits under its stem.
+def owns(stem, path, files):
+    return path in files or path == f"cas-cli/tests/{stem}.rs" or path.startswith(f"cas-cli/tests/{stem}/")
 
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."

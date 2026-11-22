@@ -4415,10 +4415,11 @@ async fn transfer_then_merged_prior_lane_rebinds_source_at_park_gh1437_gh2312() 
     let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
     assert_eq!(f.task(id).deliverables.factory_branch_start.unwrap().branch, old_lane, "{started}");
 
-    git(&checkout, &["merge", "-q", "--no-ff", "-m", &format!("Merge A's lane for {id}"), &format!("origin/{old_lane}")]);
+    // As in the incident, B's own commit need not repeat the task id.
+    git(&checkout, &["merge", "-q", "--no-ff", "--no-edit", &format!("origin/{old_lane}")]);
     std::fs::write(checkout.join("fix.rs"), "pub fn finished() {}\n").unwrap();
     git(&checkout, &["add", "fix.rs"]);
-    git(&checkout, &["commit", "-q", "-m", &format!("fix({id}): finish A's work")]);
+    git(&checkout, &["commit", "-q", "-m", "fix: finish the handoff"]);
     let tip = git(&checkout, &["rev-parse", "HEAD"]);
     git(&checkout, &["push", "-q", "origin", &lane]);
     let parked = call(&f.worker, serde_json::json!({

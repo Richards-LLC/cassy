@@ -889,7 +889,10 @@ mod tests {
             parent.design = if mode == "unreferenced" { String::new() } else {
                 format!("Plan: {}", if mode == "id-only" { "art-id-only" } else { "art-peer-plan" })
             };
-            parent.origin_project = Some(if mode == "foreign-project" { "foreign" } else { "fixture" }.into());
+            // Keep the identity with which contention_fixture created the
+            // child; changing the receiver's pin afterwards makes it foreign.
+            let project = crate::cloud::resolve_canonical_id(&core.cas_root).unwrap();
+            parent.origin_project = Some(if mode == "foreign-project" { "foreign".into() } else { project });
             let record = cas_store::PublishedArtifact {
                 id:"art-peer-plan".into(), task_id:if parent_scope { parent.id.clone() } else { task.id.clone() }, name:"decision-brief.md".into(),
                 mime:"text/markdown".into(), size_bytes:bytes.len() as u64,
@@ -921,7 +924,6 @@ mod tests {
                 receiving_tasks.add_dependency(&cas_types::Dependency::new(
                     task.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,
                 )).unwrap();
-                std::fs::write(core.cas_root.join("config.toml"), "[project]\ncanonical_id='fixture'\n").unwrap();
             } else {
                 let note = format!("ARTIFACT_PROOF: {}", serde_json::to_string(&record).unwrap());
                 core.open_task_store().unwrap().append_trusted_note(&task.id, &note).unwrap();

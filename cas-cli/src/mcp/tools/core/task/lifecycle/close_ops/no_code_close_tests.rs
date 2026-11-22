@@ -4166,3 +4166,72 @@ async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
             .all(|lease| lease.task_id == id));
     }
 }
+
+/// GH #1695: a supervisor reopens an already-landed task for revalidation.
+/// The new cycle delivers nothing, so no_delivery is the honest close, and the
+/// handed-off verification must not hold the worker's next queued start.
+#[tokio::test(flavor = "multi_thread")]
+async fn revalidated_landed_task_closes_without_delivery_and_frees_queue_gh1695() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for agent_id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(agent_id).unwrap();
+        agent.factory_session = Some("queue-session".into());
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+    }
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+
+    // The first cycle's delivery landed on the target and the task closed.
+    let id = "cas-1695a";
+    let lane = format!("{LANE}-{id}");
+    git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+    std::fs::write(checkout.join("landed.rs"), "pub fn landed() {}\n").unwrap();
+    git(&checkout, &["add", "landed.rs"]);
+    git(&checkout, &["commit", "-q", "-m", "fix(cas-1695a): landed fix"]);
+    let landed = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    git(repo, &["merge", "-q", "--ff-only", &lane]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let mut task = assigned(id, TaskType::Bug, "main");
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    task.deliverables.factory_branch_anchor = Some(landed.clone());
+    task.deliverables.parked_branch = Some(lane.clone());
+    task.deliverables.green_merge_commit = Some(landed.clone());
+    f.put(&task);
+    let mut next = assigned("cas-1695b", TaskType::Task, "main");
+    next.status = TaskStatus::Open;
+    next.assignee = None;
+    next.execution_note = Some("no-code".into());
+    next.external_ref = Some(PROOF.into());
+    f.put(&next);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let reopened = call(&f.supervisor, serde_json::json!({
+        "action":"reopen", "id":id, "reason":"Revalidate on the current tree",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Open, "{reopened}");
+    env.set("CAS_AGENT_ROLE", "worker");
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+    queue_control(&f, Some(vec![&next.id])).await;
+
+    let closed = call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "no_delivery":true,
+        "reason":"Revalidated: the landed fix passes on the current tree",
+    })).await;
+    assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some(), "{closed}");
+    let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":next.id,
+    })).unwrap())).await;
+    assert!(result.is_ok(), "{closed}\n---\n{result:?}");
+    assert_eq!(f.task(&next.id).status, TaskStatus::InProgress);
+}

@@ -187,6 +187,17 @@ pub fn run() { nested::launch(); }
                 split = impact.lane_split(self.root, impact.plan(self.root, self.base, '', None))
                 self.assertIn(audit, split['own'])
                 self.assertIn(audit, split['selected'])
+                # GH #2140: the regex/or own selection stays lane CI's; the
+                # worker gets admitted named-filter commands for its parts.
+                lib = ['nextest', 'run', '-p', 'cas', '--lib', '-E']
+                worker = [row['args'] for row in split['worker']]
+                if path == 'cas-cli/src/alpha.rs':
+                    self.assertEqual(worker, [lib + ['test(alpha::) | test(gates::registry_tests::)']])
+                    self.assertEqual(split['ci_only'], [])
+                else:
+                    self.assertIn(lib + ['test(gates::registry_tests::)'], worker)
+                    if path == 'crates/shared/src/lib.rs':
+                        self.assertEqual(split['ci_only'], ['package(shared)'])
                 self.assertTrue('--workspace' in split['build'] or any(
                     split['build'][i:i+2] == ['-p', 'cas'] for i in range(len(split['build']))))
                 self.base = self.git('rev-parse', 'HEAD')
@@ -251,6 +262,9 @@ async fn block_annotated_script_reader() { std::fs::read_to_string("scripts/tool
         self.assertIn("reads_workflow", split["own"])
         self.assertIn("annotated_script_reader", split["own"])
         self.assertIn("block_annotated_script_reader", split["own"])
+        self.assertEqual([row["args"][3:] for row in split["worker"]], [
+            ["cas", "--lib", "-E", "test(reads_script)"],
+            ["cas", "--test", "alpha_test", "-E", "test(annotated_script_reader) | test(block_annotated_script_reader) | test(reads_workflow)"]])
         self.assertNotIn("decoy", split["selected"])
         self.assertNotIn("unrelated", split["selected"])
         self.assertNotIn("all()", split["selected"])

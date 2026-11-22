@@ -13,6 +13,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import shlex
 import signal
 import subprocess
 import statistics
@@ -26,6 +27,8 @@ import zipfile
 
 VERSION = 1
 SAFE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+# The capped worker's positive named-filter grammar (factory_worker_check::named_filter).
+WORKER_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_:.-]*")
 
 
 def git(root, *args):
@@ -389,6 +392,18 @@ def lane_split(root, selection):
             selected.append(f"(package({command['package']}) and ({args[args.index('-E') + 1]}))")
         selected = " or ".join(selected)
     own = [row["filter"] for row in selection.get("file_contracts", [])]
+    # GH #2140: `own` is lane CI's nextest expression. The capped worker admits
+    # only positive named filters per package and harness, so each own part
+    # also gets that admitted superset, or is named as lane-CI-only.
+    worker, ci_only = {}, []
+    def prove(package, harness, name):
+        worker.setdefault((package, harness), []).append(f"test({name})")
+    for row in selection.get("file_contracts", []):
+        package, _, harness = row["binary"].partition("::")
+        if WORKER_NAME.fullmatch(row["test"]):
+            prove(row["package"], harness or None, row["test"])
+        else:
+            ci_only.append(row["filter"])
     try:
         crates, _ = workspace(root)
         direct = sorted(name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths))
@@ -398,12 +413,20 @@ def lane_split(root, selection):
     for name in direct:
         if name != "cas":
             own.append(f"package({name})")
+            ci_only.append(f"package({name})")
             continue
         modules = sorted({p.split("/")[2].removesuffix(".rs") for p in paths if p.startswith("cas-cli/src/")} - {"lib", "main"})
-        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        modules = [module for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules]
+        for module in modules:
+            prove("cas", None, f"{module}::")
         for stem, target in sorted(mapping.items()):
             if any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for p in paths):
                 parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
+                if target == stem:
+                    ci_only.append(f"(package(cas) and binary({target}))")
+                else:
+                    prove("cas", target, f"{stem}::")
         if parts:
             own.append("(package(cas) and (" + " or ".join(parts) + "))")
     # Existing whole-tree refusal audits belong before the ring for production
@@ -412,6 +435,7 @@ def lane_split(root, selection):
     if any(path.endswith(".rs") and "/tests/" not in path for path in paths):
         audit = "(package(cas) and binary(cas) and test(gates::registry_tests::))"
         own.append(audit)
+        prove("cas", None, "gates::registry_tests::")
         selected = f"({selected}) or ({audit})" if selected else audit
         if not build:
             build = ["-p", "cas", "--lib"]
@@ -421,7 +445,14 @@ def lane_split(root, selection):
             if "--test" in build and "--lib" not in build:
                 build.append("--lib")
     own = " or ".join(own) or None
-    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
+    commands = []
+    for (package, harness), filters in sorted(worker.items(), key=lambda item: (item[0][0], item[0][1] or "")):
+        args = ["nextest", "run", "-p", package, *(["--lib"] if harness is None else ["--test", harness]),
+                "-E", " | ".join(sorted(set(filters)))]
+        commands.append({"args": args, "command": "cas factory worker-check --cas-root \"$CAS_ROOT\" -- "
+                         + " ".join(shlex.quote(arg) for arg in args)})
+    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected,
+            "worker": commands, "ci_only": ci_only}
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 def lane_count(root, source, expression):
@@ -863,6 +894,9 @@ def lane(root, args):
         write(out, {"plan": selection, "split": split})
         outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": selection["base_source"]}
         print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
+        # GH #2140: the own expression above is lane CI's; these are the worker's.
+        print("Worker proof: " + ("; ".join(row["command"] for row in split["worker"]) or "none")
+              + "; lane CI only: " + (", ".join(split["ci_only"]) or "none"))
         print("Subprocess suites: " + ", ".join(selection.get("subprocess_stems", [])))
         status = 0
     else:

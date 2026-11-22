@@ -210,7 +210,7 @@ fn integrated_exact_and_same_tree_anchors_keep_ancestor_content_gh2222_gh2236() 
         git(repo, &["checkout", "-qb", "factory/worker"]);
         git(repo, &["rm", "obsolete.rs"]);
         let content = commit(repo, "docs/guide.md", "delivered guide\n",
-            if foreign { "docs(cas-other): replace obsolete source" } else { "docs: replace obsolete source" });
+            if foreign { "docs(cas-beef): replace obsolete source" } else { "docs: replace obsolete source" });
         let content = if reverted {
             git(repo, &["revert", "--no-edit", &content]);
             git(repo, &["rev-parse", "HEAD"])

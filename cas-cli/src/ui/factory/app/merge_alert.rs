@@ -109,7 +109,7 @@ pub(super) fn admit_ready(cas_dir: &Path, ready: &Ready) -> bool {
 
 /// Local ref reads are cheap; network evidence belongs to the external lane.
 /// Keep both refs: a push can change origin without moving the local tip.
-fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<(String, String, String, bool)> {
+fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<(String, String, String, bool, String)> {
     let DirectorEvent::WorkerIdle { worker, active_task: Some(active) } = event else { return None; };
     let task = crate::store::open_task_store_local(&repo.join(".cas")).ok()?.get(&active.task_id).ok()?;
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch);
@@ -131,16 +131,18 @@ fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Optio
                 ))
     });
     let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease, staged, declined, marked_ready));
-    Some((task.id, tip.unwrap_or_default(), refs, marked_ready))
+    Some((task.id, tip.unwrap_or_default(), refs, marked_ready, branch))
 }
 
 /// Missing CI is not an actionable merge decision for a no-code or
-/// documentation-only delivery. Unknown Git evidence stays eligible so a
-/// failed path read cannot silently hide a code delivery.
-fn suppress_unknown_ci(repo: &Path, data: &DirectorData, task_id: &str, tip: &str) -> bool {
+/// documentation-only delivery, or for a branch no workflow at its tip runs
+/// on push (cas-0c47, GH #2273): that state can never resolve. Unknown Git
+/// evidence stays eligible so a failed read cannot silently hide a code delivery.
+fn suppress_unknown_ci(repo: &Path, data: &DirectorData, task_id: &str, branch: &str, tip: &str) -> bool {
     let Some(task) = crate::store::open_task_store_local(&repo.join(".cas"))
         .ok().and_then(|store| store.get(task_id).ok()) else { return false; };
     if task.execution_note.as_deref() == Some("no-code") { return true; }
+    if !push_ci_may_cover(repo, tip, branch) { return true; }
     let (_, target, _) = crate::ui::factory::director::resolve_merge_target_for_task(data, task_id);
     let Some(target) = target else { return false; };
     let base = format!("origin/{target}");
@@ -152,6 +154,67 @@ fn suppress_unknown_ci(repo: &Path, data: &DirectorData, task_id: &str, tip: &st
     })
 }
 
+/// Whether a GitHub Actions workflow at `tip` may run on a push to `branch`.
+/// Only a readable workflow set that provably lacks a matching push trigger
+/// answers false. An unreadable file, an empty set (an external CI app may
+/// still post checks) or a filter this cannot evaluate counts as covered.
+fn push_ci_may_cover(repo: &Path, tip: &str, branch: &str) -> bool {
+    let Some(listing) = crate::git_evidence::git_text(repo, &["ls-tree", "--name-only", tip, ".github/workflows/"])
+    else { return true; };
+    let files: Vec<&str> = listing.lines().filter(|path| path.ends_with(".yml") || path.ends_with(".yaml")).collect();
+    files.is_empty() || files.iter().any(|path| {
+        crate::git_evidence::git_text(repo, &["show", &format!("{tip}:{path}")])
+            .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
+            .and_then(|workflow| workflow_push_covers(&workflow, branch))
+            .unwrap_or(true)
+    })
+}
+
+fn workflow_push_covers(workflow: &serde_yaml::Value, branch: &str) -> Option<bool> {
+    use serde_yaml::Value;
+    let on = workflow.get("on").or_else(|| workflow.as_mapping()?.get(Value::Bool(true)))?;
+    match on {
+        Value::String(event) => Some(event == "push"),
+        Value::Sequence(events) => Some(events.iter().any(|event| event.as_str() == Some("push"))),
+        Value::Mapping(events) => match events.get("push") {
+            None => Some(false),
+            Some(Value::Null) => Some(true),
+            Some(Value::Mapping(filters)) => {
+                let patterns = |key: &str| filters.get(key).map(|value| value.as_sequence()?
+                    .iter().map(|pattern| pattern.as_str()).collect::<Option<Vec<_>>>());
+                if let Some(patterns) = patterns("branches") {
+                    // Ordered filters: a later `!pattern` excludes an earlier match.
+                    let mut matched = false;
+                    for pattern in patterns? {
+                        match pattern.strip_prefix('!') {
+                            Some(negated) => if branch_glob(negated, branch)? { matched = false },
+                            None => if branch_glob(pattern, branch)? { matched = true },
+                        }
+                    }
+                    Some(matched)
+                } else if let Some(patterns) = patterns("branches-ignore") {
+                    let mut ignored = false;
+                    for pattern in patterns? { ignored |= branch_glob(pattern, branch)?; }
+                    Some(!ignored)
+                } else {
+                    // Tag-only push filters never run for a branch push.
+                    Some(!(filters.contains_key("tags") || filters.contains_key("tags-ignore")))
+                }
+            }
+            Some(_) => None,
+        },
+        _ => None,
+    }
+}
+
+/// GitHub's `*` and `**` branch globs; other operators are not evaluated.
+fn branch_glob(pattern: &str, branch: &str) -> Option<bool> {
+    if pattern.contains(['?', '+', '[', ']', '\\']) { return None; }
+    let regex = pattern.split("**").map(|part| part.split('*').map(regex::escape)
+        .collect::<Vec<_>>().join("[^/]*")).collect::<Vec<_>>().join(".*");
+    regex::Regex::new(&format!("^{regex}$")).ok().map(|regex| regex.is_match(branch))
+}
+
 /// One observation supplies both readiness and worker waits. Settled results
 /// are reused until refs change; failed CI is revisited slowly for same-SHA
 /// reruns, while pending/unknown retains the existing retry cadence.
@@ -160,7 +223,7 @@ pub(super) fn read_delivery(
     supervisor: &str,
 ) -> (Option<Ready>, Option<(String, WorkerWait)>) {
     let cas_dir = repo.join(".cas");
-    let Some((task, tip, refs, marked_ready)) = fingerprint(event, data, repo) else {
+    let Some((task, tip, refs, marked_ready, branch)) = fingerprint(event, data, repo) else {
         return (None, read_worker_wait(event, data, &cas_dir, repo, supervisor));
     };
     // Check live task evidence before reusing either an in-memory read or a
@@ -202,11 +265,11 @@ pub(super) fn read_delivery(
     let mut ci = wait.as_ref().map(|(_, wait)| wait.ci).unwrap_or("unknown");
     let ready = read(event, data, repo, wait.as_ref().map(|(_, wait)| wait), &mut ci);
     if (ci == "unknown" || ready.as_ref().is_some_and(|ready| ready.ci == "unknown"))
-        && suppress_unknown_ci(repo, data, &task, &tip)
+        && suppress_unknown_ci(repo, data, &task, &branch, &tip)
     {
         return (None, None);
     }
-    let refs = fingerprint(event, data, repo).map(|(_, _, refs, _)| refs).unwrap_or(refs);
+    let refs = fingerprint(event, data, repo).map(|(_, _, refs, _, _)| refs).unwrap_or(refs);
     let mut reads = cache.reads.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // An older in-flight observation cannot overwrite a newer request's read.
     if reads.get(&task).is_none_or(|previous| previous.checked_at <= now) {

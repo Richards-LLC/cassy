@@ -91,8 +91,8 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       await journey.stage("Open this project's tasks in Explorer", async () => {
         await list.getByRole("button", { name: /^cas-src on / }).click();
         if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
-        // The rail on desktop; on a phone the same list is in the Tasks & progress view.
-        const link = page.getByRole("complementary", { name: "Conversation context" }).or(page.getByTestId("status-view")).getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" });
+        // The rail on desktop; on a phone, the Tasks & progress sheet.
+        const link = page.getByRole("complementary", { name: "Conversation context" }).or(page.getByRole("dialog", { name: "Tasks & progress" })).getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" });
         await expect(link).toBeVisible();
         await followToExplorer(page, link, requests, PROJECT_EXPLORER);
         if (width === 1280) {

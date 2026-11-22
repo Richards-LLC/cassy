@@ -389,7 +389,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(page.getByRole("region", { name: /^Waiting on you: question from / })).toBeHidden();
     // The older session's thread is a collapsed, labelled section, with dates.
     await expect(earlierLabels).toHaveText([/^Earlier session noble-cheetah-84, Yesterday/, /^Earlier messages with no session recorded, Yesterday/]);
-    await expect(earlier.getByRole("group", { expanded: true })).toHaveCount(0);
+    for (const group of await earlier.getByRole("group").all()) await expect(group).not.toHaveAttribute("open");
   });
 
   await journey.stage("Read an earlier session's messages", async () => {

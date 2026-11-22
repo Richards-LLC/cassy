@@ -7,7 +7,7 @@ import type { Page } from "@playwright/test";
 const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
 // The palette stays in the DOM when closed, so its rows are read with includeHidden.
 const commandPalette = (page: Page) => page.getByRole("dialog", { name: "Commands", includeHidden: true });
-const appearanceRow = (page: Page, scheme: string) => commandPalette(page).getByRole("button", { name: new RegExp(`^Appearance · ${scheme}`, "i"), includeHidden: true });
+const appearanceRow = (page: Page, scheme: string) => commandPalette(page).getByRole("button", { name: `Appearance · ${scheme}`, includeHidden: true });
 
 test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
   if (await phoneLayout(page)) { await phoneDark(page, journey); return; }

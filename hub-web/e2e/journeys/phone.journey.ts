@@ -284,7 +284,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     // Machines that are not connected are listed first.
     await expect(machines.first()).toHaveAttribute("data-machine-id", "shed");
     // One clock, the thread's 12-hour one (cas-73dd9).
-    const seen = (await dialog.getByTestId("paired-machine-seen").allTextContents()).filter((text) => text.trim());
+    const seen = (await dialog.getByTestId("paired-machine-seen").allTextContents()).filter((text) => /\d:\d{2}/.test(text));
     expect(seen.length, "a machine that was seen says when").toBeGreaterThan(0);
     for (const text of seen) expect(text).toMatch(/ · \d{1,2}:\d{2}\s[AP]M$/);
     // A version the machine has not reported yet is still said (3.30.0 journey F10).

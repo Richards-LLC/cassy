@@ -337,7 +337,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
       await expect(accountsEditor(dialog)).toBeHidden();
       // The weekly meter at 38% used: its bar carries data-left="62".
-      await expect(dialog.getByTestId("accounts-meter").filter({ has: dialog.locator('[data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
+      await expect(dialog.getByTestId("accounts-meter").filter({ has: page.locator('[data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
       const stale = dialog.getByRole("listitem").filter({ hasText: "old@example.test" });
       await expect(stale).toHaveAttribute("data-login-state", "stale_login");
       await expect(stale).toBeVisible();

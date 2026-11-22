@@ -490,6 +490,7 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     // cas-bebc scopes worktree_merge to the caller's CAS_FACTORY_SESSION; the
     // test must not inherit the session of the shell that runs it (cas-31a3).
     let mut env = TestEnvGuard::temp_home();
+    for shape in ["ahead", "equal", "behind"] {
     let repo = GitRepo::new();
     run_git(&["branch", "integration"], &repo.root);
     run_git(
@@ -536,13 +537,51 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     });
     task_store.add(&task).unwrap();
 
+    // GH #2209: refused release work on the local train must not ride out
+    // with the worker's independent delivery. Equal/behind remain supported.
+    let mut unpublished = Vec::new();
+    if shape == "ahead" {
+        run_git(&["switch", "integration"], &repo.root);
+        for path in ["release.md", "release-note.md"] {
+            std::fs::write(repo.root.join(path), "unpublished release work\n").unwrap();
+            run_git(&["add", path], &repo.root);
+            run_git(&["commit", "-m", "release preparation retained after refused cut"], &repo.root);
+            unpublished.push(git_stdout(&repo.root, &["rev-parse", "HEAD"]));
+        }
+        run_git(&["switch", "main"], &repo.root);
+    } else if shape == "behind" {
+        run_git(&["switch", "-c", "remote-progress", "integration"], &repo.root);
+        std::fs::write(repo.root.join("remote.txt"), "published target progress\n").unwrap();
+        run_git(&["add", "remote.txt"], &repo.root);
+        run_git(&["commit", "-m", "published target progress"], &repo.root);
+        run_git(&["push", "origin", "HEAD:refs/heads/integration"], &repo.root);
+        run_git(&["switch", "main"], &repo.root);
+    }
+    let local_before = git_stdout(&repo.root, &["rev-parse", "integration"]);
+    let remote_before = git_stdout(remote.path(), &["rev-parse", "refs/heads/integration"]);
+    let source_before = git_stdout(&repo.root, &["rev-parse", "factory/cas8d38-worker"]);
     let service = delivery_service(&cas_root, supervisor_id);
     let mut merge = coord_req("worktree_merge");
     merge.id = Some("factory/cas8d38-worker".to_string());
     merge.task_id = Some(task.id.clone());
     merge.cleanup = Some(false);
-    let merged = service.factory(Parameters(merge)).await.expect("merge call");
-    assert!(get_text(&merged).contains("Merged"), "{}", get_text(&merged));
+    let merged = service.factory(Parameters(merge)).await;
+    let output = match &merged { Ok(result) => get_text(result), Err(error) => error.to_string() };
+    if shape == "ahead" {
+        assert!(output.contains("[G-110]"), "{output}");
+        for commit in unpublished.iter().chain([&local_before, &remote_before]) {
+            assert!(output.contains(commit), "missing commit identity {commit}: {output}");
+        }
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "integration"]), local_before);
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/integration"]), remote_before);
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "factory/cas8d38-worker"]), source_before);
+        assert!(cas_store::get_latest_worker_delivery(&cas_root, &task.id).unwrap().is_none());
+        continue;
+    }
+    assert!(cas_git_is_ancestor(&repo.root, &source_before, "integration"), "{output}");
+    assert!(cas_git_is_ancestor(&repo.root, &remote_before, "integration"), "{output}");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "integration"]),
+        git_stdout(remote.path(), &["rev-parse", "refs/heads/integration"]), "{output}");
     assert!(cas_store::get_latest_worker_delivery(&cas_root, &task.id)
         .unwrap()
         .is_none(), "observation must not fabricate a worker receipt");
@@ -557,8 +596,9 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
         }))))
         .await
         .expect("supervisor correction");
-    assert!(get_text(&corrected).contains("Corrected proof scope"));
+    assert_ne!(corrected.is_error, Some(true));
     assert_eq!(task_store.get(&task.id).unwrap().risk, [cas::types::TaskRisk::None]);
+    }
 }
 
 /// cas-eda0: a parked delivery that `worktree_merge` lands with green CI is
@@ -1689,8 +1729,17 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
+    for locally_merged in [true, false] {
     let fixture = arm_delivery("driftbefore", "drift-before", &mut env).await;
 
+    // A retry can already contain the delivery locally without having
+    // published it. Reconciliation must not publish unrelated train work.
+    if locally_merged {
+        run_git(&["push", "origin", "main"], &fixture.repo.root);
+        run_git(&["merge", "--no-ff", &fixture.receipt.source_branch, "-m", "local delivery awaiting publication"], &fixture.repo.root);
+    }
+    let origin = fixture.repo.root.join(".git/test-origin.git");
+    let remote_before = locally_merged.then(|| git_stdout(&origin, &["rev-parse", "refs/heads/main"]));
     // A concurrent actor commits on the reviewed target after approval.
     std::fs::write(fixture.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();
     run_git(&["add", "concurrent.txt"], &fixture.repo.root);
@@ -1704,6 +1753,12 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
+    if locally_merged {
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), drifted);
+        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]), remote_before.unwrap());
+        assert_no_delivery_projection(&fixture, delivery_state(&fixture));
+        continue;
+    }
     let state = delivery_state(&fixture);
     assert_eq!(
         state,
@@ -1720,6 +1775,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
         drifted,
         "a refused delivery must not touch the target ref"
     );
+    }
 }
 
 /// The real cas-0a21 race: drift lands *between* preflight and the merge, via

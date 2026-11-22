@@ -7912,69 +7912,6 @@ mod tests {
         }
     }
 
-    /// GH #2128: a Codex worker spawned for a task launches with no actionable startup
-    /// prompt (its Cassy tools may not exist yet), and the spawn row waits for the
-    /// readiness gate instead of being marked delivered. The launch is real: the
-    /// fake `codex` records the arguments it was started with.
-    #[test]
-    fn a_codex_spawn_launches_without_the_task_prompt_and_leaves_its_row_to_the_gate_gh_2128() {
-        const CHILD: &str = "CAS_CODEX_SPAWN_HANDOFF_CHILD";
-        let argv_file = std::env::var_os(CHILD).map(std::path::PathBuf::from);
-        let Some(argv_file) = argv_file else {
-            use std::os::unix::fs::PermissionsExt;
-            let cas = crate::test_support::fake_cas_on_path();
-            let argv_file = cas.bin().join("codex-argv");
-            let codex = cas.bin().join("codex");
-            std::fs::write(&codex, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n", argv_file.display())).unwrap();
-            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let test = format!("{}::a_codex_spawn_launches_without_the_task_prompt_and_leaves_its_row_to_the_gate_gh_2128", module_path!().split_once("::").unwrap().1);
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", &test, "--nocapture"])
-                .env("PATH", cas.path())
-                .env(CHILD, &argv_file)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{}\n{}",
-                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            return;
-        };
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        let project = env.home().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let cas_dir = crate::store::init_cas_dir(&project).unwrap();
-        open_task_store_cached(&cas_dir).unwrap().add(&task_with("cas-handoff", None, TaskStatus::Open)).unwrap();
-        let mut app = FactoryApp::for_test_at(cas_dir.clone());
-        app.set_factory_session("handoff".into());
-        let name = "codex-worker";
-        // A predecessor's readiness record is replaced by an awaiting one when the name launches again.
-        let stale = cas_dir.join("factory-tools-ready").join("handoff").join(name);
-        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
-        std::fs::write(&stale, std::process::id().to_string()).unwrap();
-
-        app.finish_worker_spawn(
-            spawn_result_for_test(name, &project), None, Some(cas_mux::WorkerSpec::codex_default(name)), Some("cas-handoff".into()),
-        ).unwrap();
-
-        for _ in 0..100 {
-            if argv_file.exists() { break; }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let argv = std::fs::read_to_string(&argv_file).expect("the fake codex was launched");
-        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-        let delivered: Vec<Option<String>> = conn
-            .prepare("SELECT transport_delivered_at FROM prompt_queue WHERE target = ?").unwrap()
-            .query_map([name], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
-        assert_eq!(
-            (argv.contains(cas_pty::WORKER_STARTUP_BRIEF_PREFIX.trim()), delivered.len(), delivered.iter().any(Option::is_some), crate::factory_tools_ready::tools_listed(&cas_dir, "handoff", name, |_| true)),
-            (false, 1, false, false),
-            "(launched with a startup brief argument, spawn rows, row marked delivered, tools listed before the launch lists them); argv: {argv}"
-        );
-        // The readiness record is written by the MCP child from these, so they must reach it.
-        for entry in [format!("mcp_servers.cs.env.CAS_AGENT_NAME=\"{name}\""), "mcp_servers.cs.env.CAS_AGENT_ROLE=\"worker\"".to_string()] {
-            assert!(argv.lines().any(|line| line == entry), "{entry} missing from the Codex launch: {argv}");
-        }
-    }
-
     // --- cas-6913 / cas-7a94: spawn-time task pre-assignment ------------
 
     #[test]

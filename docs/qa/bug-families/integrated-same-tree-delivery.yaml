@@ -1,0 +1,10 @@
+title: Integrated exact-anchor and same-tree content remains attributable
+statement: >-
+  A fast-forwarded exact anchor and a duplicate-content same-tree merge retain
+  their ancestor delivery, including deleted paths. Recover task-owned content
+  from the common base when both parents match the parked tree. An unrelated
+  target advance does not erase delivery, while missing, reverted or foreign
+  content still refuses G-56.
+tasks: [cas-5cf0]
+journeys: []
+invariants: []

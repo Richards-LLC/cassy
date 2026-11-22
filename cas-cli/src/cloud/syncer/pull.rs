@@ -1614,7 +1614,7 @@ fn rejects_delivery_regression(local: &Task, remote: &Task) -> bool {
 /// for the exact execution already recorded here. This imports no approval
 /// or publication authority; merge admission still checks the pushed tip.
 fn receipted_park_projection(local: &Task, remote: &Task) -> Option<Task> {
-    if !matches!(local.status, TaskStatus::InProgress | TaskStatus::Blocked)
+    if !matches!(local.status, TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked)
         || remote.status != TaskStatus::AwaitingMerge || remote.updated_at > local.updated_at
         || local.deliverables.delivery_cycle != remote.deliverables.delivery_cycle
         || local.assignee != remote.assignee
@@ -1633,6 +1633,19 @@ fn receipted_park_projection(local: &Task, remote: &Task) -> Option<Task> {
         || !remote.notes.split("\n\n").filter_map(lifecycle_audit_note).any(|(_, event)|
             event.starts_with(audit::PARKED) && event.contains(audit::PARKED_STATE))
     { return None; }
+    // Open is still a review decision. Only a builder which acknowledged
+    // this owner's exact request_changes and then parked that cycle can
+    // supersede it; an unrelated Open row or a later decision stays held.
+    if local.status == TaskStatus::Open {
+        let decision = local.notes.rsplit("\n\n").find(|block|
+            lifecycle_audit_note(block).is_some_and(|(_, event)|
+                event.starts_with(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)))?;
+        let mut after = remote.notes.split("\n\n").skip_while(|block| block.trim() != decision.trim());
+        after.next()?;
+        if !after.filter_map(lifecycle_audit_note).any(|(_, event)|
+            event.starts_with(audit::PARKED) && event.contains(audit::PARKED_STATE))
+        { return None; }
+    }
     let mut projected = local.clone();
     projected.status = remote.status;
     projected.pending_verification = remote.pending_verification;

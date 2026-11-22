@@ -755,6 +755,26 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
     );
 }
 
+/// cas-f767 (GH #2132): a capped check refused for memory pressure records a
+/// capacity wait with a 120 s retry and exits 1. Each exit re-armed the idle
+/// relay, paging the supervisor five times in fifteen minutes for one worker.
+#[test]
+fn cas_f767_recorded_capacity_wait_keeps_the_idle_relay_quiet() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    f.ci(Some("failure"));
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let mut worker = agents.get("merge-w").unwrap();
+    worker.metadata.insert("clone_path".into(), f.repo.path().display().to_string());
+    agents.register(&worker).unwrap();
+    f.app.merge_alert_retries.now = Some(Utc::now());
+    crate::factory_capacity_wait::record_refusal(&f.app.cas_dir, f.repo.path(),
+        "memory PSI some avg10 19.43% exceeds 10.00%", Utc::now()).unwrap().expect("wait recorded");
+    assert!(f.relay().is_empty(), "a scheduled capacity retry is a wait, not an idle worker");
+    crate::factory_capacity_wait::admitted(&f.app.cas_dir, f.repo.path()).unwrap();
+    assert_eq!(f.relay().len(), 1, "once admitted, the real failure still relays");
+}
+
 /// A worker waiting on its own pushed CI is not stalled, even if repeated
 /// idle episodes arrive while the task is still in progress.
 #[test]

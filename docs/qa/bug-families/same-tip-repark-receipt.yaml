@@ -5,5 +5,7 @@ statement: >-
   when remaining follow-up crosses the response budget. The anchor and cycle
   stay unchanged and the continuation records one final outcome. A changed
   snapshot or work still before required publication cannot borrow this receipt.
+  A completed continuation releases its worker guard before advertising idle,
+  so shutdown does not race the final ownership release.
 tasks: [cas-b780]
 journeys: [FACTORY-CLOSE]

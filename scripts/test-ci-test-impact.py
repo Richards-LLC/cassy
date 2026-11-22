@@ -467,8 +467,9 @@ path="tests/builtin_archive_portability_test.rs"
                         '*"binary(beta_test)"*) if [ -n "$DETERMINISTIC" ]; then '
                         ' if [ "$(cat "$SHARED_ARTIFACT")" != head ]; then echo "        PASS [   0.01s] cas::beta_test beta_test::breaks"; echo "Summary [ 0.01s] 1 test run: 1 passed"; exit 0; fi;'
                         ' case "$*" in *"--archive-file suite.tar.zst"*"--partition count:1/1"*) ;; *) exit 42 ;; esac; fi;'
+                        ' if [ -n "$HEAD_EMPTY" ]; then echo "Summary [ 0.01s] 0 tests run: 0 passed"; exit 0; fi;'
                         ' if [ -z "$DETERMINISTIC" ] && [ -f "$SHARED_ARTIFACT.replayed" ]; then '
-                        ' if [ -n "$HEAD_FAILS" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi;'
+                        ' if [ -n "$HEAD_FAILS" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100; fi;'
                         ' echo "        PASS [   0.01s] cas::beta_test beta_test::breaks"; echo "Summary [ 0.01s] 1 test run: 1 passed"; exit 0; fi;'
                         ' touch "$SHARED_ARTIFACT.replayed"; echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; if [ -n "$RING_TIMEOUT" ]; then echo "     TIMEOUT [  60.00s] cas::beta_test beta_test::hangs"; echo "Summary [ 60.01s] 2 tests run: 0 passed, 1 failed, 1 timed out"; exit 100; fi;'
                         ' if [ -n "$RING_UNPARSED" ]; then echo "Summary [ 0.01s] 2 tests run: 0 passed, 2 failed"; exit 100; fi; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100 ;;\n'
@@ -508,7 +509,8 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0)
         attribution = json.loads(state.with_name("ring-attribution.json").read_text())
         self.assertEqual([f["test"] for f in attribution["caused"]], ["beta_test::breaks"])
-        replay_runs = [line for line in calls.read_text().splitlines()[calls.read_text().splitlines().index(ring_run) + 1:] if "nextest run" in line]
+        runs = calls.read_text().splitlines()
+        replay_runs = [line for line in runs[runs.index(ring_run) + 1:] if "nextest run" in line]
         self.assertEqual(replay_runs[0], ring_run)
         del env["DETERMINISTIC"]
         # cas-ae6ae: nextest printed the FAIL twice (inline and under Summary),
@@ -523,6 +525,11 @@ path="tests/builtin_archive_portability_test.rs"
         attribution = json.loads(state.with_name("ring-attribution.json").read_text())
         self.assertEqual([f["test"] for f in attribution["caused"]], ["beta_test::breaks"])
         del env["HEAD_FAILS"]
+        env["HEAD_EMPTY"] = "1"
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0)
+        attribution = json.loads(state.with_name("ring-attribution.json").read_text())
+        self.assertEqual((attribution["status"], attribution["unattributed"]), ("unresolved", []))
+        del env["HEAD_EMPTY"]
         env["BASE_FAILS"] = "1"
         self.assertEqual(phase("attribute", "--receipt", "ring").returncode, 0, "fails at the base too: inherited")
         # Verifier repro: an inherited FAIL beside a new TIMEOUT stays red.
@@ -606,13 +613,16 @@ path="tests/builtin_archive_portability_test.rs"
         def expired(*args, **kwargs):
             self.assertEqual(json.loads(destination.read_text())["unresolved"], [failure])
             raise subprocess.TimeoutExpired(args[0], 1)
-        with patch.object(impact, "base_failure_proof", return_value=[]), \
-                patch.object(impact.subprocess, "check_call", side_effect=expired), \
-                patch.object(impact.subprocess, "run"):
-            self.assertNotEqual(impact.lane_attribute(self.root, self.base, [failure], destination, {}), 0)
-        receipt = json.loads(destination.read_text())
-        self.assertEqual((receipt["inherited"], receipt["caused"], receipt["unresolved"]), ([], [], [failure]))
-        self.assertEqual(receipt["status"], "unresolved")
+        for invocation in [None, ["nextest", "run", "-p", "cas", "--lib"]]:
+            with self.subTest(invocation=invocation), \
+                    patch.object(impact, "base_failure_proof", return_value=[]), \
+                    patch.object(impact.subprocess, "Popen", side_effect=expired) as launch, \
+                    patch.object(impact.subprocess, "run"):
+                self.assertNotEqual(impact.lane_attribute(self.root, self.base, [failure], destination, {}, invocation=invocation), 0)
+                self.assertEqual(launch.call_count, int(invocation is not None))
+            receipt = json.loads(destination.read_text())
+            self.assertEqual((receipt["inherited"], receipt["caused"], receipt["unresolved"]), ([], [], [failure]))
+            self.assertEqual(receipt["status"], "unresolved")
 
     # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
     def test_lane_uses_live_target_range_and_recorded_base_only_for_attribution(self):

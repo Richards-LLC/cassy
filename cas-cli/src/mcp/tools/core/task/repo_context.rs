@@ -1535,6 +1535,31 @@ mod tests {
         });
     }
 
+    /// GH #1941 / #2178: one close's probe of its own checkout timed out under
+    /// batch load, and the cached timeout refused every close from that
+    /// healthy checkout for the next 30 seconds (G-38). The caller's own
+    /// checkout is re-read, never answered from an earlier failure.
+    #[test]
+    fn own_checkout_is_reread_after_an_earlier_probe_failed_gh1941() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let project = home.join("gabber-studio");
+            std::fs::create_dir_all(project.join(".cas")).unwrap();
+            git(&project, &["init", "-q", "-b", "develop"]);
+            std::fs::write(project.join(".cas/config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+            std::fs::write(project.join("base"), "base").unwrap();
+            git(&project, &["add", "base"]);
+            git(&project, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "base"]);
+            let target = WorkTarget { repo_selector: "project:gabber-studio".into(), target_branch: "develop".into() };
+            let cas_root = project.join(".cas");
+            for earlier in [Err(BoundedRepoError::TimedOut), Ok(None)] {
+                candidate_probe::record_finished(&cas_root, earlier);
+                let resolved = resolve_repo_context(&cas_root, &target);
+                assert_eq!(resolved.map(|context| context.repo_root), Ok(canonical(project.clone())));
+            }
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn unreachable_known_roots_are_bounded_and_negatively_cached() {

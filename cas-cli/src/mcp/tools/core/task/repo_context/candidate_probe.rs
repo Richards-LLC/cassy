@@ -130,3 +130,15 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
         format!("WORK TARGET REPOSITORY UNAVAILABLE: known-root probe did not complete ({error:?})")
     })
 }
+
+/// Records a finished probe of `path` as an earlier lifecycle call left it.
+#[cfg(test)]
+pub(super) fn record_finished(path: &Path, result: Result<Option<Candidate>, BoundedRepoError>) {
+    let pending = Arc::new(PendingCandidate {
+        started: Instant::now(),
+        result: Mutex::new(Some(result)),
+        ready: Condvar::new(),
+    });
+    PROBES.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner())
+        .insert(path.to_path_buf(), pending);
+}

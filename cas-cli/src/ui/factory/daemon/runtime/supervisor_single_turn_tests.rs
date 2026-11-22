@@ -28,15 +28,23 @@ async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19
         let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
         assert_eq!(queue.retarget_operator_rows_to_successor("ended-supervisor", Some("ended-session"),
             &name, Some(&session)).unwrap(), [id]);
-        let request = super::prompt_queue_jobs::QueueSelectRequest {
-            cas_dir: cas.clone(), session_name: session.clone(), supervisor_name: name.clone(),
-            worker_names: vec![], dead_workers: Default::default(), replacement_workers: Default::default(),
-            limit: 10, operator_replies: false, deferred_operator_replies: Default::default(), adopt_operator_notices: false,
-        };
-        let mut selection = super::queue_and_events::run_queue_select(&request, 1).unwrap();
-        let row = selection.rows.into_iter().find(|row| row.id == id).unwrap();
-        assert!(daemon.queue_jobs.claim_resolved(&cas, &session, id, &name, &name));
-        daemon.queue_jobs.carry_claimed_row(row, selection.facts.remove(&id).unwrap());
+        daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+            cas.clone(), daemon.app.project_scope(),
+        );
+        daemon.queue_jobs.store(&cas).unwrap();
+        // Run the real selection AND readiness preparation. Stop at the
+        // asynchronous claim boundary, before any physical payload starts.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !daemon.queue_jobs.has_claim(id, &name) {
+                daemon.process_prompt_queue().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            assert!(!daemon.app.mux.has_pending_injects());
+            while !daemon.queue_jobs.claim_resolved(&cas, &session, id, &name, &name) {
+                daemon.queue_jobs.apply_completions();
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("relay selection and claim complete before the inbox poll");
         if handling != "unread" {
             let core = crate::mcp::CasCore::with_daemon(cas.clone(), None, None);
             core.set_agent_id_for_testing("single-sup".into());

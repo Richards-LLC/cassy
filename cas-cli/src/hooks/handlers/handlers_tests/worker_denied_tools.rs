@@ -560,6 +560,34 @@ fn worker_unresolved_credential_cwd_is_refused_cas_707a2() {
     );
 }
 
+/// GH #2171: dependency QA logged `pnpm audit` and a background frozen
+/// install into an artifacts directory bound in the command, from a directory
+/// the guard could not resolve, and H-09 read `"$A/..."` as a relative store
+/// path. A bound variable is judged at its value; store reads through one,
+/// bound relative or absolute, are still refused.
+#[test]
+fn worker_dependency_logging_to_a_bound_artifacts_path_is_allowed_gh_2171() {
+    let (_env, config_home) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let run = |command: &str| handle_pre_tool_use(&bash(command, project.path()), Some(&cas_root)).unwrap();
+    let audit = format!(
+        "cd \"$WORKSPACE_DIR\"; A='{}'; export PATH=\"/opt/node@26/bin:$PATH\"; \
+         pnpm audit --prod --json > \"$A/audit-prod.json\" 2> \"$A/audit-prod.err\"; \
+         pnpm audit --json > \"$A/audit.json\" 2>&1; \
+         nohup pnpm install --frozen-lockfile > \"$A/install.log\" 2>&1 &",
+        config_home.path().join("artifacts").display(),
+    );
+    assert_eq!(denial(run(&audit)), None, "{audit}");
+    for read in [
+        "cd \"$WORKSPACE_DIR\"; S=~/.config/neonctl; cat \"$S/credentials.json\"",
+        "cd ~; S=.config/neonctl; cat \"$S/credentials.json\"",
+        "F=\"$HOME/.config/neonctl/credentials.json\"; cat \"$F\"",
+    ] {
+        assert_operator_credential_refusal(run(read), read);
+    }
+}
+
 #[test]
 fn worker_piped_or_background_cd_keeps_credential_cwd_cas_707a2() {
     assert_credential_cwd_cases(

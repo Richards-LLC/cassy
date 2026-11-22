@@ -1311,7 +1311,7 @@ fn collect_script(
             if depth == 0 && let Some(contexts) = &mut effects.read_contexts {
                 if dirs.is_empty() { return Err("an unresolved credential working directory"); }
                 let command = if continuation { format!("{continuation_head}{read_command}") } else { read_command };
-                contexts.push(ShellReadContext { command, directories: dirs.clone() });
+                contexts.push(ShellReadContext { command, directories: dirs.clone(), values: values.clone() });
             }
             let read_stack = effects.read_contexts.is_some();
             let read_unconditional =

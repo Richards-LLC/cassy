@@ -126,7 +126,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
                         argv[other] == words[index] && lists_names_only(&executable, &argv[other + 1..])
                     })
                 });
-            if directories.iter().any(|cwd| statement_references_store(words, cwd, depth, names_only)) {
+            if directories.iter().any(|cwd| statement_references_store(words, cwd, depth, names_only, &context.values)) {
                 return true;
             }
         }
@@ -201,6 +201,7 @@ fn statement_references_store(
     cwd: &Path,
     depth: usize,
     names_only: bool,
+    values: &std::collections::HashMap<String, Vec<String>>,
 ) -> bool {
     if depth > 3 {
         return false;
@@ -234,13 +235,17 @@ fn statement_references_store(
     let recursive_operands = recursive_path_operand_indices(&executable, args);
     let store_parent_cwd = descends && cwd_is_store_or_parent(cwd);
     for (index, arg) in args.iter().enumerate() {
-        let explicit_path = shell_argument_is_path(&executable, arg, cwd);
-        let inferred_recursive_path = store_parent_cwd
-            && recursive_operands.contains(&index)
-            && path_operand_is_bare_relative(arg);
-        if (explicit_path || inferred_recursive_path) && path_references_store(arg, cwd, recursive)
-        {
-            return true;
+        // GH #2171: a variable the command binds is judged at every value it
+        // may hold; an unbound one keeps its spelling, as before.
+        for arg in super::pre_tool::expand_factory_shell_word(arg, values) {
+            let explicit_path = shell_argument_is_path(&executable, &arg, cwd);
+            let inferred_recursive_path = store_parent_cwd
+                && recursive_operands.contains(&index)
+                && path_operand_is_bare_relative(&arg);
+            if (explicit_path || inferred_recursive_path) && path_references_store(&arg, cwd, recursive)
+            {
+                return true;
+            }
         }
     }
     // `zip -R` matches its patterns under the working directory.

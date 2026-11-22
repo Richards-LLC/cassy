@@ -357,12 +357,10 @@ impl CasCore {
             // Retargeting retires the proof, but keeps its branch/anchor as
             // history. Commit capture can also precede a refused first park.
             // Neither is an active park; a live review or merge still is.
-            let dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, id)
+            let live_review = cas_store::has_active_verification_dispatch(&self.cas_root, id)
                 .map_err(|error| refused(error.to_string()))?;
             let delivery = cas_store::get_latest_worker_delivery(&self.cas_root, id)
                 .map_err(|error| refused(error.to_string()))?;
-            let live_review = dispatch.is_some_and(|dispatch| matches!(dispatch.state,
-                cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed));
             let live_delivery = delivery.as_ref().is_some_and(|(_, transaction)|
                 !transaction.state.is_recoverable_failure());
             let retained_park = expected.deliverables.parked_close_reason.is_some()

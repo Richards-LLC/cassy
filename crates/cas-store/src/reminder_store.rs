@@ -711,7 +711,6 @@ impl ReminderStore for SqliteReminderStore {
         cross_session: bool,
         task_id: Option<&str>,
     ) -> Result<i64> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let trigger_at_str = trigger_at.map(|dt| dt.to_rfc3339());
         let trigger_filter_str = trigger_filter.map(|f| f.to_string());
@@ -729,27 +728,32 @@ impl ReminderStore for SqliteReminderStore {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        conn.execute(
-            "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id, origin_session_id, cross_session, task_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                owner_id,
-                message,
-                trigger_type.to_string(),
-                trigger_at_str,
-                trigger_event,
-                trigger_filter_str,
-                ttl_secs,
-                now,
-                resolved_target,
-                session_id,
-                origin_session_id,
-                cross_session,
-                task_id,
-            ],
-        )?;
-
-        Ok(conn.last_insert_rowid())
+        // GH #2218: admission retries a foreign write lock on the pooled
+        // budget (releasing the process mutex between attempts) instead of
+        // failing after one busy window. The INSERT runs once, inside the
+        // opened transaction, so a retry can never duplicate the reminder.
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            tx.execute(
+                "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id, origin_session_id, cross_session, task_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    owner_id,
+                    message,
+                    trigger_type.to_string(),
+                    trigger_at_str,
+                    trigger_event,
+                    trigger_filter_str,
+                    ttl_secs,
+                    now,
+                    resolved_target,
+                    session_id,
+                    origin_session_id,
+                    cross_session,
+                    task_id,
+                ],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
     }
 
     fn list_pending(&self, owner_id: &str) -> Result<Vec<Reminder>> {

@@ -1682,6 +1682,63 @@ mod tests {
         assert_eq!(error.data.as_ref().unwrap()["notification_id"], row.id);
     }
 
+    /// GH #2187: a send whose enqueue is delayed past the response deadline
+    /// returns a continuation id instead of a bare UNKNOWN. message_status on
+    /// that id reports the send as still running, then as committed with the
+    /// one notification it wrote, so the caller never has to resend.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delayed_send_deadline_is_reconciled_by_continuation_id_cas_cd0f() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_NAME", "slow-sender");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.register_agent("slow-sender-id".into(), "slow-sender".into(), None).unwrap();
+        crate::store::open_agent_store(&root).unwrap()
+            .register(&crate::types::Agent::new("slow-recipient-id".into(), "slow-recipient".into()))
+            .unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({
+            "action": "message", "target": "slow-recipient",
+            "summary": "handoff", "message": "durable handoff",
+        });
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let (resume, blocked) = std::sync::mpsc::channel::<()>();
+        let sender = service.clone();
+        let future = async move {
+            mutation_receipt::run_on_blocking_pool(async move {
+                blocked.recv().unwrap();
+                sender.coordination(Parameters(request)).await
+            }).await.unwrap()
+        };
+        let error = service.call_with_deadline("coordination", arguments.as_object(),
+            std::time::Duration::from_millis(50), future).await.unwrap_err();
+        let data = error.data.unwrap();
+        let status = |service: CasService, id: String| async move {
+            let request = serde_json::from_value(serde_json::json!({"action": "message_status", "id": id})).unwrap();
+            service.coordination(Parameters(request)).await.unwrap().structured_content.unwrap()
+        };
+        // Dropping `resume` on a failed assertion releases the blocked handler.
+        let continuation = data["continuation_id"].as_str().map(str::to_string)
+            .expect("an uncertain send must name its continuation");
+        assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
+        assert_eq!(status(service.clone(), continuation.clone()).await["mutation_outcome"], "IN_PROGRESS");
+        resume.send(()).unwrap();
+
+        service.tool_work.wait_idle().await;
+        let settled = status(service.clone(), continuation.clone()).await;
+        let rows: Vec<_> = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap()
+            .into_iter().filter(|row| row.target == "slow-recipient").collect();
+        assert_eq!(rows.len(), 1, "the send is delivered at most once");
+        assert_eq!(settled["mutation_outcome"], "COMMITTED");
+        assert_eq!(settled["notification_id"], rows[0].id);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn registration_deadline_surfaces_blocked_late_commit_cas_1550() {
         use crate::mcp::server::CasCore;

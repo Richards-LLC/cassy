@@ -1934,12 +1934,15 @@ fn zz_explore_reconnect_72dc() {
         cmd
     };
     let status = || {
-        let out = sandbox.command().args(["factory", "worker-status", "--session", "fs-reconnect", "--cas-root"])
+        let bin = support::cas_binary().parent().unwrap().to_path_buf();
+        let out = sandbox.command().env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .args(["factory", "worker-status", "--session", "fs-reconnect", "--cas-root"])
             .arg(sandbox.path().join(".cas")).output().unwrap();
+        let fronts = std::fs::read_dir(sandbox.path().join(".cas/mcp-fronts")).map(|d| d.filter_map(|e| std::fs::read_to_string(e.ok()?.path()).ok()).collect::<Vec<_>>().join(" | ")).unwrap_or_default();
         let rows: String = rusqlite::Connection::open(sandbox.path().join(".cas/cas.db")).unwrap()
             .prepare("SELECT id||' pid='||ifnull(pid,'-')||' ppid='||ifnull(ppid,'-')||' status='||status FROM agents").unwrap()
             .query_map([], |r| r.get::<_, String>(0)).unwrap().map(Result::unwrap).collect::<Vec<_>>().join("; ");
-        format!("{}{}\nrows: {rows}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+        format!("{}{}\nrows: {rows}\nfronts: {fronts}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
     };
     let close = |mut client: McpTestClient| {
         let McpTestClient { ref mut child, .. } = client;
@@ -1950,6 +1953,8 @@ fn zz_explore_reconnect_72dc() {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         eprintln!("front exited: {:?}", client.child.try_wait());
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        eprintln!("--- closed server stderr ---\n{}", client.stderr_buf.as_ref().map(|b| b.lock().unwrap().clone()).unwrap_or_default().lines().filter(|l| l.contains("Cassy")).collect::<Vec<_>>().join("\n"));
     };
     let mut first = McpTestClient::spawn_command_capturing_stderr(supervisor());
     assert!(first.initialize().error.is_none());

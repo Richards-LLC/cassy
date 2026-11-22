@@ -1,4 +1,4 @@
-## Workflows
+## Core Concepts
 
 ### Revalidating an already-landed task
 

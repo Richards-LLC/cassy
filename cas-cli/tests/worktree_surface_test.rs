@@ -2836,8 +2836,8 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
                 assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), landed, "{retry:?}");
             } else {
                 assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before, "{continued:?}");
+                assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), before);
             }
-            assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), before);
             assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id, dispatch.id);
             continue;
         }

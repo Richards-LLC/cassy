@@ -4561,6 +4561,13 @@ mod merge_hold_tests {
     use cas_types::{Agent, AgentRole, Task, TaskStatus};
     use chrono::{Duration, Utc};
 
+    async fn update(core: &crate::mcp::CasCore, patch: serde_json::Value) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        core.cas_task_update_with_delivery_mode(
+            serde_json::from_value(serde_json::json!({"id": "cas-6f92"})).unwrap(),
+            None, None, false, None, Some(patch), None, None, false,
+        ).await
+    }
+
     /// GH #2278: only a live supervisor holds a parked delivery, for a
     /// bounded time. Cassy stamps the supervisor and the parked anchor and
     /// records the owner and reason on the task.
@@ -4583,10 +4590,6 @@ mod merge_hold_tests {
         store.add(&parked).unwrap();
         let until = Utc::now() + Duration::hours(12);
         let hold = |until: chrono::DateTime<Utc>| serde_json::json!({"merge_hold": {"owner": "Ben", "reason": "GitHub review of prompt text", "until": until}});
-        let update = |core: &crate::mcp::CasCore, patch| core.cas_task_update_with_delivery_mode(
-            serde_json::from_value(serde_json::json!({"id": "cas-6f92"})).unwrap(),
-            None, None, false, None, Some(patch), None, None, false,
-        );
         let held = || store.get_execution_state("cas-6f92").unwrap().and_then(|state| state.get("merge_hold").cloned());
 
         let assignee = crate::mcp::CasCore::with_daemon(root.clone(), None, None);

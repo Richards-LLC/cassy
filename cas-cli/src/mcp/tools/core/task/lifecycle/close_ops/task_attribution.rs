@@ -1676,7 +1676,14 @@ fn merge_tip_content_presence_selected(
     let mut commits = match explicit_commits {
         Some(commits) => commits.to_vec(),
         None => {
-            let ranges = final_snapshot_delivery_ranges(repo, target, window, merge_tip)?;
+            // Snapshot recovery needs a real work window: its anchored range
+            // uses the window's creation floor, which the identity fallback
+            // sets to the epoch, so it would claim any unnamed commit (cas-988f).
+            let ranges = if has_work_window {
+                final_snapshot_delivery_ranges(repo, target, window, merge_tip)?
+            } else {
+                task_delivery_ranges(repo, target, window, Some(merge_tip))?
+            };
             attributed_content_commits(repo, merge_tip, window, identity, &ranges)?
         }
     };

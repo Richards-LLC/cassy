@@ -6351,3 +6351,59 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     }
 
 }
+
+/// cas-3d8b (GH #1000): the quarantine ledger is keyed by bare task id, so a
+/// stale entry for a task this project owns hid its peer updates from every
+/// pull and deleted its queued pushes. A foreign id with no local owner stays
+/// quarantined.
+#[tokio::test]
+async fn stale_quarantine_entry_for_a_live_local_task_no_longer_blocks_pull_or_push_cas_3d8b() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (project, team) = ("stale-quarantine-project", "stale-quarantine-team");
+    let mut live = Task::new("cas-stale-quarantine".into(), "live local task".into());
+    live.origin_project = Some(project.into());
+    live.updated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    let foreign = "cas-foreign-quarantine";
+    let rows = vec![
+        team_task_fixture(&live.id, TaskStatus::AwaitingMerge, project, project,
+            chrono::Utc::now() - chrono::Duration::hours(1)),
+        team_task_fixture(foreign, TaskStatus::Open, project, "another-project", chrono::Utc::now()),
+    ];
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path(format!("/api/teams/{team}/sync/pull")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": rows, "task_dependencies": [], "team_id": team,
+            "pulled_at": "2026-11-22T23:00:00Z", "status": "ok"
+        }))).mount(&server).await;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    tasks.add(&live).unwrap();
+    let queue = Arc::new(SyncQueue::open(&root).unwrap());
+    queue.init().unwrap();
+    for id in [live.id.as_str(), foreign] {
+        queue.quarantine_row("task", id, "purge-foreign peer-evidence row from verified delete-set").unwrap();
+    }
+    queue.enqueue_for_team(EntityType::Task, &live.id, SyncOperation::Upsert,
+        Some(&serde_json::to_string(&live).unwrap()), team).unwrap();
+    let syncer = CloudSyncer::new_for_project(Arc::clone(&queue), CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), project.into(), &root);
+
+    let pulled = syncer.pull_team(team, project,
+        &*crate::store::open_store_local(&root).unwrap(), &*tasks,
+        &*crate::store::open_rule_store_local(&root).unwrap(),
+        &*crate::store::open_skill_store_local(&root).unwrap()).unwrap();
+    assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
+
+    assert_eq!(tasks.get(&live.id).unwrap().status, TaskStatus::AwaitingMerge, "peer park never applied");
+    assert_eq!(queue.pending_for_team(team, 10, 5).unwrap().len(), 1, "queued push was deleted");
+    assert!(tasks.get(foreign).is_err(), "a foreign row must not be admitted");
+    assert_eq!(queue.quarantined_ids("task").unwrap().into_iter().collect::<Vec<_>>(), [foreign.to_string()]);
+}

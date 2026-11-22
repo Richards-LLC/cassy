@@ -6950,7 +6950,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(owner["factory_session"], "factory-a");
         assert_eq!(owner["live"], false);
         assert_eq!(owner["status"], "active");
-        assert_eq!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().len(), 2);
+        assert!(crate::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(10).unwrap().is_empty());
 
         expired.status = cas_types::AgentStatus::Shutdown;
         expired.last_heartbeat = chrono::Utc::now();
@@ -6965,7 +6965,7 @@ mod cas_89e1_post_merge_message_type_tests {
         agents.register(&competing).unwrap();
         let error = service.message_send(status).await.unwrap_err();
         assert_eq!(error.data.unwrap()["reason"], "ambiguous_owner");
-        assert_eq!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().len(), 2);
+        assert!(crate::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(10).unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

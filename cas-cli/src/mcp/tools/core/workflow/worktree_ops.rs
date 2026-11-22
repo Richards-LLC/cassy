@@ -2076,6 +2076,21 @@ fn requested_merge_source_tip(repo: &Path, branch: &str, origin_only: bool) -> R
         }))
 }
 
+/// An approved receipt still needs its immutable source published before integration.
+fn verify_pushed_delivery_anchor(repo: &Path, branch: &str, anchor: &str) -> Result<(), String> {
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let anchor = git.resolve_commit(anchor).unwrap_or_else(|| anchor.to_string());
+    let pushed = requested_merge_source_tip(repo, branch, true)
+        .map_err(|error| format!("Cannot verify pushed delivery {branch}: {error}"))?;
+    if pushed.as_deref() != Some(anchor.as_str()) {
+        return Err(format!(
+            "PARKED DELIVERY NOT PUSHED: {branch} must be pushed at parked anchor {anchor}; live origin is {}. No merge was attempted.",
+            pushed.as_deref().unwrap_or("missing"),
+        ));
+    }
+    Ok(())
+}
+
 /// cas-7ce6: the branch that holds a parked task's reviewed `anchor`.
 ///
 /// - `Ok(None)`: merge `source` as asked.
@@ -2339,19 +2354,10 @@ impl CasCore {
         };
         let git = crate::worktree::GitOperations::new(repo.to_path_buf());
         let check_pushed = |selected: Option<String>, anchor: &str| {
-            let anchor = git.resolve_commit(anchor).unwrap_or_else(|| anchor.to_string());
             if task.task_type != cas_types::TaskType::Epic
                 && task.delivery_mode == cas_types::DeliveryMode::PushBranch
             {
-                let branch = selected.as_deref().unwrap_or(source);
-                let pushed = requested_merge_source_tip(repo, branch, true)
-                    .map_err(|error| format!("Cannot verify pushed delivery {branch}: {error}"))?;
-                if pushed.as_deref() != Some(anchor.as_str()) {
-                    return Err(format!(
-                        "PARKED DELIVERY NOT PUSHED: {branch} must be pushed at parked anchor {anchor}; live origin is {}. No merge was attempted.",
-                        pushed.as_deref().unwrap_or("missing"),
-                    ));
-                }
+                verify_pushed_delivery_anchor(repo, selected.as_deref().unwrap_or(source), anchor)?;
             }
             Ok(selected)
         };
@@ -5462,6 +5468,16 @@ impl CasCore {
                     return fail(state, code, detail.to_string());
                 }
             };
+            if !scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
+                // Only live published containment can resume without the source ref.
+                let published = preflight != DeliveryMergePreflight::Execute
+                    && requested_merge_source_tip(&cwd, &receipt.target_branch, true).ok().flatten()
+                        .is_some_and(|tip| manager.git().is_ancestor(&receipt.commit_sha, &tip));
+                if !published {
+                    verify_pushed_delivery_anchor(&cwd, &receipt.source_branch, &receipt.commit_sha)
+                        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-97", message)))?;
+                }
+            }
             if preflight == DeliveryMergePreflight::Execute {
                 cas_store::transition_worker_delivery(
                     &cas_root,

@@ -365,6 +365,8 @@ async fn arm_delivery_with_selector(
         .await
         .expect("verification add");
     assert!(get_text(&verification).contains("approved"));
+    // Review may precede publication; integration requires the approved source pushed.
+    run_git(&["push", "origin", &receipt.source_branch], &repo.root);
 
     DeliveryFixture {
         repo,
@@ -394,6 +396,9 @@ async fn run_merge(fixture: &DeliveryFixture) -> String {
 async fn open_release_train_refuses_trunk_even_with_allow_trunk() {
     let mut env = TestEnvGuard::temp_home();
     let fixture = arm_delivery("train-guard", "train-guard", &mut env).await;
+    // Keep the tracking cache at the anchor while the live source is absent.
+    run_git(&["update-ref", "-d", &format!("refs/heads/{}", fixture.receipt.source_branch)],
+        &fixture.repo.root.join(".git/test-origin.git"));
     env.set_current_dir(&fixture.repo.root);
     let tasks = open_task_store(&fixture.cas_root).unwrap();
     let mut train = Task::new("cas-train".into(), "Release train vNEXT".into());

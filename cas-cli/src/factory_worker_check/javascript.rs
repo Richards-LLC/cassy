@@ -2976,6 +2976,19 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         }
     }
 
+    /// GH #2246, #2166: Jest printed `Tests: 2957 passed` while the widened
+    /// receipt said 2955: tests sharing a name in one file collapsed into one
+    /// identity. The count is the passing results the runner reported.
+    #[test]
+    fn widened_jest_count_is_the_runners_passing_results_gh2246() {
+        let report = json!({"success":true,"testResults":[
+            {"name":"/project/a.test.js","status":"passed","assertionResults":[
+                {"fullName":"pool drains","status":"passed"}, {"fullName":"pool drains","status":"passed"}]},
+            {"name":"/project/b.test.js","status":"passed","assertionResults":[
+                {"fullName":"resets","status":"passed"}, {"fullName":"needs db","status":"pending"}]}]});
+        assert_eq!(validate_report("jest", Path::new("/project"), &report, &[], 1).unwrap(), 3);
+    }
+
     #[test]
     fn playwright_report_requires_five_clean_attempts_without_retry() {
         let selected = [id("a.spec.ts", "group changed")];

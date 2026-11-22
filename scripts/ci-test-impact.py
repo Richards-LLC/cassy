@@ -433,6 +433,16 @@ def lane_count(root, source, expression):
     return sum(1 for suite in suites for case in suite["testcases"].values() if case["filter-match"]["status"] == "matches" and not case.get("ignored"))
 
 
+def symlinked_tmpdir():
+    """cas-2e53: macOS spells TMPDIR through a symlink (/var -> /private/var).
+    Lane tests run under a symlinked TMPDIR too, so a fixture that compares a
+    raw tempdir path with a resolved one fails on Linux as it does on macOS."""
+    physical = Path(tempfile.mkdtemp(prefix="cas-lane-tmp-"))
+    link = physical.with_name(physical.name + "-link")
+    link.symlink_to(physical, target_is_directory=True)
+    return str(link)
+
+
 def lane_run(root, selection, source, expression, extra, destination, role):
     """Run one phase. Parsed test failures wait for base attribution; a
     failure without a parsed failed test fails the phase at once."""
@@ -441,7 +451,7 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     # Preserve archive compiler identity while binding the actual runtime.
     selection = dict(selection, configuration=proof_configuration(root, selection.get("configuration")))
     started = time.monotonic()
-    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
+    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()), TMPDIR=symlinked_tmpdir())
     invocation = ["nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"]
     status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), *invocation], cwd=root, env=env).returncode
     receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)

@@ -5180,6 +5180,13 @@ Default show retains Type and Demo for builtin gates, and names full-only sectio
 
 ## Durable task artifacts
 
+An ordinary task target edit that excludes an unparked task's recorded start
+base refuses before saving with `rule_id=unparked_target_base_migration`.
+Its structured `recovery` names the explicit supervisor `proof_scope_fix`
+request, replacement branch/base and `rebind_branch` request. Preserve the old
+lane; create the clean replacement from that base, approve its binding, then
+start the task again. Dirty checkouts and foreign work still refuse rebinding.
+
 `factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).
 New task evidence lives in `<base>/<project-key>/<task-id>/`; assignment briefs
 print the exact path. The key combines the project folder label with a SHA256

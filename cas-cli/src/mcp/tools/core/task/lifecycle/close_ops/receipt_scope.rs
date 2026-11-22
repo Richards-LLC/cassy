@@ -197,8 +197,19 @@ pub(super) fn park_refusals(
     if let Some(class) = recorded_class_audit(cas_root, &task.id)
         && !crate::mcp::tools::core::task::repair_class::receipts_cover_class(&passing.filters(), &class)
     {
+        // cas-8a5c: name the Cargo targets that register the class; an
+        // integration module is not in --lib.
+        let targets = crate::factory_worker_check::stability::rust::class_targets(proof_repo, head, changed_paths, &class)
+            .unwrap_or_default();
+        let commands = if targets.is_empty() {
+            format!("`cargo nextest run -p <crate> <--lib | --test <harness>> -E '{class}'`, choosing the Cargo target that registers it")
+        } else {
+            targets.iter().map(|(package, harness)| format!("`cargo nextest run -p {package} {} -E '{class}'`",
+                harness.as_ref().map_or_else(|| "--lib".to_owned(), |harness| format!("--test {harness}"))))
+                .collect::<Vec<_>>().join("; ")
+        };
         refusals.push(crate::gates::tag("G-61", format!(
-            "CLASS_AUDIT_REQUIRED: task {} was sent back with class audit `{class}`, and no passing capped receipt at {short} runs all of it. Run it through the capped runner (`cargo nextest run -p <crate> --lib -E '{class}'`), fix what fails, then retry park.",
+            "CLASS_AUDIT_REQUIRED: task {} was sent back with class audit `{class}`, and no passing capped receipt at {short} runs all of it. Run it through the capped runner ({commands}), fix what fails, then retry park.",
             task.id,
         )));
     }

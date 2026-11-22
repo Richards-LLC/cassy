@@ -1,0 +1,10 @@
+title: A rejected team task push is rebased by one pull when the local lifecycle outranks the cloud row
+statement: >-
+  After a revision_conflict rejection, one pull adopts the cloud revision and
+  rebuilds the queued payload even when the pull keeps a local parked or closed
+  delivery over the cloud's older Open row. The next push is accepted without
+  manual queue surgery. Store vetoes and rows owned by another project stay
+  explicit conflicts.
+tasks: [cas-af0d]
+journeys: [FACTORY-MERGE]
+invariants: []

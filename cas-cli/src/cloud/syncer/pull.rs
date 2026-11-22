@@ -2139,10 +2139,13 @@ impl CloudSyncer {
     ) -> Result<(), CasError> {
         if revision.is_none() { return Ok(()) }
         let local = store.get(&remote.id)?;
+        // GH #2318: a delivery regression is a settled local-wins decision,
+        // like a lifecycle timestamp. Without it a parked or closed local row
+        // never adopts the cloud revision that rejected its push.
         let can_reconcile = incoming_is_owner
             && local.origin_project == remote.origin_project
             && matches!(outcome, Ok(UpsertResult::Skipped(
-                "local_conflict" | "lifecycle_timestamp"
+                "local_conflict" | "lifecycle_timestamp" | "delivery_lifecycle_event"
             )));
         // A store veto may represent an in-flight delivery, live execution or
         // a concurrent mutation. It is not a settled local-wins decision and

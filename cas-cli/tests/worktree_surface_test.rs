@@ -2430,6 +2430,30 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                     .unwrap()
                     .success()
             );
+
+        }
+        let remote_before = origin_only.then(|| {
+            git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
+        });
+
+        // cas-bd5f: task must belong to alice (matching worker/task/epic).
+        let (_epic_id, worker_task_id) =
+            create_epic_and_worker_task(&cas_root, "epic/foo", Some("alice"));
+
+        let wt_path = cas_root.join("worktrees").join("alice");
+        repo.add_worktree(&wt_path, "factory/alice");
+        std::fs::write(wt_path.join("alice-work.txt"), "alice's work").unwrap();
+        run_git(&["add", "."], &wt_path);
+        run_git(&["commit", "-m", "alice work"], &wt_path);
+        if origin_only {
+            run_git(&["push", "origin", "factory/alice"], &repo.root);
+            let tasks = open_task_store(&cas_root).unwrap();
+            let mut task = tasks.get(&worker_task_id).unwrap();
+            task.delivery_mode = cas::types::DeliveryMode::PushBranch;
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.parked_branch = Some("factory/alice".into());
+            task.deliverables.factory_branch_anchor = Some(git_stdout(&wt_path, &["rev-parse", "HEAD"]));
+            tasks.update(&task).unwrap();
             let hook = repo.root.join(".git/hooks/pre-push");
             let log = remote.path().join("push-tree.log");
             let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
@@ -2445,19 +2469,6 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                 std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        let remote_before = origin_only.then(|| {
-            git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
-        });
-
-        // cas-bd5f: task must belong to alice (matching worker/task/epic).
-        let (_epic_id, worker_task_id) =
-            create_epic_and_worker_task(&cas_root, "epic/foo", Some("alice"));
-
-        let wt_path = cas_root.join("worktrees").join("alice");
-        repo.add_worktree(&wt_path, "factory/alice");
-        std::fs::write(wt_path.join("alice-work.txt"), "alice's work").unwrap();
-        run_git(&["add", "."], &wt_path);
-        run_git(&["commit", "-m", "alice work"], &wt_path);
 
         let _env = env.enter_dir(&repo.root);
 
@@ -3679,6 +3690,8 @@ async fn test_worktree_merge_refuses_stale_or_conflicting_rebound_ref_gh1397() {
             _ => {
                 let tasks = open_task_store(&fixture.cas_root).unwrap();
                 let mut task = tasks.get("cas-e429").unwrap();
+                // The recorded start authorizes active-task source resolution.
+                task.status = TaskStatus::InProgress;
                 task.deliverables
                     .factory_branch_start
                     .as_mut()
@@ -4781,8 +4794,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
-    // cas-d8ab: count origin fetches. Containment, the target sync and its
-    // re-check share the merge's one origin read.
+    // Source publication needs one live read before merging. Containment,
+    // target sync and the final close share one further origin read.
     let fetch_log = remote.path().join("fetches.log");
     let counter = remote.path().join("count-upload-pack");
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
@@ -4791,8 +4804,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED") && !get_text(&landed).contains("PUSH NOT CONFIRMED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
-    assert_eq!(fetches, 1,
-        "the merge's one origin read also serves the final close's integration proof (verification is disabled in this routing fixture): {}", get_text(&landed));
+    assert_eq!(fetches, 2,
+        "one source publication read and one shared target/close read (verification is disabled in this routing fixture): {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
 

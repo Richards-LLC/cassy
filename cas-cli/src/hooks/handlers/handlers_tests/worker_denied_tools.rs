@@ -583,6 +583,10 @@ fn worker_dependency_logging_to_a_bound_artifacts_path_is_allowed_gh_2171() {
         "cd \"$WORKSPACE_DIR\"; S=~/.config/neonctl; cat \"$S/credentials.json\"",
         "cd ~; S=.config/neonctl; cat \"$S/credentials.json\"",
         "F=\"$HOME/.config/neonctl/credentials.json\"; cat \"$F\"",
+        // A binding counts only from where the shell makes it: a later
+        // rebinding, or a `NAME=value` that is only an argument, binds nothing.
+        "F=credentials.json; cat \"$HOME/.config/neonctl/$F\"; F=../../../harmless",
+        "printf '%s\\n' F=../../../harmless; cat \"$HOME/.config/neonctl/$F\"",
     ] {
         assert_operator_credential_refusal(run(read), read);
     }

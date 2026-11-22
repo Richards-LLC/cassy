@@ -537,19 +537,35 @@ fn baseline(root: &Path, target: &str, audit: &mut Audit) -> Counts {
     current
 }
 
-pub(super) fn finish(root: &Path, target: &str, sites: Vec<Site>, functions: &[Function], registered: &BTreeSet<String>, audit: &mut Audit) {
+fn names<'a>(functions: impl IntoIterator<Item = &'a Function>) -> BTreeMap<String, Vec<&'a Function>> {
     let mut names = BTreeMap::<String, Vec<&Function>>::new();
     for f in functions { names.entry(f.name.clone()).or_default().push(f); }
+    names
+}
+
+fn helpers(names: &BTreeMap<String, Vec<&Function>>) -> BTreeSet<String> {
     let mut helpers = BTreeSet::new();
     loop {
         let before = helpers.len();
-        for (name, functions) in &names {
+        for (name, functions) in names {
             if functions.len() == 1 && functions[0].authority_value.as_ref().is_some_and(|value| value.reads(&helpers)) {
                 helpers.insert(name.clone());
             }
         }
-        if helpers.len() == before { break; }
+        if helpers.len() == before { return helpers; }
     }
+}
+
+/// Lines of `sites` whose condition reads caller authority, resolved through
+/// the whole tree's `functions` exactly as `finish` resolves them.
+pub(super) fn authority_lines<'a>(sites: &[Site], functions: impl IntoIterator<Item = &'a Function>) -> Vec<usize> {
+    let helpers = helpers(&names(functions));
+    sites.iter().filter(|site| site.condition.reads_authority(&helpers)).map(|site| site.line).collect()
+}
+
+pub(super) fn finish(root: &Path, target: &str, sites: Vec<Site>, functions: &[Function], registered: &BTreeSet<String>, audit: &mut Audit) {
+    let names = names(functions);
+    let helpers = helpers(&names);
     let functions = names.into_iter().filter_map(|(name, functions)|
         (functions.len() == 1).then(|| (name, functions[0].refused.clone()))).collect();
     let allowed = baseline(root, target, audit);

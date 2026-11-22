@@ -1,0 +1,10 @@
+title: Remote transfer refuses before local mutation
+statement: >-
+  A locally cached remote receiver or a worker known only to the scoped peer
+  roster produces TRANSFER_RECEIVER_ON_OTHER_MACHINE with its owning machine
+  and the action for that machine's supervisor. No receiver is imported and
+  no task, lease or checkout changes, including supervisor force-transfer.
+  Local adoption keeps its existing validation.
+tasks: [cas-9eb3]
+journeys: []
+invariants: []

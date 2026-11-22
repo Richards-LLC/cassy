@@ -1853,8 +1853,11 @@ impl CasCore {
                 }
             }
         }
+        let main_journeys = (req.labels.is_some() || req.priority.is_some())
+            .then(|| crate::finding_triage::main_journeys_for_task(&self.cas_root, &task))
+            .unwrap_or_default();
         if req.labels.is_some()
-            && crate::finding_triage::has_undeclared_main_reach(&self.cas_root, &triaged_labels)
+            && crate::finding_triage::has_undeclared_main_reach(&main_journeys, &triaged_labels)
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -1868,7 +1871,7 @@ impl CasCore {
             });
         }
         let derived_priority = if req.priority.is_some() || req.labels.is_some() {
-            crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,
+            crate::finding_triage::normalize_labels(&main_journeys, &mut triaged_labels,
                 &format!("{}\n{}", task.notes, req.notes.as_deref().unwrap_or_default()))
         } else { None };
         if let Some((requested, derived)) = req.priority.zip(derived_priority)

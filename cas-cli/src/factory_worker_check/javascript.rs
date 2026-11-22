@@ -2514,14 +2514,14 @@ process.exit(ok ? 0 : 1);
         assert_eq!(passing().receipts().len(), 1);
     }
 
-    /// A stand-in Playwright: lists or runs the `.spec.ts` files under its
+    /// A stand-in Playwright: lists or runs the `.spec.ts` or `.journey.ts` files under its
     /// config's testDir that the positional pattern names ("No tests found" otherwise).
     const STAND_IN_PLAYWRIGHT: &str = r#"#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
 const config = path.resolve(at('--config')), dir = path.join(path.dirname(config), require(config).testDir);
 const pattern = new RegExp(a[a.length - 1]), repeats = a.includes('--list') ? 0 : Number(at('--repeat-each'));
-const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(dir, f)) : [];
+const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => /\.(spec|journey)\.ts$/.test(f)).map((f) => path.join(dir, f)) : [];
 const listed = files.filter((file) => pattern.test(file)), root = path.dirname(config);
 const result = { status: 'passed', retry: 0 }, test = { expectedStatus: 'passed', projectName: 'chromium', results: [result] };
 const report = { config: { rootDir: root }, errors: listed.length ? [] : [{ message: 'No tests found' }], suites: listed.map((file) => ({
@@ -2551,16 +2551,21 @@ process.exit(listed.length ? 0 : 1);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(repo.path().join("hub-web/node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
         write("hub-web/e2e/journeys/journey.ts", "import { test as base } from '@playwright/test';\nexport const test = base;\n");
-        let journey = "hub-web/e2e/journeys/catalog-refresh.spec.ts";
-        write(journey, "import { test } from './journey';\ntest('catalog refresh', async () => {});\n");
+        // cas-9fcc's four journeys, as its G-61 refusal named them.
+        let journeys = ["catalog-refresh", "end-session", "opaque-auth", "reply-voice"]
+            .map(|name| format!("hub-web/e2e/journeys/{name}.journey.ts"));
+        for journey in &journeys {
+            write(journey, "import { test, expect } from './journey';\ntest('journey', async () => {});\n");
+        }
         // A plain unit test beside both configs still belongs to Vitest.
         let unit = "hub-web/src/catalog.test.ts";
         write(unit, "test('catalog', () => {});\n");
 
-        let prescribed = super::super::stability::rerun_commands(
-            Path::new("/cas"), repo.path(), &[id(journey, "catalog refresh"), id(unit, "catalog")]);
+        let mut tests: Vec<Identity> = journeys.iter().map(|journey| id(journey, "journey")).collect();
+        tests.push(id(unit, "catalog"));
+        let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests);
         assert_eq!(prescribed, [
-            format!("`cas factory worker-check --cas-root /cas -- playwright {journey}`"),
+            format!("`cas factory worker-check --cas-root /cas -- playwright {}`", journeys.join(" ")),
             format!("`cas factory worker-check --cas-root /cas -- vitest {unit}`"),
         ]);
     }

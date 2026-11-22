@@ -2665,16 +2665,26 @@ impl CasCore {
         let task_store = self.open_task_store()?;
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
+            // GH #1695: a close saved with its active verification dispatch
+            // resumes on the verdict without the worker; it is not WIP.
+            let handed_off = |id: &str| task_store.get(id).is_ok_and(|task| {
+                task.pending_verification
+                    && task.deliverables.no_delivery_close_intent.as_ref().is_some_and(|intent|
+                        cas_store::get_latest_verification_dispatch(&self.cas_root, id).ok().flatten()
+                            .is_some_and(|dispatch| dispatch.id == intent.dispatch_id && matches!(dispatch.state,
+                                cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)))
+            });
             let mut active = task_store.list(Some(TaskStatus::InProgress))
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
                 .into_iter().filter(|task| task.id != req.id
                     && !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
                     && task.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
                 .map(|task| task.id).collect::<Vec<_>>();
-            active.extend(agents.list_active_leases()
+            active.extend(crate::worker_task_queue::unfinished_worker_leases(task_store.as_ref(), agents.as_ref(), worker)
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
-                .into_iter().filter(|lease| lease.agent_id == worker.id && lease.task_id != req.id)
+                .into_iter().filter(|lease| lease.task_id != req.id)
                 .map(|lease| lease.task_id));
+            active.retain(|id| !handed_off(id));
             active.sort();
             active.dedup();
             // gate[G-08 start]: Single active WIP per worker
@@ -2774,6 +2784,7 @@ impl CasCore {
             && matches!(
                 crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
                 crate::factory_isolation::WorkerBinding::Sibling { .. }
+                    | crate::factory_isolation::WorkerBinding::Unowned
             )
         {
             let own = crate::factory_isolation::worker_task_branch(&worker.name, &task.id);
@@ -4081,7 +4092,7 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
-        let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
+        let start_guidance = format!("{}{}\n\n{}", self.close_requirements(&task), start_guidance(&task), qa_impact::predicted(self, &task));
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),

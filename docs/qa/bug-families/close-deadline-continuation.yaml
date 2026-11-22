@@ -1,0 +1,9 @@
+title: Slow task closes return durable progress without transport failure
+statement: >-
+  A retained close returns a non-error structured IN_PROGRESS result until its
+  checked disposition commits, then COMMITTED. Both responses identify the
+  persisted continuation. Releasing delayed preflight, evidence or follow-up
+  records one correlated final outcome without repeating the close. A successful
+  park is classified by this request's receipt, including a legacy error reply.
+tasks: [cas-23c1]
+journeys: [FACTORY-CLOSE]

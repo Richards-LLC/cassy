@@ -1181,7 +1181,7 @@ fn enqueue_delivery_pr_merged_wake(
     });
 
     // cas-ffd5: a merged receipt is not a reusable pre-merge approval. Use
-    // close's exact-cycle selection before issuing its worker instruction.
+    // close's exact-cycle selection before issuing its merged receipt.
     if !release_wait {
         use crate::mcp::tools::core::task::lifecycle::close_ops::{
             close_cycle_verdict, required_verification_type,
@@ -1243,7 +1243,7 @@ fn enqueue_delivery_pr_merged_wake(
             worker,
             &prompt,
             factory_session.as_deref(),
-            Some(&format!("PR #{pr_number} merged: close {task_id}")),
+            Some(&format!("PR #{pr_number} merged: receipt for {task_id}")),
             Some(NotificationPriority::High),
             &key,
             Some(&cas_store::QueueOrigin::Daemon),
@@ -1455,7 +1455,7 @@ fn apply_delivery_pr_observation(
     Ok(())
 }
 
-/// Give the worker a bounded chance to close after the typed merge wake. If it
+/// Give the merge/verdict path a bounded chance to finalize the delivery. If it
 /// remains open, the existing durable supervisor attention lane tells the
 /// supervisor exactly which PR/receipt needs recovery. Its stable key makes
 /// this a single escalation for the merge episode.
@@ -3730,7 +3730,8 @@ mod worker_attention_tests {
             assert_eq!(rows[0].target, "delivery-worker");
             assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
             assert!(rows[0].prompt.contains(&task.id));
-            assert!(rows[0].prompt.contains(&format!("commit_receipt={}", observation.merge_commit.as_deref().unwrap())));
+            assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
+            assert!(rows[0].prompt.contains(&format!("merge_commit=\"{}\"", observation.merge_commit.as_deref().unwrap())));
             assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
 
             // cas-ffd5: an absent verdict, or a new pending cycle after an older

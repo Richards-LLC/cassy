@@ -1,0 +1,10 @@
+title: Named journey admission happens before the server clock
+statement: >-
+  Named and responsive journey startup prepares the canonical source-bound
+  snapshot before the webServer deadline. Memory refusal yields typed
+  NOT_STARTED with reason memory_admission and code 75 without executing a test.
+  A ready snapshot executes the selected test; fixture and registered-hub
+  configurations do not build an unrelated local snapshot.
+tasks: [cas-4aed]
+journeys: []
+invariants: []

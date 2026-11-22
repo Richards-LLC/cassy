@@ -482,6 +482,43 @@ pub fn fetch_task(
 }
 
 const EVIDENCE_SYNC: &str = "EVIDENCE_SYNC: ";
+const EVIDENCE_REPORT: &str = "evidence-sync-report.json";
+const EVIDENCE_SAMPLE: usize = 20;
+const EVIDENCE_NOTE_BYTES: usize = 16 * 1024;
+
+fn short_evidence_text(text: &str, bytes: usize) -> String {
+    let clean: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if clean.len() <= bytes { return clean; }
+    let end = clean.char_indices().map(|(i, _)| i).take_while(|i| *i <= bytes - 3).last().unwrap_or(0);
+    format!("{}...", &clean[..end])
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EvidenceReportRef {
+    path: String,
+    artifact_id: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EvidenceReport {
+    manifest: EvidenceSync,
+    skipped: Vec<String>,
+    unpublished: Vec<String>,
+    excluded: Vec<String>,
+}
+
+fn evidence_summary(report: &EvidenceReport) -> String {
+    let mut summary = format!("Files: {}; optional not published: {}; required not published: {}; excluded trees: {}. Full report: {EVIDENCE_REPORT}",
+        report.manifest.files.len(), report.skipped.len(), report.unpublished.len(), report.excluded.len());
+    // One shared sample budget, including errors and excluded directories.
+    for item in report.unpublished.iter().chain(&report.skipped).chain(&report.excluded)
+        .chain(report.manifest.files.iter().filter(|_| report.unpublished.is_empty()).map(|file| &file.name)).take(EVIDENCE_SAMPLE)
+    {
+        summary.push_str("\n- ");
+        summary.push_str(&short_evidence_text(item, 256));
+    }
+    summary
+}
 
 /// cas-8018 (GH #2268): park publication is bounded so a close never waits on
 /// a slow Cloud. Each upload request gets at most [`PUBLISH_REQUEST_TIMEOUT`]
@@ -519,6 +556,10 @@ struct EvidenceSync {
     /// field existed were all routed.
     #[serde(default = "strict_by_default")]
     strict: bool,
+    /// Large manifests live in a verified artifact, rather than a synced row.
+    /// Absent on legacy and small inline manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report: Option<EvidenceReportRef>,
 }
 
 fn strict_by_default() -> bool { true }
@@ -540,20 +581,32 @@ fn safe_relative(name: &str) -> bool {
 }
 
 /// Every regular file under `dir`, recursively, by task-relative path.
-fn evidence_files(dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+fn evidence_files(dir: &Path) -> std::io::Result<(Vec<(String, PathBuf)>, Vec<String>)> {
     let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(dir).min_depth(1).sort_by_file_name() {
+    let mut excluded = Vec::new();
+    let walker = walkdir::WalkDir::new(dir).min_depth(1).sort_by_file_name().into_iter().filter_entry(|entry| {
+        if entry.file_type().is_dir() && matches!(entry.file_name().to_str(), Some("node_modules" | ".git" | "vendor" | ".venv")) {
+            excluded.push(entry.path().strip_prefix(dir).unwrap_or(entry.path()).display().to_string());
+            return false;
+        }
+        true
+    });
+    for entry in walker {
         let entry = entry.map_err(std::io::Error::other)?;
         if !entry.file_type().is_file() {
             continue;
         }
         let relative = entry.path().strip_prefix(dir).map_err(std::io::Error::other)?;
+        // Never recursively publish the previous report or a fetched copy.
+        if relative.components().count() == 1 && relative.to_str().is_some_and(|name|
+            name == EVIDENCE_REPORT || (name.starts_with("art-") && name.ends_with(&format!("-{EVIDENCE_REPORT}"))))
+        { continue; }
         let name = relative.to_str().filter(|name| safe_relative(name)).ok_or_else(|| {
             std::io::Error::other(format!("{} has no portable task-relative name", entry.path().display()))
         })?;
         files.push((name.replace(std::path::MAIN_SEPARATOR, "/"), entry.path().to_path_buf()));
     }
-    Ok(files)
+    Ok((files, excluded))
 }
 
 fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathBuf> {
@@ -576,10 +629,11 @@ pub(crate) fn publish_routed_evidence(
     let dir = evidence_dir(cas_root, task).map_err(|error| error.to_string())?;
     let fail = |detail: String| format!(
         "EVIDENCE PUBLICATION INCOMPLETE: {detail}. Task {} has local evidence in {}; publish it before a peer reviews the delivery.",
-        task.id, dir.display());
-    let mut paths = if dir.exists() {
+        task.id, short_evidence_text(&dir.display().to_string(), 1024));
+    let fail = |detail: String| fail(short_evidence_text(&detail, 8192));
+    let (mut paths, excluded) = if dir.exists() {
         evidence_files(&dir).map_err(|error| fail(error.to_string()))?
-    } else { Vec::new() };
+    } else { (Vec::new(), Vec::new()) };
     let mut unpublished = Vec::new();
     let mut cited_names = std::collections::BTreeSet::new();
     // A close can also cite a capped runner log in the worker checkout.
@@ -612,8 +666,8 @@ pub(crate) fn publish_routed_evidence(
             }
         }
     }
-    if paths.is_empty() {
-        return if unpublished.is_empty() { Ok(()) } else { Err(fail(unpublished.join("; "))) };
+    if paths.is_empty() && unpublished.is_empty() && excluded.is_empty() {
+        return Ok(());
     }
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
@@ -687,20 +741,41 @@ pub(crate) fn publish_routed_evidence(
         };
         files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
     }
-    if !unpublished.is_empty() { return Err(fail(unpublished.join("; "))); }
     // Every park records where each evidence file sits under the task evidence
     // directory, so the merge owner can restore nested captures at the paths
     // the ledger cites (GH #2079). Only a routed build makes it strict.
     let audience = if routed { source.unwrap_or_else(|| "the merge owner".into()) } else { "the merge owner".into() };
-    let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files, strict: routed };
-    let mut note = format!(
+    let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files, strict: routed, report: None };
+    let report = EvidenceReport { manifest, skipped, unpublished, excluded };
+    std::fs::create_dir_all(&dir).map_err(|error| fail(error.to_string()))?;
+    let report_path = dir.join(EVIDENCE_REPORT);
+    std::fs::write(&report_path, serde_json::to_vec(&report).map_err(|error| fail(error.to_string()))?)
+        .map_err(|error| fail(error.to_string()))?;
+    let summary = evidence_summary(&report);
+    if !report.unpublished.is_empty() { return Err(fail(summary)); }
+    let inline = serde_json::to_string(&report.manifest).map_err(|error| fail(error.to_string()))?;
+    let manifest_note = if inline.len() <= 4096 && report.manifest.files.len() <= EVIDENCE_SAMPLE {
+        inline
+    } else {
+        let artifact_id = match upload(&report_path) {
+            Ok(id) => Some(id),
+            Err(error) if routed => return Err(fail(format!("{summary}\nManifest publication: {error}"))),
+            Err(_) => None, // Ordinary evidence remains best effort.
+        };
+        serde_json::to_string(&EvidenceSync {
+            machine_id: short_evidence_text(&report.manifest.machine_id, 128),
+            root: short_evidence_text(&report.manifest.root, 512), files: Vec::new(), strict: routed,
+            report: Some(EvidenceReportRef { path: EVIDENCE_REPORT.into(), artifact_id }),
+        }).map_err(|error| fail(error.to_string()))?
+    };
+    let note = format!(
         "[{}] Evidence synced for review on {audience}\n{EVIDENCE_SYNC}{}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-        serde_json::to_string(&manifest).map_err(|error| fail(error.to_string()))?,
+        manifest_note,
+        audience = short_evidence_text(&audience, 256),
     );
-    if !skipped.is_empty() {
-        note.push_str(&format!("\nNot published (optional for this park): {}", skipped.join("; ")));
-    }
+    let note = format!("{note}\n{summary}");
+    if note.len() >= EVIDENCE_NOTE_BYTES { return Err(fail("Evidence summary exceeds its byte budget".into())); }
     let tasks = crate::store::open_task_store(cas_root).map_err(|error| fail(error.to_string()))?;
     tasks.append_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;
     Ok(())
@@ -828,7 +903,35 @@ pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task)
     if sealed && manifest.is_none() { return Err("Remote park has no valid complete evidence manifest".into()); }
     if let Some(mut sync) = manifest {
         sync.strict |= sealed;
-        let restored = materialize_manifest(cas_root, task, &sync);
+        let restored = (|| {
+            if let Some(reference) = &sync.report {
+                let loaded = (|| -> anyhow::Result<EvidenceSync> {
+                    anyhow::ensure!(reference.path == EVIDENCE_REPORT, "invalid evidence report path");
+                    let path = if let Some(id) = &reference.artifact_id {
+                        // Use the same authenticated task snapshot as the
+                        // manifest, rather than re-reading a stale local row.
+                        let artifact = from_notes(&task.notes, id, &task.id)?
+                            .ok_or_else(|| anyhow::anyhow!("no synced artifact record {id}"))?;
+                        let store = SqliteArtifactStore::open(cas_root)?;
+                        let config = crate::config::Config::load(cas_root)?;
+                        let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+                        let roots = PublishRoots::new(cas_root, &base, &task.id);
+                        fetch(&store, super::cloud_client(cas_root).as_ref(), &roots, artifact,
+                            &format!("{id}-{EVIDENCE_REPORT}"))?
+                    } else {
+                        anyhow::ensure!(!sync.strict, "strict evidence report is not published");
+                        evidence_dir(cas_root, task)?.join(&reference.path)
+                    };
+                    let report: EvidenceReport = serde_json::from_slice(&std::fs::read(path)?)?;
+                    anyhow::ensure!(report.manifest.report.is_none(), "nested evidence report");
+                    Ok(report.manifest)
+                })().map_err(|error| format!("EVIDENCE NOT SYNCED: report {}: {error}", reference.path))?;
+                let strict = sync.strict;
+                sync = loaded;
+                sync.strict |= strict;
+            }
+            materialize_manifest(cas_root, task, &sync)
+        })();
         if sync.strict {
             return restored;
         }
@@ -936,6 +1039,85 @@ mod tests {
     use super::*;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
 
+    /// GH #2292: file-count growth belongs in an artifact, never a task row.
+    /// Both the full manifest and optional failures retain their detail while
+    /// the synced summary stays bounded and the peer restores the last file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evidence_sync_notes_stay_bounded_over_5000_files_cas_591f() {
+        use wiremock::matchers::body_partial_json;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for optional_failures in [false, true] {
+            let server = MockServer::start().await;
+            let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(body_partial_json(serde_json::json!({"name":"evidence-sync-report.json"})))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "artifact_id":"cloud-report", "upload_url":format!("{}/report",server.uri()),
+                    "required_headers":{},
+                }))).mount(&server).await;
+            let captured = uploaded.clone();
+            Mock::given(method("PUT")).and(path("/report"))
+                .respond_with(move |request: &wiremock::Request| {
+                    *captured.lock().unwrap() = request.body.clone();
+                    ResponseTemplate::new(200)
+                }).mount(&server).await;
+            Mock::given(method("POST")).and(path("/api/artifacts/cloud-report/complete"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url":null})))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path("/api/artifacts/cloud-report/url"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id":"cloud-report", "url":format!("{}/report",server.uri()),
+                }))).mount(&server).await;
+            let captured = uploaded.clone();
+            Mock::given(method("GET")).and(path("/report"))
+                .respond_with(move |_: &wiremock::Request| {
+                    ResponseTemplate::new(200).set_body_bytes(captured.lock().unwrap().clone())
+                }).mount(&server).await;
+            let mut task = cas_types::Task::new("cas-591f-fixture".into(), "large evidence tree".into());
+            if !optional_failures {
+                task.notes = format!("BUILD_ROUTE: {}", serde_json::json!({
+                    "source_machine_id":"peer-fixture", "key":"large-evidence", "sender_agent_id":"sup",
+                    "recipient_agent_id":"worker", "recipient":"worker", "free_slots":1, "load_per_cpu":null,
+                }));
+            }
+            let parking = PeerReviewer::new(&server.uri(), task);
+            env.set("CAS_ROOT", &parking.root);
+            let dir = parking.evidence_dir();
+            std::fs::create_dir_all(dir.join("captures")).unwrap();
+            std::fs::create_dir_all(dir.join("srt/node_modules/dependency")).unwrap();
+            for index in 0..5000 {
+                std::fs::write(dir.join(format!("captures/{index:04}.txt")), b"").unwrap();
+            }
+            for index in 0..100 {
+                std::fs::write(dir.join(format!("srt/node_modules/dependency/{index}.js")), b"").unwrap();
+            }
+            if optional_failures {
+                for index in 0..96 {
+                    std::fs::write(dir.join(format!("optional-{index:03}-{}.log", "x".repeat(180))), b"not uploaded").unwrap();
+                }
+            }
+            let (parked, report) = tokio::task::spawn_blocking(move || {
+                publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
+                let parked = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
+                assert!(parked.notes.len() < 16 * 1024,
+                    "evidence sync appended {} bytes for 5,000 files", parked.notes.len());
+                let report: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(dir.join("evidence-sync-report.json")).unwrap()).unwrap();
+                (parked, report)
+            }).await.unwrap();
+            assert_eq!(report["manifest"]["files"].as_array().unwrap().len(), 5000);
+            assert_eq!(report["skipped"].as_array().unwrap().len(), if optional_failures { 96 } else { 0 });
+            assert_eq!(report["excluded"].as_array().unwrap().len(), 1);
+            let owner = PeerReviewer::new(&server.uri(), parked);
+            env.set("CAS_ROOT", &owner.root);
+            tokio::task::spawn_blocking(move || {
+                materialize_peer_evidence(&owner.root, &owner.task).unwrap();
+                assert_eq!(std::fs::read(owner.evidence_dir().join("captures/4999.txt")).unwrap(), b"");
+                assert!(!owner.evidence_dir().join("srt/node_modules").exists());
+            }).await.unwrap();
+        }
+    }
+
     /// cas-5f96: an older park must not revert a subsequently published ledger.
     /// A sealed park refuses that revision; a newer park still replaces old bytes.
     #[tokio::test(flavor = "multi_thread")]
@@ -986,7 +1168,7 @@ mod tests {
                         serde_json::to_string(&records[usize::from(published_new)]).unwrap(),
                         serde_json::to_string(&records[0]).unwrap(),
                         serde_json::to_string(&EvidenceSync {
-                            machine_id: "publisher".into(), root: "/publisher/evidence".into(), strict,
+                            machine_id: "publisher".into(), root: "/publisher/evidence".into(), strict, report: None,
                             files: vec![SyncedFile { name: "LEDGER.md".into(),
                                 sha256: artifact.sha256.clone(), artifact_id: Some(artifact.id.clone()) }],
                         }).unwrap());

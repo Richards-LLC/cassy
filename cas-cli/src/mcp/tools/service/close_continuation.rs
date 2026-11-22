@@ -136,8 +136,9 @@ impl Pending {
 
 pub(super) struct LateClose {
     pending: Option<Pending>,
-    work: Option<ToolWorkPermit>,
+    // Drop order matters: release worker ownership before signaling idle.
     _worker_guard: Option<std::sync::Arc<File>>,
+    work: Option<ToolWorkPermit>,
 }
 
 impl LateClose {
@@ -180,6 +181,10 @@ impl LateClose {
             work: Some(service.tool_work.permit()),
             _worker_guard: worker_guard,
         })
+    }
+
+    pub(super) fn id(&self) -> &str {
+        &self.pending.as_ref().expect("pending close continuation").journal.id
     }
 
     pub(super) fn finish(mut self, note: String, failed: bool, retry_peer_park: bool) -> Result<(), String> {

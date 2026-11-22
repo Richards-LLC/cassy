@@ -84,17 +84,14 @@ pub(crate) fn render(impact: &Value) -> String {
     out
 }
 
+pub(crate) fn predicted_value(core: &CasCore, task: &Task) -> Result<Value> {
+    let repo = super::super::repo_context::resolve_task_metadata_repo(&core.cas_root, task)
+        .map_err(|error| anyhow!(error))?;
+    Ok(serde_json::to_value(crate::qa_impact::predicted(&repo, &core.load_config().qa(), task)?)?)
+}
+
 pub(crate) fn predicted(core: &CasCore, task: &Task) -> String {
-    let result = (|| -> Result<Value> {
-        let repo = if let Some(target) = task.deliverables.work_target.as_ref() {
-            super::super::repo_context::resolve_repo_context(&core.cas_root, target)
-                .map_err(|e| anyhow!(e))?
-                .repo_root
-        } else {
-            close_ops::resolve_close_gate_repo_root(&core.cas_root).map_err(|e| anyhow!(e))?
-        };
-        Ok(serde_json::to_value(crate::qa_impact::predicted(&repo, &core.load_config().qa(), task)?)?)
-    })();
+    let result = predicted_value(core, task);
     match result {
         Ok(report) => format!(
             "Predicted QA impact (paths named in title, description, design and proof targets; not a delivery diff):\n{}",
@@ -205,3 +202,7 @@ pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option
     }).collect();
     (!missing.is_empty()).then(|| format!("QA RECORD REJECTED: the ledger has no row for live journeys {}. Add one row per journey: PASS, FAIL, NOT A ROUTE, or NOT EXERCISED: <reason>.", missing.join(", ")))
 }
+
+#[cfg(test)]
+#[path = "qa_impact_tests.rs"]
+mod checkout_tests;

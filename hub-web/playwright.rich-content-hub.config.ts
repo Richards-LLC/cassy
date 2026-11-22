@@ -1,6 +1,6 @@
 // The same named journey, with Commander assets served by a registered real hub.
 import { defineConfig } from "@playwright/test";
-import base from "./playwright.config";
+import base from "./playwright.base";
 
 const value = process.env.HUB_RICH_HUB_URL;
 if (!value) throw new Error("Set HUB_RICH_HUB_URL to the registered candidate's /commander/ URL");

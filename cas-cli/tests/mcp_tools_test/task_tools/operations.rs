@@ -5751,16 +5751,89 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
     }
 }
 
+/// cas-ea31 / cas-7e76a takeover cases 2-4, replayed from Nov 21.
+/// Case 2: the receiver already sits on one of the task's branches, just not
+/// the first that resolves. Case 3: after a review return cleared the anchor,
+/// the prior worker's task branch is at the train base while the parked lane
+/// holds the delivery and a later task (also with the receiver reset to the
+/// delivery tip, GH #2073). Case 4: the receiver is at a newer
+/// train tip with no work of its own; with an own commit it is still refused.
+#[tokio::test]
+async fn transfer_adopt_branch_takeover_cases_cas_ea31() {
+    let mut failures = Vec::new();
+    for case in ["receiver-on-candidate", "anchor-in-history", "receiver-at-delivery-after-return",
+        "receiver-at-train-tip", "receiver-own-work"] {
+        let mut env = TestEnvGuard::temp_home();
+        let BranchAdoptionFixture { temp, destination, service, mut task, receiver, tip, .. } =
+            branch_adoption_fixture(&mut env);
+        let root = temp.path();
+        let dest = destination.path();
+        let tasks = open_task_store(&root.join(".cas")).unwrap();
+        let base = branch_transfer_git(root, &["rev-parse", &format!("{tip}~1")]);
+        match case {
+            "receiver-on-candidate" => {
+                let handoff = "factory/old-worker-cas-branch1100";
+                branch_transfer_git(root, &["branch", handoff, &tip]);
+                branch_transfer_git(dest, &["switch", handoff]);
+                task.deliverables.handoff_branches.push(handoff.into());
+            }
+            // GH #2073: after a review return the receiver was reset to the
+            // delivery tip and was still refused as diverging.
+            "anchor-in-history" | "receiver-at-delivery-after-return" => {
+                if case == "receiver-at-delivery-after-return" {
+                    branch_transfer_git(dest, &["reset", "--hard", &tip]);
+                }
+                branch_transfer_git(root, &["branch", "factory/test-agent-cas-branch1100", &base]);
+                std::fs::write(root.join("later-task.txt"), "separate work").unwrap();
+                branch_transfer_git(root, &["add", "later-task.txt"]);
+                branch_transfer_git(root, &["commit", "-m", "later task"]);
+                task.deliverables.factory_branch_anchor = None;
+                task.deliverables.historical_factory_branch_anchors = vec![tip.clone()];
+            }
+            _ => {
+                branch_transfer_git(dest, &["commit", "--allow-empty", "-m", "train advanced"]);
+                branch_transfer_git(dest, &["branch", "main", "HEAD"]);
+                if case == "receiver-own-work" {
+                    branch_transfer_git(dest, &["commit", "--allow-empty", "-m", "own work"]);
+                }
+            }
+        }
+        tasks.update(&task).unwrap();
+        let before = branch_transfer_git(dest, &["rev-parse", "HEAD"]);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+        })).unwrap();
+        let result = service.task(Parameters(request)).await;
+        if case == "receiver-own-work" {
+            if result.is_ok() || branch_transfer_git(dest, &["rev-parse", "HEAD"]) != before {
+                failures.push(format!("{case}: a receiver with its own unintegrated commit must be refused untouched"));
+            }
+            continue;
+        }
+        let adopted = (
+            branch_transfer_git(dest, &["branch", "--show-current"]),
+            branch_transfer_git(dest, &["rev-parse", "HEAD"]),
+            dest.join("later-task.txt").exists(),
+        );
+        if let Err(error) = result {
+            failures.push(format!("{case}: {error}"));
+        } else if adopted != ("factory/new-worker-cas-branch1100".to_string(), tip.clone(), false) {
+            failures.push(format!("{case}: adopted {adopted:?}, expected the delivery tip {tip}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 #[tokio::test]
 async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
-    for mode in ["dirty", "dirty-force", "diverged", "foreign", "unrelated-branch", "ahead", "foreign-source-ahead"] {
+    for mode in ["remote-roster", "remote-registered", "remote-force", "dirty", "dirty-force", "diverged", "foreign", "unrelated-branch", "ahead", "foreign-source-ahead"] {
         let mut env = TestEnvGuard::temp_home();
         let fixture = branch_adoption_fixture(&mut env);
         let foreign = tempfile::TempDir::new().unwrap();
         let cas_dir = fixture.temp.path().join(".cas");
         let agents = open_agent_store(&cas_dir).unwrap();
         let mut original_holder = fixture.source.id.clone();
-        if mode == "dirty-force" {
+        if matches!(mode, "dirty-force" | "remote-force") {
             env.set("CAS_AGENT_ROLE", "supervisor");
             let mut supervisor = fixture.source.clone();
             supervisor.role = AgentRole::Supervisor;
@@ -5770,6 +5843,29 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
             agents.release_lease(&fixture.task.id, &fixture.source.id).unwrap();
             assert!(agents.try_claim(&fixture.task.id, &holder.id, 600, None).unwrap().is_success());
             original_holder = holder.id;
+        }
+        let server = if mode == "remote-roster" {
+            let server = MockServer::start().await;
+            std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='transfer-fixture'\n").unwrap();
+            CloudConfig { endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default() }
+                .save_to_cas_dir(&cas_dir).unwrap();
+            let row = |id, name, role| serde_json::json!({
+                "id":id,"name":name,"agent_type":role,"status":"active","machine_id":"prowl-id",
+                "last_heartbeat":chrono::Utc::now().to_rfc3339(),"active_tasks":0,
+                "metadata":{"role":role,"canonical_id":"transfer-fixture","factory_session":"peer-session","hostname":"prowl"}
+            });
+            Mock::given(method("GET")).and(path("/api/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "status":"ok","agents":[row("peer-supervisor","peer-supervisor","supervisor"),
+                        row("remote-worker-id","remote-worker","worker")]
+                }))).mount(&server).await;
+            Some(server)
+        } else { None };
+        if matches!(mode, "remote-registered" | "remote-force") {
+            let mut receiver = fixture.receiver.clone();
+            receiver.machine_id = Some("prowl-id".into());
+            receiver.metadata.insert("hostname".into(), "prowl".into());
+            agents.update(&receiver).unwrap();
         }
         let own_branch = format!("factory/{}-{}", fixture.receiver.name, fixture.task.id);
         if matches!(mode, "ahead" | "foreign-source-ahead") {
@@ -5795,7 +5891,7 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
             agents.update(&receiver).unwrap();
         } else if mode == "unrelated-branch" {
             branch_transfer_git(fixture.destination.path(), &["switch", "-c", "factory/unrelated-worker"]);
-        } else {
+        } else if !mode.starts_with("remote") {
             std::fs::write(fixture.destination.path().join("own-work.txt"), "keep me").unwrap();
             if mode == "diverged" {
                 branch_transfer_git(fixture.destination.path(), &["add", "own-work.txt"]);
@@ -5804,11 +5900,27 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
         }
         let before_head = branch_transfer_git(fixture.destination.path(), &["rev-parse", "HEAD"]);
         let before_branch = branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let before_task = serde_json::to_value(tasks.get(&fixture.task.id).unwrap()).unwrap();
+        let before_lease = serde_json::to_value(agents.get_lease(&fixture.task.id).unwrap()).unwrap();
         let request = serde_json::from_value(serde_json::json!({
-            "action": "transfer", "id": fixture.task.id, "to_agent": fixture.receiver.name,
-            "adopt_branch": true, "supervisor_override": mode == "dirty-force",
+            "action": "transfer", "id": fixture.task.id,
+            "to_agent": if mode == "remote-roster" { "remote-worker" } else { fixture.receiver.name.as_str() },
+            "adopt_branch": true, "supervisor_override": matches!(mode, "dirty-force" | "remote-force"),
         })).unwrap();
         let error = fixture.service.task(Parameters(request)).await.expect_err(mode);
+        if mode.starts_with("remote") {
+            let data = error.data.as_ref().expect("remote receiver refusal identifies the machine");
+            assert_eq!(data["code"], "TRANSFER_RECEIVER_ON_OTHER_MACHINE");
+            assert_eq!(data["machine"], "prowl");
+            assert_eq!(data["next_action"], "transfer_from_receiver_supervisor");
+        }
+        if let Some(server) = server {
+            assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() == "GET"));
+            assert!(agents.get("remote-worker-id").is_err());
+        }
+        assert_eq!(serde_json::to_value(tasks.get(&fixture.task.id).unwrap()).unwrap(), before_task, "{mode}");
+        assert_eq!(serde_json::to_value(agents.get_lease(&fixture.task.id).unwrap()).unwrap(), before_lease, "{mode}");
 
         let after = open_task_store(&cas_dir).unwrap().get(&fixture.task.id).unwrap();
         assert_eq!(after.assignee, fixture.task.assignee, "{mode}");

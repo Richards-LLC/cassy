@@ -10,6 +10,25 @@ use cas_types::{AgentRole, Task};
 use super::GitOperations;
 
 #[derive(Debug)]
+enum OwnRemoteAhead {
+    Count(usize),
+    Missing,
+    NoRemote,
+    Unknown,
+}
+
+impl OwnRemoteAhead {
+    fn render(&self) -> String {
+        match self {
+            Self::Count(n) => n.to_string(),
+            Self::Missing => "missing".into(),
+            Self::NoRemote => "no_remote".into(),
+            Self::Unknown => "unknown".into(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct RetainedWorktree {
     pub worker: String,
     pub task: Option<String>,
@@ -17,7 +36,9 @@ pub(crate) struct RetainedWorktree {
     pub branch: Option<String>,
     pub push_remote: Option<String>,
     pub head: String,
+    // On no remote, or ahead of the local target in a repository without remotes.
     pub unpushed: Option<usize>,
+    own_remote_ahead: OwnRemoteAhead,
     pub dirty: Option<usize>,
     errors: Vec<String>,
 }
@@ -31,10 +52,12 @@ pub(crate) struct RetainedInventory {
 impl RetainedWorktree {
     pub fn summary(&self) -> String {
         format!(
-            "{} task={} HEAD={} unpushed={} dirty={} path={}",
+            "{} task={} HEAD={} ahead_of_own_remote={} {}={} dirty={} path={}",
             self.worker,
             self.task.as_deref().unwrap_or("unknown"),
             self.head,
+            self.own_remote_ahead.render(),
+            if self.push_remote.is_some() { "on_no_remote" } else { "ahead_of_local_target" },
             count(self.unpushed),
             count(self.dirty),
             self.path.display(),
@@ -286,6 +309,7 @@ pub(crate) fn scan_until(cas_root: &Path, deadline: Instant) -> RetainedInventor
             push_remote: push_remote.clone(),
             head,
             unpushed: None,
+            own_remote_ahead: OwnRemoteAhead::Unknown,
             dirty: None,
             errors: Vec::new(),
         };
@@ -337,11 +361,34 @@ pub(crate) fn scan_until(cas_root: &Path, deadline: Instant) -> RetainedInventor
             }
             Err(error) => entry.errors.push(format!("dirty count: {error}")),
         }
-        if entry.unpushed != Some(0) || entry.dirty != Some(0) {
+        match own_remote_ahead(&entry, deadline) {
+            Ok(ahead) => entry.own_remote_ahead = ahead,
+            Err(error) => entry.errors.push(format!("own-remote ahead count: {error}")),
+        }
+        // A commit published on the train still needs pushing to this branch.
+        // Unknown probes remain visible rather than silently looking clean.
+        let own_push_needed = matches!(entry.own_remote_ahead,
+            OwnRemoteAhead::Count(1..) | OwnRemoteAhead::Unknown);
+        if entry.unpushed != Some(0) || entry.dirty != Some(0) || own_push_needed {
             report.entries.push(entry);
         }
     }
     report
+}
+
+fn own_remote_ahead(entry: &RetainedWorktree, deadline: Instant) -> Result<OwnRemoteAhead, String> {
+    let Some(remote) = entry.push_remote.as_deref() else {
+        return Ok(OwnRemoteAhead::NoRemote);
+    };
+    let branch = entry.branch.as_deref().ok_or("checkout has no branch")?;
+    let reference = format!("refs/remotes/{remote}/{branch}");
+    let refs = git(&entry.path, &["for-each-ref", "--format=%(refname)", &reference], deadline)?;
+    // A missing tracking ref is different from a failed probe or zero ahead.
+    if !refs.lines().any(|name| name == reference) {
+        return Ok(OwnRemoteAhead::Missing);
+    }
+    let output = git(&entry.path, &["rev-list", "--count", "HEAD", "--not", &reference], deadline)?;
+    output.trim().parse::<usize>().map(OwnRemoteAhead::Count).map_err(|error| error.to_string())
 }
 
 fn git(repo: &Path, args: &[&str], deadline: Instant) -> Result<String, String> {
@@ -532,6 +579,15 @@ mod tests {
             assert_eq!(entry.unpushed, Some(1));
             assert_eq!(entry.dirty, Some(1));
             assert_eq!(entry.push_remote.as_deref(), remote);
+            let summary = entry.summary();
+            let fields: Vec<_> = summary.split_whitespace().collect();
+            if remote.is_some() {
+                assert!(fields.contains(&"ahead_of_own_remote=missing"));
+                assert!(fields.contains(&"on_no_remote=1"));
+            } else {
+                assert!(fields.contains(&"ahead_of_own_remote=no_remote"));
+                assert!(fields.contains(&"ahead_of_local_target=1"));
+            }
             // Dirty-only work remains visible after its commits reach target.
             commit_git(&worker, &["reset", "--hard", "main"]);
             let dirty_only = scan_now();

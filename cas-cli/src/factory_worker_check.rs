@@ -3868,9 +3868,19 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         write(embedded, "tasks: [cas-new]\n");
         fixture_commit_as(&repo, "docs: embedded family");
         let voided = fixture_head(&repo);
+        // A proof at a commit the tip does not descend from never carries.
+        git(&repo, &["checkout", "--detach", &tested]).unwrap();
+        write("notes.txt", "sibling\n");
+        fixture_commit_as(&repo, "sibling");
+        let sibling = fixture_head(&repo);
+        stability::record(&root, &repo, &sibling, stability::Proof {
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        }).unwrap();
         let passing = PassingTests::new(&root, &repo, &voided);
         assert_eq!(stability::missing(&passing, &[keeper.clone()]), [keeper.clone()]);
-        assert_eq!(stability::invalidated(&passing, &[keeper]), [(tested, Some(vec![embedded.to_owned()]))]);
+        let mut refused = vec![(tested, Some(vec![embedded.to_owned()])), (sibling, None)];
+        refused.sort();
+        assert_eq!(stability::invalidated(&passing, &[keeper]), refused);
     }
 
     #[test]

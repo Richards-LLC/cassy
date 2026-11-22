@@ -2949,8 +2949,10 @@ Vitest helpers there retain their source role and select importing specs.
 A Playwright helper that only Playwright specs import, directly or through other
 relative imports in its package, uses `playwright <helper file>`. The capped
 runner runs those importing specs under the helper's config (or the caller's
-`--config`) and records proof for the helper. A helper no spec imports keeps
-its package proof (GH #2146).
+`--config`) and records proof for the helper. A spec counts only when it loads
+`@playwright/test` at runtime and imports no other runner; `import type` does
+not. A helper no spec imports, or a unit test also imports, keeps its previous
+proof (GH #2146).
 That wider set runs once and records a separate widened receipt at the tested
 commit. Park consumes it without executing tests; identified changed tests still
 owe five consecutive passes. Caller Jest name filters cannot narrow this proof.

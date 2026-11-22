@@ -2665,6 +2665,15 @@ impl CasCore {
         let task_store = self.open_task_store()?;
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
+            // GH #1695: a close saved with its active verification dispatch
+            // resumes on the verdict without the worker; it is not WIP.
+            let handed_off = |id: &str| task_store.get(id).is_ok_and(|task| {
+                task.pending_verification
+                    && task.deliverables.no_delivery_close_intent.as_ref().is_some_and(|intent|
+                        cas_store::get_latest_verification_dispatch(&self.cas_root, id).ok().flatten()
+                            .is_some_and(|dispatch| dispatch.id == intent.dispatch_id && matches!(dispatch.state,
+                                cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)))
+            });
             let mut active = task_store.list(Some(TaskStatus::InProgress))
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
                 .into_iter().filter(|task| task.id != req.id
@@ -2675,6 +2684,7 @@ impl CasCore {
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
                 .into_iter().filter(|lease| lease.task_id != req.id)
                 .map(|lease| lease.task_id));
+            active.retain(|id| !handed_off(id));
             active.sort();
             active.dedup();
             // gate[G-08 start]: Single active WIP per worker

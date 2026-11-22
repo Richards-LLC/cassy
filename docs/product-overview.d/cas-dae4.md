@@ -1,3 +1,3 @@
 ## Core Concepts
 
-A reassigned task whose previous worker never parked or delivered is bound to the replacement's own branch automatically at task start, provided that branch is untouched at the target. The previous branch is kept as handoff history. A task whose previous worker did deliver still needs a supervisor-approved rebind once the replacement has pushed a task commit.
+A replacement worker on a reassigned task reaches a bound lane without a supervisor override. When the predecessor's branch is untouched, start binds the replacement's own branch automatically. When the predecessor committed work, that branch is kept, the replacement keeps working and delivers, and the supervisor's `rebind_branch` then binds the replacement's branch.

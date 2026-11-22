@@ -2241,10 +2241,20 @@ impl QueueJobs {
         // Rows whose claims are back join the batch (a claimed row is not
         // selectable again, spec §4.5 rule 1).
         let ready = self.take_claim_ready_rows();
+        // cas-20f6: QueueSelect's writes run ahead of queued claim jobs, so
+        // this selection may have read a carried row, or a carried batch's
+        // passenger, before its claim landed. The carry owns those rows: a
+        // fresh copy delivered separately splits one directed batch into
+        // two turns. A fresh batch naming an owned row waits for the next
+        // selection, after the carry has delivered or released it.
+        let owned: HashSet<i64> = self.carried.values()
+            .chain(ready.iter())
+            .flat_map(|(row, facts)| std::iter::once(row.id).chain(facts.message_batch.iter().map(|member| member.id)))
+            .collect();
+        let facts = &selection.facts;
+        selection.rows.retain(|row| !owned.contains(&row.id) && facts.get(&row.id)
+            .is_none_or(|facts| facts.message_batch.iter().all(|member| !owned.contains(&member.id))));
         for (row, facts) in ready {
-            if selection.rows.iter().any(|selected| selected.id == row.id) {
-                continue;
-            }
             selection.facts.insert(row.id, facts);
             selection.rows.push(row);
         }

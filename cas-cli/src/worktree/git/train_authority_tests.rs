@@ -558,7 +558,7 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
                 else { json!({"total_count": 0, "workflow_runs": []}) })
         }
     }
-    let fixture = Fixture::new();
+    let fixture = Fixture::unenrolled();
     let root = crate::store::init_cas_dir(&fixture.left).unwrap();
     std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='fixture'\n").unwrap();
     let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
@@ -569,28 +569,48 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     successor.factory_session = Some("session-b".into()); successor.cc_session_id = Some("harness-b".into());
     for agent in [&actor, &successor] { agents.register(agent).unwrap(); agents.update(agent).unwrap(); }
     let successor_identity = crate::train_owner::identity(&successor, &successor.id).unwrap();
-    let original = Snapshot::read(&fixture.left, "cas-6456").unwrap();
-    let quiesced = original.prepare(&fixture.left, &fixture.actor, &successor_identity, "service-transfer").unwrap()
-        .quiesce(&fixture.left, &fixture.actor, &Settled::default()).unwrap();
+    let target = "epic/release-train-test-cas-6456".to_string();
     let tasks = core.open_task_store().unwrap();
     let mut train = crate::types::Task::new("cas-6456".into(), "train".into());
     train.task_type = crate::types::TaskType::Epic;
-    train.branch = Some(original.record.target.clone());
-    train.labels = vec!["release-train".into(), crate::train_owner::ENROLLED.into()];
+    train.branch = Some(target.clone());
+    train.labels = vec!["release-train".into()];
     train.epic_verification_owner = Some(actor.id.clone());
     tasks.add(&train).unwrap();
-    let request = Request { operation: Action::Accept, expected_authority: quiesced.tip.clone(),
-        expected_generation: original.record.generation.clone(), transfer_id: "service-transfer".into(),
-        request_id: uuid::Uuid::new_v4().to_string(), reason: "move publisher".into(), successor: None };
     let state = Rc::new(RefCell::new(json!({})));
     let reads = Rc::new(Cell::new(0));
     let checks = crate::train_owner::provider::fixture_checks(Provider { state: state.clone(), reads: reads.clone() });
+    core.set_agent_id_for_testing(actor.id.clone());
+    // The first prepare enrolls under the legacy owner. A stale expectation
+    // refuses before any Git write and names the current CAS values.
+    let mut prepare = Request { operation: Action::Prepare, expected_authority: "unenrolled".into(),
+        expected_generation: "stale".into(), transfer_id: "service-transfer".into(),
+        request_id: uuid::Uuid::new_v4().to_string(), reason: "move publisher".into(), successor: Some(successor.id.clone()) };
+    let stale = core.train_owner_transfer_checked(&train, &prepare, &checks).unwrap_err();
+    assert!(Snapshot::read_optional(&fixture.left, &train.id).unwrap().is_none());
+    let legacy = crate::factory_session_scope::train_owner_generation(&root, &train).unwrap();
+    assert!(stale.contains(&legacy), "{stale}");
+    prepare.expected_generation = legacy;
+    let prepared = core.train_owner_transfer_checked(&train, &prepare, &checks).unwrap();
+    let original = Snapshot::read(&fixture.left, &train.id).unwrap();
+    assert_eq!((original.record.phase.clone(), original.record.target_sha.clone()), (Phase::Draining, fixture.base.clone()));
+    assert_eq!(prepared["authority"], original.tip);
+    assert!(tasks.get(&train.id).unwrap().labels.iter().any(|label| label == crate::train_owner::ENROLLED));
+    // Draining already fences the prior owner's own publication; the
+    // production quiescence evidence is that fence, not a heartbeat.
+    assert!(original.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &fixture.base).is_err());
+    let quiesce = Request { operation: Action::Quiesce, expected_authority: original.tip.clone(),
+        expected_generation: original.record.generation.clone(), successor: None, ..prepare.clone() };
+    core.train_owner_transfer_checked(&train, &quiesce, &checks).unwrap();
+    let quiesced = Snapshot::read(&fixture.left, &train.id).unwrap();
+    assert_eq!(quiesced.record.quiescence.as_ref().unwrap()["publishers"]["fence"], "atomic-authority-lease");
+    let request = Request { operation: Action::Accept, expected_authority: quiesced.tip.clone(), ..quiesce.clone() };
     // A registered supervisor who is not the named successor cannot accept,
     // and cannot choose its own fingerprint in the request.
-    core.set_agent_id_for_testing(actor.id.clone());
+    let before = reads.get();
     assert!(core.train_owner_transfer_checked(&train, &request, &checks).is_err());
     assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, quiesced.tip);
-    assert_eq!(reads.get(), 0);
+    assert_eq!(reads.get(), before);
     let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
     core.set_agent_id_for_testing(successor.id.clone());
     // Every unchanged-target accept must freshly reject armed PR, queue, run
@@ -624,6 +644,23 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     assert_eq!(retry, receipt);
     assert_eq!(tasks.get(&train.id).unwrap().updated_at, clock);
     assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, accepted.tip);
+    // After the transfer only the accepted owner's fence publishes: generic
+    // pushes refuse, the prior owner cannot obtain a fence, and the daemon
+    // may publish only for the exact live recorded process.
+    let head = fixture.candidate(&fixture.left, "fenced-merge");
+    let git = GitOperations::new(fixture.left.clone());
+    let unfenced = git.publish_pinned_source_to_origin(&target, &head, TIMEOUT);
+    assert!(crate::gates::codes_in(&format!("{unfenced:?}")).contains(&"G-113"), "{unfenced:?}");
+    let prior = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    prior.set_agent_id_for_testing(actor.id.clone());
+    assert!(crate::train_owner::publication_fence(&prior, &fixture.left, &target).is_err());
+    let daemon = crate::train_owner::local_owner_fence(&root, &fixture.left, &target).unwrap().unwrap();
+    assert_eq!(daemon.1, successor_identity);
+    let (authority, owner) = crate::train_owner::publication_fence(&core, &fixture.left, &target).unwrap().unwrap();
+    assert!(git.publish_merge_candidate(&target, &head, false, Some((&authority, &owner))).is_published());
+    let published = Snapshot::read(&fixture.left, &train.id).unwrap();
+    assert_eq!((fixture.target(), published.record.target_sha), (head.clone(), head));
+    assert_eq!(published.record.generation, accepted.record.generation);
 }
 
 #[test]

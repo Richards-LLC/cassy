@@ -199,6 +199,7 @@ impl Snapshot {
     }
 
     /// `proven_merge` keeps the merge path's G-160 combined-tree validation.
+    // gate-audit[proven_merge]: selector Internal publication provenance from publish_merge_candidate selects G-160 merge validation; no caller override is accepted.
     pub(crate) fn publish_as(&self, git: &GitOperations, actor: &Identity, head: &str, proven_merge: bool) -> Result<TargetPushOutcome, String> {
         let live = Self::read(&git.repo_root, &self.record.train)?;
         if live.record.generation != self.record.generation || live.record.identity != *actor {

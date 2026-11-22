@@ -2641,6 +2641,11 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
             .branch,
         branch
     );
+    let mut parked = tasks.get(&task.id).unwrap();
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.deliverables.factory_branch_anchor = Some(tip.clone());
+    parked.deliverables.parked_branch = Some(branch.clone());
+    tasks.update(&parked).unwrap();
     ReboundMergeFixture {
         repo,
         origin,
@@ -2666,6 +2671,8 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         let attributed = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
         let tasks = open_task_store(&f.cas_root).unwrap();
         let mut task = tasks.get("cas-e429").unwrap();
+        task.status = TaskStatus::InProgress;
+        task.deliverables.parked_branch = None;
         task.deliverables.factory_branch_anchor = Some(attributed.clone());
         tasks.update(&task).unwrap();
 
@@ -2752,12 +2759,12 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
         let tasks = open_task_store(&fixture.cas_root).unwrap();
         let mut task = tasks.get("cas-e429").unwrap();
         task.depth = if verdict == "approved" { TaskDepth::Light } else { TaskDepth::Deep };
-        task.status = if verdict == "approved" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        task.status = TaskStatus::AwaitingMerge;
         if verdict == "approved" { task.task_type = TaskType::Bug; }
         task.labels = vec!["force-verifier".into()];
         task.acceptance_criteria = "Review this candidate before publishing it.".into();
-        task.deliverables.factory_branch_anchor = (verdict != "approved").then(|| fixture.tip.clone());
-        task.deliverables.parked_branch = (verdict != "approved").then(|| fixture.branch.clone());
+        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
         tasks.update(&task).unwrap();
         let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
         let mut merge = coord_req("worktree_merge");

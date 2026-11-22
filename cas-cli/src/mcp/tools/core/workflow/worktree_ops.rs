@@ -2325,6 +2325,15 @@ impl CasCore {
         parent_branch: &str,
         task: &cas_types::Task,
     ) -> Result<Option<String>, String> {
+        if task.task_type != cas_types::TaskType::Epic
+            && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+            && (matches!(task.status, cas_types::TaskStatus::Open | cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked)
+                || task.deliverables.factory_branch_anchor.as_deref().is_none_or(|anchor| anchor.trim().is_empty()))
+        {
+            return Err(format!(
+                "DELIVERY NOT PARKED: push_branch task {} requires its pushed, parked anchor before merging. Have the worker push its validated delivery and park it with task action=close, then retry worktree_merge. No merge was attempted.", task.id,
+            ));
+        }
         let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
             return Ok(None);
         };
@@ -5935,7 +5944,12 @@ impl CasCore {
             }
 
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
-                .or(dirty_pushed_anchor);
+                .or(dirty_pushed_anchor)
+                .or_else(|| scoped_task.as_deref()
+                    .filter(|task| transactional_delivery.is_none()
+                        && task.task_type != cas_types::TaskType::Epic
+                        && task.delivery_mode == cas_types::DeliveryMode::PushBranch)
+                    .and(parked_source_tip.as_deref()));
             // GH #2151: a local_merge delivery integrates its exact local
             // anchor; only a pushed delivery owes origin source-ref proof.
             let source_proof = if scoped_task.as_deref()
@@ -6729,8 +6743,7 @@ impl CasCore {
         let push_note = match (task_id, merge_commit.as_deref()) {
             (Some(task_id), Some(merge_sha))
                 if transactional_delivery.is_none() && push_outcome.is_published() => {
-                // cas-46ea: an unparked task merged from its pushed lane tip
-                // closes the same way as a parked one.
+                // Close the published delivery using its existing park receipt.
                 if let Some(head) = fast_lane_head.as_deref()
                     && ci_admission == cas_types::MergeCiAdmission::Green
                 {

@@ -1,0 +1,11 @@
+title: Worker merge requires a pushed parked source
+statement: >-
+  A push_branch worker delivery cannot integrate an InProgress local rebase,
+  including legacy tasks with no recorded start binding. Pushed active tasks
+  must park first, and a parked local anchor absent from origin cannot merge.
+  Refusal preserves worker and target refs. A valid pushed parked anchor still
+  integrates through immutable source proof; local_merge and already-integrated
+  receipt recovery retain their own policies.
+tasks: [cas-c2335]
+journeys: []
+invariants: []

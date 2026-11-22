@@ -611,8 +611,6 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
     premerge_record_then_merge(&[
         // The worker cannot close while its candidate is still under review.
         ("worker-blocked", "success", Some("approved"), true),
-        // cas-46ea: merged from a pushed lane tip without a park.
-        ("unparked", "success", Some("approved"), true),
         ("green-approved", "success", Some("approved"), true),
         ("green-rejected", "success", Some("rejected"), false),
         ("advisory-no-checks", "no-checks", Some("approved"), true),
@@ -731,12 +729,9 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             registration.metadata.insert("clone_path".into(), worker_path.display().to_string());
             agents.update(&registration).unwrap();
         }
-        if row == "unparked" {
-            task.status = TaskStatus::Open;
-        }
         task_store.add(&task).unwrap();
 
-        if row == "fresh-branch" || row == "unparked" {
+        if row == "fresh-branch" {
             env.set("CAS_AGENT_ROLE", "worker");
             delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
                 "action": "start", "id": task.id,
@@ -822,17 +817,16 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         // The worker's own close parks the delivery and keeps its reason.
         let parked_reason = format!("PASS: delivered.txt for {row}");
         env.set("CAS_AGENT_ROLE", "worker");
-        let park = if row == "unparked" { String::new() } else { get_text(
+        let park = get_text(
             &delivery_service(&cas_root, &worker_id)
                 .task(Parameters(task_req(serde_json::json!({
                     "action": "close", "id": task.id, "reason": parked_reason,
                 }))))
                 .await
                 .expect("worker close"),
-        ) };
+        );
         let parked = task_store.get(&task.id).unwrap();
-        let parked_status = if row == "unparked" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
-        assert_eq!(parked.status, parked_status, "{row}: {park}");
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{row}: {park}");
         if row == "fresh-branch" {
             assert!(park.contains("MERGE REQUIRED"), "{park}");
             assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(delivery_branch.as_str()));
@@ -1185,11 +1179,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         assert_eq!(after_dispatch.id, dispatch.id, "publication reuses the pre-merge verdict");
         assert_eq!(after_dispatch.repository, dispatch.repository, "publication cannot replace the reviewed proof");
         if closes {
-            if row == "unparked" {
-                assert!(after_merge.close_reason.as_deref().is_some_and(|reason| reason.contains(&merge_sha)), "{row}: {:?}", after_merge.close_reason);
-            } else {
-                assert_eq!(after_merge.close_reason.as_deref(), Some(parked_reason.as_str()));
-            }
+            assert_eq!(after_merge.close_reason.as_deref(), Some(parked_reason.as_str()));
             assert_eq!(after_merge.assignee.as_deref(), Some(worker.as_str()), "{row}: attributed to the assignee");
         } else {
             assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "CI override stays a manual close: {row}: {merged}");
@@ -1212,11 +1202,6 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         assert!(
             !worker_prompts.iter().any(|p| p.contains("Retry task close")),
             "{row}: Cassy closes or reopens; the worker never re-closes: {worker_prompts:?}"
-        );
-        assert_eq!(
-            worker_prompts.iter().filter(|p| p.contains("Cassy parked it")).count(),
-            usize::from(row == "unparked"),
-            "{row}: a worker parked by the merge hears it once (cas-e9d6): {worker_prompts:?}"
         );
         if closes && admission == "advisory" {
             assert!(worker_prompts.iter().any(|p| p.contains("CI advisory (unconfirmed)")), "{worker_prompts:?}");

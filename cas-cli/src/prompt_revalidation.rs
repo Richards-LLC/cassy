@@ -259,9 +259,9 @@ pub(crate) struct MergeRequestEnvelope {
 }
 
 /// Daemon-authored lifecycle wake for a worker whose parked delivery PR has
-/// merged. The body deliberately names the exact close receipt so an idle
-/// worker can resume the terminal action without guessing which commit landed.
-/// The caller routes missing approval to supervisor reconciliation first.
+/// merged. The receipt names the observed merge without asking the parked
+/// worker to close again. Finalization belongs to the merge/verdict path;
+/// missing approval is routed to supervisor reconciliation by the caller.
 ///
 /// cas-d511: a delivery waiting on the release verdict owes the worker no
 /// close (it would only answer WAITING FOR RELEASE VERDICT), so that notice is
@@ -276,13 +276,11 @@ pub(crate) fn delivery_pr_merged_envelope(
     let task_id = xml_attribute_value(task_id);
     let worker = xml_attribute_value(worker);
     let merge_commit = xml_attribute_value(merge_commit);
-    let (quiet, next) = if release_wait {
-        (
-            format!("{}\n", cas_store::QUIET_MESSAGE_MARKER),
-            format!("{task_id} waits for the release verdict, which closes it; nothing to do"),
-        )
+    let quiet = format!("{}\n", cas_store::QUIET_MESSAGE_MARKER);
+    let next = if release_wait {
+        format!("{task_id} waits for the release verdict, which closes it; nothing to do")
     } else {
-        (String::new(), format!("close {task_id} with commit_receipt={merge_commit}"))
+        format!("{task_id} remains owned by Cassy's merge/verdict finalization; the worker owes no close action")
     };
     format!(
         "{quiet}<delivery-pr-merged task_id=\"{task_id}\" worker=\"{worker}\" pr_number=\"{pr_number}\" merge_commit=\"{merge_commit}\">\nPR #{pr_number} merged at {merge_commit}: {next}\n{DELIVERY_PR_MERGED_ENVELOPE_CLOSE}"

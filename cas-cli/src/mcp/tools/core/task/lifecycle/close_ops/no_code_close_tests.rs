@@ -2431,7 +2431,7 @@ async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
         let error = result.unwrap_err();
         assert_eq!(error.data.as_ref().unwrap()["rule_id"], "unparked_target_base_migration");
         assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
-            serde_json::to_value(before.deliverables).unwrap());
+            serde_json::to_value(&before.deliverables).unwrap());
         let recovery = &error.data.as_ref().unwrap()["recovery"];
         call(&f.supervisor, recovery["target_update"].clone()).await;
         let replacement = recovery["branch"].as_str().unwrap();

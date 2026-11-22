@@ -136,7 +136,10 @@ fn candidate_preparation_notice(
             Ok(candidate) => ("premerge_candidate_ready", format!("{}:{}:{}:{}", task.id,
                 candidate.source_sha, candidate.target_sha, candidate.context_digest),
                 format!("Candidate ready for {}. Retry {retry}. The immutable candidate is cached; publication still requires its exact review.", task.id)),
-            Err(error) => ("premerge_candidate_failed", key.to_string(), format!(
+            // Each failed attempt is its own occurrence: a retry resolves the
+            // same build key, and the idempotent queue dropped every failure
+            // after the first, so the held retry never resolved (GH #2106).
+            Err(error) => ("premerge_candidate_failed", format!("{key}:{}", uuid::Uuid::new_v4()), format!(
                 "Candidate preparation failed for {}: {}. Resolve the failure, then retry {retry}.", task.id,
                 crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error.to_string()))),
         };

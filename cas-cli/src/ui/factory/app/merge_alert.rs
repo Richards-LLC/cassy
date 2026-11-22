@@ -47,7 +47,7 @@ fn prior_ready(cas_dir: &Path, task: &str, tip: &str) -> Option<Ready> {
         &std::fs::read(ready_receipt_path(cas_dir, task, tip)).ok()?,
     ).ok()?;
     (receipt.evidence.task_id == task && receipt.evidence.factory_tip == tip).then(|| Ready {
-        tip: tip.to_string(), ci: "success", evidence: receipt.evidence, worker: receipt.worker,
+        tip: tip.to_string(), ci: "success", ci_source: String::new(), evidence: receipt.evidence, worker: receipt.worker,
     })
 }
 
@@ -416,6 +416,8 @@ pub(super) struct Ready {
     pub evidence: MergeAlertEvidence,
     pub tip: String,
     pub ci: &'static str,
+    /// cas-2421: for unknown CI, the check-runs query and what it observed.
+    pub ci_source: String,
     /// Present for an active delivery whose readiness does not depend on idle/park.
     pub worker: Option<String>,
 }
@@ -608,7 +610,7 @@ fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&
         _ => return None,
     };
     let tip = evidence.factory_tip.clone();
-    let ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo);
+    let (ci, ci_source) = crate::mcp::tools::core::workflow::delivery_tip_ci_reading(&tip, repo);
     // cas-e48d: the target can gain this delivery while GitHub answers the
     // CI probe. Refresh containment too, so a completed-CI relay cannot quote
     // the pre-CI target. This remains one bounded exact-target check on the
@@ -628,7 +630,7 @@ fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&
         })?;
     if tip != evidence.factory_tip || tip != current { return None; }
     *observed_ci = ci;
-    Some(Ready { evidence, tip, ci, worker: None })
+    Some(Ready { evidence, tip, ci, ci_source, worker: None })
 }
 
 /// The same worker-owned pushed delivery as worktree_merge, with the stricter
@@ -690,7 +692,7 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
     if resolve(&branch).as_deref() != Some(&tip) { return None; }
     *observed_ci = ci;
     if ci != "success" { return None; }
-    Some(Ready { evidence, tip, ci, worker: Some(worker.to_string()) })
+    Some(Ready { evidence, tip, ci, ci_source: String::new(), worker: Some(worker.to_string()) })
 }
 
 #[cfg(test)]

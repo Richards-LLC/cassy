@@ -221,6 +221,7 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
 
 /// GH #1365: a claimed mention's occurrence identity survives the managed
 /// wake and the selected reply intent, including the durable client request.
+/// GH #2242: the wake's own resource and claim ref reach the reply intent.
 #[test]
 fn claimed_mention_occurrence_links_the_managed_reply_intent() {
     use crate::coordination::external_work::{
@@ -293,10 +294,16 @@ fn claimed_mention_occurrence_links_the_managed_reply_intent() {
         .expect("claimed occurrence in wake");
     assert_eq!(selected, occurrence);
 
+    // GH #2242: the wake names the claimed thread, so reply_intent needs no
+    // id the supervisor cannot see (it once passed delivery_id: unknown_resource).
+    let field = |name: &str| prompt.split_whitespace()
+        .find_map(|part| part.strip_prefix(name)).unwrap_or_else(|| panic!("{name} in wake: {prompt}"));
+    let target = &cloud.claim["deliveries"][0]["target"];
+    assert_eq!(field("external_ref="), target["permalink"]);
+    let resource_id = field("resource_id=");
     let contract: Value = serde_json::from_str(REPLY_INTENT).unwrap();
     let case = &contract["cases"][0];
     let request_id = case["request"]["payload"]["request_id"].as_str().unwrap();
-    let resource_id = case["request"]["path_params"]["id"].as_str().unwrap();
     let journal = SqliteRequestJournal::open(temp.path()).unwrap();
     let port = Arc::new(ReplyPort {
         response: case["response"]["payload"].clone(),

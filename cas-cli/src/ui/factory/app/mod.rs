@@ -1711,6 +1711,7 @@ impl FactoryApp {
         let DeliveryInputs {
             qa_progress,
             answered_blocked_workers,
+            recycling_workers,
             data: loaded_data,
             blocks_deps,
             idle_liveness,
@@ -1782,8 +1783,10 @@ impl FactoryApp {
                 // gate, and revalidation then rebinds it to the worker's live
                 // lease, so a held worker kept getting "pending delivery"
                 // relays until release_worker.
+                // cas-fcd5b (GH #1693): a worker being recycled is not idle;
+                // its replacement starts a fresh episode once it registers.
                 if let DirectorEvent::WorkerIdle { worker, .. } = event
-                    && self.event_detector.is_worker_held(worker)
+                    && (self.event_detector.is_worker_held(worker) || recycling_workers.contains(worker))
                 {
                     return None;
                 }

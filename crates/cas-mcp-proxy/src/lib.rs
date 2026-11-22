@@ -1606,6 +1606,7 @@ impl ProxyEngine {
     /// A lost response is never permission to repeat a write. Reconcile only
     /// the locally retained ID, through the same caller and policy boundary.
     /// `resend` holds the post's arguments while one resend is still allowed.
+    // gate-audit[managed]: selector Chooses which next_action a reasonless not_posted names (new reply intent or new request ID). It never sends, resends or waives a refusal.
     async fn reconcile_violet_message(
         &self,
         caller: &ProxyCaller,

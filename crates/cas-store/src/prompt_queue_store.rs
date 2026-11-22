@@ -11566,6 +11566,44 @@ mod tests {
         assert_ne!(summaries[0], summaries[4], "a hold recorded 29 minutes late must be labelled differently");
     }
 
+    /// GH #1731 §2: `task_started (17:10:32Z) [delayed 15m; cause unrecorded]`.
+    /// A row queued long after its occurrence carries that known cause; only
+    /// a row that waited in the queue with no hold stays unexplained.
+    #[test]
+    fn late_enqueued_lifecycle_digest_names_its_enqueue_delay_gh_1731() {
+        let mut summaries = Vec::new();
+        for enqueued_late in [false, true] {
+            let (temp, store) = create_test_store();
+            use crate::AgentStore;
+            let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role(
+                "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            supervisor.factory_session = Some("session".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-ccef".into(), "relay target".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            let occurrence = Utc::now() - chrono::Duration::minutes(15);
+            let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, occurrence.to_rfc3339());
+            let EnqueueIdempotentResult::Created(id) = store.enqueue_idempotent("lifecycle:1", "supervisor", &body, Some("session"), Some("task_started: cas-ccef"), None, "started-1", Some(&QueueOrigin::Daemon)).unwrap() else { panic!("new relay") };
+            if !enqueued_late {
+                store.conn.lock().unwrap().execute(
+                    "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                    params![occurrence.to_rfc3339(), id],
+                ).unwrap();
+            }
+            let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+            assert_eq!(surfaced.len(), 1);
+            assert!(surfaced[0].summary.is_some());
+            summaries.push(surfaced[0].summary.clone());
+        }
+        assert_ne!(summaries[0], summaries[1], "a late enqueue is a recorded cause, not an unexplained wait");
+    }
+
     #[test]
     fn lifecycle_digest_aba_uses_newer_same_session_occurrence_only() {
         use crate::{AgentStore, NotifyIdempotentResult, SqliteSupervisorQueueStore, SupervisorQueueStore};

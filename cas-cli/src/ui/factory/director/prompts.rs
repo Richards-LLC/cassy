@@ -2723,6 +2723,43 @@ mod tests {
         );
     }
 
+    /// GH #1731 §3: an idle signal detected on one task reached the
+    /// supervisor right after the worker was given the next one, and named
+    /// that new task. A plain idle premise is withdrawn; a merge-required
+    /// alert stays about its own parked task.
+    #[test]
+    fn idle_detected_on_one_task_never_names_a_later_assignment_gh_1731() {
+        let lease = |id: &str, status| ActiveLeaseSummary {
+            task_id: id.to_string(),
+            task_title: id.to_string(),
+            task_status: status,
+            close_rejected_reason: None,
+            pending_qa: None,
+        };
+        for (old_status, survives) in [(TaskStatus::InProgress, false), (TaskStatus::AwaitingMerge, true)] {
+            let event = DirectorEvent::WorkerIdle {
+                worker: "swift-fox".to_string(),
+                active_task: Some(lease("cas-old", old_status)),
+            };
+            let mut data = make_data(0);
+            data.in_progress_tasks = vec![
+                task_with_status("cas-old", Some("swift-fox"), old_status),
+                task_with_status("cas-50a3", Some("swift-fox"), TaskStatus::InProgress),
+            ];
+            data.agents[0].active_lease = Some(lease("cas-50a3", TaskStatus::InProgress));
+
+            let rechecked = revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None);
+            let named = match rechecked {
+                Some(DirectorEvent::WorkerIdle { active_task, .. }) => active_task.map(|task| task.task_id),
+                other => {
+                    assert!(other.is_none(), "{other:?}");
+                    None
+                }
+            };
+            assert_eq!(named.as_deref(), survives.then_some("cas-old"), "{old_status:?}");
+        }
+    }
+
     #[test]
     fn test_delivery_recheck_drops_stale_ready_and_blocked_signals() {
         let ready_event = DirectorEvent::AgentRegistered {

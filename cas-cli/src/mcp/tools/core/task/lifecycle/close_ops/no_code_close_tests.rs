@@ -2435,10 +2435,11 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
 
 /// cas-db91 (GH #1698): after a supervisor rebinds a task to its rebuilt
 /// `-r2` lane, close measures `-r2`, whether its tip is local or only on
-/// origin, never the old per-task lane that still carries the first build.
+/// origin, or still empty (an approved empty rebind, GH #1673), never the old
+/// per-task lane that still carries the first build.
 #[tokio::test]
 async fn rebound_r2_lane_is_the_close_measured_branch_cas_db91() {
-    for remote_only in [false, true] {
+    for (remote_only, empty) in [(false, false), (true, false), (false, true)] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
@@ -2461,20 +2462,29 @@ async fn rebound_r2_lane_is_the_close_measured_branch_cas_db91() {
         git(&checkout, &["push", "-q", "origin", &lane]);
         let rebuilt = format!("{lane}-r2");
         git(&checkout, &["checkout", "-q", "-b", &rebuilt, "main"]);
-        std::fs::write(checkout.join("rebuilt.rs"), "pub fn rebuilt() {}\n").unwrap();
-        git(&checkout, &["add", "rebuilt.rs"]);
-        git(&checkout, &["commit", "-q", "-m", "fix(cas-1698): rebuilt delivery"]);
-        git(&checkout, &["push", "-q", "origin", &rebuilt]);
-        let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
-            "action":"rebind_branch", "id":id, "branch":rebuilt, "reason":"Bind the rebuilt delivery",
-        })).unwrap())).await;
-        assert!(rebound.is_ok(), "{rebound:?}");
+        if empty {
+            // The approved empty rebind records the lane before its first commit.
+            let mut task = f.task(id);
+            let start = task.deliverables.factory_branch_start.as_mut().unwrap();
+            start.branch = rebuilt.clone();
+            start.base_sha = git(repo, &["rev-parse", "main"]);
+            f.put(&task);
+        } else {
+            std::fs::write(checkout.join("rebuilt.rs"), "pub fn rebuilt() {}\n").unwrap();
+            git(&checkout, &["add", "rebuilt.rs"]);
+            git(&checkout, &["commit", "-q", "-m", "fix(cas-1698): rebuilt delivery"]);
+            git(&checkout, &["push", "-q", "origin", &rebuilt]);
+            let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"rebind_branch", "id":id, "branch":rebuilt, "reason":"Bind the rebuilt delivery",
+            })).unwrap())).await;
+            assert!(rebound.is_ok(), "{rebound:?}");
+        }
         if remote_only {
             git(&checkout, &["checkout", "-q", "--detach"]);
             git(repo, &["branch", "-D", &rebuilt]);
         }
         assert_eq!(close_measured_factory_branch(repo, &f.task(id), WORKER).trim_start_matches("origin/"),
-            rebuilt, "remote_only={remote_only}");
+            rebuilt, "remote_only={remote_only} empty={empty}");
     }
 }
 

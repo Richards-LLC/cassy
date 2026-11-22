@@ -1594,6 +1594,13 @@ After approving a worker's fresh delivery branch, a live registered supervisor
 can run `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"`.
 Use the caller harness's normal tool prefix. The task must be unparked and keep
 its assignee and declared target; use `request_changes` first for a parked delivery.
+After an approved `proof_scope_fix` retarget, retained branch/anchor history does
+not prevent recovery while Blocked. The worker can prepare a clean
+`factory/<worker>-<task>-r2` branch at the corrected target with its delivery;
+the supervisor rebinds it, then the worker resumes, pushes the fresh branch and
+parks normally. Blocked commit capture before a successful first park is also
+recoverable. Pending review, merge authority and an unretired prior park still
+refuse rebinding; neither history nor active proof may be overwritten.
 The assigned worker must have the existing replacement branch checked out cleanly
 in its registered repository. Canonical worker branches, the worker's per-task
 branch, and that per-task branch with a recovery suffix are supported. Cassy

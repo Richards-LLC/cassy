@@ -1577,10 +1577,13 @@ fn a_blocker_parked_behind_a_busy_supervisor_surfaces_at_its_next_tool_boundary_
     assert!(context.contains(blocker), "{context}");
     let report = store.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
-    // A later release re-signals the inbox, but a surfaced row never shows twice.
-    store
-        .park_for_busy_recipient(id, Some("tool call in flight"), chrono::Utc::now() + chrono::Duration::seconds(30))
-        .unwrap();
+    // A later re-signal makes the boundary read the store again, but a
+    // surfaced row never shows twice.
+    std::fs::write(
+        cas_root.join("inbox-signal").join(cas_store::inbox_signal_file_name(SUPERVISOR)),
+        i64::MAX.to_string(),
+    )
+    .unwrap();
     let again = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
     assert!(!serde_json::to_string(&again).unwrap().contains(blocker), "surfaced once");
 }

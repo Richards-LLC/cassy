@@ -156,7 +156,7 @@ pub(super) fn adopt_task_branch(
         return Err("receiver worktree belongs to a different repository than the task".into());
     }
     if !git.run(&["status", "--porcelain"])?.is_empty() {
-        return Err("receiver worktree has uncommitted work; commit it before adopting".into());
+        return Err("receiver worktree has uncommitted work; the receiver saves it with `git stash push -u` (or commits it on its own branch) before adopting, then applies it on the adopted branch".into());
     }
     let mut candidates: Vec<String> = task
         .assignee
@@ -176,12 +176,24 @@ pub(super) fn adopt_task_branch(
     }
     candidates.extend(task.deliverables.parked_branch.iter().cloned());
     candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
+    // cas-7e76a: a task already assigned to the receiver keeps its
+    // predecessor's lane as the recorded start.
+    candidates.extend(
+        task.deliverables
+            .factory_branch_start
+            .as_ref()
+            .filter(|start| task.assignee.is_some() && start.assignee != receiver.name)
+            .map(|start| start.branch.clone()),
+    );
     if let Some(prior) = task.assignee.as_deref() {
         candidates.push(crate::factory_isolation::expected_worker_branch(prior));
     }
     let mut source = None;
     'branches: for branch in candidates {
-        if !branch.starts_with("factory/") {
+        // The receiver's own lanes are the destination, never the source.
+        if !branch.starts_with("factory/")
+            || classify_worker_binding(&receiver.name, Some(&branch)) == WorkerBinding::Own
+        {
             continue;
         }
         for prefix in ["refs/heads", "refs/remotes/origin"] {

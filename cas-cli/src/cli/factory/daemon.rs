@@ -150,7 +150,7 @@ pub(super) fn execute_daemon(
         crate::ui::factory::SessionManager::new().save_daemon_metadata(metadata, &cas_root)?;
     }
     let resolved_supervisor_name = host.map(|host| host.name).or(supervisor_name)
-        .unwrap_or_else(|| crate::orchestration::names::generate_unique(1).remove(0));
+        .unwrap_or_else(crate::orchestration::names::generate);
 
     // Build native Agent Teams spawn configs so agents start with Teams CLI flags.
     let (teams_configs, lead_session_id) = if worker_host.is_some() { (Default::default(), String::new()) } else {

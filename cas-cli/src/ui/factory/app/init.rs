@@ -45,10 +45,10 @@ impl FactoryApp {
         {
             use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
             let sup = generate_minion_supervisor();
-            let workers = generate_minion_unique(config.workers);
+            let workers = generate_minion_unique(config.workers, &|_| false);
             (sup, workers)
         } else {
-            let all_names = generate_unique(config.workers + 1);
+            let all_names = generate_unique(config.workers + 1, &|_| false);
             let sup = config
                 .supervisor_name
                 .unwrap_or_else(|| all_names[0].clone());

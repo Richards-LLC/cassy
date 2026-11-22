@@ -3173,10 +3173,10 @@ impl FactoryApp {
                     .chain(self.crash_cleanups_pending.keys())
                     .map(String::as_str)
                     .collect();
-                let mut candidate = generate_unique(1)[0].clone();
+                let mut candidate = generate_unique(1, &|_| false)[0].clone();
                 let mut attempts = 0;
                 while existing.contains(candidate.as_str()) && attempts < 100 {
-                    candidate = generate_unique(1)[0].clone();
+                    candidate = generate_unique(1, &|_| false)[0].clone();
                     attempts += 1;
                 }
                 candidate

@@ -6,7 +6,9 @@ statement: >-
   branch is never refused. Registration keeps worker namespaces exclusive: a
   worker name that extends another worker's name across a hyphen is refused,
   so no branch has two owners. Supervisors are exempt, and names without a
-  hyphen boundary (eager-panda-2, eager-panda-27) both register.
-tasks: [cas-ea31]
+  hyphen boundary (eager-panda-2, eager-panda-27) both register. Spawn
+  applies the same rule against local and origin factory branches, the name
+  generators skip overlapping names, and cas doctor reports existing overlaps.
+tasks: [cas-ea31, cas-dc08]
 journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
 invariants: []

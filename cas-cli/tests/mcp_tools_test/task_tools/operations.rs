@@ -6009,6 +6009,14 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
     let denied = guard("git fetch origin && git merge --ff-only origin/main");
     assert_eq!(denied.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{denied}");
     assert!(denied.to_string().contains("adopt_branch=true"), "{denied}");
+    // cas-7e76a: the receiver already started its own fresh task lane and
+    // left edits on the source checkout. Cleaning that checkout is allowed.
+    let own = cas::factory_isolation::worker_task_branch(&receiver.name, &task.id);
+    branch_transfer_git(root, &["branch", &own, &format!("{tip}^")]);
+    std::fs::write(managed.join("delivery.txt"), "unsaved takeover edit").unwrap();
+    let cleanup = guard("git checkout -- .");
+    assert_eq!(cleanup.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("allow"), "{cleanup}");
+    branch_transfer_git(&managed, &["checkout", "--", "."]);
     // The named recovery must work in one supervisor call without asking
     // the worker to run a checkout that the guard itself refuses.
     env.set("CAS_AGENT_ROLE", "supervisor");

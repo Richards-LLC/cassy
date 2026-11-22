@@ -1514,6 +1514,9 @@ if '--config' in a:
     config = pathlib.Path(a[a.index('--config') + 1])
     configured_root = re.search(r"\broot:\s*['\"]([^'\"]+)", config.read_text())
     if configured_root: test_root = config.parent / configured_root[1]
+if '--showConfig' in a:
+    print(json.dumps({'globalConfig': {'rootDir': str(test_root)}}))
+    sys.exit(0)
 specs = sorted(test_root.rglob('*.spec.ts'))
 if '--listTests' in a:
     print(json.dumps([str(p) for p in specs]))

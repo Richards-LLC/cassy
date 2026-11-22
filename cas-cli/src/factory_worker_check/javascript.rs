@@ -2983,6 +2983,12 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             shared["testResults"][0]["assertionResults"] = json!([
                 {"fullName":"group changed","status":"passed"}, {"fullName":"group changed","status":"passed"}]);
             assert_eq!(validate_report(runner, repo, &shared, &selected, 1).unwrap(), 2);
+            // GH #2225, #2252: `$field` rows that expand to one title prove the template.
+            let field = [Identity { parameterized: true, ..id("a.test.js", "case $name") }];
+            let mut field_rows = rows.clone();
+            field_rows["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"case alpha","status":"passed"}, {"fullName":"case alpha","status":"passed"}]);
+            assert_eq!(validate_report(runner, repo, &field_rows, &field, 1).unwrap(), 2);
             let mut failed_row = rows.clone();
             failed_row["testResults"][0]["assertionResults"][1]["status"] = json!("failed");
             assert!(validate_report(runner, repo, &failed_row, &template, 1).is_err());

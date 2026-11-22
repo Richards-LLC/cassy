@@ -1661,7 +1661,7 @@ fn execute_tests(
     };
     if let Some((scope, _, cause)) = widened {
         super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")) }, count as u64)?;
-        println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
+        println!("widened: PASS {head} {scope:?} {count} passed tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
 }
@@ -1916,6 +1916,9 @@ fn validate_report_with_inherited(
     inherited: &BTreeSet<(Identity, String)>,
 ) -> Result<usize> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
+    // Passing results as the runner counts them; tests sharing a name in one
+    // file are one identity but separate passes (GH #2246).
+    let mut passed = 0;
     if runner == "playwright" {
         let root = report
             .get("config")
@@ -1932,6 +1935,7 @@ fn validate_report_with_inherited(
             &mut projects,
             inherited,
         )?;
+        passed = projects.len();
         for ((identity, _project), count) in projects {
             if count != repeats {
                 bail!(
@@ -1989,6 +1993,7 @@ fn validate_report_with_inherited(
                             );
                         }
                         *results.entry(id).or_default() += 1;
+                        passed += 1;
                     }
                     Some("pending" | "skipped" | "todo" | "disabled")
                         if !tests.iter().any(|test| test.selects(&id)) => {}
@@ -2018,7 +2023,7 @@ fn validate_report_with_inherited(
         bail!("{runner} ran tests outside the changed selection");
     }
     if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
-    Ok(results.len())
+    Ok(passed)
 }
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {

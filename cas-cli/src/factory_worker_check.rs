@@ -2300,6 +2300,11 @@ exit "$code"
     command
 }
 
+/// This process's stdout when it is a regular file (a foreground check's log).
+pub(crate) fn stdout_log_path() -> Option<PathBuf> {
+    detached_log_path().filter(|path| path.is_file())
+}
+
 /// Resolve the actual redirected file, rather than interpreting shell text.
 #[cfg(target_os = "linux")]
 fn detached_log_path() -> Option<PathBuf> {

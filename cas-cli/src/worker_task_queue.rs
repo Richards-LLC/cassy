@@ -118,6 +118,11 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
         .open(locks.join("shared-queue-checkout.lock")).map_err(|_| refused())?;
     lock.try_lock_exclusive().map_err(|_| refused())?;
+    let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
+    // cas-22c6: only a switch to the worker's lane can move a live run's tree.
+    if crate::factory_isolation::branch_at(checkout).as_deref() != Some(branch.as_str()) {
+        admit_checkout_switch(root, worker, task_id)?;
+    }
     let git = |args: &[&str]| std::process::Command::new("git").current_dir(checkout)
         .args(args).output().map_err(|_| refused());
     let status = git(&["status", "--porcelain"])?;
@@ -130,11 +135,43 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
             && matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
             && ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref()))
     { return Err(refused()); }
-    let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
     let exists = git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])?.status.success();
     let switched = if exists { git(&["switch", &branch])? } else { git(&["switch", "-c", &branch])? };
     if !switched.status.success() { return Err(refused()); }
     crate::factory_isolation::verify_worker_worktree_binding(&worker.name, checkout, None).map_err(error)
+}
+
+/// cas-22c6 (GH #2286): the one admission for every start that would move a
+/// worker's checkout, queued or direct: a switch to the worker's lane or a
+/// task branch, and a reset of a reused lane to its target. Callers ask only
+/// when the move would actually happen, so a same-branch resume is admitted.
+/// A detached proof run still reading the checkout, or uncommitted work in
+/// it, would lose its tree mid-run.
+pub(crate) fn admit_checkout_switch(root: &Path, worker: &Agent, task_id: &str) -> Result<(), McpError> {
+    let Some(busy) = queue_checkout_busy(root, worker) else { return Ok(()) };
+    // gate[G-161 start]: Task start waits while the worker's checkout is busy
+    Err(error(crate::gates::tag("G-161", format!(
+        "Cannot start {task_id} yet: {busy}. A queued start resumes on its own once that clears; \
+         finish or stop it, then retry `task action=start id={task_id}`."
+    ))))
+}
+
+/// cas-22c6: why a start must not switch `worker`'s checkout yet,
+/// using the worker's registered detached runs and its checkout's status.
+fn queue_checkout_busy(root: &Path, worker: &Agent) -> Option<&'static str> {
+    if crate::factory_worker_runs::snapshot(root, &worker.name, None, chrono::Utc::now())
+        .is_ok_and(|runs| runs.running)
+    {
+        return Some("a detached run is still using the worker's checkout");
+    }
+    let checkout = worker.metadata.get("clone_path")?;
+    let status = std::process::Command::new("git")
+        .current_dir(checkout)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()?;
+    (status.status.success() && !status.stdout.is_empty())
+        .then_some("the worker's checkout has uncommitted changes")
 }
 
 /// Only this module can construct a start principal on behalf of a worker.
@@ -218,6 +255,7 @@ pub(crate) fn admit_assignment(root: &Path, task: &cas_types::Task, live: Option
 }
 
 impl CasCore {
+    // gate-audit[supervisor_only]: selector Restricts the caller to the owning supervisor; when false a worker reads only its own queue. Neither value waives G-162.
     fn queue_worker(&self, name: &str, supervisor_only: bool) -> Result<Agent, McpError> {
         let agents = self.open_agent_store()?;
         let caller_id = self.get_registered_agent_id_read_only()?;
@@ -256,9 +294,11 @@ impl CasCore {
                 .as_ref()
                 .is_none_or(|owner| owner.agent_id != supervisor.id)
         {
-            return Err(error(
+            // gate[G-162 assign]: Worker task queue owned by another factory supervisor
+            return Err(error(crate::gates::tag(
+                "G-162",
                 "Worker task queue belongs to another factory supervisor",
-            ));
+            )));
         }
         Ok(worker)
     }
@@ -361,9 +401,11 @@ impl CasCore {
                 queue.current_started = true;
             }
             if queue.current_started && ids.iter().any(|id| Some(id) == queue.current_task.as_ref()) {
-                return Err(error(
+                // gate[G-163 assign]: Queue replacement names the task already running
+                return Err(error(crate::gates::tag(
+                    "G-163",
                     "The current task is already running; supply only pending task IDs",
-                ));
+                )));
             }
             ids.retain(|id| Some(id) != queue.current_task.as_ref());
             queue.pending = ids;
@@ -756,6 +798,8 @@ impl CasCore {
                 return Ok(Some(format!("Task queue waiting for context recycle completion before {id}")));
             }
         }
+        // cas-22c6: a busy checkout refuses inside the start below
+        // (admit_checkout_switch, G-161); the cursor stays due for repair.
         let mut reserved_epoch = None;
         let result = async {
             let mut task = tasks.get(&id).map_err(error)?;

@@ -4082,7 +4082,12 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
-        let start_guidance = format!("{}{}\n\n{}", self.close_requirements(&task), start_guidance(&task), qa_impact::predicted(self, &task));
+        let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
+        // cas-96a7: the predicted QA impact is reference context, not a
+        // start-only instruction. It is saved and shown, but in a brief start
+        // it is clipped with the other context instead of pushing the close
+        // checks past the response budget.
+        let predicted_impact = format!("\n\n{}", qa_impact::predicted(self, &task));
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),
@@ -4152,7 +4157,7 @@ impl CasCore {
             let durable_recall = self.related_recall_context(
                 &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
             ).unwrap_or_default();
-            let context = format!("{peer_notes}{advisory}{durable_recall}{cited_issues}");
+            let context = format!("{peer_notes}{advisory}{predicted_impact}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
@@ -4214,7 +4219,8 @@ impl CasCore {
                     .map(|line| format!("Cited issue: {line}"))
                     .unwrap_or_default();
             let optional = format!(
-                "\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                "\n{}\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                clipping.excerpt(predicted_impact.trim_start(), 600),
                 clipping.excerpt(&related_context, 120),
                 task_scope(&task, &mut clipping),
                 task_show_notes(&task.notes, &task.id, &mut clipping),
@@ -4259,7 +4265,7 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
@@ -4278,6 +4284,7 @@ impl CasCore {
             sibling_notes_info.unwrap_or_default(),
             self.workflow_guidance(),
             start_guidance,
+            predicted_impact,
             push_note,
         )))
     }

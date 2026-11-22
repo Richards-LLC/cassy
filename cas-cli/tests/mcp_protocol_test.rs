@@ -1923,3 +1923,58 @@ fn partial_cas_with_only_proxy_toml_initializes_and_serves_gh_1170() {
         "serve must start after init --force: {response:?}"
     );
 }
+
+#[test]
+fn zz_explore_reconnect_72dc() {
+    let sandbox = CasSandbox::new();
+    let supervisor = || {
+        let mut cmd = sandbox.command();
+        cmd.env("CAS_SESSION_ID", "sup-reconnect").env("CAS_AGENT_NAME", "warm-cardinal-19")
+            .env("CAS_AGENT_ROLE", "supervisor").env("CAS_FACTORY_SESSION", "fs-reconnect");
+        cmd
+    };
+    let status = || {
+        let out = sandbox.command().args(["factory", "worker-status", "--session", "fs-reconnect", "--cas-root"])
+            .arg(sandbox.path().join(".cas")).output().unwrap();
+        let rows: String = rusqlite::Connection::open(sandbox.path().join(".cas/cas.db")).unwrap()
+            .prepare("SELECT id||' pid='||ifnull(pid,'-')||' ppid='||ifnull(ppid,'-')||' status='||status FROM agents").unwrap()
+            .query_map([], |r| r.get::<_, String>(0)).unwrap().map(Result::unwrap).collect::<Vec<_>>().join("; ");
+        format!("{}{}\nrows: {rows}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let close = |mut client: McpTestClient| {
+        let McpTestClient { ref mut child, .. } = client;
+        let _ = child;
+        drop(std::mem::replace(&mut client.stdin, { let mut c = Command::new("cat").stdin(Stdio::piped()).spawn().unwrap(); c.stdin.take().unwrap() }));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while client.child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        eprintln!("front exited: {:?}", client.child.try_wait());
+    };
+    let mut first = McpTestClient::spawn_command_capturing_stderr(supervisor());
+    assert!(first.initialize().error.is_none());
+    first.call_tool("system", json!({"action":"version"}));
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    eprintln!("=== first connection\n{}", status());
+    // Scenario A: close, then reconnect.
+    close(first);
+    eprintln!("=== after close\n{}", status());
+    let mut second = McpTestClient::spawn_command_capturing_stderr(supervisor());
+    assert!(second.initialize().error.is_none());
+    let v = second.call_tool("system", json!({"action":"version"}));
+    eprintln!("version: {:?}", v.result.as_ref().map(|r| r.to_string().chars().take(200).collect::<String>()));
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    eprintln!("=== A: after reconnect\n{}", status());
+    // Scenario B: open the replacement, then close the old one.
+    let mut third = McpTestClient::spawn_command_capturing_stderr(supervisor());
+    assert!(third.initialize().error.is_none());
+    third.call_tool("system", json!({"action":"version"}));
+    close(second);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    eprintln!("=== B: after overlapping reconnect\n{}", status());
+    let hb = third.call_tool("coordination", json!({"action":"heartbeat"}));
+    eprintln!("hb: {:?}", hb.result.as_ref().map(|r| r.to_string().chars().take(300).collect::<String>()));
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    eprintln!("=== B: after heartbeat\n{}", status());
+    panic!("explore");
+}

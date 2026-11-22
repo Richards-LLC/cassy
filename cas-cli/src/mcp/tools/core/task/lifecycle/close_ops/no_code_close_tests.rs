@@ -2432,17 +2432,31 @@ async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
             "action":"update", "id":id, "target_branch":"develop",
             "reason":"Supervisor authorizes resetting the clean lane onto develop",
         })).unwrap())).await;
-        assert!(result.is_err(), "divergent target must not leave a stale start: {result:?}");
-        let error = result.unwrap_err();
-        assert_eq!(error.data.as_ref().unwrap()["rule_id"], "unparked_target_base_migration");
-        assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
-            serde_json::to_value(&before.deliverables).unwrap());
-        let recovery = &error.data.as_ref().unwrap()["recovery"];
+        let recovery = if obstruction == "foreign" {
+            // Nonempty retargets keep the old boundary and rely on explicit
+            // rebind attribution; a metadata edit must not erase that work.
+            result.unwrap();
+            assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
+            serde_json::json!({
+                "branch":format!("{lane}-retarget"), "base":"origin/develop",
+                "rebind":{"action":"rebind_branch", "id":id, "branch":format!("{lane}-retarget"),
+                    "reason":"Approve replacement without discarding foreign delivery"},
+            })
+        } else {
+            assert!(result.is_err(), "divergent target must not leave a stale start: {result:?}");
+            let error = result.unwrap_err();
+            assert_eq!(error.data.as_ref().unwrap()["rule_id"], "unparked_target_base_migration");
+            assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
+                serde_json::to_value(&before.deliverables).unwrap());
+            error.data.as_ref().unwrap()["recovery"].clone()
+        };
         if let Some(start) = recovery.get("start") {
             call(&f.worker, start.clone()).await;
             assert_eq!(f.task(id).status, TaskStatus::InProgress);
         }
-        call(&f.supervisor, recovery["target_update"].clone()).await;
+        if let Some(target_update) = recovery.get("target_update") {
+            call(&f.supervisor, target_update.clone()).await;
+        }
         let replacement = recovery["branch"].as_str().unwrap();
         git(&checkout, &["checkout", "-q", "-b", replacement, recovery["base"].as_str().unwrap()]);
         let rebound = f.supervisor.task(Parameters(serde_json::from_value(recovery["rebind"].clone()).unwrap())).await;

@@ -824,11 +824,6 @@ pub fn resolve_worker_supervisor(
     agent_store: &dyn AgentStore,
     factory_session: Option<&str>,
 ) -> Option<OwningSupervisor> {
-    // Non-factory lifecycle callers retain their legacy unscoped lookup.
-    // Worker message/reminder entry points require a named session themselves.
-    if factory_session.is_none() {
-        return resolve_owning_supervisor(agent_store, None);
-    }
     resolve_worker_supervisor_from_agents(&agent_store.list(None).ok()?, factory_session).ok()
 }
 
@@ -838,11 +833,17 @@ pub(crate) fn resolve_worker_supervisor_from_agents(
     agents: &[cas_types::Agent],
     factory_session: Option<&str>,
 ) -> Result<OwningSupervisor, &'static str> {
-    let session = factory_session.map(str::trim).filter(|s| !s.is_empty())
-        .ok_or("no_factory_session")?;
     let supervisors: Vec<_> = agents.iter()
         .filter(|a| a.role == AgentRole::Supervisor)
         .collect();
+    // Direct snapshot callers (including MCP messages) need the same legacy
+    // None lookup as resolve_owning_supervisor, not just the store wrapper.
+    let Some(session) = factory_session else {
+        return best_supervisor(supervisors.into_iter().cloned().collect())
+            .ok_or("owner_unavailable");
+    };
+    let session = Some(session.trim()).filter(|s| !s.is_empty())
+        .ok_or("no_factory_session")?;
     let select = |candidates: Vec<cas_types::Agent>| -> Result<OwningSupervisor, &'static str> {
         let live: Vec<_> = candidates.into_iter().filter(crate::supervisor_notices::is_live).collect();
         let names: std::collections::HashSet<_> = live.iter()

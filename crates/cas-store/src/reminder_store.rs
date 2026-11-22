@@ -1086,6 +1086,40 @@ mod tests {
         assert_eq!(pending[0].target_id, "supervisor-1");
     }
 
+    /// GH #2218: a task-bound reminder requested while another factory
+    /// connection holds the write lock longer than one busy window is
+    /// admitted exactly once after the lock clears; a lock held through the
+    /// whole retry budget is refused and leaves no row.
+    #[test]
+    fn task_bound_create_outlasts_one_busy_window_and_refuses_on_exhaustion() {
+        let (temp, store) = create_test_store();
+        let create = |store: &SqliteReminderStore| {
+            store.create_with_scope(
+                "worker-1", None, "check the package run", ReminderTriggerType::Time,
+                Some(Utc::now() + chrono::Duration::seconds(90)), None, None, 3600,
+                None, Some("session-1"), false, Some("cas-c17f"),
+            )
+        };
+        // One busy window shorter than the foreign writer's hold.
+        store.conn.lock().unwrap().busy_timeout(Duration::from_millis(20)).unwrap();
+        let holder = Connection::open(temp.path().join("cas.db")).unwrap();
+        holder.execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;").unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            holder.execute_batch("COMMIT").unwrap();
+            holder
+        });
+        create(&store).expect("transient contention must not lose the reminder");
+        let holder = releaser.join().unwrap();
+        assert_eq!(store.list_for_task("cas-c17f").unwrap().len(), 1);
+
+        crate::shared_db::set_pooled_write_budget_for_tests(Duration::from_millis(200));
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        create(&store).expect_err("a lock held through the budget must be refused");
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(store.list_for_task("cas-c17f").unwrap().len(), 1, "no row on refusal");
+    }
+
     /// GH #1208: a durable (TTL 0) event reminder can be expired by id; an
     /// already-ended row is left alone.
     #[test]

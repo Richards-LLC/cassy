@@ -93,6 +93,17 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
     }
 }
 
+/// GH #2171: the Bash command runs a statement from a directory the guard
+/// cannot resolve, so its relative and `$VAR` operands are judged as if they
+/// ran inside a credential store.
+pub(super) fn bash_directory_unresolved(input: &HookInput) -> bool {
+    let unknown = std::ffi::OsStr::new(super::pre_tool::UNKNOWN_DIRECTORY);
+    input.tool_input.as_ref().and_then(|tool_input| tool_input.get("command")).and_then(Value::as_str)
+        .and_then(|command| super::pre_tool::shell_read_contexts(command, Path::new(&input.cwd)))
+        .is_some_and(|contexts| contexts.iter().flat_map(|context| &context.directories)
+            .any(|directory| directory.as_ref().is_none_or(|directory| directory.components().any(|part| part.as_os_str() == unknown))))
+}
+
 /// A command that cannot be projected is refused: no weaker reading stands in
 /// for the per-statement projection. An unresolved directory may be any
 /// directory, so its statements are judged from every one that could matter.
@@ -235,9 +246,15 @@ fn statement_references_store(
     let recursive_operands = recursive_path_operand_indices(&executable, args);
     let store_parent_cwd = descends && cwd_is_store_or_parent(cwd);
     for (index, arg) in args.iter().enumerate() {
-        // GH #2171: a variable the command binds is judged at every value it
-        // may hold; an unbound one keeps its spelling, as before.
-        for arg in super::pre_tool::expand_factory_shell_word(arg, values) {
+        // The operand's own spelling is always judged. A value the command
+        // binds to a variable can only add a refusal, never clear one.
+        let mut candidates = vec![arg.clone()];
+        for value in super::pre_tool::expand_factory_shell_word(arg, values) {
+            if !candidates.contains(&value) {
+                candidates.push(value);
+            }
+        }
+        for arg in candidates {
             let explicit_path = shell_argument_is_path(&executable, &arg, cwd);
             let inferred_recursive_path = store_parent_cwd
                 && recursive_operands.contains(&index)

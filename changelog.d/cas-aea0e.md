@@ -1,10 +1,11 @@
 ### Fixed — Factory
 
-- **H-09 no longer refuses dependency logging to an artifacts variable** — Was:
-  a worker running `pnpm audit` and a background `pnpm install` that wrote
-  their logs to `"$A/..."`, with `A` set earlier in the same command, was
-  refused as operator credential access when the command's directory could
-  not be resolved. Now: a variable the command binds is judged at its value,
-  so those writes are allowed; a credential store read through such a
-  variable, relative or absolute, is refused, including one the guard used
-  to miss.
+- **H-09 names the supported form for dependency logging, and refuses store reads through a variable** — Was:
+  a worker that changed into a directory Cassy could not resolve, then ran
+  `pnpm audit` or a background `pnpm install` logging to an artifacts
+  variable, got a bare operator-credential refusal with no way forward;
+  and a credential store read through a variable set in the same command
+  was allowed. Now: that refusal says to `cd` to the literal project
+  directory first, which is allowed; the operand spelling is still judged
+  exactly as before, and a value a variable is set to can only add a
+  refusal, so a store read through it is refused.

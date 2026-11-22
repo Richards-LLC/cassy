@@ -2554,7 +2554,8 @@ mod tests {
         assert_eq!(committed["notification_id"], 42);
         let unknown = unknown.unwrap_err();
         let data = unknown.data.unwrap();
-        assert_eq!(data["mutation_outcome"], "UNKNOWN");
+        // cas-cd0f: the uncommitted send keeps running under its continuation.
+        assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
         assert!(data["notification_id"].is_null());
         assert_eq!(data["budget_ms"], 10);
         assert!(data["elapsed_ms"].as_u64().unwrap() >= 10);

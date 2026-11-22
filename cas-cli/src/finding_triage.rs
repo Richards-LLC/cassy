@@ -3,12 +3,21 @@ use std::{collections::BTreeSet, path::Path};
 
 use cas_types::{FindingReach, FindingSeverity, FindingTriage, Priority, Task};
 
-fn main_journeys(root: &Path) -> BTreeSet<String> {
+fn main_journeys(root: &Path, task: Option<&Task>) -> BTreeSet<String> {
     let path = crate::config::Config::load(root)
         .map(|c| c.qa().registry.path).unwrap_or_else(|_| crate::qa_registry::DEFAULT_PATH.into());
-    let repo = if root.file_name().is_some_and(|name| name == ".cas") {
-        root.parent().unwrap_or(root)
-    } else { root };
+    let repo = match task {
+        Some(task) => match crate::mcp::tools::core::task::repo_context::resolve_task_metadata_repo(root, task) {
+            Ok(repo) => repo,
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "task journey registry could not be resolved");
+                return BTreeSet::new();
+            }
+        },
+        None => if root.file_name().is_some_and(|name| name == ".cas") {
+            root.parent().unwrap_or(root).to_path_buf()
+        } else { root.to_path_buf() },
+    };
     crate::qa_registry::load(&repo.join(path)).ok().map(|registry| {
         registry.main_journeys.into_iter().filter(|id| registry.journeys.iter().any(|journey| {
             journey.id == *id && matches!(journey.status.as_str(), "live" | "active")
@@ -17,7 +26,7 @@ fn main_journeys(root: &Path) -> BTreeSet<String> {
 }
 
 pub(crate) fn normalize_finding(root: &Path, triage: &mut FindingTriage) -> bool {
-    let main = triage.journey.as_ref().is_some_and(|id| main_journeys(root).contains(id));
+    let main = triage.journey.as_ref().is_some_and(|id| main_journeys(root, None).contains(id));
     triage.normalize(main);
     main
 }
@@ -26,10 +35,15 @@ fn label_value(labels: &[String], key: &str) -> Option<String> {
     labels.iter().rev().find_map(|label| label.strip_prefix(key).map(str::to_owned))
 }
 
+/// Resolve declared main journeys from the same checkout used for task impact.
+pub(crate) fn main_journeys_for_task(root: &Path, task: &Task) -> BTreeSet<String> {
+    main_journeys(root, Some(task))
+}
+
 /// Validate merged axes before normalization could discard requested main reach.
-pub(crate) fn has_undeclared_main_reach(root: &Path, labels: &[String]) -> bool {
+pub(crate) fn has_undeclared_main_reach(main: &BTreeSet<String>, labels: &[String]) -> bool {
     label_value(labels, "reach:").as_deref() == Some("main")
-        && label_value(labels, "journey:").is_none_or(|id| !main_journeys(root).contains(&id))
+        && label_value(labels, "journey:").is_none_or(|id| !main.contains(&id))
 }
 
 pub(crate) fn finding_labels(labels: &mut Vec<String>, triage: &FindingTriage) {
@@ -46,7 +60,7 @@ pub(crate) fn finding_labels(labels: &mut Vec<String>, triage: &FindingTriage) {
 
 /// Unclassified legacy findings are theoretical too. Ordinary untriaged work
 /// retains its existing priority. A caller's manual priority never wins over axes.
-pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>, notes: &str) -> Option<Priority> {
+pub(crate) fn normalize_labels(main_journeys: &BTreeSet<String>, labels: &mut Vec<String>, notes: &str) -> Option<Priority> {
     if !labels.iter().any(|l| l == "from-finding" || l.starts_with("severity:") || l.starts_with("reach:")) {
         return None;
     }
@@ -61,7 +75,8 @@ pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>, notes: &st
         journey: label_value(labels, "journey:"),
         repro,
     };
-    let main = normalize_finding(root, &mut triage);
+    let main = triage.journey.as_ref().is_some_and(|id| main_journeys.contains(id));
+    triage.normalize(main);
     let priority = triage.priority(main);
     finding_labels(labels, &triage);
     labels.retain(|l| l != "triage-backlog");
@@ -82,7 +97,11 @@ pub(crate) fn priority_not_applied(labels: &[String], requested: Priority, deriv
 }
 
 pub(crate) fn apply(root: &Path, task: &mut Task) {
-    if let Some(priority) = normalize_labels(root, &mut task.labels, &task.notes) { task.priority = priority; }
+    if !task.labels.iter().any(|l| l == "from-finding" || l.starts_with("severity:") || l.starts_with("reach:")) {
+        return;
+    }
+    let main = main_journeys_for_task(root, task);
+    if let Some(priority) = normalize_labels(&main, &mut task.labels, &task.notes) { task.priority = priority; }
 }
 
 pub(crate) fn focus_brief(root: &Path) -> String {

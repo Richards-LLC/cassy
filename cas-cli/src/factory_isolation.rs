@@ -799,6 +799,14 @@ mod tests {
             own_task_branch_task_id("loyal-crow-4", "factory/loyal-crow-40"),
             None
         );
+        // cas-ea31: without a `-` boundary the longer worker's task branch
+        // is its own under both identities. With one (`ab` / `ab-owner`) the
+        // shorter name would parse it too, which is why registration
+        // refuses that pair.
+        let longer = "factory/eager-panda-27-cas-1234";
+        assert_eq!(own_task_branch_task_id("eager-panda-27", longer), Some("cas-1234"));
+        assert_eq!(own_task_branch_task_id("eager-panda-2", longer), None);
+        assert!(own_task_branch_task_id("ab", "factory/ab-owner-cas-1234").is_some());
         assert_eq!(
             classify_worker_binding("loyal-crow-4", Some("factory/loyal-crow-40")),
             WorkerBinding::Unowned

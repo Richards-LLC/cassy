@@ -129,10 +129,11 @@ fn reconcile_restarted_factory_supervisor(
 }
 
 /// cas-ea31 (N1): factory names own `factory/<name>` and
-/// `factory/<name>-<task-ref>`. A name that extends another factory name with
-/// a letter-led part would let the shorter name's task grammar claim the
-/// longer one's branches, so registration keeps the namespaces prefix-free.
-/// Digit-led extensions (`kevin-2`) never parse as task refs and are allowed.
+/// `factory/<name>-<task-ref>`. A worker name that extends another worker's
+/// name with `-` and any suffix (`ab-owner` beside `ab`) would let both own
+/// `factory/ab-owner-cas-12`, so registration keeps worker namespaces
+/// exclusive. Without the `-` boundary (`eager-panda-27` beside
+/// `eager-panda-2`) the names cannot share a branch and are allowed.
 /// Only workers commit on `factory/` branches, so supervisors and primaries
 /// (`kevin-supervisor` beside worker `kevin`) cannot collide and are not checked.
 fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: &str) -> Result<()> {
@@ -144,7 +145,7 @@ fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: 
         longer
             .strip_prefix(shorter)
             .and_then(|rest| rest.strip_prefix('-'))
-            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphabetic()))
+            .is_some_and(|rest| !rest.is_empty())
     };
     let mut statement = conn.prepare(
         "SELECT name FROM agents WHERE id != ?1 AND role = 'worker'",
@@ -156,7 +157,7 @@ fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: 
             return Err(StoreError::Other(format!(
                 "WORKER_NAME_OVERLAPS: '{name}' would share the branch namespace factory/{}-… \
                  with registered agent '{other}'. Choose a name that does not extend another \
-                 factory name with a hyphen and a letter.",
+                 worker name with a hyphen.",
                 if name.len() < other.len() { name } else { other },
             )));
         }

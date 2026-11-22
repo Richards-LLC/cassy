@@ -1747,8 +1747,8 @@ fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
     assert_eq!(renewals, 1);
 }
 
-/// cas-ea31 (N1): a factory name must not extend another registered factory
-/// name with a letter-led part. `ab` would otherwise own `factory/ab-cd-12`'s
+/// cas-ea31 (N1): a worker name must not extend another registered worker
+/// name with `-` and any suffix. `ab` would otherwise own `factory/ab-cd-12`'s
 /// branches by syntax, in Rust and in the Git hooks alike.
 #[test]
 fn factory_names_cannot_share_a_branch_namespace_cas_ea31() {
@@ -1759,7 +1759,10 @@ fn factory_names_cannot_share_a_branch_namespace_cas_ea31() {
     let overlap = store.register(&worker("abcd-id", "ab-cd-12")).expect_err("ab-cd-12 shares ab's namespace");
     assert!(overlap.to_string().contains("WORKER_NAME_OVERLAPS"), "{overlap}");
     store.register(&worker("ab-id", "ab")).expect("re-registering the same name");
-    store.register(&worker("ab2-id", "ab-2")).expect("a digit-led extension never parses as a task");
+    let owner = store.register(&worker("abowner-id", "ab-owner")).expect_err("ab and ab-owner would both own factory/ab-owner-cas-1234");
+    assert!(owner.to_string().contains("WORKER_NAME_OVERLAPS"), "{owner}");
+    store.register(&worker("ep2-id", "eager-panda-2")).unwrap();
+    store.register(&worker("ep27-id", "eager-panda-27")).expect("no '-' boundary, so no shared branch");
     let supervisor = Agent::new_with_role("absup-id".into(), "ab-supervisor".into(), AgentRole::Supervisor);
     store.register(&supervisor).expect("a supervisor owns no factory branches, so it cannot collide");
     let mut renamed = worker("other-id", "other");

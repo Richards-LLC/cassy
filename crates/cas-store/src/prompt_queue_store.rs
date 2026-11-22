@@ -11525,6 +11525,12 @@ mod tests {
             if let Some(detail) = detail {
                 if busy {
                     store.record_wake_gate_decline(id, detail).unwrap();
+                    // A recheck declines again; the hold keeps its first start.
+                    let since = || SqlitePromptQueueStore::holding_since_on_conn(&store.conn.lock().unwrap(), id).unwrap();
+                    let first = since();
+                    store.record_wake_gate_decline(id, detail).unwrap();
+                    assert!(first.is_some());
+                    assert_eq!(since(), first, "a repeated decline must not move the hold's start");
                 } else {
                     store.record_pending_reason(id, PendingReason::GatedNotReady, Some("pane not ready for injection")).unwrap();
                     assert_eq!(store.message_delivery_report(id).unwrap().unwrap().holding_detail.as_deref(), Some("pane not ready for injection"));

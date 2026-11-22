@@ -6758,7 +6758,7 @@ impl FactoryDaemon {
                                     agent,
                                 )
                         });
-                        // gate[W-16 watchdog]: Post-registration harness exit or disappearance
+                        // gate[W-16 watchdog]: Post-registration harness exit, disappearance or first-prompt timeout
                         if process_exited {
                             return Some((
                                 worker.clone(),
@@ -6777,6 +6777,31 @@ impl FactoryDaemon {
                         return Some((worker.clone(), VerificationAction::Confirmed));
                     }
                     if boot_window_elapsed {
+                        // Registration and a repainting TUI do not prove the first prompt ran.
+                        // Keep Claude's boot watch through its existing first-prompt grace.
+                        let awaiting_first_prompt = self.app.harness_for(worker) == cas_mux::SupervisorCli::Claude
+                            && !active_agents.iter().filter(|agent| agent.name == *worker
+                                && agent.factory_session.as_deref() == Some(self.session_name.as_str()))
+                                .any(|agent| {
+                                    let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+                                        self.app.cas_dir(), agent) else { return false };
+                                    let observed = crate::mcp::tools::service::harness_observation::latest_turn_observations(
+                                        &path, cas_mux::SupervisorCli::Claude);
+                                    [observed.wake, observed.reaction, observed.completion].into_iter().flatten()
+                                        .any(|turn| turn.at >= chrono::DateTime::<chrono::Utc>::from(verification.launched_wall))
+                                });
+                        if awaiting_first_prompt {
+                            if verification.registered_at.is_some_and(|registered_at|
+                                now.saturating_duration_since(registered_at) >= CLAUDE_FIRST_PROMPT_GRACE)
+                            {
+                                return Some((worker.clone(), VerificationAction::Failed(crate::gates::tag("W-16", format!(
+                                    "Worker did not take its first prompt within {} seconds after registration; no turn from this launch was observed. Inspect the worker's startup output, then recycle the worker or reassign its task.{}",
+                                    CLAUDE_FIRST_PROMPT_GRACE.as_secs(),
+                                    pane_tail.as_deref().map(|tail| format!("\n\nLast worker pane output:\n{tail}")).unwrap_or_default(),
+                                )))));
+                            }
+                            return None;
+                        }
                         return Some((worker.clone(), VerificationAction::Expired));
                     }
                 } else if let Some(registered_at) = verification.registered_at {
@@ -6885,7 +6910,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 verification.request_id,
                 &worker,
-                None,
+                verification.task_id.as_deref(),
                 "register",
                 success,
                 &detail,

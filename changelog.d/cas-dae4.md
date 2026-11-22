@@ -1,0 +1,3 @@
+### Fixed — Worker replacement
+
+- **A replacement worker can start a task its predecessor never delivered** — When the previous worker's branch holds only a handoff commit (nothing parked or delivered) and a replacement starts at the base, `task start` now binds the replacement's own branch and keeps the old branch as handoff history. It no longer tells the replacement to ask for a `rebind_branch` that would refuse until the replacement had delivered. When the predecessor did deliver, start now tells the replacement to keep working and ask for the rebind after its first pushed commit (GH #1579).

@@ -261,11 +261,15 @@ pub(super) fn reassigned_branch_start(
     );
     let target_tip = git.tip(&target_ref).ok()?;
     // GH #1760: a queued task may have waited through a retarget without
-    // delivering anything. Its old lane can contain an unrelated inherited
-    // base; preserve that ref and bind the untouched successor at the target.
-    // Missing refs or delivery evidence never establish an empty old lane.
-    let empty_successor = queued_start
-        && branch == crate::factory_isolation::worker_task_branch(&worker.name, &task.id)
+    // delivering anything. cas-dae4 (GH #1579): a replacement spawned at the
+    // base after its predecessor left only a handoff commit is the same case.
+    // A predecessor that never parked or delivered leaves nothing to inherit:
+    // keep its lane as handoff history and bind the untouched successor's own
+    // lane at the target. Missing refs or delivery evidence never establish an
+    // empty old lane, and a queued successor only ever owns its per-task lane.
+    let own_lane = branch == crate::factory_isolation::worker_task_branch(&worker.name, &task.id)
+        || (!queued_start && branch == crate::factory_isolation::expected_worker_branch(&worker.name));
+    let empty_successor = own_lane
         && tip == target_tip
         && task.deliverables.parked_branch.is_none()
         && task.deliverables.factory_branch_anchor.is_none()
@@ -274,7 +278,7 @@ pub(super) fn reassigned_branch_start(
             .is_ok_and(|delivery| delivery.is_none())
         && git.text(&["status", "--porcelain"]).ok()?.is_empty();
     for old_tip in &previous_tips {
-        if !(empty_successor && *old_tip == previous.base_sha)
+        if !empty_successor
             && !git.output(&["merge-base", "--is-ancestor", old_tip, &tip])
                 .ok()?.status.success()
         {
@@ -302,7 +306,7 @@ pub(super) fn reassigned_branch_start(
         BranchRebindAudit {
             actor: worker.id.clone(),
             reason: if empty_successor {
-                "Automatic queued reassignment before first delivery: prior tips are untouched or inherited".into()
+                "Automatic reassignment before first delivery: the predecessor lane has no recorded delivery and is kept as handoff history".into()
             } else {
                 "Automatic reassignment: every previous branch tip is inherited".into()
             },

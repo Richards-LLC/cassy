@@ -60,12 +60,13 @@ async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19
                 daemon.process_prompt_queue().await.unwrap();
                 let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
                 if typed.contains("COMMANDER-CONTROL-4F19") && typed.ends_with('\r')
-                    && !daemon.app.mux.has_pending_injects() { break typed; }
+                    && !daemon.app.mux.has_pending_injects()
+                    && !daemon.queue_jobs.has_claim(id, &name) { break typed; }
                 tokio::task::yield_now().await;
             }
         }).await.expect("the unobserved control reaches the real consumer");
-        assert_eq!(typed.contains("COMMANDER-CLAIM-4F19"), handling == "unread", "{handling}: {typed:?}");
         let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(typed.contains("COMMANDER-CLAIM-4F19"), handling == "unread", "{handling}: {typed:?}; {report:?}");
         if handling != "unread" {
             assert_eq!(report.recipient_receipt, Some(SurfacingSource::InboxPoll));
             assert_eq!(report.confirmation_source, if handling == "acknowledged" {

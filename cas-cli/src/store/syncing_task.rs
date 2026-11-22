@@ -584,6 +584,15 @@ impl TaskStore for SyncingTaskStore {
         self.inner.patch_execution_state(task_id, patch)
     }
 
+    fn project_train_owner(&self, expected: &Task, projection: &cas_types::TrainOwnerProjection) -> Result<bool> {
+        // Git is already durable. Publish the resulting row through the
+        // existing recoverable current-row journal; projection repair is safe
+        // to repeat after a crash at either local boundary.
+        let committed = self.inner.project_train_owner(expected, projection)?;
+        if committed { self.publish_current_row(&expected.id)?; }
+        Ok(committed)
+    }
+
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         let _sync_guard = self
             .queue

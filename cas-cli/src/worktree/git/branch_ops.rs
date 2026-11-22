@@ -1139,7 +1139,7 @@ impl GitOperations {
                     reason: "the merge does not contain the observed origin tip".into(),
                 };
             }
-            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, PUSH_TIMEOUT)
+            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, None, PUSH_TIMEOUT)
         };
         let first = publish(head, &expected);
         if !reconcile_peer || !matches!(first, TargetPushOutcome::NonFastForward { .. }) {
@@ -1253,16 +1253,17 @@ impl GitOperations {
         head: &str,
         timeout: Duration,
     ) -> TargetPushOutcome {
-        self.publish_pinned_source_with_lease(branch, head, None, false, timeout)
+        self.publish_pinned_source_with_lease(branch, head, None, false, None, timeout)
     }
 
     // gate-audit[proven_merge]: selector Internal publication provenance selects merge validation with G-160 versus ordinary source pre-push checks; no caller override is accepted.
-    fn publish_pinned_source_with_lease(
+    pub(super) fn publish_pinned_source_with_lease(
         &self,
         branch: &str,
         head: &str,
         expected: Option<&str>,
         proven_merge: bool,
+        authority: Option<&super::train_authority::AtomicUpdate>,
         timeout: Duration,
     ) -> TargetPushOutcome {
         let remote_ref = format!("origin/{branch}");
@@ -1318,6 +1319,10 @@ impl GitOperations {
             }
         }
         cmd.arg("push");
+        if let Some(authority) = authority {
+            cmd.arg("--atomic")
+                .arg(format!("--force-with-lease={}:{}", authority.reference, authority.expected));
+        }
         if let Some(expected) = expected {
             cmd.arg(format!("--force-with-lease=refs/heads/{branch}:{expected}"));
         }
@@ -1327,7 +1332,11 @@ impl GitOperations {
             // moves while a hook runs; fully qualify the destination so
             // push.default / configured refspecs cannot choose another ref.
             &format!("{local_sha}:refs/heads/{branch}"),
-        ])
+        ]);
+        if let Some(authority) = authority {
+            cmd.arg(format!("{}:{}", authority.next, authority.reference));
+        }
+        cmd
         // Never block on an interactive credential prompt (mirrors fetch).
         .env("GIT_TERMINAL_PROMPT", "0")
         .env_remove("CAS_PROVEN_MERGE_HEAD")
@@ -1338,6 +1347,24 @@ impl GitOperations {
         if proven_merge && let Some(base) = expected {
             cmd.env("CAS_PROVEN_MERGE_HEAD", &local_sha)
                 .env("CAS_PROVEN_MERGE_BASE", base);
+        }
+
+        if authority.is_some() {
+            // Probe receive-pack atomic support without mutating either ref.
+            // Use the same clean checkout, remote, environment and hook policy.
+            let mut probe = Command::new(cmd.get_program());
+            probe.args(cmd.get_args()).arg("--dry-run").current_dir(checkout.path());
+            for (key, value) in cmd.get_envs() {
+                if let Some(value) = value { probe.env(key, value); }
+                else { probe.env_remove(key); }
+            }
+            match Self::run_command_bounded(probe, timeout.saturating_sub(started.elapsed())) {
+                Ok(output) if output.status.success() => {}
+                _ => return TargetPushOutcome::NotPushed {
+                    sha: Some(local_sha), remote_sha: expected.map(str::to_string),
+                    reason: "TRAIN_TRANSFER_FENCE_UNAVAILABLE: atomic receive-pack probe refused".into(),
+                },
+            }
         }
 
         match Self::run_command_bounded(cmd, timeout.saturating_sub(started.elapsed())) {

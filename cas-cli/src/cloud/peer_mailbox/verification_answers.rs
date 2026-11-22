@@ -61,7 +61,7 @@ fn scope(root: &Path, task: &Task, question: &Question) -> Result<bool, String> 
         && question.train == train.id
         && crate::cloud::resolve_canonical_id(root).as_deref() == Some(&question.project)
         && train.epic_verification_owner.as_deref() == Some(&question.owner)
-        && crate::factory_session_scope::train_owner_generation(&train)? == question.generation)
+        && crate::factory_session_scope::train_owner_generation(root, &train)? == question.generation)
 }
 
 pub(crate) fn publish(
@@ -108,7 +108,7 @@ pub(crate) fn publish(
         project,
         train: train.id.clone(),
         owner: train.epic_verification_owner.clone().unwrap(),
-        generation: crate::factory_session_scope::train_owner_generation(&train)?,
+        generation: crate::factory_session_scope::train_owner_generation(root, &train)?,
         task: task.id.clone(),
         dispatch: dispatch.id.clone(),
         boundary: boundary(task, dispatch)?,

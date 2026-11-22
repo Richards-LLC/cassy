@@ -120,6 +120,10 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.patch_execution_state(task_id, patch)
     }
 
+    fn project_train_owner(&self, expected: &Task, projection: &cas_types::TrainOwnerProjection) -> Result<bool> {
+        self.inner.project_train_owner(expected, projection)
+    }
+
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         self.inner.update(task)
     }

@@ -59,6 +59,8 @@ fn identity_metadata_carries_role_repo_focus_session_and_host() {
     let mut agent = Agent::new("sup-1".into(), "bright-lark-8".into());
     agent.role = AgentRole::Supervisor;
     agent.factory_session = Some("factory-a".into());
+    let key = crate::train_owner::transfer::REMOTE_IDENTITY;
+    agent.metadata.insert(key.into(), "forged".into());
     agent
         .metadata
         .insert("clone_path".into(), "/src/widgets".into());
@@ -72,6 +74,13 @@ fn identity_metadata_carries_role_repo_focus_session_and_host() {
         Some("factory-a")
     );
     assert_eq!(meta.get(META_HOSTNAME).map(String::as_str), Some("box-a"));
+    assert!(!meta.contains_key(key));
+    agent.machine_id = Some("machine-a".into());
+    agent.cc_session_id = Some("harness-a".into());
+    agent.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
+    let registered = identity_metadata(&agent, Some(REPO), None, None);
+    assert_eq!(registered.get(key), Some(&crate::train_owner::identity(&agent, &agent.id).unwrap().incarnation));
     assert_eq!(
         meta.get("clone_path").map(String::as_str),
         Some("/src/widgets"),

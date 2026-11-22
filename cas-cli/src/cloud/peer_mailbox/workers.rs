@@ -65,7 +65,7 @@ impl WorkerDirectory {
             if train.is_terminal() || train.task_type != TaskType::Epic
                 || owner != worker.supervisor.agent_id
                 || agent.metadata.get("train_owner").map(String::as_str) != Some(owner)
-                || agent.metadata.get("train_owner_generation") != crate::factory_session_scope::train_owner_generation(&train).ok().as_ref()
+                || agent.metadata.get("train_owner_generation") != crate::factory_session_scope::train_owner_generation(root, &train).ok().as_ref()
             { continue; }
             let mut ids = BTreeSet::from([owner.to_string()]);
             if let peers::SlotHolder::Successor { peer, .. } = peers::slot_holder(&supervisors, &worker.supervisor, !worker.supervisor.live) {

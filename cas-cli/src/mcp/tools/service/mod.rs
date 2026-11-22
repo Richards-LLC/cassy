@@ -1326,6 +1326,7 @@ impl CasService {
                     ])
                 }
                 "train_merge" => Some(&["action", "id", "task_ids", "supervisor_override", "reason"]),
+                "train_owner_transfer" => Some(&["action", "id", "owner_transfer"]),
                 "train_freeze" => Some(&["action", "id", "reason", "decision"]),
                 "claim" => Some(&["action", "external_ref", "request_id"]),
                 "claim_status" => Some(&["action", "request_id"]),
@@ -1425,6 +1426,16 @@ impl CasService {
                 // cas-e477: read-only peer supervisor discovery.
                 "peers" => heap_future(|| this.coordination_peers(req)).await,
                 "peer_transcript" => heap_future(|| this.coordination_peer_transcript(req)).await,
+
+                "train_owner_transfer" => {
+                    let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_owner_transfer requires id=<train>"))?;
+                    let transfer = req.owner_transfer.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_owner_transfer requires owner_transfer"))?;
+                    let inner = this.inner.clone();
+                    tokio::task::spawn_blocking(move || inner.train_owner_transfer(&train, &transfer))
+                        .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                        .map(Self::success)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))
+                }
 
                 "train_merge" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_merge requires id=<epic>"))?;

@@ -1020,7 +1020,7 @@ async fn train_owner_reaches_worker_host_without_a_local_supervisor_cas_b674() {
     train.task_type = crate::types::TaskType::Epic;
     train.epic_verification_owner = Some("remote-owner".into());
     tasks.add(&train).unwrap();
-    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    let generation = crate::factory_session_scope::train_owner_generation(&machine.cas, &train).unwrap();
     machine.register("worker", "worker", AgentRole::Worker, "owner-session");
     let agents = open_agent_store(&machine.cas).unwrap();
     let mut worker = agents.get("worker").unwrap();
@@ -1083,7 +1083,7 @@ async fn owner_and_worker_host_send_directly_and_lifecycle_notices_survive_park_
     let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
     train.task_type = crate::types::TaskType::Epic;
     train.epic_verification_owner = Some("owner".into());
-    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    let generation = crate::factory_session_scope::train_owner_generation(&owner_machine.cas, &train).unwrap();
     let mut task = crate::types::Task::new("cas-delivery".into(), "Delivery".into());
     task.assignee = Some("worker".into());
     for machine in [&owner_machine, &host_machine] {
@@ -1239,7 +1239,7 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     let mut train = crate::types::Task::new("cas-train".into(), "Train".into());
     train.task_type = crate::types::TaskType::Epic;
     train.epic_verification_owner = Some("owner".into());
-    let generation = crate::factory_session_scope::train_owner_generation(&train).unwrap();
+    let generation = crate::factory_session_scope::train_owner_generation(&owner.cas, &train).unwrap();
     let bytes = b"committed portable proof\n";
     let digest = hex::encode(Sha256::digest(bytes));
     let artifact = cas_store::PublishedArtifact {

@@ -1177,6 +1177,13 @@ impl CasCore {
                 }
             })?;
         }
+        if (super::release_train::is_release_train(&task)
+            || task.labels.iter().any(|label| label == crate::train_owner::ENROLLED))
+            && req.epic_verification_owner.as_deref().is_some_and(|owner|
+                normalize_epic_verification_owner(owner) != task.epic_verification_owner.as_deref().and_then(normalize_epic_verification_owner)) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: change release-train ownership through the explicit quiescence protocol")));
+        }
         let original_updated_at = task.updated_at;
         if proof_scope_fix {
             let reason = proof_scope_fix_reason.map(str::trim).unwrap_or_default();
@@ -1813,6 +1820,13 @@ impl CasCore {
         // must not require a registered session or readable agent store.
         let mut triaged_labels = task.labels.clone();
         if let Some(labels) = req.labels.as_deref() {
+            let supplied = labels.split(',').map(str::trim).collect::<Vec<_>>();
+            if task.labels.iter().any(|label| label == crate::train_owner::ENROLLED)
+                != supplied.contains(&crate::train_owner::ENROLLED)
+                || (super::release_train::is_release_train(&task) && !supplied.contains(&super::release_train::RELEASE_TRAIN_LABEL)) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: enrollment metadata is managed by the train authority")));
+            }
             if labels.trim().is_empty() {
                 // Clearing user labels cannot erase finding provenance or
                 // promote a theoretical finding through the legacy default.

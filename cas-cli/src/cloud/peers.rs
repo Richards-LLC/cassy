@@ -171,6 +171,12 @@ pub fn identity_metadata(
     put(META_FOCUS, focus);
     put(META_FACTORY_SESSION, agent.factory_session.as_deref());
     put(META_HOSTNAME, hostname);
+    // Overwrite this reserved value from the actual runtime registration.
+    // Model-supplied metadata cannot choose a successor incarnation.
+    metadata.remove(crate::train_owner::transfer::REMOTE_IDENTITY);
+    if let Ok(identity) = crate::train_owner::identity(agent, &agent.id) {
+        metadata.insert(crate::train_owner::transfer::REMOTE_IDENTITY.into(), identity.incarnation);
+    }
     metadata
 }
 

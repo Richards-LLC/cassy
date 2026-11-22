@@ -224,6 +224,21 @@ fn spawn_workers_lane_survives_factory_and_coordination_decoding() {
 }
 
 #[test]
+fn train_transfer_wire_rejects_identity_claims_cas_6456() {
+    let payload = serde_json::json!({"action": "train_owner_transfer", "id": "cas-train", "owner_transfer": {
+        "operation": "prepare", "expected_authority": "sha", "expected_generation": "generation",
+        "transfer_id": "transfer", "request_id": "request", "reason": "handoff", "successor": "registered-id"
+    }});
+    let request: CoordinationRequest = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(request.owner_transfer.as_ref().unwrap().successor.as_deref(), Some("registered-id"));
+    for field in ["identity", "incarnation", "operator_claim", "supervisor_override"] {
+        let mut claimed = payload.clone();
+        claimed["owner_transfer"][field] = serde_json::json!("caller claim");
+        assert!(serde_json::from_value::<CoordinationRequest>(claimed).is_err());
+    }
+}
+
+#[test]
 fn test_system_request_report_bug() {
     let req: SystemRequest = serde_json::from_str(
         r#"{

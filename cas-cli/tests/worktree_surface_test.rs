@@ -8445,7 +8445,7 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
     register_delivery_agent(
         &cas_root,
         "existing-worker-registration",
-        "worker",
+        "stale-role-worker",
         AgentRole::Worker,
         "registration-authority-factory",
     );

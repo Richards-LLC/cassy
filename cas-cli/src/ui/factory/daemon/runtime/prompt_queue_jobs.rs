@@ -2118,7 +2118,7 @@ impl QueueJobs {
     ) -> bool {
         let key = (row, recipient.to_string());
         if !self.claims.contains_key(&key) {
-            self.submit_claim(cas_dir, session, row, recipient, target);
+            self.submit_claim_job(cas_dir, session, row, recipient, target, None);
             if matches!(self.exec, Exec::Inline(_)) {
                 self.apply_completions();
             }
@@ -2128,20 +2128,12 @@ impl QueueJobs {
             // while its job result waited for the next control pass.
             // Re-read on the store lane before this token can be consumed.
             let token = *token;
-            self.submit_claim_recheck(cas_dir, session, row, recipient, target, token);
+            self.submit_claim_job(cas_dir, session, row, recipient, target, Some(token));
             if matches!(self.exec, Exec::Inline(_)) {
                 self.apply_completions();
             }
         }
         matches!(self.claims.get(&key), Some(ClaimState::Ready(..)))
-    }
-
-    fn submit_claim(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str) {
-        self.submit_claim_job(cas_dir, session, row, recipient, target, None);
-    }
-
-    fn submit_claim_recheck(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str, token: cas_store::ClaimToken) {
-        self.submit_claim_job(cas_dir, session, row, recipient, target, Some(token));
     }
 
     fn submit_claim_job(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str, held: Option<cas_store::ClaimToken>) {

@@ -452,11 +452,11 @@ async fn open_release_train_refuses_trunk_even_with_allow_trunk() {
     tasks.update(&cut).unwrap();
     // Approval of an immutable completion receipt does not publish its source.
     let origin = fixture.repo.root.join(".git/test-origin.git");
-    let local_before = git_stdout(&fixture.repo.root, &["show-ref"]);
-    let origin_before = git_stdout(&origin, &["show-ref"]);
+    let local_before = git_stdout(&fixture.repo.root, &["for-each-ref"]);
+    let origin_before = git_stdout(&origin, &["for-each-ref"]);
     let refused = run_merge(&fixture).await;
-    assert_eq!(git_stdout(&fixture.repo.root, &["show-ref"]), local_before, "{refused}");
-    assert_eq!(git_stdout(&origin, &["show-ref"]), origin_before, "{refused}");
+    assert_eq!(git_stdout(&fixture.repo.root, &["for-each-ref"]), local_before, "{refused}");
+    assert_eq!(git_stdout(&origin, &["for-each-ref"]), origin_before, "{refused}");
     assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge, "{refused}");
     run_git(&["push", "origin", &fixture.receipt.source_branch], &fixture.repo.root);
     let merged = run_merge(&fixture).await;

@@ -463,6 +463,7 @@ async fn open_release_train_refuses_trunk_even_with_allow_trunk() {
     assert_eq!(git_stdout(&fixture.repo.root, &["for-each-ref"]), local_before, "{refused}");
     assert_eq!(git_stdout(&origin, &["for-each-ref"]), origin_before, "{refused}");
     assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge, "{refused}");
+    assert!(cas::gates::codes_in(&refused).contains(&"G-97"), "{refused}");
     run_git(&["push", "origin", &fixture.receipt.source_branch], &fixture.repo.root);
     let merged = run_merge(&fixture).await;
     assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"),

@@ -824,26 +824,44 @@ pub fn resolve_worker_supervisor(
     agent_store: &dyn AgentStore,
     factory_session: Option<&str>,
 ) -> Option<OwningSupervisor> {
-    if let Some(owner) = resolve_owning_supervisor(agent_store, factory_session) {
-        return Some(owner);
+    // Non-factory lifecycle callers retain their legacy unscoped lookup.
+    // Worker message/reminder entry points require a named session themselves.
+    if factory_session.is_none() {
+        return resolve_owning_supervisor(agent_store, None);
     }
-    let session = factory_session.map(str::trim).filter(|s| !s.is_empty())?;
-    let supervisors: Vec<cas_types::Agent> = agent_store
-        .list(None)
-        .ok()?
-        .into_iter()
+    resolve_worker_supervisor_from_agents(&agent_store.list(None).ok()?, factory_session).ok()
+}
+
+/// Resolve and diagnose one registry snapshot. Status alone is not liveness;
+/// stale owners and competing pane names cannot authorize a different factory.
+pub(crate) fn resolve_worker_supervisor_from_agents(
+    agents: &[cas_types::Agent],
+    factory_session: Option<&str>,
+) -> Result<OwningSupervisor, &'static str> {
+    let session = factory_session.map(str::trim).filter(|s| !s.is_empty())
+        .ok_or("no_factory_session")?;
+    let supervisors: Vec<_> = agents.iter()
         .filter(|a| a.role == AgentRole::Supervisor)
         .collect();
+    let select = |candidates: Vec<cas_types::Agent>| -> Result<OwningSupervisor, &'static str> {
+        let live: Vec<_> = candidates.into_iter().filter(crate::supervisor_notices::is_live).collect();
+        let names: std::collections::HashSet<_> = live.iter()
+            .map(|a| if a.name.is_empty() { &a.id } else { &a.name }).collect();
+        if names.len() > 1 { return Err("ambiguous_owner"); }
+        best_supervisor(live).ok_or("owner_unavailable")
+    };
+    let scoped: Vec<_> = supervisors.iter()
+        .filter(|a| a.factory_session.as_deref() == Some(session))
+        .map(|a| (*a).clone()).collect();
+    if !scoped.is_empty() {
+        return select(scoped);
+    }
     if let Some(name) = session_metadata_supervisor_name(session)
-        && let Some(owner) = best_supervisor(
-            supervisors
-                .iter()
-                .filter(|a| a.name == name)
-                .cloned()
-                .collect(),
-        )
     {
-        return Some(owner);
+        let named: Vec<_> = supervisors.iter().filter(|a| a.name == name
+            && a.factory_session.as_deref().is_none_or(|s| s.trim().is_empty() || s == session))
+            .map(|a| (*a).clone()).collect();
+        if !named.is_empty() { return select(named); }
     }
     let sessionless_live: Vec<cas_types::Agent> = supervisors
         .into_iter()
@@ -853,11 +871,12 @@ pub fn resolve_worker_supervisor(
                 .is_none_or(|s| s.trim().is_empty())
         })
         .filter(|a| crate::supervisor_notices::is_live(a))
+        .cloned()
         .collect();
-    if sessionless_live.len() == 1 {
-        return best_supervisor(sessionless_live);
+    if !sessionless_live.is_empty() {
+        return select(sessionless_live);
     }
-    None
+    Err("no_session_owner")
 }
 
 /// Owner notices may cross local supervisor sessions; worker operations may not.

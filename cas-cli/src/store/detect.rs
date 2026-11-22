@@ -1311,7 +1311,7 @@ mod tests {
     #[test]
     fn git_toplevel_wins_over_nested_cas_directory() {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
-        let temp = TempDir::new().unwrap();
+        let temp = crate::test_paths::physical_tempdir();
         let output = std::process::Command::new("git")
             .args(["init", "--quiet"])
             .current_dir(temp.path())
@@ -1325,13 +1325,13 @@ mod tests {
         init_cas_dir(&temp.path().join("packages/widget")).unwrap();
 
         let found = find_cas_root_from(&subdir).unwrap();
-        assert_eq!(found, temp.path().canonicalize().unwrap().join(".cas"));
+        assert_eq!(found, temp.path().join(".cas"));
     }
 
     #[test]
     fn uninitialized_nested_git_repo_does_not_inherit_parent_store() {
         let mut env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
-        let temp = TempDir::new().unwrap();
+        let temp = crate::test_paths::physical_tempdir();
         let parent_store = init_cas_dir(temp.path()).unwrap();
         let repo = temp.path().join("child");
         std::fs::create_dir_all(repo.join("src")).unwrap();
@@ -1358,11 +1358,8 @@ mod tests {
         env.remove("CAS_ROOT");
 
         let child_store = init_cas_dir(&repo).unwrap();
-        // Git reports the physical toplevel, unlike init_cas_dir's input spelling.
-        assert_eq!(
-            find_cas_root_from(&repo.join("src")).unwrap(),
-            child_store.canonicalize().unwrap()
-        );
+        // Git reports the physical toplevel.
+        assert_eq!(find_cas_root_from(&repo.join("src")).unwrap(), child_store);
         assert_ne!(child_store, parent_store);
     }
 

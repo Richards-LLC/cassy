@@ -205,11 +205,10 @@ impl TestEnvGuard {
 
     pub(crate) fn temp_home() -> Self {
         let mut guard = Self::new();
-        let temp = TempDir::new().expect("temp HOME");
-        // TempDir may expose a symlinked platform spelling (notably macOS
-        // `/var` -> `/private/var`). Keep test HOME and every path derived
-        // from it in the same canonical namespace production validation uses.
-        let path = temp.path().canonicalize().expect("canonical temp HOME");
+        // Keep test HOME and every path derived from it in the physical
+        // namespace production validation uses.
+        let temp = crate::test_paths::physical_tempdir();
+        let path = temp.path().to_path_buf();
         guard.temp_home = Some(temp);
         guard.temp_home_path = Some(path.clone());
         guard.set("HOME", &path);

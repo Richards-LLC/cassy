@@ -3803,7 +3803,7 @@ fn stall_confirmation_real_resolution_failure_keeps_checkpoint_fallback() {
 fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_recovers() {
     let _env = crate::test_support::TestEnvGuard::temp_home();
     let root = tempfile::tempdir().unwrap();
-    let account = tempfile::tempdir().unwrap();
+    let account = crate::test_paths::physical_tempdir();
     let rollout = account.path().join("sessions/2026/10/15/rollout-stall-real.jsonl");
     std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
     let now = chrono::Utc::now();
@@ -3821,7 +3821,7 @@ fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_reco
     let cold = std::time::SystemTime::now() - Duration::from_secs(1800);
     std::fs::write(&rollout, format!("{meta}\n{call}\n")).unwrap();
     std::fs::File::open(&rollout).unwrap().set_modified(cold).unwrap();
-    assert_eq!(crate::cli::factory::wedged::resolve_worker(root.path(), &worker.name).unwrap().transcript_path.as_deref(), Some(rollout.canonicalize().unwrap().as_path()));
+    assert_eq!(crate::cli::factory::wedged::resolve_worker(root.path(), &worker.name).unwrap().transcript_path.as_deref(), Some(rollout.as_path()));
     let mut data = stalled_data_for(make_agent_working_stalled(&worker.id, &worker.name, "cas-real", 0, Some(1800), now));
     let mut detector = DirectorEventDetector::new(vec![worker.name.clone()], "supervisor".into());
     detector.set_cas_root(root.path().into());

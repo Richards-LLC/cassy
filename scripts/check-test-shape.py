@@ -6,6 +6,8 @@ test files in any language for exact prose snapshots or source/workflow text
 needles. Prose pins cannot be waived by comments. Vendor code is excluded. Integration tests under cas-cli/tests and
 crates/*/tests must resolve Cargo binaries at runtime rather than through
 env!("CARGO_BIN_EXE_<name>"); this archive-portability rule cannot be exempted.
+Added or changed Rust test lines may not canonicalize a tempdir `.path()`; macOS
+fixtures root at test_paths::physical_tempdir() instead.
 Text-pin checks cover changed test files, so legacy pins do not block unrelated
 work. With --changed-since, only added or modified lines are checked for text
 pins; without it, changed test files are scanned in full. --changed-since uses
@@ -1257,6 +1259,21 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
                 if not function_pin and not pinned(source, ts[start].start) and not pinned(source, t.start) and source.count("\n", 0, t.start) + 1 not in pin_lines:
                     line = source.count('\n', 0, t.start) + 1
                     hits.append((line, kind))
+    # cas-2e53: macOS temp roots are symlinks (/var, /tmp -> /private/...).
+    # Canonicalizing a tempdir path where it is compared patches one site;
+    # the fixture roots at test_paths::physical_tempdir() instead. Added or
+    # changed lines only, so legacy sites do not block unrelated work.
+    if check_text_pins:
+        shape = ['.', 'path', '(', ')', '.', 'canonicalize', '(', ')']
+        found = set()
+        for _, begin, end in scopes:
+            for i in range(begin + 1, min(end, len(ts)) - len(shape) + 1):
+                if i in found or [x.value for x in ts[i:i + len(shape)]] != shape or any(x.string for x in ts[i:i + len(shape)]):
+                    continue
+                found.add(i)
+                line = source.count('\n', 0, ts[i + 5].start) + 1
+                if changed_text_lines is None or line in changed_text_lines:
+                    hits.append((line, 'per-site tempdir canonicalization'))
     text_ranges = []
     if integration:
         text_ranges.append((0, len(source)))
@@ -1421,6 +1438,8 @@ def main():
                               f'falling back to option_env!("CARGO_BIN_EXE_{name}")')
                 elif kind == 'TEST_ASSERTION_PROSE':
                     remedy = 'assert behavior, an error code or a rule ID; pin comments do not waive prose checks'
+                elif kind == 'per-site tempdir canonicalization':
+                    remedy = 'root the fixture at test_paths::physical_tempdir() instead of canonicalizing where it is compared'
                 elif kind == 'exact-text pin':
                     remedy = 'assert behavior or machine data; prose pins cannot be waived by comments'
                 else:

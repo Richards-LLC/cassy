@@ -559,6 +559,18 @@ def test_workflow_command():
                 self.assertFalse(self.hits(code, 'cas-cli/tests/probe.rs'))
         self.assertFalse(self.hits('const BIN: &str = env!("CARGO_BIN_EXE_cas");', 'cas-cli/src/lib.rs'))
 
+    def test_per_site_tempdir_canonicalization_is_rejected_on_changed_lines_cas_2e53(self):
+        patch = '#[test] fn t() {\nlet repo = root.path().canonicalize().unwrap();\n}'
+        kind = 'per-site tempdir canonicalization'
+        self.assertEqual([hit for hit in shape.lint(patch, 'cas-cli/src/x.rs') if hit[1] == kind], [(2, kind)])
+        self.assertEqual([hit for hit in shape.lint(patch, 'cas-cli/tests/x.rs') if hit[1] == kind], [(2, kind)])
+        self.assertFalse(shape.lint(patch, 'cas-cli/src/x.rs', changed_text_lines={1}))
+        for code in ['#[test] fn t() { let root = test_paths::physical_tempdir(); }',
+                     'fn real() { let repo = root.path().canonicalize()?; }',
+                     '#[test] fn t() { let s = "root.path().canonicalize()"; }']:
+            with self.subTest(code=code):
+                self.assertFalse(shape.lint(code, 'cas-cli/src/x.rs'))
+
     def test_archive_binary_rule_covers_every_crate_and_binary_cas_7bce(self):
         # The workspace archive carries every crate's integration tests.
         self.assertEqual([kind for _, kind in self.hits(

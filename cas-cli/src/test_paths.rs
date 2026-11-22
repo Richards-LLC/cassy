@@ -93,13 +93,21 @@ pub fn warm_stub(path: &Path, script: &str) {
     std::fs::write(path, script).expect("write test stub");
 }
 
-/// Create a private hub fixture beneath a canonical temporary directory.
-/// macOS commonly spells TMPDIR through /var, a symlink rejected by hub state.
-pub fn private_hub_tempdir() -> tempfile::TempDir {
+/// A temporary directory whose `path()` is already physical. macOS spells
+/// TMPDIR through symlinks (`/var` -> `/private/var`, `/tmp` -> `/private/tmp`)
+/// while Git, shells, test runners and path validation report resolved paths.
+/// Root a fixture here once instead of canonicalizing at each comparison.
+pub fn physical_tempdir() -> tempfile::TempDir {
     let parent = std::env::temp_dir()
         .canonicalize()
         .expect("temporary directory must be canonicalizable");
-    let temp = tempfile::tempdir_in(parent).expect("canonical temporary fixture directory");
+    tempfile::tempdir_in(parent).expect("physical temporary fixture directory")
+}
+
+/// Create a private hub fixture beneath a physical temporary directory;
+/// hub state rejects a symlinked ancestor.
+pub fn private_hub_tempdir() -> tempfile::TempDir {
+    let temp = physical_tempdir();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

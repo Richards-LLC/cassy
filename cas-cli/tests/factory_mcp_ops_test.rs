@@ -60,11 +60,9 @@ impl FactoryTestEnv {
     }
 
     fn with_agent_id_and_env(agent_id: &str, env_guard: Option<EnvGuard>) -> Self {
-        let temp = TempDir::new().expect("Failed to create temp dir");
-        // cas-253d: macOS temp roots (/tmp, /var) are symlinks, and host
-        // retention refuses symlinked ancestors; keep the project physical.
-        let cas_root = init_cas_dir(&temp.path().canonicalize().expect("canonical temp dir"))
-            .expect("Failed to init CAS dir");
+        // Host retention refuses symlinked ancestors.
+        let temp = cas::test_paths::physical_tempdir();
+        let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
 
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing(agent_id.to_string());
@@ -80,9 +78,8 @@ impl FactoryTestEnv {
 
     fn without_agent_id() -> Self {
         let env_guard = EnvGuard::ensure_isolated_home();
-        let temp = TempDir::new().expect("Failed to create temp dir");
-        let cas_root = init_cas_dir(&temp.path().canonicalize().expect("canonical temp dir"))
-            .expect("Failed to init CAS dir");
+        let temp = cas::test_paths::physical_tempdir();
+        let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         let service = CasService::new(core, None);
         Self {

@@ -7,12 +7,23 @@ import type { Page } from "@playwright/test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+const conversationList = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" });
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page, project: string) => conversationList(page).getByRole("button", { name: new RegExp(`^${project} on `) });
+const connection = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
+const messageStatus = (page: Page) => page.getByRole("status", { name: "Message status" });
+const turn = (page: Page, text: string) => page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: text });
+// A held send says it waits for the connection; an acknowledged one is queued; a delivered one says so.
+const heldLine = (page: Page) => page.getByRole("log").getByRole("status").filter({ hasText: "Waiting for the connection" });
+const queuedLine = (page: Page) => page.getByRole("log").getByRole("status").filter({ hasText: /^Queued for supervisor$/ });
+const deliveredLine = (page: Page) => page.getByRole("log").getByRole("status").filter({ hasText: /^Delivered$/ });
+
 async function choose(page: Page) {
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  await conversationRow(page, "cas-src").click();
   // Selecting a row can finish before the conversation has attached. Do not
   // take its hub offline while the thread is still opening (cas-05f7).
   await expect(page.getByRole("textbox", { name: "Your message" })).toBeEditable();
-  await expect(page.locator('.thread .empty[data-state="loading"]')).toHaveCount(0);
+  await expect(page.getByTestId("conversation-thread").getByRole("status").filter({ hasText: "Opening the conversation…" })).toHaveCount(0);
 }
 async function send(page: Page, text: string) {
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -33,7 +44,7 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
     await journey.open(); await choose(page);
     await peer.goto(page.url()); await choose(peer);
     await Promise.all([hub.down("atlas", { sockets: "close" }), other.down("atlas", { sockets: "close" })]);
-    for (const tab of [page, peer]) await expect(tab.locator("#conversation-connection")).not.toHaveAttribute("data-phase", "live");
+    for (const tab of [page, peer]) await expect(connection(tab)).not.toHaveAttribute("data-phase", "live");
     await send(page, "One instruction, one delivery");
     for (const tab of [page, peer]) await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
   });
@@ -49,14 +60,14 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
     // Both tabs project the same active claim before any receipt arrives.
     // Retry here would allow the still-running send to cross the wire twice.
     for (const tab of [page, peer]) {
-      await expect(tab.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+      await expect(heldLine(tab)).toHaveCount(0);
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     const owner = hub.sends.length ? hub : other;
     owner.queueLatest(PELICAN);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
-      await expect(tab.getByRole("log").locator('.bub[data-state="acknowledged"] .conversation-delivery')).toBeVisible();
+      await expect(queuedLine(tab)).toBeVisible();
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(1);
@@ -104,12 +115,12 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
     await page.getByRole("button", { name: "Retry sending", exact: true }).click();
     await expect.poll(() => hub.sends.length + other.sends.length).toBe(2);
     expect(new Set([...hub.sends, ...other.sends].map(send => send.client_ref)).size).toBe(1);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   });
   await journey.stage("A late receipt settles both tabs and removes Retry", async () => {
     (hub.sends.length ? hub : other).queueLatest(PELICAN);
     for (const tab of [page, peer]) {
-      await expect(tab.getByRole("log").locator('.bub[data-state="acknowledged"] .conversation-delivery')).toBeVisible();
+      await expect(queuedLine(tab)).toBeVisible();
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(2);
@@ -117,7 +128,7 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
   await peer.close();
 });
 
-async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") {
+async function captureReceiptSurface(page: Page, state: "stored" | "forwarded", text: string) {
   const qa = process.env.DELIVERY_QA;
   if (!qa) return;
   await mkdir(qa, { recursive: true });
@@ -126,12 +137,14 @@ async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") 
     for (const colorScheme of ["light", "dark"] as const) {
       await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
       // cas-97d58 F05: a kept reply shows nothing; only an unkept one says so.
-      if (state === "stored") await expect(page.getByRole("log").locator('[data-stored="true"]').first()).toBeVisible();
-      else await expect(page.getByRole("log").locator("[data-stored=false] .reply-storage-receipt")).toBeVisible();
+      if (state === "stored") {
+        await expect(turn(page, text)).toHaveAttribute("data-stored", "true");
+        await expect(turn(page, text)).toBeVisible();
+      } else await expect(turn(page, text).getByText("Not kept on this device yet", { exact: true })).toBeVisible();
       await page.screenshot({ path: join(qa, `${state}-${colorScheme}-${size}.png`) });
     }
   }
-  const html = await page.locator(".conversation-reading").evaluate(node => node.outerHTML);
+  const html = await page.getByTestId("conversation-thread").evaluate(node => node.outerHTML);
   const css = await readFile("dist/app.css", "utf8");
   await writeFile(join(qa, `${state}.html`), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body>${html}</body></html>`);
   for (const [name, query, media] of [["forced-colors", "(forced-colors: active)", { forcedColors: "active" }], ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }], ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }]] as const) {
@@ -155,11 +168,11 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     await journey.open(); await choose(page);
     await second.goto(page.url()); await choose(second);
     await Promise.all([hub.down("atlas", { sockets: "close" }), other.down("atlas", { sockets: "close" })]);
-    await expect(page.locator("#conversation-connection")).not.toHaveAttribute("data-phase", "live");
-    await expect(second.locator("#conversation-connection")).not.toHaveAttribute("data-phase", "live");
+    await expect(connection(page)).not.toHaveAttribute("data-phase", "live");
+    await expect(connection(second)).not.toHaveAttribute("data-phase", "live");
     await Promise.all([send(page, "First tab keeps this"), send(second, "Second tab keeps that")]);
-    await expect(page.getByRole("log").locator(".conversation-held")).not.toHaveCount(0);
-    await expect(second.getByRole("log").locator(".conversation-held")).not.toHaveCount(0);
+    await expect(heldLine(page)).not.toHaveCount(0);
+    await expect(heldLine(second)).not.toHaveCount(0);
     await expect.poll(async () => (await journalRows(page, "sends")).filter((row) => row.send?.state === "held").map((row) => row.send!.text).sort()).toEqual(["First tab keeps this", "Second tab keeps that"]);
   });
   const references = (await journalRows(page, "sends")).filter(row => row.send?.state === "held").map(row => row.send!.id).sort();
@@ -182,7 +195,8 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     await choose(page); await choose(second);
     // A single BrowserContext clock drives both tabs, including after reload.
     await page.clock.fastForward(15_000);
-    await expect(page.getByRole("log").locator('.bub[data-state="unconfirmed"]')).toHaveCount(2);
+    // The only two sends are the two tabs' messages; both are unconfirmed bubbles.
+    for (const text of ["First tab keeps this", "Second tab keeps that"]) await expect(turn(page, text)).toHaveAttribute("data-state", "unconfirmed");
     await expect.poll(() => [...hub.sends, ...other.sends].length).toBe(2);
     expect(errors).toEqual([]);
   });
@@ -191,26 +205,26 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
 
 test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line clears (cas-387e)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
-  const status = page.locator("#message-status");
+  const status = messageStatus(page);
   await journey.stage("Send while the machine is away: the message waits, and the composer says so", async () => {
     await journey.open(); await choose(page);
     await hub.down("atlas", { sockets: "close" });
-    await expect(page.locator("#conversation-connection")).not.toHaveAttribute("data-phase", "live");
+    await expect(connection(page)).not.toHaveAttribute("data-phase", "live");
     await send(page, "Send this when Atlas is back");
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
+    await expect(heldLine(page)).toHaveCount(1);
     await expect(status).toBeVisible();
   });
   await journey.stage("Atlas comes back: the message goes out once and the waiting line clears", async () => {
     await hub.up("atlas");
     await choose(page);
     await expect.poll(() => hub.sends.map((row) => row.text), { timeout: 20_000 }).toEqual(["Send this when Atlas is back"]);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
+    await expect(heldLine(page)).toHaveCount(0);
     await expect(status).toBeHidden();
   });
   await journey.stage("Delivered: nothing says it will go out by itself", async () => {
     hub.deliverLatest(PELICAN);
-    await expect(page.getByRole("log").locator('.bub[data-state="delivered"] .conversation-delivery')).toBeVisible();
+    await expect(deliveredLine(page)).toBeVisible();
     await expect(status).toBeHidden();
     expect(hub.sends.map((row) => row.text)).toEqual(["Send this when Atlas is back"]);
   });
@@ -223,7 +237,7 @@ test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line 
     for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
       for (const colorScheme of ["light", "dark"] as const) {
         await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
-        await expect(page.getByRole("log").locator('.bub[data-state="delivered"] .conversation-delivery')).toBeVisible();
+        await expect(deliveredLine(page)).toBeVisible();
         await expect(status).toBeHidden();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
         await page.screenshot({ path: join(qa, `delivered-${colorScheme}-${size}.png`) });
@@ -255,14 +269,14 @@ test("HUB-J12 a held message another tab delivers clears this tab's waiting line
   await second.clock.install({ time: journeyNow() });
   const other = new HubDouble(second, { machines: [ATLAS], paired: ["atlas"], multiplex: true });
   await other.install();
-  const status = page.locator("#message-status");
+  const status = messageStatus(page);
   await journey.stage("This tab holds a message while the machine is away", async () => {
     await journey.open(); await choose(page);
     await second.goto(page.url()); await choose(second);
     await Promise.all([hub.down("atlas", { sockets: "close" }), other.down("atlas", { sockets: "close" })]);
-    await expect(page.locator("#conversation-connection")).not.toHaveAttribute("data-phase", "live");
+    await expect(connection(page)).not.toHaveAttribute("data-phase", "live");
     await send(page, "Held in the first tab");
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
+    await expect(heldLine(page)).toHaveCount(1);
     await expect(status).toContainText(/\S/);
   });
   await journey.stage("The other tab reconnects first and delivers it; this tab stops promising", async () => {
@@ -270,17 +284,17 @@ test("HUB-J12 a held message another tab delivers clears this tab's waiting line
     await choose(second);
     await expect.poll(() => other.sends.map((row) => row.text), { timeout: 20_000 }).toEqual(["Held in the first tab"]);
     other.deliverLatest(PELICAN);
-    await expect(second.getByRole("log").locator('.bub[data-state="delivered"] .conversation-delivery')).toBeVisible();
-    await expect(second.locator("#message-status")).toBeHidden();
+    await expect(deliveredLine(second)).toBeVisible();
+    await expect(messageStatus(second)).toBeHidden();
     // Nothing is held for this conversation any more, so the first tab no
     // longer says the message will go out by itself, even while still offline.
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    await expect(heldLine(page)).toHaveCount(0);
     await expect(status).toBeHidden();
   });
   await journey.stage("This tab comes back: no waiting line, sent once", async () => {
     await hub.up("atlas");
     await choose(page);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
     // Never a second copy of it here; the composer stays clear.
     expect(await page.getByRole("log").getByText("Held in the first tab").count()).toBeLessThanOrEqual(1);
     await expect(status).toBeHidden();
@@ -305,17 +319,17 @@ test("HUB-J12 cancellation persists and cannot drain after reload", journeyPart,
     expect(ink.label).toBe(ink.bubble);
     expect(ink.border).toBe(ink.bubble);
     await cancel.click();
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    await expect(heldLine(page)).toHaveCount(0);
     // A cancel is the operator's choice, not a failure: no red "unsent" chip.
     await expect(page.getByText("Cancel this waiting instruction", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /unsent message/ })).toHaveCount(0);
-    await expect(page.locator("#message-status")).toBeVisible();
+    await expect(messageStatus(page)).toBeVisible();
     expect((await journalRows(page, "sends")).some((row) => row.send?.text === "Cancel this waiting instruction")).toBe(false);
   });
   await journey.stage("Reload and reconnect do not resurrect the cancelled client reference", async () => {
     await page.reload(); await choose(page);
     hub.upstreamBack(PELICAN);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live", { timeout: 20_000 });
+    await expect(connection(page)).toHaveAttribute("data-phase", "live", { timeout: 20_000 });
     await expect(page.getByText("Cancel this waiting instruction", { exact: true })).toHaveCount(0);
     expect(hub.sends.some((row) => row.text === "Cancel this waiting instruction")).toBe(false);
   });
@@ -389,9 +403,10 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
     expect(order).toContain("restore-read");
     // cas-97d58 F05 (supersedes cas-e6d2's always-visible receipt): kept is the
     // quiet normal state, recorded on the bubble, never read out after every turn.
-    await expect(page.getByRole("log").locator('[data-stored="true"]').filter({ hasText: "A durable reply on this device" })).toHaveCount(1);
+    await expect(turn(page, "A durable reply on this device")).toHaveCount(1);
+    await expect(turn(page, "A durable reply on this device")).toHaveAttribute("data-stored", "true");
     await expect(page.getByRole("log")).not.toContainText("Read by operator");
-    await captureReceiptSurface(page, "stored");
+    await captureReceiptSurface(page, "stored", "A durable reply on this device");
   });
   await journey.stage("A reload replays the same immutable reply and re-ACKs without a second bubble", async () => {
     const before = hub.persistedReplies.length;
@@ -444,30 +459,31 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __failReplyStorage?: boolean }).__failReplyStorage = true; });
     id = hub.supervisorSays(PELICAN, "Replay this if the tab disappears");
-    await expect(page.getByRole("log").locator('[data-stored="false"]').filter({ hasText: "Replay this if the tab disappears" })).toHaveCount(1);
+    await expect(turn(page, "Replay this if the tab disappears")).toHaveCount(1);
+    await expect(turn(page, "Replay this if the tab disappears")).toHaveAttribute("data-stored", "false");
     expect(hub.persistedReplies.filter((row) => row.notification_id === id)).toHaveLength(0);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(0);
-    await captureReceiptSurface(page, "forwarded");
+    await captureReceiptSurface(page, "forwarded", "Replay this if the tab disappears");
   });
   await journey.stage("Reload recovers the unacknowledged reply from durable hub history", async () => {
     await page.reload(); await choose(page);
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);
     await expect(page.getByRole("log").getByText("Replay this if the tab disappears", { exact: true })).toHaveCount(1);
-    await expect(page.getByRole("log").locator('[data-stored="true"]').filter({ hasText: "Replay this if the tab disappears" })).toHaveCount(1);
+    await expect(turn(page, "Replay this if the tab disappears")).toHaveCount(1);
+    await expect(turn(page, "Replay this if the tab disappears")).toHaveAttribute("data-stored", "true");
   });
 });
 
 test("HUB-J3 replies read before a reload stay read after it (cas-97d58 F14)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
-  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-  const casSrc = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
+  const casSrc = conversationRow(page, "cas-src");
   await journey.stage("Read a reply, then move to another conversation", async () => {
     await journey.open();
     await casSrc.click();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     hub.supervisorSays(PELICAN, "Read before the reload.");
     await expect(page.getByRole("log").getByText("Read before the reload.")).toBeVisible();
-    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
+    await conversationRow(page, "gabber-studio").click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(casSrc.getByLabel(/unread/)).toHaveCount(0);
   });

@@ -3,6 +3,14 @@ import { join } from "node:path";
 import { test, expect, journeyPart } from "./journey";
 import { SCOPES, type LaunchWorld, type Machine } from "./hub-double";
 import { PELICAN } from "./world";
+import type { Locator, Page } from "@playwright/test";
+
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const casSrcRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
+const newSession = (page: Page) => page.getByRole("button", { name: "New session", exact: true });
+// The Accounts confirmation form; it stays mounted (hidden) between operations.
+const accountsEditor = (dialog: Locator) => dialog.getByTestId("accounts-editor");
+const usageFor = (dialog: Locator, account: string) => dialog.getByRole("status", { name: `Usage for ${account}`, exact: true });
 
 /** Atlas with one live supervisor on cas-src; ledger-api and old-notes are idle projects. */
 const ATLAS: Machine = {
@@ -49,14 +57,13 @@ test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true
 test("HUB-J13 grant launch and keep the permission across a reload", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });
-  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
 
   await journey.stage("A paired controller enables launch from Commander", async () => {
     await journey.open();
-    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toBeVisible();
+    await expect(casSrcRow(page)).toBeVisible();
     // cas-865c: New session is named by its goal before the permission too; it
     // opens the sheet's grant view, which explains what is asked.
-    const toggle = page.locator("#new-session-toggle");
+    const toggle = newSession(page);
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute("data-launch-grant", "true");
     await toggle.tap();
@@ -78,7 +85,7 @@ test("HUB-J13 grant launch and keep the permission across a reload", journeyPart
     await hub.seedPaired();
     await page.reload();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
-    await expect(page.locator("#new-session-toggle")).not.toHaveAttribute("data-launch-grant", "true");
+    await expect(newSession(page)).not.toHaveAttribute("data-launch-grant", "true");
   });
 });
 
@@ -111,7 +118,7 @@ test("HUB-J13 recover from a refused launch by browsing a folder", journeyPart, 
     // cas-cee5 (journey F32): the login command is code with Copy, as a
     // logged-out account row shows it, not prose to retype.
     await expect(alert).toBeVisible();
-    await expect(alert.locator(".launch-error-command code")).toHaveText("cas claude login main");
+    await expect(alert.getByRole("code")).toHaveText("cas claude login main");
     await alert.getByRole("button", { name: "Copy cas claude login main", exact: true }).tap();
     await expect(alert.getByRole("button", { name: "Copy cas claude login main", exact: true })).toBeVisible();
     await sheet.getByText("The machine's message").tap();
@@ -123,7 +130,7 @@ test("HUB-J13 recover from a refused launch by browsing a folder", journeyPart, 
   await journey.stage("Browse a launch folder and start a repository in it", async () => {
     await sheet.getByRole("tab", { name: "Browse" }).tap();
     await sheet.getByRole("button", { name: /clients/ }).tap();
-    await expect(sheet.locator(".launch-crumbs")).toContainText("clients");
+    await expect(sheet.getByRole("navigation", { name: "Folder", exact: true })).toContainText("clients");
     await sheet.getByRole("radio", { name: /acme-portal/ }).check();
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet).toBeHidden({ timeout: 15_000 });
@@ -141,8 +148,10 @@ test("HUB-J13 read the grant command and supervisor and worker hints on a phone"
     // here, so the sheet shows the command to run on the machine. It wraps
     // only between whole tokens at 390px ("pane:i / nput" was the defect).
     await journey.open();
-    await page.locator('#new-session-toggle[data-launch-grant="true"]').tap();
-    const code = sheet.locator(".launch-grant-command code");
+    await expect(newSession(page)).toHaveAttribute("data-launch-grant", "true");
+    await newSession(page).tap();
+    // The grant view's one visible command.
+    const code = sheet.getByRole("code");
     await expect(code).toContainText("session:launch");
     const splits = await code.evaluate((node) => {
       const chars: Array<{ char: string; top: number }> = [];
@@ -171,7 +180,8 @@ test("HUB-J13 allow launch with a long machine name on a phone", journeyPart, as
 
   await journey.stage("A long machine name fits the phone consent", async () => {
     await journey.open();
-    await page.locator('#new-session-toggle[data-launch-grant="true"]').tap();
+    await expect(newSession(page)).toHaveAttribute("data-launch-grant", "true");
+    await newSession(page).tap();
     const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${machine.label}` });
     await expect(allow).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close", exact: true })).toBeVisible();
@@ -220,12 +230,12 @@ for (const cell of consentCells) {
     await journey.stage(`${cell.id} the machine permission is readable before consent`, async () => {
       await page.getByRole("button", { name: "New session", exact: true }).click();
       await expect(sheet).toBeVisible();
-      await expect(sheet.locator(".launch-grant .launch-lead")).toContainText(machine.label);
+      await expect(sheet.getByTestId("launch-lead")).toContainText(machine.label);
       expect(hub.scopesFor("atlas")).not.toContain("session-launch");
       const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${machine.label}` });
       if (cell.readonly) {
         await expect(allow).toHaveCount(0);
-        await expect(sheet.locator(".launch-grant-command")).toContainText("session:launch");
+        await expect(sheet.getByRole("code")).toContainText("session:launch");
       } else {
         await expect(allow).toBeFocused();
         expect(await allow.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
@@ -325,27 +335,30 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await journey.stage(`Accounts at ${width} in ${colorScheme}`, async () => {
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
-      await expect(dialog.locator(".accounts-editor")).toBeHidden();
-      await expect(dialog.locator(".accounts-meter").filter({ has: page.locator('.accounts-bar > [data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
-      await expect(dialog.locator('.accounts-row[data-login-state="stale_login"]')).toBeVisible();
-      await expect(dialog.locator(".accounts-where").filter({ hasText: "~/.claude-spare" })).toBeVisible();
+      await expect(accountsEditor(dialog)).toBeHidden();
+      // The weekly meter at 38% used reads "62% left · resets <time>".
+      await expect(dialog.getByText(/^62% left/)).toContainText(/(AM|PM) [A-Z]/);
+      const stale = dialog.getByRole("listitem").filter({ hasText: "old@example.test" });
+      await expect(stale).toHaveAttribute("data-login-state", "stale_login");
+      await expect(stale).toBeVisible();
+      await expect(dialog.getByRole("paragraph").filter({ hasText: "~/.claude-spare" })).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (width === 390) {
         await page.mouse.move(200, 600);
         await page.mouse.wheel(0, 1800);
-        await expect(dialog.locator('.accounts-row:has(strong[title^="grok:"]) .accounts-readonly')).toBeInViewport();
+        await expect(dialog.getByRole("paragraph").filter({ hasText: /^Grok uses one account\./ })).toBeInViewport();
         await page.mouse.wheel(0, -1800);
         await expect(dialog.getByText("hello@example.test", { exact: true })).toBeInViewport();
       }
     });
     await journey.stage(`Clean up confirmation spans the sheet at ${width} in ${colorScheme}`, async () => {
-      const banner = dialog.locator(".accounts-cleanup-banner");
+      const banner = dialog.getByRole("note").filter({ hasText: /\d+ to clean up/ });
       const bannerHeight = (await banner.boundingBox())!.height;
       await banner.getByRole("button", { name: "Clean up", exact: true }).click();
-      const editor = dialog.locator(".accounts-editor");
+      const editor = accountsEditor(dialog);
       await expect(editor).toBeVisible();
-      await expect(editor.locator("input")).toBeFocused();
-      const box = (await editor.boundingBox())!, field = (await editor.locator("input").boundingBox())!, bar = (await banner.boundingBox())!;
+      await expect(editor.getByRole("textbox")).toBeFocused();
+      const box = (await editor.boundingBox())!, field = (await editor.getByRole("textbox").boundingBox())!, bar = (await banner.boundingBox())!;
       if (process.env.DELIVERY_QA) await page.screenshot({ path: join(process.env.DELIVERY_QA, `cleanup-${width}-${colorScheme}.png`) });
       // cas-9543: the shared dialog form is a zero-intrinsic-width grid; as a child of the banner's flex row it was a sliver.
       expect(box.width).toBeGreaterThanOrEqual(bar.width - 1);
@@ -357,49 +370,52 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     });
   }
   await journey.stage("Typed confirmation removes the intended profile and New session refreshes", async () => {
-    const row = dialog.locator("li").filter({ hasText: "hello@example.test" });
+    const row = dialog.getByRole("listitem").filter({ hasText: "hello@example.test" });
     // cas-eae3: the default account shows its Default badge, never Set default;
     // Rename, Disable and Remove live in its ⋯ menu.
     await expect(row.getByText("Default", { exact: true })).toBeVisible();
     await expect(row.getByRole("button", { name: "Set default", exact: true })).toHaveCount(0);
     await expect(row.getByRole("button", { name: "Remove", exact: true })).toBeHidden();
-    await row.locator(".accounts-more > summary").click();
+    await row.getByLabel("More actions for hello@example.test", { exact: true }).click();
     await row.getByRole("button", { name: "Remove", exact: true }).focus();
     await page.keyboard.press("Enter");
     await expect(dialog.getByRole("textbox", { name: /claude:spare/ })).toBeFocused();
     await dialog.getByRole("textbox").fill("cancelled confirmation");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(dialog.locator(".accounts-editor")).toBeHidden();
-    await expect(dialog.locator(".accounts-editor input")).toHaveValue("");
-    await expect(dialog.locator(".accounts-editor h3")).toBeEmpty();
+    await expect(accountsEditor(dialog)).toBeHidden();
+    await expect(accountsEditor(dialog).getByRole("textbox", { includeHidden: true })).toHaveValue("");
+    await expect(accountsEditor(dialog).getByRole("heading", { includeHidden: true })).toBeEmpty();
     await expect(row.getByRole("button", { name: "Remove", exact: true })).toBeFocused();
     expect(removed).toEqual([]);
     await page.keyboard.press("Enter");
     await dialog.getByRole("textbox").fill("claude:spare");
     await page.keyboard.press("Enter");
-    await expect(dialog.locator(".accounts-notice")).toBeVisible();
+    await expect(dialog.getByRole("status", { name: "Accounts notice", exact: true })).toBeVisible();
     await expect(dialog.getByText("hello@example.test", { exact: true })).toHaveCount(0);
-    await expect(dialog.locator(".accounts-editor")).toBeHidden();
-    await expect(dialog.locator(".accounts-editor input")).toHaveValue("");
-    await expect(dialog.locator(".accounts-editor h3")).toBeEmpty();
+    await expect(accountsEditor(dialog)).toBeHidden();
+    await expect(accountsEditor(dialog).getByRole("textbox", { includeHidden: true })).toHaveValue("");
+    await expect(accountsEditor(dialog).getByRole("heading", { includeHidden: true })).toBeEmpty();
     expect(removed).toEqual(["claude:spare"]);
     await dialog.getByRole("button", { name: "Close accounts" }).click();
     await expect(page.getByRole("button", { name: "Accounts", exact: true })).toBeFocused();
-    await page.locator("#new-session-toggle").click();
+    await newSession(page).click();
     const start = page.getByRole("dialog", { name: "New session", exact: true });
-    await expect(start.locator('input[name="launch-account"][value="main"]')).toBeVisible();
-    await expect(start.locator('input[name="launch-account"][value="spare"]')).toHaveCount(0);
+    // Account radios are named by the profile, then its tags.
+    await expect(start.getByRole("radio", { name: /^main(\s|$)/ })).toBeVisible();
+    await expect(start.getByRole("radio", { name: /^spare(\s|$)/, includeHidden: true })).toHaveCount(0);
   });
   await journey.stage("Read-only accounts have no rendered confirmation editor", async () => {
     hub.setScopes("atlas", ["machine-read", "session-read"]);
     await hub.seedPaired();
     await page.reload();
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
-    await expect(dialog.locator(".accounts-grant")).toBeVisible();
-    await expect(dialog.locator("[data-grant-command]")).toBeVisible();
-    for (const button of await dialog.locator("[data-operation]").all()) await expect(button).toBeDisabled();
-    await expect(dialog.locator(".accounts-editor")).toBeHidden();
-    expect(await dialog.locator(".accounts-editor").evaluate(node => node.getClientRects().length)).toBe(0);
+    const grant = dialog.getByRole("note").filter({ hasText: /^Read-only on / });
+    await expect(grant).toBeVisible();
+    await expect(grant.getByRole("button", { name: "Copy command", exact: true })).toBeVisible();
+    // Every account operation, including those folded in a closed ⋯ menu.
+    for (const button of await dialog.getByRole("group", { name: /^Actions for / }).getByRole("button", { includeHidden: true }).all()) await expect(button).toBeDisabled();
+    await expect(accountsEditor(dialog)).toBeHidden();
+    expect(await accountsEditor(dialog).evaluate(node => node.getClientRects().length)).toBe(0);
   });
 });
 
@@ -424,7 +440,7 @@ test("HUB-J13 check native account usage before starting without switching", jou
       const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
       for (const provider of ["claude", "codex"]) {
         await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
-        const result = dialog.locator(`[data-usage-account="${provider}:main"]`);
+        const result = usageFor(dialog, `${provider}:main`);
         await expect(result).toContainText(new RegExp("(?=[\\s\\S]*5h)(?=[\\s\\S]*23%)")); await expect(result).toContainText("44%");
         await expect(result).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)")); await expect(result).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*11)(?=[\\s\\S]*00)"));
         await expect(result).toContainText("Snapshot is stale");
@@ -437,7 +453,7 @@ test("HUB-J13 check native account usage before starting without switching", jou
       const dialog = page.getByRole("dialog", { name: "New session", exact: true });
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       await dialog.getByRole("button", { name: "Check usage for claude:support@petrastella.io", exact: true }).click();
-      await expect(dialog.locator('[data-usage-account="claude:support@petrastella.io"]')).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)"));
+      await expect(usageFor(dialog, "claude:support@petrastella.io")).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)"));
 
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       expect(hub.launches).toEqual([]);
@@ -470,14 +486,13 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
     ] } });
   });
   await journey.open();
-  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-  await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
+  await casSrcRow(page).click();
   for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
     await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
     await journey.stage(`Quality at ${width} ${colorScheme}`, async () => {
       // Desktop's shortcut starts in list search; phone's starts in the composer.
       // Locator.press focuses the visible field before sending the single chord.
-      const palette = page.locator("#command-palette");
+      const palette = page.getByRole("dialog", { name: "Commands" });
       const shortcutTarget = width === 1280
         ? page.getByRole("searchbox", { name: "Search conversations", exact: true })
         : page.getByRole("textbox", { name: "Your message", exact: true });
@@ -486,15 +501,21 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
       await palette.getByRole("button", { name: /^Quality/ }).click();
       const dialog = page.getByRole("dialog", { name: "Quality" });
       // Context burn per delivery doubled (14.7M against 5M): the headline names it with a factor on one line.
-      const factor = dialog.locator(".quality-factor");
+      // The hero verdict's one emphasis is its factor.
+      const factor = dialog.getByRole("emphasis");
       await expect(factor).toHaveText("2.9× worse");
       await expect(factor).toBeVisible();
       expect(await factor.evaluate(node => node.getClientRects().length)).toBe(1);
-      await expect(dialog.locator(".quality-hero svg")).toBeVisible();
-      await expect(dialog.locator(".quality-rubric:not(.quality-pending)")).toHaveCount(7);
-      await expect(dialog.locator(".quality-pending")).not.toHaveCount(0);
-      await expect(dialog.locator(".quality-wakes tbody tr")).toHaveCount(2);
-      await expect(dialog.locator(".quality-wakes")).toContainText("cosmic-pelican-12");
+      // The hero's figure holds its one chart.
+      await expect(dialog.getByRole("figure").getByRole("img")).toBeVisible();
+      // A rubric still awaiting a score says "awaiting …"; a scored one does not.
+      const rubrics = dialog.getByRole("region", { name: "Every rubric, by who it scores", exact: true }).getByRole("listitem");
+      await expect(rubrics.filter({ hasNotText: "awaiting " })).toHaveCount(7);
+      await expect(rubrics.filter({ hasText: "awaiting " })).not.toHaveCount(0);
+      const wakes = dialog.getByRole("table", { name: /^Supervisor tokens by wake source/ });
+      // Body rows lead with a row header; the head row has column headers only.
+      await expect(wakes.getByRole("row").filter({ has: page.getByRole("rowheader") })).toHaveCount(2);
+      await expect(wakes).toContainText("cosmic-pelican-12");
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`quality-${width}-${colorScheme}.png`) });
       await dialog.getByRole("button", { name: "Close quality" }).click();

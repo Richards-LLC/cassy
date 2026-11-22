@@ -1,37 +1,44 @@
 import { activate, phoneLayout, showConversationList } from "./responsive-goals";
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { test, expect, expectWholeFocusRing, holdPageClock } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 
+// The pairing dialog is named by its step's heading.
+const pairDialog = (page: Page) => page.getByRole("dialog", { name: /^(Pair a machine|Machine authorized)$/ });
+// The step's scroller: the invitation form, or the create/code section.
+const pairScroller = (dialog: Locator) => dialog.getByTestId("pair-flow").or(dialog.locator("#pair-form"));
+// The pairing status line; the share and copy confirmations are separate live regions.
+const pairStatus = (dialog: Locator) => dialog.getByRole("status", { name: "Pairing status" });
+
 /** Every field in the dialog is visible without scrolling it (F4). */
 async function everyFieldAboveTheFold(dialog: Locator): Promise<void> {
-  const fields = dialog.locator("input:visible");
+  const fields = dialog.getByRole("textbox").or(dialog.getByRole("checkbox")).filter({ visible: true });
   for (let index = 0; index < await fields.count(); index += 1) await expect(fields.nth(index)).toBeInViewport({ ratio: 1 });
-  expect(await dialog.locator("form, .pair-flow").first().evaluate((scroller: Element) => scroller.scrollTop), "the dialog opens unscrolled").toBe(0);
+  expect(await pairScroller(dialog).evaluate((scroller: Element) => scroller.scrollTop), "the dialog opens unscrolled").toBe(0);
 }
 
 test("HUB-J1 first open and pair a machine with a code", async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], relay: { machine: "atlas", claimAfter: 2, authorizeAfter: 4 } });
-  const dialog = page.locator("#pair-dialog");
+  const dialog = pairDialog(page);
   const phone = await phoneLayout(page);
 
   await journey.stage("Open Cassy Commander for the first time", async () => {
     await journey.open();
     await expect(page.getByRole("heading", { name: phone ? "Conversations" : "Stay close to the work.", exact: true })).toBeVisible();
-    await expect(page.locator("#conversation-empty")).toBeVisible();
+    await expect(page.getByTestId("conversation-empty")).toBeVisible();
   });
 
   await journey.stage("Ask for a pairing code", async () => {
     await activate(page, page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeVisible();
-    await expect(dialog.locator(".pair-lead").first()).toBeVisible();
-    await expect(dialog.locator(".pair-technical > summary")).toBeVisible();
+    await expect(dialog.getByText("This browser will be able to:")).toBeVisible();
+    await expect(dialog.getByText("Technical details", { exact: true })).toBeVisible();
     // cas-d043 G11: the dialog is named by its heading.
     await expect(page.getByRole("dialog", { name: "Pair a machine", exact: true })).toBeVisible();
     // cas-d043 H15: with nothing scrolled beneath it, the action bar is the
     // sheet itself (its hairline only), never a whiter slab.
-    const bar = dialog.locator(".dialog-actions");
-    const fieldsScroll = await dialog.locator(".pair-flow").evaluate((flow) => flow.scrollHeight > flow.clientHeight + 1);
+    const bar = dialog.getByTestId("dialog-actions");
+    const fieldsScroll = await dialog.getByTestId("pair-flow").evaluate((flow) => flow.scrollHeight > flow.clientHeight + 1);
     if (!fieldsScroll) expect(await bar.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
     await everyFieldAboveTheFold(dialog);
     // cas-d8a5 (journey F31): every value the countdown shows, from the code
@@ -52,13 +59,13 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(dialog.getByText("cas hub authorize KQ7M-4XTR")).toBeVisible();
     // cas-a56c: someone who does not run the machine can send the code on in
     // one tap, and the waiting line is not followed by an empty ruled row.
-    await expect(dialog.locator(".pair-share")).toBeVisible();
+    await expect(dialog.getByTestId("pair-share")).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Send the code" })).toBeVisible();
-    await expect(dialog.locator("#pair-status")).toBeVisible();
+    await expect(pairStatus(dialog)).toBeVisible();
     // cas-f281: the pairing-status poll can replace this dialog subtree after
     // the status becomes visible; assert the rendered bar as it settles.
     await expect(
-      dialog.locator(".dialog-actions"),
+      dialog.getByTestId("dialog-actions"),
       "the waiting line's rule is the only one above the bar",
     ).toHaveCSS("border-top-width", "0px");
   });
@@ -66,10 +73,10 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
   await journey.stage("Approve on the machine", async () => {
     await expect(dialog.getByRole("heading", { name: "Machine authorized" })).toBeVisible({ timeout: 15_000 });
     await expect(dialog.getByText("Atlas · Linux").first()).toBeVisible();
-    await expect(dialog.locator(".pair-machine")).toBeVisible();
+    await expect(dialog.getByTestId("pair-machine")).toBeVisible();
     // One heading per step: "Machine authorized" is said once (cas-b2e4 F01).
-    await expect(dialog.locator("#pair-title")).toHaveCount(1);
-    await expect(dialog.locator(".pair-status")).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Machine authorized", exact: true })).toHaveCount(1);
+    await expect(pairStatus(dialog)).toBeVisible();
     await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await everyFieldAboveTheFold(dialog);
     // The claim rebuilt the dialog; its countdown carried on from where it
@@ -85,7 +92,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(dialog).toBeHidden();
     // Desktop returns to Pair; phone focuses the reading region without
     // opening the soft keyboard (cas-12c29).
-    await expect(page.locator(phone ? ".conversation-reading.thread" : "#pair-toggle")).toBeFocused();
+    await expect(phone ? page.getByTestId("conversation-thread") : page.getByRole("complementary", { name: "Supervisor conversations" }).getByRole("button", { name: "Pair a machine", exact: true })).toBeFocused();
     if (phone) await expect(page.getByRole("textbox", { name: "Your message" })).not.toBeFocused();
     expect(hub.exchanges).toHaveLength(1);
     expect(hub.exchanges[0]).toMatchObject({ hub_id: "atlas", operator_label: "Daniel", token: "journey-invitation" });
@@ -96,7 +103,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await holdPageClock(page);
     try {
       await showConversationList(page);
-      const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
+      const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
       await expect(row).toBeVisible();
       // cas-d8a5 (journey F32): the row's spoken name reads as words: no run-on
       // badge, no empty part, no stray " , " before its time.
@@ -108,7 +115,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
       // cas-010f: a supervisor that has not written yet reads plainly. The
       // conversation is the only surface (cas-0546): the card offers no other
       // view, and the header carries Raw output and Interrupt.
-      const empty = page.locator(".thread .empty");
+      const empty = page.getByTestId("conversation-thread").getByTestId("empty");
       // A held clock must still drive the frame that presents a mounted thread.
       await expect.poll(async () => {
         await page.clock.runFor(32);
@@ -121,9 +128,9 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
       // The "connected" toast sits at the top, clear of the message box (journey F12).
       // Keep the actual active notice for geometry checks; expired notices
       // now correctly have no text (cas-326e8).
-      const toast = page.locator("#toast");
+      const toast = page.getByRole("status", { name: "Notice" });
       await expect(toast).toBeVisible();
-      const [notice, composer] = await Promise.all([toast.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
+      const [notice, composer] = await Promise.all([toast.boundingBox(), page.getByTestId("conversation-composer").boundingBox()]);
       expect(notice!.y + notice!.height, "toast above the composer").toBeLessThan(composer!.y);
       // It covers no heading either: at the top right it used to land on the
       // context rail's "Tasks & progress" (3.30.0 journey F8).

@@ -11,7 +11,7 @@ test("HUB-J6 reply by voice", async ({ page, journey }) => {
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / }).click();
     await expect(page.getByRole("button", { name: "Start listening" })).toBeEnabled();
   });
 

@@ -3,6 +3,18 @@ import { test, expect, journeyPart } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
 import { journeyStamp } from "./clock";
+import type { Page } from "@playwright/test";
+
+const conversationList = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" });
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page, project: string) => conversationList(page).getByRole("button", { name: new RegExp(`^${project} on `) });
+const conversationRows = (page: Page) => conversationList(page).getByRole("button", { name: /^\S+ on / });
+const heading = (page: Page) => page.getByTestId("conversation-heading");
+const headingTitle = (page: Page) => heading(page).getByRole("heading", { level: 1 });
+// The header's host line is titled "<machine> · <codename>".
+const hostLine = (page: Page, title: string) => heading(page).getByTitle(title, { exact: true });
+const commandPalette = (page: Page) => page.getByRole("dialog", { name: "Commands" });
+const jumpCommands = (page: Page) => commandPalette(page).getByRole("button", { name: /^Jump to / });
 
 /**
  * cas-9772: wait for `ready` bounded by protocol events, not wall time. It
@@ -57,21 +69,21 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await journey.open();
     // Each machine wears its own accent: the row avatars differ, and the
     // header avatar matches the row that was opened (journey F16).
-    const avatar = (project: RegExp) => list.getByRole("button", { name: project }).and(list.locator(".conversation-row")).locator(".conversation-avatar");
+    const avatar = (project: string) => conversationRow(page, project).getByTestId("conversation-avatar");
     const colour = (locator: ReturnType<typeof avatar>) => locator.evaluate((element) => getComputedStyle(element).backgroundColor);
-    expect(await colour(avatar(/cas-src/))).not.toBe(await colour(avatar(/gabber-studio/)));
-    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
-    await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
-    expect(await page.locator(".conversation-identity .conversation-avatar").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe(await colour(avatar(/cas-src/)));
-    await expect(page.locator(".conversation-host")).toContainText(`Atlas · Linux · ${PELICAN}`);
+    expect(await colour(avatar("cas-src"))).not.toBe(await colour(avatar("gabber-studio")));
+    await conversationRow(page, "cas-src").click();
+    await expect(headingTitle(page)).toHaveText("cas-src");
+    expect(await heading(page).getByTestId("conversation-avatar").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe(await colour(avatar("cas-src")));
+    await expect(hostLine(page, `Atlas · Linux · ${PELICAN}`)).toContainText(`Atlas · Linux · ${PELICAN}`);
     await composer.fill("Draft: ask about the flaky pairing test");
   });
 
   await journey.stage("Switch to the Mac and send there", async () => {
     await expect(back).toBeHidden();
-    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
-    await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
-    await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
+    await conversationRow(page, "gabber-studio").click();
+    await expect(headingTitle(page)).toHaveText("gabber-studio");
+    await expect(hostLine(page, `Studio Mac · macOS · ${OTTER}`)).toContainText(`Studio Mac · macOS · ${OTTER}`);
     await expect(composer).toHaveValue("");
     await composer.fill("Is the Mac build green?");
     const sent = hub.nextSend();
@@ -80,8 +92,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   });
 
   await journey.stage("Come back to the draft", async () => {
-    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
-    await expect(page.locator(".conversation-host")).toBeVisible();
+    await conversationRow(page, "cas-src").click();
+    await expect(hostLine(page, `Atlas · Linux · ${PELICAN}`)).toBeVisible();
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
@@ -105,11 +117,11 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.keyboard.press("ControlOrMeta+k");
     await expect(search).toBeFocused();
     await page.keyboard.press("ControlOrMeta+k");
-    const palette = page.locator("#command-palette");
+    const palette = commandPalette(page);
     await expect(palette).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
-    await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
+    await expect(headingTitle(page)).toHaveText("cas-src");
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
   });
 
@@ -117,16 +129,16 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // cas-7eaf: none of these routes leaves focus on <body>.
     // Opening a conversation from the list by Enter or a click lands in its
     // reply box; the list stays beside the thread on a desktop (cas-479a).
-    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).focus();
+    await conversationRow(page, "gabber-studio").focus();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
-    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
     // Focus the operator moves after the pick is theirs: the landing that
     // waits for the conversation must not pull it back (cas-7eaf QA F01).
-    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
+    await conversationRow(page, "gabber-studio").click();
     const raw = page.getByRole("button", { name: "Raw output", exact: true });
     await raw.focus();
     // cas-9772: let it attach and a full render round pass, counted in the
@@ -140,8 +152,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.keyboard.press("ControlOrMeta+k");
     await page.getByRole("searchbox", { name: "Filter commands" }).fill("cas-src");
     await page.keyboard.press("Enter");
-    await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
+    await expect(commandPalette(page)).toBeHidden();
+    await expect(headingTitle(page)).toHaveText("cas-src");
     await expect.poll(() => page.evaluate(() => document.activeElement !== document.body && document.activeElement !== null)).toBe(true);
   });
 
@@ -149,35 +161,35 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // cas-50a7: each machine's accent is stored when it first pairs, so a new
     // pairing never re-colours the fleet, and a third machine gets its own.
     await expect(composer).toBeVisible();
-    const avatar = (project: RegExp) => list.getByRole("button", { name: project }).and(list.locator(".conversation-row")).locator(".conversation-avatar");
-    const colour = (project: RegExp) => avatar(project).evaluate((element) => getComputedStyle(element).backgroundColor);
-    const atlas = await colour(/cas-src/);
-    const studio = await colour(/gabber-studio/);
+    const avatar = (project: string) => conversationRow(page, project).getByTestId("conversation-avatar");
+    const colour = (project: string) => avatar(project).evaluate((element) => getComputedStyle(element).backgroundColor);
+    const atlas = await colour("cas-src");
+    const studio = await colour("gabber-studio");
     await page.goto("about:blank");
     await page.goto(`./#pair=A1pha0xZt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRaQ&hub=alpha&hub_url=${encodeURIComponent("https://alpha.test")}&machine=${encodeURIComponent("Alpha · Linux")}&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt`);
-    const dialog = page.locator("#pair-dialog");
+    const dialog = page.getByRole("dialog", { name: /^(?:Pair a machine|Machine authorized)$/ });
     await dialog.getByRole("textbox", { name: /Your name/ }).fill("Daniel");
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
     const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
     if (await back.isVisible().catch(() => false)) await back.click();
-    await within("the paired machine's sessions are listed", () => hub.catalogFetchCount("alpha"), 3, () => list.getByRole("button", { name: /orion/ }).and(list.locator(".conversation-row")).isVisible());
-    expect(await colour(/cas-src/), "Atlas keeps its accent").toBe(atlas);
-    expect(await colour(/gabber-studio/), "Studio keeps its accent").toBe(studio);
-    expect(await colour(/orion/), "the new machine gets its own accent").not.toBe(atlas);
-    expect(await colour(/orion/)).not.toBe(studio);
+    await within("the paired machine's sessions are listed", () => hub.catalogFetchCount("alpha"), 3, () => conversationRow(page, "orion").isVisible());
+    expect(await colour("cas-src"), "Atlas keeps its accent").toBe(atlas);
+    expect(await colour("gabber-studio"), "Studio keeps its accent").toBe(studio);
+    expect(await colour("orion"), "the new machine gets its own accent").not.toBe(atlas);
+    expect(await colour("orion")).not.toBe(studio);
     // And after a reload, from storage.
     await page.reload();
-    await expect(list.getByRole("button", { name: /orion/ }).and(list.locator(".conversation-row"))).toBeVisible();
+    await expect(conversationRow(page, "orion")).toBeVisible();
     // cas-c9a3: rows refill their markup as each machine's catalog lands after
     // the reload (conversation-list.ts sets innerHTML when it changes), so a
     // one-shot read can hit an avatar that was just replaced and read "".
     // The colour is asserted on the avatar as rendered, re-resolved until it is.
-    await expect(avatar(/cas-src/), "Atlas keeps its accent after a reload").toHaveCSS("background-color", atlas);
-    await expect(avatar(/gabber-studio/), "Studio keeps its accent after a reload").toHaveCSS("background-color", studio);
+    await expect(avatar("cas-src"), "Atlas keeps its accent after a reload").toHaveCSS("background-color", atlas);
+    await expect(avatar("gabber-studio"), "Studio keeps its accent after a reload").toHaveCSS("background-color", studio);
     // cas-7752: the draft started on the Linux machine survived the pair link
     // opened in this tab and the reload: it is there when I return to it...
-    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
     // ...and once it is sent, it does not come back after another reload.
     const sent = hub.nextSend();
@@ -185,7 +197,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Draft: ask about the flaky pairing test" });
     await expect(composer).toHaveValue("");
     await page.reload();
-    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).toHaveValue("");
   });
@@ -193,25 +205,27 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   await journey.stage("Know each conversation and machine by name", async () => {
     // 3.30.0 journey F2/F3: the list, the conversation header and the
     // palette lead with the project; the codename is secondary.
-    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
-    await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
-    await expect(page.locator(".conversation-host")).toContainText(`Atlas · Linux · ${PELICAN}`);
+    await conversationRow(page, "cas-src").click();
+    await expect(headingTitle(page)).toHaveText("cas-src");
+    await expect(hostLine(page, `Atlas · Linux · ${PELICAN}`)).toContainText(`Atlas · Linux · ${PELICAN}`);
     // The header's avatar reads the machine's own name, never a separator.
-    await expect(page.locator(".conversation-identity .conversation-avatar")).toHaveText("A");
+    await expect(heading(page).getByTestId("conversation-avatar")).toHaveText("A");
     // Each list row's spoken name leads with its project, then its machine.
     for (const [project, machine] of [["cas-src", "Atlas"], ["gabber-studio", "Studio Mac"], ["orion", "Alpha"], ["lighthouse", "Alpha"]]) {
-      await expect(list.getByRole("button", { name: new RegExp(`^${project} on ${machine}`) }).and(list.locator(".conversation-row")), `${project} leads its row`).toHaveCount(1);
+      await expect(list.getByRole("button", { name: new RegExp(`^${project} on ${machine}`) }), `${project} leads its row`).toHaveCount(1);
     }
     // The palette: "Jump to <project>", the codename first on the line beneath
     // (a session summary, when one has arrived, follows the machine).
     await page.getByRole("button", { name: "Appearance & commands" }).click();
-    const palette = page.locator("#command-palette");
+    const palette = commandPalette(page);
     await expect(palette).toBeVisible();
-    const jump = (project: string) => palette.locator(".palette-command[data-palette-session]").filter({ hasText: `Jump to ${project}` });
-    await expect(jump("gabber-studio").locator("span")).toContainText("gabber-studio");
-    await expect(jump("gabber-studio").locator("small")).toHaveText(new RegExp(`^${OTTER} · Studio Mac · macOS`));
-    await expect(jump("cas-src").locator("small")).toHaveText(new RegExp(`^${PELICAN} · Atlas · Linux`));
-    await expect(jump("orion").locator("small")).toHaveText(/^keen-lynx-1 · Alpha · Linux/);
+    const jump = (project: string) => jumpCommands(page).filter({ hasText: `Jump to ${project}` });
+    // The line beneath is the command's only text that does not start "Jump to".
+    const beneath = (project: string, line: RegExp) => jump(project).getByText(line);
+    await expect(jump("gabber-studio").getByText("Jump to gabber-studio", { exact: true })).toContainText("gabber-studio");
+    await expect(beneath("gabber-studio", new RegExp(`^${OTTER} · Studio Mac · macOS`))).toHaveText(new RegExp(`^${OTTER} · Studio Mac · macOS`));
+    await expect(beneath("cas-src", new RegExp(`^${PELICAN} · Atlas · Linux`))).toHaveText(new RegExp(`^${PELICAN} · Atlas · Linux`));
+    await expect(beneath("orion", /^keen-lynx-1 · Alpha · Linux/)).toHaveText(/^keen-lynx-1 · Alpha · Linux/);
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
   });
@@ -220,25 +234,25 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // cas-645e: the list and the palette agree. A live supervisor that has
     // not spawned workers is one the operator can talk to; a stale or
     // supervisor-less session is hidden from both.
-    await expect(list.getByRole("button", { name: /lighthouse/ }).and(list.locator(".conversation-row"))).toBeVisible();
-    const listRows = await list.locator(".conversation-row").count();
+    await expect(conversationRow(page, "lighthouse")).toBeVisible();
+    const listRows = await conversationRows(page).count();
     await page.getByRole("button", { name: "Appearance & commands" }).click();
-    const palette = page.locator("#command-palette");
+    const palette = commandPalette(page);
     await expect(palette).toBeVisible();
-    const jumps = palette.locator(".palette-command[data-palette-session]");
+    const jumps = jumpCommands(page);
     await expect(jumps.filter({ hasText: "Jump to lighthouse" })).toHaveCount(1);
     const jumpSessions = (await jumps.evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.paletteSession ?? ""))).sort();
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
     expect(jumpSessions, "palette Jump rows").toHaveLength(4);
     expect(listRows, "conversation list rows").toBe(jumpSessions.length);
-    for (const hidden of [/attic/, /nobody/]) await expect(list.getByRole("button", { name: hidden }).and(list.locator(".conversation-row"))).toHaveCount(0);
+    for (const hidden of ["attic", "nobody"]) await expect(conversationRow(page, hidden)).toHaveCount(0);
   });
 
   await journey.stage("Hear the open conversation as the page heading", async () => {
     // Journey F19: the goal state (final.aria.yml) names the open
     // conversation in the page heading and the tab title.
-    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await expect(page.locator("body")).toMatchAriaSnapshot(`- heading "cas-src" [level=1]`);
     await expect(page).toHaveTitle(`cas-src ${PELICAN} — Cassy Cloud`);
   });
@@ -283,7 +297,7 @@ for (const width of [1280, 390]) {
       const hub = await journey.hub({ machines: [soundwave, prowl], paired: ["soundwave", "prowl"] });
       await journey.open();
       const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-      await expect(list.locator(".conversation-row")).toHaveCount(4);
+      await expect(conversationRows(page)).toHaveCount(4);
       // Raw input, as a hand gives it: a press and a release with nothing
       // between them but the live updates (no action overlay pauses).
       const input = await page.context().newCDPSession(page);
@@ -317,6 +331,9 @@ for (const width of [1280, 390]) {
         }), supervisor);
         expect(opened, `${what}: ${supervisor} opened`).toBeLessThanOrEqual(150);
       };
+      // A row by its spoken name: "<project> on <machine>, <codename>, …".
+      const rowOf = (owner: Machine, session: { supervisor: string; project_dir: string }) =>
+        list.getByRole("button", { name: new RegExp(`^${session.project_dir.split("/").at(-1)} on ${owner.label.split(" · ")[0]}, ${session.supervisor}(?:,|$)`) });
       let stamp = -3_600_000;
       let last = "";
       await journey.stage("Every tap opens the conversation it pressed, while the list is changing", async () => {
@@ -329,7 +346,7 @@ for (const width of [1280, 390]) {
           const key = `${owner.id}:${target.name}`;
           last = key;
           if (width === 390) await showConversationList(page);
-          const row = list.locator(`.conversation-row[data-thread-key="${key}"]`);
+          const row = rowOf(owner, target);
           await row.scrollIntoViewIfNeeded();
           const box = (await row.boundingBox())!;
           const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -344,7 +361,7 @@ for (const width of [1280, 390]) {
             stamp += 61_000;
             other!.last_activity_at = journeyStamp(stamp);
             await hub.announceCatalog(prowl.id);
-            await expect(list.locator('.conversation-row[data-machine-id="prowl"]').first(),
+            await expect(list.getByRole("button", { name: /^\S+ on prowl, / }).first(),
               `tap ${tap}: activity never re-sorts the prowl group`).toHaveAttribute("data-thread-key", `${prowl.id}:calm-raven-72`);
             if (soundwave.sessions.some((session) => session.name === PASSING.name && session.liveness === "live")) {
               soundwave.sessions = soundwave.sessions.map((session) => session.name === PASSING.name ? { ...session, liveness: "stale_metadata" as const } : session);
@@ -358,7 +375,7 @@ for (const width of [1280, 390]) {
             // A fulfilled catalog request is not a rendered catalog. Observe
             // each toggle before the next tap can toggle it back, otherwise
             // coalesced reads can skip the intervening start/end altogether.
-            await expect(list.locator(`.conversation-row[data-thread-key="${soundwave.id}:${PASSING.name}"]`),
+            await expect(rowOf(soundwave, PASSING),
               `tap ${tap}: the catalog rendered the session start/end`).toHaveCount(soundwave.sessions.some(session => session.name === PASSING.name && session.liveness === "live") ? 1 : 0);
             // Compare this press's node, not a sticky flag on reused rows that
             // may have been pressed in an earlier iteration.
@@ -378,7 +395,7 @@ for (const width of [1280, 390]) {
           const key = `${soundwave.id}:${target.name}`;
           last = key;
           if (width === 390) await showConversationList(page);
-          const row = list.locator(`.conversation-row[data-thread-key="${key}"]`);
+          const row = rowOf(soundwave, target);
           await row.scrollIntoViewIfNeeded();
           const box = (await row.boundingBox())!;
           await press(box.x + box.width / 2, box.y + box.height / 2);
@@ -387,9 +404,10 @@ for (const width of [1280, 390]) {
         }
       });
       // The last tap won: the open conversation and the list agree.
-      await expect(page.locator(".conversation-host .codename")).toHaveText(last.split(":")[1]!);
+      await expect(heading(page).getByTestId("codename")).toHaveText(last.split(":")[1]!);
       // (On a phone the list is a screen of its own; going back to it leaves the conversation.)
-      if (width !== 390) await expect(list.locator('.conversation-row[aria-current="true"]')).toHaveAttribute("data-thread-key", last);
+      // getByRole has no aria-current filter; only rows carry aria-current in the list.
+      if (width !== 390) await expect(list.locator('[aria-current="true"]')).toHaveAttribute("data-thread-key", last);
     });
   });
 }

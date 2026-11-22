@@ -2,6 +2,12 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
+import type { Page } from "@playwright/test";
+
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
+// The slot is only ever created as the stage's sole child (ensureConversationStage).
+const threadSlot = (page: Page) => page.getByTestId("conversation-thread-slot");
 
 for (const colorScheme of ["light", "dark"] as const) {
   test.describe(colorScheme, () => {
@@ -10,17 +16,17 @@ for (const colorScheme of ["light", "dark"] as const) {
       const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
       await journey.stage("Read the phone conversation, the only thing in its stage", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        const thread = page.locator(".conversation-reading.thread");
+        await conversationRow(page).click();
+        const thread = page.getByTestId("conversation-thread");
         await expect(thread).toBeVisible();
         // cas-f285: the thread mounts straight into the stage; no pane host,
         // terminal mount or canvas sits beside it.
-        await expect(page.locator("#conversation-stage > .conversation-thread-slot")).toBeVisible();
+        await expect(threadSlot(page)).toBeVisible();
         await expect(page.locator(".pane-host, .terminal-mount, canvas")).toHaveCount(0);
         hub.supervisorSays(PELICAN, "The phone conversation stays readable.");
         await expect(page.getByRole("log").getByText("The phone conversation stays readable.")).toBeVisible();
         expect(await page.locator("body").ariaSnapshot(), "no terminal in the accessibility tree").not.toContain("The supervisor is ready.");
-        const geometry = await page.locator("#conversation-stage > .conversation-thread-slot").evaluate((slot) => {
+        const geometry = await page.locator('#conversation-stage > [data-testid="conversation-thread-slot"]').evaluate((slot) => {
           const box = (node: Element) => {
             const r = node.getBoundingClientRect();
             const s = getComputedStyle(node);

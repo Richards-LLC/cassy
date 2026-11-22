@@ -2,6 +2,17 @@ import { activate, phoneLayout, showConversationList } from "./responsive-goals"
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, STUDIO } from "./world";
 import { SCOPES } from "./hub-double";
+import type { Locator, Page } from "@playwright/test";
+
+// A link opens the confirmation form, titled "Pair a machine".
+const pairDialog = (page: Page) => page.getByRole("dialog", { name: "Pair a machine", exact: true });
+const technicalSummary = (dialog: Locator) => dialog.getByText("Technical details", { exact: true });
+// The <details> disclosure (role group) that holds the Technical details summary.
+const technicalDetails = (page: Page, dialog: Locator) => dialog.getByRole("group").filter({ has: page.getByText("Technical details", { exact: true }) });
+// One permission line in a machine's Fleet permissions region, found by its permission name.
+const OPERATE = "Manage workers and tasks";
+const MANAGE = "Stop and restart workers and sessions";
+const permission = (page: Page, fleet: Locator, name: string) => fleet.getByTestId("fleet-permission").filter({ has: page.getByText(name, { exact: true }) });
 
 // A first link, for another machine, that the operator opened earlier in the same tab.
 const EARLIER_TOKEN = "Zq3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRa";
@@ -12,18 +23,19 @@ const EARLIER_TOKEN = "Zq3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRa";
 test("HUB-J2 pair a link that grants factory:manage, and see a pairing without it named (cas-d382)", journeyPart, async ({ page, journey }) => {
   const phone = await phoneLayout(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["studio"], scopes: { studio: SCOPES } });
-  const dialog = page.locator("#pair-dialog");
+  const dialog = pairDialog(page);
   const MANAGE_TOKEN = "M3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRaQ";
   await journey.stage("Open a link that grants factory:manage", async () => {
     await journey.open();
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${MANAGE_TOKEN}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas%20%C2%B7%20Linux&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage`);
-    await expect(dialog.locator('input[name="url"]')).toBeVisible();
-    await expect(dialog.locator(".pair-lead").first()).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Machine's hub address", exact: true })).toBeVisible();
+    // The capability lead; a withheld-scopes lead after it starts "This link does not let it".
+    await expect(dialog.getByText(/^This browser will be able to:/)).toBeVisible();
     // Native disclosure scrolling is tracked separately in cas-207a.
     // Desktop retains the raw checkbox; both layouts verify visible grants
     // and the exact requested scopes at exchange.
     if (!phone) {
-      await dialog.locator(".pair-technical > summary").click();
+      await technicalSummary(dialog).click();
       await expect(dialog.getByRole("checkbox", { name: "factory:manage", exact: true })).toBeChecked();
     }
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
@@ -36,16 +48,17 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
   });
   await journey.stage("Paired machines names each pairing's fleet permissions", async () => {
     await showConversationList(page);
-    await activate(page, page.locator("#paired-machines-toggle"));
-    const machines = page.locator("#paired-machines-dialog");
+    // The footer's paired-machines button: "<n> paired machines <state>".
+    await activate(page, page.getByRole("button", { name: /^2 paired machines / }));
+    const machines = page.getByRole("dialog", { name: "Paired machines", exact: true });
     await expect(machines).toBeVisible();
-    const atlas = machines.locator('[data-machine-id="atlas"] .paired-machine-fleet');
-    const studio = machines.locator('[data-machine-id="studio"] .paired-machine-fleet');
-    await expect(atlas.locator('[data-permission="manage"] .fleet-permission-state')).toBeVisible();
-    await expect(atlas.locator('[data-permission="manage"] .fleet-permission-name')).toBeVisible();
+    const atlas = machines.getByRole("region", { name: /^Fleet permissions on Atlas/ });
+    const studio = machines.getByRole("region", { name: /^Fleet permissions on Studio/ });
+    await expect(permission(page, atlas, MANAGE).getByTestId("fleet-permission-state")).toBeVisible();
+    await expect(permission(page, atlas, MANAGE).getByText(MANAGE, { exact: true })).toBeVisible();
     // Studio was paired for control only: explain the missing permission
     // before its re-pair command, without a disabled fleet-action lookalike.
-    const manage = studio.locator('[data-permission="manage"]');
+    const manage = permission(page, studio, MANAGE);
     // The command is reachable by keyboard and copies exactly.
     const copy = manage.getByRole("button", { name: "Copy command" });
     if (phone) await activate(page, copy);
@@ -56,11 +69,12 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     // A control pairing may allow managing workers itself, once: the first
     // press says what it allows, the second grants it.
-    const allow = studio.locator('[data-permission="operate"]').getByRole("button", { name: "Allow managing workers" });
+    // The name matches both "Allow managing workers" and its "Confirm: allow managing workers on …" press.
+    const allow = permission(page, studio, OPERATE).getByRole("button", { name: "Allow managing workers" });
     await activate(page, allow);
-    await expect(studio.locator('[data-permission="operate"] .fleet-permission-allow')).toBeVisible();
-    await activate(page, studio.locator('[data-permission="operate"] .fleet-permission-allow'));
-    await expect(studio.locator('[data-permission="operate"] .fleet-permission-state')).toBeVisible();
+    await expect(allow).toBeVisible();
+    await activate(page, allow);
+    await expect(permission(page, studio, OPERATE).getByTestId("fleet-permission-state")).toBeVisible();
   });
 });
 
@@ -74,10 +88,11 @@ for (const scheme of ["light", "dark"] as const) {
 
     test(`HUB-J2 a tap opens Technical details on a scrolled invitation form, phone ${scheme} (cas-207a)`, journeyPart, async ({ page, journey }) => {
       await journey.hub({ machines: [ATLAS, STUDIO] });
-      const dialog = page.locator("#pair-dialog");
+      const dialog = pairDialog(page);
+      // Scroll probe only: the form is the dialog's scroller.
       const form = dialog.locator("#pair-form");
       const name = dialog.getByRole("textbox", { name: "Your name (shown on the machine)" });
-      const summary = dialog.locator(".pair-technical > summary");
+      const summary = technicalSummary(dialog);
 
       await journey.stage("Scroll the focused invitation form and tap Technical details", async () => {
         await page.goto(`./#pair=${EARLIER_TOKEN}&hub=studio&hub_url=https%3A%2F%2Fstudio.test&machine=Studio%20Mac&scopes=machine:read,session:read,pane:read`);
@@ -89,11 +104,11 @@ for (const scheme of ["light", "dark"] as const) {
 
         await summary.tap();
 
-        await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
+        await expect(technicalDetails(page, dialog)).toHaveAttribute("open", "");
         // Let the tap's click task and the rebuild it released both run: on the
         // page clock, timers and frames included, not a fixed pause (cas-c4b2).
         await page.clock.runFor(100);
-        await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
+        await expect(technicalDetails(page, dialog)).toHaveAttribute("open", "");
         for (const scope of ["machine:read", "session:read", "pane:read"]) {
           await expect(dialog.getByRole("checkbox", { name: scope, exact: true })).toBeChecked();
         }

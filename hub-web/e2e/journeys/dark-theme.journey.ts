@@ -1,6 +1,13 @@
 import { phoneLayout, phoneDark } from "./responsive-goals";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
+import type { Page } from "@playwright/test";
+
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
+// The palette stays in the DOM when closed, so its rows are read with includeHidden.
+const commandPalette = (page: Page) => page.getByRole("dialog", { name: "Commands", includeHidden: true });
+const appearanceRow = (page: Page, scheme: string) => commandPalette(page).getByRole("button", { name: new RegExp(`^Appearance · ${scheme}`, "i"), includeHidden: true });
 
 test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
   if (await phoneLayout(page)) { await phoneDark(page, journey); return; }
@@ -8,7 +15,7 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
 
   await journey.stage("Open the conversation in the light theme", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Light-stage dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
     hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
@@ -18,13 +25,14 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
     // Ctrl+K lands in the list search; the appearance lives behind the list's Appearance & commands button.
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     // The row in effect says so (F20): System, with a check and "Current".
-    const current = page.locator("#command-palette [data-palette-scheme][aria-current='true']");
+    // scheme.ts marks the row in effect with aria-current and the description "Current" together.
+    const current = commandPalette(page).getByRole("button", { name: /^Appearance · \S+\s*Current/ });
     await expect(current).toHaveCount(1);
     await expect(current).toHaveAttribute("data-palette-scheme", "system");
-    await expect(current.locator(".palette-check")).toBeVisible();
-    await expect(current.locator("small")).toBeVisible();
+    await expect(current.getByText("✓", { exact: true })).toBeVisible();
+    await expect(current.getByText(/^Current/)).toBeVisible();
     // cas-865c: every Appearance row fits the palette at 1280×720.
-    for (const scheme of ["system", "light", "dark"]) await expect(page.locator(`#command-palette [data-palette-scheme='${scheme}']`)).toBeInViewport({ ratio: 1 });
+    for (const scheme of ["system", "light", "dark"]) await expect(appearanceRow(page, scheme)).toBeInViewport({ ratio: 1 });
     await page.getByRole("button", { name: /^Appearance · Dark/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-scheme", "dark");
   });
@@ -37,7 +45,7 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
   await journey.stage("The choice survives a reload", async () => {
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("data-scheme", "dark");
-    await expect(page.locator("#command-palette [data-palette-scheme='dark']")).toHaveAttribute("aria-current", "true");
+    await expect(appearanceRow(page, "dark")).toHaveAttribute("aria-current", "true");
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.getByRole("log").getByText("Status: the Linux lane is green; the Mac lane is still running.")).toBeVisible();
   });
@@ -55,7 +63,7 @@ test("HUB-J10 high contrast keeps the open conversation and Send marked (cas-66f
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.stage("Open the conversation in dark", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Contrast-stage dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
     hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
@@ -68,9 +76,9 @@ test("HUB-J10 high contrast keeps the open conversation and Send marked (cas-66f
   await journey.stage("High contrast keeps the open conversation and Send marked", async () => {
     // Windows high contrast (forced colours) drops author tints and fills; the
     // open row must still read as selected and Send as a button (cas-ac7d).
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
+    const row = conversationRow(page);
     const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
-    const sidebar = page.locator(".conversation-sidebar");
+    const sidebar = page.getByRole("complementary", { name: "Supervisor conversations" });
     const bg = (locator: typeof row) => locator.evaluate((element) => getComputedStyle(element).backgroundColor);
     // CSSOM can serialize equivalent forced-colour pixels in different color
     // spaces; compare the browser-rendered pixel, not the string.
@@ -111,7 +119,7 @@ test("HUB-J10 high contrast keeps the open conversation and Send marked (cas-66f
       await page.mouse.move(700, 300);
       // The coalesced status line's 10px clamp spacer is a border; forced
       // colours must not paint it as a bar in the text colour (journey F11).
-      const spacer = await page.getByRole("log").locator(".coalesce").first().evaluate((element) => {
+      const spacer = await page.getByRole("log").getByTestId("coalesce").evaluate((element) => {
         const style = getComputedStyle(element);
         return { width: style.borderBottomWidth, border: style.borderBottomColor, fill: style.backgroundColor, text: style.color };
       });

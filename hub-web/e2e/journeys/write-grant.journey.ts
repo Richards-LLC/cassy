@@ -1,6 +1,12 @@
 import { clickConversationHeaderAction, test, expect, journeyPart } from "./journey";
 import { SCOPES, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
+import type { Page } from "@playwright/test";
+
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
+const statusView = (page: Page) => page.getByTestId("status-view");
+const grantResult = (page: Page) => statusView(page).getByRole("status", { name: "Write access result", exact: true });
 
 // cas-ab04 (GH #1169 part 2): from a paired device the operator grants the
 // agents on one task write access to a folder outside their worktree, until
@@ -29,12 +35,12 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
     test.use({ viewport: { width, height: 844 }, colorScheme });
     const body = async ({ page, journey }: { page: import("@playwright/test").Page; journey: any }) => {
       const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
-      const rail = page.locator("#status-view");
-      const panel = rail.locator(".write-grant");
-      const announcer = page.locator("#fleet-ops-announcer");
+      const rail = statusView(page);
+      const panel = rail.getByTestId("write-grant");
+      const announcer = page.getByRole("status", { name: "Fleet results", exact: true });
       await journey.stage("Open the fleet", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await conversationRow(page).click();
         if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         await expect(rail.getByRole("button", { name: "Write access…" })).toBeVisible();
       });
@@ -47,12 +53,12 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         // cas-68d0 F01: the name is announced once: by the group at 1280, by
         // the phone sheet's dialog at 390, never also by an inner group.
         await expect(page.getByRole("group", { name: "Write access outside the worktree" })).toHaveCount(width === 390 ? 0 : 1);
-        await expect(panel.locator(".write-grant-lead")).toBeVisible();
+        await expect(panel.getByText("Lets the agents on one task write to a folder outside their worktree until the task closes.", { exact: true })).toBeVisible();
         if (width === 390) {
-          await expect(panel.locator(".write-grant-where")).toBeVisible();
+          await expect(panel.getByText(/^cas-src on /)).toBeVisible();
           await expect(page.getByRole("dialog", { name: "Write access outside the worktree" }).getByRole("button", { name: "Close write access", exact: true })).toBeVisible();
         } else {
-          await expect(panel.locator(".write-grant-where")).toHaveCount(0);
+          await expect(panel.getByText(/^cas-src on /)).toHaveCount(0);
         }
         await expect(panel.getByRole("combobox", { name: "Task" })).toHaveValue("cas-1234");
         await expect(panel.getByRole("checkbox", { name: "create" })).toBeChecked();
@@ -70,7 +76,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         });
         const heard = () => page.evaluate(() => (window as unknown as { heardGrant: string[] }).heardGrant);
         await panel.getByRole("button", { name: "Review grant" }).click();
-        await expect(rail.locator(".write-grant-result")).toHaveText(missing);
+        await expect(grantResult(page)).toHaveText(missing);
         // cas-5020: focus goes to the field that is missing, not the line.
         await expect(panel.getByRole("textbox", { name: "Folder" })).toBeFocused();
         await expect(announcer).toHaveText(missing);
@@ -100,13 +106,13 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await confirm.getByRole("button", { name: "Grant", exact: true }).focus();
         await page.keyboard.press("Enter");
         const receipt = "Write access granted for cas-1234: /home/operator/soundwave-config/docs/requests (create+edit) until the task closes.";
-        await expect(rail.locator(".write-grant-result")).toHaveText(receipt);
+        await expect(grantResult(page)).toHaveText(receipt);
         await expect(announcer).toHaveText(receipt);
         // cas-5020: focus lands on the receipt's next action (Revoke…), drawn
         // with the token focus ring, never on the status line.
         const revoke = panel.getByRole("button", { name: "Revoke…" });
         await expect(revoke).toBeFocused();
-        await expect(rail.locator(".write-grant-result")).not.toBeFocused();
+        await expect(grantResult(page)).not.toBeFocused();
         const ring = await revoke.evaluate((node) => {
           const probe = document.createElement("span");
           probe.style.outlineColor = "var(--color-focus)";
@@ -127,12 +133,12 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(panel.getByRole("textbox", { name: "Folder" })).toHaveValue("");
         await expect(panel.getByRole("textbox", { name: "Reason" })).toHaveValue("");
         await expect(panel.getByRole("combobox", { name: "Task" })).toHaveValue("cas-1234");
-        await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveText("cas-1234");
-        await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveCSS("white-space", "nowrap");
+        await expect(grantResult(page).getByText("cas-1234", { exact: true })).toHaveText("cas-1234");
+        await expect(grantResult(page).getByText("cas-1234", { exact: true })).toHaveCSS("white-space", "nowrap");
         // cas-a8d9: compare the receipt with the fade's rendered top, including
         // the sticky pseudo-element's negative margins inside the rail padding.
         if (width === 1280) {
-          await expect.poll(() => rail.locator(".write-grant-result").evaluate((line) => {
+          await expect.poll(() => grantResult(page).evaluate((line) => {
             const scroller = line.closest(".conversation-context")!;
             const fade = getComputedStyle(scroller, "::after");
             const probe = document.createElement("span");
@@ -166,7 +172,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await page.keyboard.press("Enter");
         await expect(confirm).toContainText("cas-1234");
         await confirm.getByRole("button", { name: "Revoke", exact: true }).click();
-        await expect(rail.locator(".write-grant-result")).toContainText("cas-1234");
+        await expect(grantResult(page)).toContainText("cas-1234");
       });
     };
     if (part) test(`HUB-J20 write access ${width} ${colorScheme} cas_ab04`, journeyPart, body);
@@ -180,14 +186,16 @@ test.describe("write access without factory:manage cas_ab04", () => {
     const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate"] }, fleet: { [PELICAN]: fleet() } });
     await journey.stage("A pairing without factory:manage", async () => {
       await journey.open();
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-      await expect(page.locator("#status-view").getByRole("button", { name: "Write access…" })).toHaveCount(0);
-      const permissions = page.locator("#status-view .fleet-permissions");
-      await permissions.locator("summary").focus(); await page.keyboard.press("Enter");
+      await conversationRow(page).click();
+      await expect(statusView(page).getByRole("button", { name: "Write access…" })).toHaveCount(0);
+      // The Permissions disclosure is a <details> (role group) opened from its summary.
+      const summary = page.getByText(/^(View only|Limited access) · Permissions$/);
+      const permissions = statusView(page).getByRole("group").filter({ has: summary });
+      await permissions.getByText(/^(View only|Limited access) · Permissions$/).focus(); await page.keyboard.press("Enter");
       await expect(permissions).toBeVisible();
       expect(hub.writeGrants).toHaveLength(0);
       await permissions.getByRole("link", { name: "Open Paired machines" }).click();
-      await expect(page.locator("#paired-machines-dialog")).toBeVisible();
+      await expect(page.getByRole("dialog", { name: "Paired machines", exact: true })).toBeVisible();
     });
   });
 });

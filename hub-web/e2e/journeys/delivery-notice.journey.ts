@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
 import { expectDetailsCopyRow } from "../details-copy-row";
+import type { Page } from "@playwright/test";
 
 // cas-e829: the operator's 2026-10-01 Accounting screenshot. The live session
 // has a blocker from yesterday, a later message from the operator that does
@@ -19,6 +20,17 @@ const ATLAS: Machine = {
 const NOTICE_SUMMARY = "Supervisor hasn't seen: worker died: daring-robin-43 (9m)";
 const NOTICE_HEADLINE = "The supervisor missed an update: a worker stopped";
 const NOTICE_TEXT = "The supervisor (happy-cheetah-1, Codex) was told 9 minutes ago that worker died: daring-robin-43, and the message never reached it.";
+// A row is named "<project> on <machine>, …"; End session and Cassy controls are not.
+const accountingRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^Accounting\S* on Atlas/ });
+// includeHidden: the panel's cards are counted whether or not the phone sheet shows them, as the CSS did.
+const noticeCards = (page: Page) => page.getByTestId("attention-panel").getByRole("article", { includeHidden: true }).filter({ hasText: NOTICE_HEADLINE });
+// The header's Attention badge is named "Attention: N items for this session"; it may sit in the closed More menu.
+const attentionBadge = (page: Page) => page.getByRole("button", { name: /^Attention: \d+ items? for this session$/, includeHidden: true });
+const moreActions = (page: Page) => page.getByRole("button", { name: /^More conversation actions/ });
+const conversationHeading = (page: Page) => page.getByTestId("conversation-heading");
+// The rail changes role (complementary, or the phone's dialog), so its state is read through its test id.
+const contextRail = (page: Page) => page.getByTestId("conversation-context");
+const turnTimes = (page: Page) => page.getByRole("log").getByRole("time", { includeHidden: true });
 const notice = (id: number, at: string, resolved = false) => ({
   notification_id: id, reply_to: null, message: NOTICE_TEXT, summary: NOTICE_SUMMARY, device_id: "*", kind: "blocker", attachments: [], session: SESSION, at,
   notice: { source: "relay-watchdog", subject: SUBJECT, resolved },
@@ -41,23 +53,25 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     },
   });
   const log = page.getByRole("log");
-  const attentionItems = page.locator("#attention-panel article", { hasText: NOTICE_HEADLINE });
+  const attentionItems = noticeCards(page);
 
   await journey.stage("Open the session: only its conversation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
+    await accountingRow(page).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(log).toContainText("Looking at the ledger import now.");
     await expect(log).not.toContainText("never reached it");
     // Yesterday's turn shows its date, not a bare clock time.
-    await expect(log.locator(".turn time").first()).toContainText("Sep 29, 5:20 PM");
+    // The thread's first turn time: order is the contract.
+    await expect(turnTimes(page).first()).toContainText("Sep 29, 5:20 PM");
   });
 
   await journey.stage("A blocker I never answered does not say I replied", async () => {
-    const blocker = log.locator('.obj.blk[data-notification-id="900"]');
-    await expect(blocker.locator(".blk-handled")).toBeVisible();
+    const blocker = log.getByRole("group", { name: /^Blocker from / }).filter({ hasText: "The ledger import is red" });
+    const handled = blocker.getByText(/^(You've written since this|Acknowledged — you replied)$/);
+    await expect(handled).toBeVisible();
 
-    await expect(blocker.locator(".blk-handled svg.tick")).toHaveCount(0);
+    await expect(handled.getByRole("img", { includeHidden: true })).toHaveCount(0);
   });
 
   await journey.stage("The delivery problem is one attention item", async () => {
@@ -76,25 +90,31 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems).toHaveCount(1);
     await expect(log).not.toContainText("never reached it");
     // cas-5c22: the item carries the notice's own time, not when this page heard of it.
-    await expect(attentionItems.locator("time")).toContainText(new RegExp("(?=[\\s\\S]*29)(?=[\\s\\S]*5)(?=[\\s\\S]*49)"));
-    await expect(attentionItems.locator(".attention-title")).toHaveText(NOTICE_HEADLINE);
-    await expect(attentionItems.locator(".attention-detail")).toContainText("daring-robin-43");
-    await expect(page.locator(".attention-group-label")).toContainText("happy-cheetah-1");
-    await expect(page.locator(".attention-dismiss-group")).toHaveCount(0);
+    await expect(attentionItems.getByRole("time")).toContainText(new RegExp("(?=[\\s\\S]*29)(?=[\\s\\S]*5)(?=[\\s\\S]*49)"));
+    await expect(attentionItems.getByTestId("attention-title")).toHaveText(NOTICE_HEADLINE);
+    await expect(attentionItems.getByTestId("attention-detail")).toContainText("daring-robin-43");
+    await expect(page.getByTestId("attention-group-label")).toContainText("happy-cheetah-1");
+    await expect(page.getByRole("button", { name: "Dismiss group", exact: true, includeHidden: true })).toHaveCount(0);
   });
 
   const desktop = page.viewportSize()!;
   await journey.stage("On a phone, the delivery problem is one tap from the conversation", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
-    const badge = page.locator("#conversation-attention");
+    const badge = attentionBadge(page);
     await openConversationActions(page);
     await expect(badge).toBeVisible();
-    await expect(badge.locator(".conversation-attention-count")).toHaveText("1");
+    await expect(badge.getByTestId("conversation-attention-count")).toHaveText("1");
     // cas-a929: a visible warning must not push any header control off-screen.
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
-      for (const selector of ["#conversation-back", "#conversation-attention", ".conversation-identity", ".conversation-header-actions button"]) {
-        for (const element of await page.locator(selector).all()) {
+      for (const [selector, controls] of [
+        ["#conversation-back", page.getByRole("button", { name: "‹ Conversations", exact: true })],
+        ["#conversation-attention", badge],
+        [".conversation-identity", page.getByTestId("conversation-identity")],
+        // includeHidden: every header action, as the CSS listed them, must be on screen.
+        [".conversation-header-actions button", page.getByTestId("conversation-header-actions").getByRole("button", { includeHidden: true })],
+      ] as const) {
+        for (const element of await controls.all()) {
           await expect(element).toBeVisible();
           const bounds = (await element.boundingBox())!;
           expect(bounds.x, `${colorScheme} ${selector} left edge`).toBeGreaterThanOrEqual(0);
@@ -105,17 +125,17 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
       await expect(page.getByRole("button", { name: "Show work", exact: true })).toBeVisible();
     }
     await page.emulateMedia({ colorScheme: "light" });
-    const headerHeight = await page.locator(".conversation-heading").evaluate(node => node.getBoundingClientRect().height);
+    const headerHeight = await conversationHeading(page).evaluate(node => node.getBoundingClientRect().height);
     expect(headerHeight).toBeLessThanOrEqual(64);
-    await expect(page.locator(".conversation-title-line > #conversation-connection")).toBeVisible();
+    await expect(conversationHeading(page).getByRole("status", { name: "Connection", exact: true, includeHidden: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
     await page.screenshot({ path: join(RECEIPTS, "phone-header-attention-390.png") });
     await openConversationActions(page); await badge.click();
     const sheet = page.getByRole("dialog", { name: "Attention for this session" });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close attention" })).toBeFocused();
-    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE })).toBeVisible();
-    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE }).locator("time")).toContainText(new RegExp("(?=[\\s\\S]*29)(?=[\\s\\S]*5)(?=[\\s\\S]*49)"));
+    await expect(sheet.getByRole("article").filter({ hasText: NOTICE_HEADLINE })).toBeVisible();
+    await expect(sheet.getByRole("article").filter({ hasText: NOTICE_HEADLINE }).getByRole("time")).toContainText(new RegExp("(?=[\\s\\S]*29)(?=[\\s\\S]*5)(?=[\\s\\S]*49)"));
   });
 
   await journey.stage("Keyboard stays in the sheet", async () => {
@@ -160,24 +180,24 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // QA round 3 F02/F03: a minute rollover (the cards' ages change) is not a
     // redraw either. Open the notice's Details, rest on its Copy, cross a
     // minute on the page clock: the same element keeps focus, Details stays open.
-    const notice = sheet.locator("article.attention-item").first();
+    const notice = sheet.getByRole("article").filter({ hasText: NOTICE_HEADLINE });
     // cas-b56b: while Details is closed its Copy is not laid out at all, so
     // no "Copy" box sits below the rail's scroll range for a layout check
     // (the strict visual inspector) to find. Opening Details brings it back.
-    expect(await notice.locator(".attention-copy").evaluate((node) => node.getBoundingClientRect().height), "a closed notice's Copy has no box").toBe(0);
-    await notice.locator("summary").click();
+    expect(await notice.getByRole("button", { name: "Copy", exact: true, includeHidden: true }).evaluate((node) => node.getBoundingClientRect().height), "a closed notice's Copy has no box").toBe(0);
+    await notice.getByText("Details", { exact: true }).click();
     await expectDetailsCopyRow(notice, "Copy has its own row, above the full Details text at390px");
     await expect(notice.locator("pre")).toContainText("9");
     // cas-ed87: Details reads as the message, never as a {summary, message} object.
     await expect(notice.locator("pre"), "Details is the message as text at 390px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
-    await notice.locator("summary").focus();
+    await notice.getByText("Details", { exact: true }).focus();
     await page.keyboard.press("Tab");
     await expectWholeFocusRing(notice.getByRole("button", { name: "Copy" }), { vertical: true });
     const copy = await focused();
     await page.clock.fastForward(61_000);
     await hub.announceCatalog("atlas");
     expect(await focused(), "focus stays on Copy across a minute").toBe(copy);
-    await expect(notice.locator("details")).toHaveAttribute("open", "");
+    await expect(notice.getByRole("group")).toHaveAttribute("open", "");
     await notice.getByRole("button", { name: "Copy", exact: true }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy still copies the displayed Details after refresh").toBe(await notice.locator("pre").textContent());
     // cas-f486: a phone that wakes after ten minutes, with the session list
@@ -188,21 +208,21 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     atlas.push({ name: "Accounting-calm-wren-4", supervisor: "calm-wren-4", project_dir: "/projects/Payroll", workers: [], liveness: "live" });
     await page.clock.fastForward(600_000);
     await hub.announceCatalog("atlas");
-    await expect(page.locator(".conversation-shell[data-before-wake]")).toHaveCount(0);
+    await expect(page.getByTestId("conversation-shell")).not.toHaveAttribute("data-before-wake");
     const sameControl = (label: string) => label.replace(/#\d+$/, "");
     await expect.poll(async () => sameControl(await focused()), { message: "focus is on Copy again after the page is rebuilt" }).toBe(sameControl(copy));
-    await expect(sheet.locator("article.attention-item").first().locator("details")).toHaveAttribute("open", "");
+    await expect(sheet.getByRole("article").filter({ hasText: NOTICE_HEADLINE }).getByRole("group")).toHaveAttribute("open", "");
     atlas[atlas.length - 1]!.liveness = "stale_metadata";
     await hub.announceCatalog("atlas");
     await expect.poll(async () => sameControl(await focused())).toBe(sameControl(copy));
-    await sheet.locator(".attention-dismiss").focus();
-    await expect(page.locator(".conversation-main")).toHaveAttribute("inert", "");
+    await sheet.getByRole("button", { name: /^Dismiss \w+ event$/ }).focus();
+    await expect(page.getByRole("main", { includeHidden: true })).toHaveAttribute("inert", "");
     await expect(sheet).toBeVisible();
   });
 
   await journey.stage("A palette opened over the sheet closes first", async () => {
     const sheet = page.getByRole("dialog", { name: "Attention for this session" });
-    const palette = page.locator("#command-palette");
+    const palette = page.getByRole("dialog", { name: "Commands", includeHidden: true });
     // QA F02: the topmost layer owns Escape.
     await page.keyboard.press("ControlOrMeta+k");
     if (!(await palette.evaluate((node) => (node as HTMLDialogElement).open))) await page.keyboard.press("ControlOrMeta+k");
@@ -212,7 +232,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(palette).not.toHaveAttribute("open", "");
     await expect(sheet).toBeVisible();
     // Focus is back in the sheet, on the control it left (Dismiss notice).
-    await expect(sheet.locator(".attention-dismiss")).toBeFocused();
+    await expect(sheet.getByRole("button", { name: /^Dismiss \w+ event$/ })).toBeFocused();
   });
 
   await journey.stage("Close it and keep reading", async () => {
@@ -221,35 +241,36 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
-    const badge = page.locator("#conversation-attention");
-    await expect(page.locator("#conversation-more")).toBeFocused();
+    const badge = attentionBadge(page);
+    await expect(moreActions(page)).toBeFocused();
     // A catalog change rebuilds the shell, and the fresh badge starts hidden
     // until its region shows it: focus must still land back on it.
     const sessions = hub.machine("atlas").sessions;
     sessions.push({ name: "Accounting-quiet-otter-3", supervisor: "quiet-otter-3", project_dir: "/projects/Ledger", workers: [], liveness: "live" });
     await hub.announceCatalog("atlas");
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
+    // Rows only: "<project> on Atlas, …"; "End session <codename> on Atlas" has a space before "on".
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).getByRole("button", { name: /^\S+ on Atlas/, includeHidden: true })).toHaveCount(2);
     sessions[sessions.length - 1]!.liveness = "stale_metadata";
-    await expect(page.locator("#conversation-more")).toBeFocused();
+    await expect(moreActions(page)).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
   });
 
   await journey.stage("A sheet left open on a phone is a plain rail on a desktop", async () => {
-    const badge = page.locator("#conversation-attention");
+    const badge = attentionBadge(page);
     await openConversationActions(page);
     hub.machine("atlas").sessions[0]!.project_dir = "/projects/Accounting-refreshed";
     await hub.announceCatalog("atlas");
-    await expect(page.locator(".conversation-identity h1 b")).toHaveText("Accounting-refreshed");
-    await expect(page.locator("#conversation-more-menu")).toBeVisible();
+    await expect(conversationHeading(page).getByRole("heading", { level: 1 })).toHaveText("Accounting-refreshed");
+    await expect(page.getByRole("group", { name: "Conversation actions", exact: true })).toBeVisible();
     await badge.click();
     await expect(page.getByRole("dialog", { name: "Attention for this session" })).toBeVisible();
     // cas-a5c6: the phone turns into a desktop (rotation, or a window resize).
     await page.setViewportSize(desktop);
-    const rail = page.locator(".conversation-context");
+    const rail = contextRail(page);
     await expect(rail).not.toHaveAttribute("role", "dialog");
     await expect(rail).not.toHaveAttribute("aria-modal", "true");
     await expect(rail).toHaveAttribute("aria-label", /\S/);
-    await expect(page.locator("#conversation-attention")).toHaveAttribute("aria-expanded", "false");
+    await expect(attentionBadge(page)).toHaveAttribute("aria-expanded", "false");
     // Nothing the operator can see is left inert (cas-f285: no hidden pane
     // host remains to exempt).
     await expect(page.locator("[inert]")).toHaveCount(0);
@@ -267,7 +288,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await hub.announceCatalog("atlas");
     await expect.poll(() => staleCopy!.evaluate((node) => node.isConnected)).toBe(false);
     expect(await staleCopy!.boundingBox(), "the replaced Copy has no geometry").toBeNull();
-    await expect(attentionItems.locator("details")).toHaveAttribute("open", "");
+    await expect(attentionItems.getByRole("group")).toHaveAttribute("open", "");
     await expectDetailsCopyRow(attentionItems, "Copy has its own row at1280px too after a catalog redraw");
     sessions[sessions.length - 1]!.liveness = "stale_metadata";
     await hub.announceCatalog("atlas");
@@ -275,7 +296,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
     // cas-177c: Copy says what it copied, the Details text, not an "event payload".
     await attentionItems.getByRole("button", { name: "Copy" }).click();
-    await expect(page.locator("#toast")).toBeVisible();
+    await expect(page.getByRole("status", { name: "Notice" })).toBeVisible();
     expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy copies the Details text").toBe(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
     const deliveryCount = () => page.evaluate(() => {
       const stored = JSON.parse(localStorage.getItem("commander.usage.v1") ?? "null") as { days?: Record<string, Record<string, number>> } | null;
@@ -290,24 +311,24 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.
     await page.reload();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
+    await accountingRow(page).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
     expect(await deliveryCount(), "resolved history and explicit resolution do not count twice").toBe(beforeResolution + 1);
     // cas-d043 G03: yesterday's blocker reads as the visit showed it; the time
     // this browser stored it is not a machine stamp to measure a clock by.
-    await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 5:20 PM");
+    await expect(turnTimes(page).first()).toHaveText("Sep 29, 5:20 PM");
     // cas-b113: resolved watchdog notices must not return from the device
     // journal as conversation blockers, nor make the rail wait on me.
-    await expect(log.locator(".bub", { hasText: NOTICE_TEXT })).toHaveCount(0);
+    await expect(log.getByTestId("conversation-turn").filter({ hasText: NOTICE_TEXT })).toHaveCount(0);
     await expect(log).not.toContainText("never reached it");
-    await expect(page.locator('.conversation-context .context-jump[data-kind="blocker"]')).toHaveCount(0);
-    const waiting = page.locator('.conversation-context [data-section="waiting"]');
+    await expect(contextRail(page).getByRole("button", { name: /^Blocker/, includeHidden: true })).toHaveCount(0);
+    const waiting = contextRail(page).getByRole("region", { name: "Waiting on you", exact: true, includeHidden: true });
     await expect(waiting).toBeHidden();
-    await expect(waiting.locator("li")).toHaveCount(0);
+    await expect(waiting.getByRole("listitem", { includeHidden: true })).toHaveCount(0);
     // Hidden static headings do not represent a waiting state. The spoken
     // rail must contain neither a waiting heading nor a waiting region.
-    expect(await page.locator(".conversation-context").ariaSnapshot()).not.toMatch(/Waiting on you/);
+    expect(await contextRail(page).ariaSnapshot()).not.toMatch(/Waiting on you/);
     await expect(page.getByRole("region", { name: /Waiting on you/ })).toHaveCount(0);
   });
 
@@ -315,10 +336,11 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // The supervisor answers a question asked in yesterday's ended session:
     // it arrives in this thread, naming the session it answers.
     hub.supervisorSays(SESSION, "The bank feed reconciled overnight.", { reply_to: 3196200, reply_to_session: "Accounting-wise-lion-31" });
-    const answer = log.locator(".bub", { hasText: "The bank feed reconciled overnight." });
-    await expect(answer.locator(".reply-quote")).toContainText("wise-lion-31");
+    const answer = log.getByTestId("conversation-turn").filter({ hasText: "The bank feed reconciled overnight." });
+    await expect(answer.getByText(/^Reply to /)).toContainText("wise-lion-31");
     await expect(answer).toHaveAttribute("data-reply-to", "3196200");
-    await expect(page.getByRole("region", { name: "Earlier sessions" }).locator("details[open]")).toHaveCount(0);
+    // An open earlier session shows its turn list; a collapsed one hides it.
+    await expect(page.getByRole("region", { name: "Earlier sessions" }).getByRole("group").getByRole("list")).toHaveCount(0);
   });
 });
 
@@ -342,7 +364,7 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
     open.onerror = () => reject(open.error);
   }));
   const choose = async () => {
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
+    await accountingRow(page).click();
   };
   await journey.stage("Offline notices commit only to attention and drain every pending batch", async () => {
     await journey.open(); await choose();
@@ -352,7 +374,7 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
     const rows = await stored();
     expect(rows).toHaveLength(12);
     expect(rows.filter(row => row.acknowledgedAt)).toHaveLength(1);
-    await expect(page.locator(".turn").filter({ hasText: "never reached it" })).toHaveCount(0);
+    await expect(page.getByRole("log").getByRole("group").filter({ hasText: "never reached it" })).toHaveCount(0);
   });
   await journey.stage("A fresh attach retains attention without resending drained notices", async () => {
     const requests = hub.historyRequests.length;
@@ -362,6 +384,6 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
     expect(hub.pendingReplyForwards).toHaveLength(12);
     expect(noticeIds()).toHaveLength(12);
     expect(await stored()).toHaveLength(12);
-    await expect(page.locator("#attention-panel article", { hasText: NOTICE_HEADLINE })).toHaveCount(11);
+    await expect(noticeCards(page)).toHaveCount(11);
   });
 });

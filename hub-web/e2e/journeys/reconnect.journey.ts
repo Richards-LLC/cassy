@@ -1,6 +1,19 @@
 import { activate, showConversationList, openConversation } from "./responsive-goals";
 import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN } from "./world";
+import type { Page } from "@playwright/test";
+
+const conversationList = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" });
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => conversationList(page).getByRole("button", { name: /^cas-src on / });
+// The header's connection chip is hidden while it has no words; attribute checks still read it.
+const connectionChip = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
+const messageStatus = (page: Page) => page.getByRole("status", { name: "Message status" });
+const conversationLog = (page: Page) => page.getByRole("log");
+// The held send's waiting line, and the supervisor's working line.
+const heldNotice = (page: Page) => conversationLog(page).getByRole("status").filter({ hasText: "Waiting for the connection" });
+const workingLine = (page: Page) => conversationLog(page).getByTestId("working");
+const attentionCount = (page: Page) => page.getByTestId("conversation-attention-count");
 
 // cas-4ce5: recovery is driven by the app's next scheduled attach, which is at
 // most MACHINE_RETRY_CEILING_MS (10 s) away however long the outage lasted.
@@ -22,10 +35,10 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
-  const header = page.locator("#conversation-connection");
-  const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
-  const footer = page.locator("#hub-footer-badges");
-  const banner = page.locator(".terminal-disconnected-banner");
+  const header = connectionChip(page);
+  const row = conversationRow(page);
+  const pairingDot = page.getByTestId("pairing-dot");
+  const banner = page.getByTestId("terminal-disconnected-banner");
   /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
   /** The journey's own turns as painted, top to bottom (cas-eb4b). */
   const SAID = ["Are you there?", "Are we back?", "Back. Nothing was lost."];
@@ -33,7 +46,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const text = log.textContent ?? "";
     return said.map((line) => ({ line, at: text.indexOf(line) })).filter(({ at }) => at >= 0).sort((a, b) => a.at - b.at).map(({ line }) => line);
   }, SAID);
-  const threadOrder = () => page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
+  const threadOrder = () => conversationLog(page).evaluate((log) => [...log.children].filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
   let beforeOutage: string[] = [];
   /**
    * Journey F42: what the live regions say, one entry per change of words in
@@ -92,7 +105,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const seen = await together.jsonValue() as Record<string, string>;
     expect(seen.banner).toContain("Atlas · Linux");
     expect(seen.header).toMatch(/^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
-    await expect(row.locator(".conversation-preview.interrupted")).toBeVisible();
+    await expect(row.getByTestId("conversation-preview")).toBeVisible();
+    await expect(row.getByTestId("conversation-preview")).toHaveClass(/\binterrupted\b/);
     // Journey F42: the banner announces the outage, once. The header's
     // "Reconnecting" is on screen but is not a second announcement. The page
     // clock runs the app's next second and a half (its retry included) at
@@ -104,10 +118,10 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(banner.getByRole("button", { name: "Connection details" })).toBeVisible();
     // Two machines, one of them down: the footer names it (cas-0739) and its dot is not all-clear (cas-b789).
     expect(seen.footer).toContain("Atlas");
-    await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
+    await expect(pairingDot).toHaveClass("pairing-dot partial");
     // Only the terminal dims: the conversation stays readable while it
     // reconnects (cas-3446 measured 2.2-3.3:1 when the whole mount faded).
-    const readingOpacity = await page.locator(".conversation-reading").evaluate((element) => {
+    const readingOpacity = await page.getByTestId("conversation-thread").evaluate((element) => {
       let product = 1;
       for (let node: Element | null = element; node; node = node.parentElement) {
         product *= Number(getComputedStyle(node).opacity);
@@ -119,17 +133,17 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // and goes out by itself, once, when the session is back (cas-0978).
     await composer.fill("Are you there?");
     await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
-    await expect(page.locator("#message-status")).toBeVisible();
+    await expect(messageStatus(page)).toBeVisible();
     await expect(composer).toHaveValue("");
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
+    await expect(heldNotice(page)).toHaveCount(1);
     expect(hub.sends.filter((m) => m.text === "Are you there?")).toHaveLength(0);
     // cas-5a8f: a send held in this browser is not supervisor execution: the
     // thread does not say "working" beside "Waiting for the connection", on
     // screen or to a screen reader.
-    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
+    await expect(workingLine(page)).toHaveCount(0);
     // The rail defers to the banner: no second, technical alarm about the same
     // drop, and whatever it does show counts the same in every place (cas-90d4).
-    const rail = page.locator("#attention-panel");
+    const rail = page.getByTestId("attention-panel");
     await expect(rail).toBeAttached();
     await expect(rail.getByRole("button", { name: "Open conversation" })).toHaveCount(0);
     const railCounts = await rail.evaluate((element) => {
@@ -156,19 +170,19 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await showConversationList(page);
     await expect(row).not.toContainText("Reconnecting");
     await openConversation(page, "cas-src");
-    await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot connected");
+    await expect(pairingDot).toHaveClass("pairing-dot connected");
     // The held message went out on its own, exactly once, and the waiting
     // line cleared with the reconnect (cas-0978, cas-b789).
     await expect.poll(() => hub.sends.filter((m) => m.text === "Are you there?").length, { timeout: 10_000 }).toBe(1);
-    await expect(page.locator("#message-status")).toBeHidden();
-    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    await expect(messageStatus(page)).toBeHidden();
+    await expect(heldNotice(page)).toHaveCount(0);
     // cas-71f4: while it still says "Sending…", that bubble is the one
     // sending signal; no working line beside it.
-    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
+    await expect(workingLine(page)).toHaveCount(0);
     hub.deliverLatest(PELICAN);
-    await expect(page.getByRole("log").locator('.bub[data-state="delivered"] .conversation-delivery')).toBeVisible();
+    await expect(conversationLog(page).getByRole("status").filter({ hasText: /^Delivered$/ })).toBeVisible();
     // cas-3f40: a transport receipt proves handoff, not supervisor execution.
-    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
+    await expect(workingLine(page)).toHaveCount(0);
     // A second flush would come from a timer: the page clock runs the next
     // second at once, and a round trip carries anything it sent to the double
     // (cas-c4b2).
@@ -216,7 +230,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     });
     hub.hold(PELICAN);
     hub.drop(PELICAN);
-    await expect(banner.locator(".banner-text")).toContainText("Atlas · Linux");
+    await expect(banner.getByRole("status")).toContainText("Atlas · Linux");
     // Turning the phone resizes the terminal, which tries to tell the hub: that
     // send fails while the connection is down, which used to raise a toast.
     await page.setViewportSize({ width: 390, height: 760 });
@@ -282,7 +296,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // opens over the thread.
     const interruptsBefore = hub.frames.filter((frame) => frame.kind === "InterruptPane").length;
     await interrupt.dispatchEvent("click");
-    await expect(page.locator("#toast")).toHaveText(outage);
+    await expect(page.getByRole("status", { name: "Notice" })).toHaveText(outage);
     await raw.dispatchEvent("click");
     await expect(page.getByRole("dialog", { name: "Raw output" })).toBeHidden();
     expect(hub.frames.filter((frame) => frame.kind === "InterruptPane"), "no interrupt during the outage").toHaveLength(interruptsBefore);
@@ -339,12 +353,12 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const recovered = events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: event.sequence <= 2, enriched: false }));
     await expect.poll(stored, { message: "Live resolves only its outage notices, retaining all four rows" }).toEqual(recovered);
 
-    await expect(page.locator("#conversation-attention .conversation-attention-count")).toHaveText("1");
+    await expect(attentionCount(page)).toHaveText("1");
     // A later enrichment revision of the retained outage must stay history.
     await emit(events.slice(0, 2).map(event => ({ ...event, revision: 1,
       enrichment: { severity: "warning", action: "none", summary: "Recovered outage diagnostic", fingerprint: `outage:${event.sequence}` },
     })));
     await expect.poll(stored).toEqual(recovered.map(row => ({ ...row, enriched: row.resolved })));
-    await expect(page.locator("#conversation-attention .conversation-attention-count")).toHaveText("1");
+    await expect(attentionCount(page)).toHaveText("1");
   });
 });

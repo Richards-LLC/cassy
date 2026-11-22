@@ -1,4 +1,4 @@
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { clickConversationHeaderAction, test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { journeyNow } from "./clock";
@@ -9,6 +9,20 @@ import type { FleetWorld } from "./hub-double";
 const numbers = async (where: Locator) => ((await where.innerText()).match(/\d+/g) ?? []).map(Number);
 const expectNumbers = (where: Locator, exact: number[]) => expect.poll(() => numbers(where)).toEqual(exact);
 const expectRun = (where: Locator, run: number[]) => expect.poll(async () => { const all = await numbers(where); return all.some((_, at) => run.every((n, i) => all[at + i] === n)); }).toBe(true);
+
+const teamPanel = (page: Page) => page.getByRole("tabpanel", { name: "Team", exact: true });
+// A lane is a "Worker lanes" item headed by its worker; its delivery trail's items have no heading.
+const teamLanes = (page: Page) => page.getByRole("list", { name: "Worker lanes", exact: true }).getByRole("listitem").filter({ has: page.getByRole("heading", { level: 3 }) });
+const teamLane = (page: Page, worker: string) => teamLanes(page).filter({ has: page.getByRole("heading", { level: 3, name: worker, exact: true }) });
+// The state pill is labelled "<worker>: <state>".
+const laneState = (page: Page, worker: string) => teamLane(page, worker).getByLabel(new RegExp(`^${worker}: `));
+const statusView = (page: Page) => page.getByTestId("status-view");
+const railRelease = (page: Page) => statusView(page).getByTestId("release-progress");
+const workerCard = (page: Page, worker: string) => statusView(page).getByRole("article").filter({ has: page.getByRole("button", { name: `${worker} timeline`, exact: true }) });
+const composerSlot = (page: Page) => page.getByTestId("conversation-composer-slot");
+// A Live epics row is the item holding its toggle; its task rows do not.
+const epicRow = (page: Page, epics: Locator, name: RegExp) => epics.getByRole("listitem").filter({ has: page.getByRole("button", { name }) });
+const groupLabels = (tasks: Locator) => tasks.getByText(/^(In progress|Open|Merged) · \d+$/);
 
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
   test.describe(`Team staffing ${width}`, () => {
@@ -27,8 +41,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       await journey.stage("Open Team beside the supervisor conversation", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src on Atlas/ }).click();
-        await expect(page.locator("#team-panel")).toBeHidden();
-        await expect(page.locator(".team-lane")).toHaveCount(0);
+        await expect(teamPanel(page)).toBeHidden();
+        await expect(teamLanes(page)).toHaveCount(0);
         await page.getByRole("textbox", { name: "Your message" }).fill("Keep my draft while checking the team");
         const tab = page.getByRole("tab", { name: "Conversation", exact: true });
         await tab.focus(); await page.keyboard.press("ArrowRight");
@@ -36,15 +50,15 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
         await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1]);
         expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
-        await expect(panel.locator(".team-lane")).toHaveCount(4);
-        await panel.locator(".team-lane").last().scrollIntoViewIfNeeded();
-        const lastLane = await panel.locator(".team-lane").last().boundingBox();
+        await expect(teamLanes(page)).toHaveCount(4);
+        await teamLanes(page).last().scrollIntoViewIfNeeded();
+        const lastLane = await teamLanes(page).last().boundingBox();
         expect(lastLane!.y + lastLane!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
-        await expect(page.locator(".conversation-context .release-progress")).toBeHidden();
+        await expect(railRelease(page)).toBeHidden();
         await panel.evaluate(element => { element.scrollTop = 0; });
         if (width === 1280) {
           // The rail stays a working control list, and the lanes out-weigh it.
-          const card = page.locator(".conversation-context .status-agent").first();
+          const card = workerCard(page, "swift-lark-3");
           await expect(card.getByText("swift-lark-3", { exact: true })).toBeVisible();
           await expect(card.getByRole("button", { name: /timeline/ })).toBeVisible();
           expect((await card.boundingBox())!.height).toBeLessThan(lastLane!.height);
@@ -54,31 +68,31 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         }
         await expectRun(panel, [3, 8]);
         await expect(panel).toContainText("Build the Team view");
-        const model = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"] .team-model`);
+        const model = (worker: string) => teamLane(page, worker).getByText(/^codex · /);
         await expect(model("swift-lark-3")).toHaveAttribute("data-model-reported", "true");
         await expect(model("swift-lark-3")).toHaveAttribute("data-model", "gpt-6.1");
         await expect(model("brisk-wren-9")).toHaveAttribute("data-model-reported", "false");
         await expect(model("brisk-wren-9")).not.toHaveAttribute("data-model", /.*/);
         await expect(panel).not.toContainText("RAW TOOL OUTPUT");
         // Working and waiting differ by color and mark, not just by the word.
-        const look = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"]`).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => { const s = getComputedStyle(node); return [s.color, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius].join(" "); }));
+        const look = (worker: string) => teamLane(page, worker).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => { const s = getComputedStyle(node); return [s.color, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius].join(" "); }));
         const [working, waiting] = [await look("swift-lark-3"), await look("brisk-wren-9")];
         expect(working[1]).not.toBe(waiting[1]);
         for (const [worker, label] of [["swift-lark-3", "Working"], ["brisk-wren-9", "Idle"]]) {
-          await expect(panel.locator(`.team-lane[data-worker="${worker}"]`).getByRole("img", { name: label, exact: true })).toHaveAttribute("title", label);
+          await expect(teamLane(page, worker).getByRole("img", { name: label, exact: true })).toHaveAttribute("title", label);
         }
         // The track is an outline, so a release at zero cannot read as a full bar.
-        expect(await panel.locator(".release-progress progress").evaluate(bar => { const style = getComputedStyle(bar); return [style.borderTopStyle, style.backgroundColor]; })).toEqual(["solid", "rgba(0, 0, 0, 0)"]);
+        expect(await panel.getByRole("progressbar").evaluate(bar => { const style = getComputedStyle(bar); return [style.borderTopStyle, style.backgroundColor]; })).toEqual(["solid", "rgba(0, 0, 0, 0)"]);
         // The track's connector is a graphic that carries meaning, so it holds 3:1 against its lane.
-        const connector = await panel.locator(".team-lane").first().evaluate(lane => {
+        const connector = await teamLanes(page).first().evaluate(lane => {
           const channels = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number);
           const luminance = (value: string) => { const [r, g, b] = channels(value).map(part => { const unit = part / 255; return unit <= 0.03928 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
           const [line, card] = [luminance(getComputedStyle(lane.querySelectorAll(".team-trail li")[1], "::after").backgroundColor), luminance(getComputedStyle(lane).backgroundColor)];
           return (Math.max(line, card) + 0.05) / (Math.min(line, card) + 0.05);
         });
         expect(connector).toBeGreaterThanOrEqual(3);
-        await expect(panel.locator("[data-team-action]")).toHaveCount(0);
-        await expect(page.locator("#conversation-composer-slot")).toBeHidden();
+        await expect(panel.getByRole("region", { name: "Needs you", exact: true }).getByRole("button")).toHaveCount(0);
+        await expect(composerSlot(page)).toBeHidden();
         expect(hub.frames.filter(frame => ["ScrollbackRequest", "WorkEventsRequest", "WorkEventDetailRequest"].includes(frame.kind))).toEqual([]);
       });
       await journey.stage("Same-state workers expose the blocked task before healthy peers", async () => {
@@ -86,10 +100,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         fleet.tasks[2].status = "blocked";
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
-        await expect(panel.locator(".team-lane").first()).toHaveAttribute("data-worker", "brisk-wren-9");
-        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-state')).toHaveText("Blocked");
-        await expect(panel.locator("[data-team-action]")).toHaveCount(0);
-        await expect(panel.locator(".team-needs")).toHaveAttribute("data-active", "false");
+        await expect(teamLanes(page).first()).toHaveAttribute("data-worker", "brisk-wren-9");
+        await expect(laneState(page, "brisk-wren-9")).toHaveText("Blocked");
+        await expect(panel.getByRole("region", { name: "Needs you", exact: true }).getByRole("button")).toHaveCount(0);
+        await expect(panel.getByRole("region", { name: "Needs you", exact: true })).toHaveAttribute("data-active", "false");
         await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1]);
       });
       await journey.stage("A lifecycle event updates staffing without reloading", async () => {
@@ -98,9 +112,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         fleet.agents[3].liveness = "offline";
         const started = performance.now();
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
-        await expect(page.locator('.team-lane[data-worker="swift-lark-3"] .team-state')).toHaveText("Stalled", { timeout: 5_000 });
-        const waiting = page.locator('.team-lane[data-worker="brisk-wren-9"]');
-        const offline = page.locator('.team-lane[data-worker="calm-heron-5"]');
+        await expect(laneState(page, "swift-lark-3")).toHaveText("Stalled", { timeout: 5_000 });
+        const waiting = teamLane(page, "brisk-wren-9");
+        const offline = teamLane(page, "calm-heron-5");
         await expect(offline.getByRole("img", { name: "Offline", exact: true })).toHaveAttribute("title", "Offline");
         const look = (lane: typeof waiting) => lane.evaluate(node => { const pill = getComputedStyle(node.querySelector(".team-state")!); const dot = getComputedStyle(node.querySelector(".supervisor-state")!); return [pill.color, `${dot.backgroundColor} ${dot.outlineColor} ${dot.outlineWidth}`]; });
         const [waitingLook, offlineLook] = [await look(waiting), await look(offline)];
@@ -111,10 +125,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       });
       await journey.stage("Read Team with forced colors and reduced motion", async () => {
         await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
-        await expect(page.locator("#team-panel")).toBeVisible();
-        expect(await page.locator(".team-state").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
-        const waiting = page.locator('.team-lane[data-worker="brisk-wren-9"]');
-        const offline = page.locator('.team-lane[data-worker="calm-heron-5"]');
+        await expect(teamPanel(page)).toBeVisible();
+        expect(await laneState(page, "swift-lark-3").evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        const waiting = teamLane(page, "brisk-wren-9");
+        const offline = teamLane(page, "calm-heron-5");
         const treatment = (lane: typeof waiting) => lane.evaluate(node => { const pill = getComputedStyle(node.querySelector(".team-state")!); const dot = getComputedStyle(node.querySelector(".supervisor-state")!); return [pill.textDecorationLine, dot.borderRadius]; });
         const [waitingLook, offlineLook] = [await treatment(waiting), await treatment(offline)];
         expect(waitingLook[0]).not.toBe(offlineLook[0]);
@@ -126,12 +140,12 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(forced.unselected).toBe(forced.page);
         expect(forced.selected).not.toBe(forced.unselected);
         expect(forced.name).toBe(forced.row);
-        if (width === 1280) expect(await page.locator(".conversation-context .status-agent").first().evaluate(row => getComputedStyle(row).borderTopWidth)).toBe("0px");
+        if (width === 1280) expect(await workerCard(page, "swift-lark-3").evaluate(row => getComputedStyle(row).borderTopWidth)).toBe("0px");
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         await page.getByRole("tab", { name: "Conversation", exact: true }).click();
-        await expect(page.locator("#team-panel")).toBeHidden();
-        if (width === 1280) await expect(page.locator(".conversation-context .release-progress")).toBeVisible();
-        await expect(page.locator("#conversation-composer-slot")).toBeVisible();
+        await expect(teamPanel(page)).toBeHidden();
+        if (width === 1280) await expect(railRelease(page)).toBeVisible();
+        await expect(composerSlot(page)).toBeVisible();
         await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("Keep my draft while checking the team");
       });
     });
@@ -178,37 +192,37 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
       const statusReads: string[] = [];
       page.on("request", request => { const match = /\/v1\/sessions\/([^/]+)\/status$/.exec(new URL(request.url()).pathname); if (match) statusReads.push(decodeURIComponent(match[1]!)); });
       await journey.hub({ machines: [machine, remote], paired: [ATLAS.id, remote.id], fleet: { [PELICAN]: local, "remote-session": follow, "gabber-session": foreign } });
-      const status = page.locator("#status-view");
-      const epics = status.locator(".live-epics");
+      const status = statusView(page);
+      const epics = status.getByRole("region", { name: /^Live epics · / });
       await journey.stage("Read the project's live epics in Tasks & progress, with nothing above the conversation", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src on Atlas/ }).click();
-        await expect(page.locator("#epic-tabs")).toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Epic progress", exact: true })).toHaveCount(0);
         // Only the hidden Team panel sits between the view tabs and the conversation.
         expect(await page.evaluate(() => {
           const between: string[] = [];
           for (let node = document.querySelector(".conversation-tabs")?.nextElementSibling; node && node.id !== "conversation-pane-slot"; node = node.nextElementSibling) if (!(node as HTMLElement).hidden) between.push(node.id || node.className);
           return between;
         })).toEqual([]);
-        const tabs = (await page.locator(".conversation-tabs").boundingBox())!;
-        expect(tabs.y + tabs.height).toBeLessThanOrEqual((await page.locator("#conversation-pane-slot").boundingBox())!.y);
+        const tabs = (await page.getByRole("tablist", { name: "Conversation views", exact: true }).boundingBox())!;
+        expect(tabs.y + tabs.height).toBeLessThanOrEqual((await page.getByRole("tabpanel", { name: "Conversation", exact: true }).boundingBox())!.y);
         if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         await expectNumbers(epics.getByRole("heading", { level: 3 }).first(), [3]);
         expect(await status.evaluate(root => Boolean(root.querySelector(".release-progress")!.compareDocumentPosition(root.querySelector(".live-epics")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
-        await expectRun(status.locator(".release-progress"), [1, 5]);
-        await expectRun(status.locator(".release-progress"), [3, 1, 1]);
-        await expectRun(status.locator(".release-progress"), [4]);
-        await expectRun(status.locator(".release-progress"), [1, 1]);
+        await expectRun(railRelease(page), [1, 5]);
+        await expectRun(railRelease(page), [3, 1, 1]);
+        await expectRun(railRelease(page), [4]);
+        await expectRun(railRelease(page), [1, 1]);
         const rail = epics.getByRole("button", { name: /Commander progress rail/ });
         await expect(rail).toContainText("6/12");
         await expectRun(rail, [4, 2, 6, 1]);
         await expect(rail.getByRole("img", { name: "Commander progress rail: 4 open · 2 in progress · 6 merged" })).toBeVisible();
         // Blocked work leads; the train, untitled and foreign epics never appear.
-        expect(await epics.locator(".live-epic-toggle").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.fleetFocus))).toEqual(["epic:rail", "epic:follow-ups", "epic:quiet"]);
+        expect(await epics.getByRole("button").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.fleetFocus))).toEqual(["epic:rail", "epic:follow-ups", "epic:quiet"]);
         await expect(status).not.toContainText("Gabber voice");
         await expect(status).not.toContainText("EPIC");
         await expect(status).not.toContainText("—/—");
-        await expect(epics.locator(".live-epics-footer")).toHaveCount(0);
+        await expect(epics.getByText(/quiet open epics? in Explorer$/)).toHaveCount(0);
         // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
         expect(statusReads).toContain("gabber-session");
         expect(statusReads).toContain("remote-session");
@@ -235,16 +249,16 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
       });
       await journey.stage("Open the peer epic in place and watch a merge update its split", async () => {
         const peer = epics.getByRole("button", { name: /Follow-ups/ });
-        const tasks = page.locator(`#${await peer.getAttribute("aria-controls")}`);
+        const tasks = epicRow(page, epics, /Follow-ups/).getByTestId("live-epic-tasks");
         await expect(tasks).toBeHidden();
         await peer.focus(); await page.keyboard.press("Enter");
         await expect(peer).toHaveAttribute("aria-expanded", "true");
         await expect(tasks).toContainText("Follow up on the release");
         await expect(tasks).not.toContainText("follow-1");
-        const parked = tasks.locator(".live-epic-task").filter({ hasText: "Follow up on the release" });
-        await expect(parked.locator(".live-epic-task-machine")).toHaveText("prowl");
-        await expect(parked.locator(".live-epic-chip")).toHaveClass(/live-epic-chip--parked/);
-        await expect.poll(async () => (await tasks.locator(".live-epic-group-label").allTextContents()).map(text => Number(text.match(/\d+/)?.[0]))).toEqual([1, 2, 2]);
+        const parked = tasks.getByRole("listitem").filter({ hasText: "Follow up on the release" });
+        await expect(parked.getByTestId("live-epic-task-machine")).toHaveText("prowl");
+        await expect(parked.getByTestId("live-epic-chip")).toHaveClass(/live-epic-chip--parked/);
+        await expect.poll(async () => (await groupLabels(tasks).allTextContents()).map(text => Number(text.match(/\d+/)?.[0]))).toEqual([1, 2, 2]);
         await expectRun(peer, [2, 1, 2]);
         // The delivery merges while its task is still parked and its worker still live:
         // the row moves to Merged and the split moves with it.
@@ -252,25 +266,25 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["prowl.test", "remote-session"]);
         await expectRun(peer, [2, 0, 3]);
         await expect(peer).toContainText("3/5");
-        await expect(tasks.locator(".live-epic-group-label")).toHaveText(["Open · 2", "Merged · 3"]);
-        await tasks.locator(".live-epic-merged summary").click();
-        await expect(tasks.locator(".live-epic-merged")).toContainText("Follow up on the release");
+        await expect(groupLabels(tasks)).toHaveText(["Open · 2", "Merged · 3"]);
+        await tasks.getByText(/^Merged · \d+$/).click();
+        await expect(tasks.getByRole("group")).toContainText("Follow up on the release");
         await expect(peer).toHaveAttribute("aria-expanded", "true");
         // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
         expect(statusReads).toContain("gabber-session");
         if (process.env.EPIC_PROGRESS_QA) await page.screenshot({ path: `${process.env.EPIC_PROGRESS_QA}/epic-progress-${width}-${colorScheme}-expanded.png` });
         if (width === 390) {
           await page.keyboard.press("Escape");
-          await expect(page.locator("#conversation-more")).toBeFocused();
+          await expect(page.getByRole("button", { name: "More conversation actions", exact: true })).toBeFocused();
         }
       });
       await journey.stage("Read Live epics with forced colors and reduced motion", async () => {
         await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
         if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         await expect(epics.getByRole("button", { name: /Follow-ups/ })).toBeVisible();
-        const opening = epics.locator(".live-epic").filter({ hasText: "Follow-ups" });
+        const opening = epicRow(page, epics, /Follow-ups/);
         await opening.evaluate(node => node.classList.add("is-opening"));
-        expect(await opening.locator(".live-epic-tasks").evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        expect(await opening.getByTestId("live-epic-tasks").evaluate(node => getComputedStyle(node).animationName)).toBe("none");
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
       });
     });

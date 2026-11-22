@@ -17750,22 +17750,52 @@ fn checkout_is_clean(worktree: &std::path::Path) -> bool {
 /// no-delivery close ineligible. Retarget safety uses the same evidence gate:
 /// only an otherwise empty source can have its recorded start rebound.
 pub(crate) fn has_recorded_no_delivery_state(task: &Task, receipt: Option<&str>) -> bool {
+    recorded_no_delivery_state(task, receipt, false)
+}
+
+/// `prior_cycle` exempts only the code identity a reopen retained from an
+/// ended delivery cycle; the caller must prove that identity landed.
+fn recorded_no_delivery_state(task: &Task, receipt: Option<&str>, prior_cycle: bool) -> bool {
     let delivery = &task.deliverables;
     task.execution_note.is_some()
         || task.branch.is_some()
         || receipt.is_some()
         || !handoff_prior_holders(&task.notes).is_empty()
-        || has_recorded_code_delivery(task)
-        || delivery.parked_branch.is_some()
+        || (!prior_cycle && (has_recorded_code_delivery(task)
+            || delivery.parked_branch.is_some()
+            || delivery.review_envelope.is_some()
+            || delivery.green_merge_commit.is_some()))
+        || delivery.factory_branch_anchor.is_some()
         || !delivery.handoff_branches.is_empty()
         || delivery.integration_batch.is_some()
         || delivery.delivery_pr_number.is_some()
-        || delivery.review_envelope.is_some()
         || delivery.negative_result.is_some()
         || delivery.evidence_only.is_some()
-        || delivery.green_merge_commit.is_some()
         || delivery.merge_conflicted
         || delivery.declined_factory_branch_anchors.as_ref().is_some_and(|anchors| !anchors.is_empty())
+}
+
+/// GH #1695: a reopen ends the delivery cycle and keeps its commits as
+/// history. A revalidation cycle that delivers nothing may declare
+/// no_delivery only when that retained identity is already on the target.
+/// Returns the retained tips when the task has that shape; landing is
+/// measured by the caller.
+fn prior_cycle_tips(task: &Task) -> Option<Vec<String>> {
+    let delivery = &task.deliverables;
+    if delivery.delivery_cycle == 0 || delivery.factory_branch_start.is_none() {
+        return None;
+    }
+    let mut tips: Vec<String> = delivery.historical_factory_branch_anchors.iter()
+        .chain(&delivery.commit_hash)
+        .chain(&delivery.merge_commit)
+        .chain(&delivery.delivery_pr_merge_commit)
+        .chain(&delivery.green_merge_commit)
+        .map(|tip| tip.trim().to_string())
+        .filter(|tip| !tip.is_empty())
+        .collect();
+    tips.sort_unstable();
+    tips.dedup();
+    (!tips.is_empty()).then_some(tips)
 }
 
 /// Refusals retain the measured commit identities and containing refs, including
@@ -17802,8 +17832,10 @@ fn measure_no_delivery(
     supervisor_source_recovery: bool,
 ) -> Result<String, String> {
     let delivery = &task.deliverables;
-    if has_recorded_no_delivery_state(task, receipt) {
-        return Err("recorded delivery, methodology or handoff evidence exists; use the ordinary close contract.".into());
+    const RECORDED: &str = "recorded delivery, methodology or handoff evidence exists; use the ordinary close contract.";
+    let prior_tips = prior_cycle_tips(task);
+    if recorded_no_delivery_state(task, receipt, prior_tips.is_some()) {
+        return Err(RECORDED.into());
     }
     let window = window.ok_or("task attribution is unavailable")?;
     // A successful inventory distinguishes truly absent refs from failed
@@ -17821,9 +17853,6 @@ fn measure_no_delivery(
         let (name, sha) = line.split_once(' ').ok_or("Git ref inventory is malformed")?;
         refs.insert(name.to_string(), sha.to_string());
     }
-    if !window.identity.known_commits.is_empty() {
-        return Err(no_delivery_commit_refusal(repo, &window.identity.known_commits, &refs));
-    }
     let origin_target = format!("refs/remotes/origin/{target}");
     let target_ref = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
         && refs.contains_key(&origin_target)
@@ -17832,8 +17861,27 @@ fn measure_no_delivery(
     } else {
         target.to_string()
     };
-    let target_sha = resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}"))
-        .ok_or("integration target is unavailable")?;
+    let resolve_target = || resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}"))
+        .ok_or("integration target is unavailable");
+    // The landed prior cycle is the only identity exempt from absence; any
+    // unlanded retained tip keeps the ordinary close contract.
+    let landed = match prior_tips.as_ref() {
+        Some(tips) => {
+            let target_sha = resolve_target()?;
+            if !tips.iter().all(|tip| git_commit_is_ancestor(repo, tip, &target_sha)) {
+                return Err(RECORDED.into());
+            }
+            tips.clone()
+        }
+        None => Vec::new(),
+    };
+    let is_landed = |commit: &str| landed.iter().any(|tip| git_commit_is_ancestor(repo, commit, tip));
+    let unlanded: Vec<String> = window.identity.known_commits.iter()
+        .filter(|commit| !is_landed(commit)).cloned().collect();
+    if !unlanded.is_empty() {
+        return Err(no_delivery_commit_refusal(repo, &unlanded, &refs));
+    }
+    let target_sha = resolve_target()?;
     let source = task.deliverables.factory_branch_start.as_ref();
     let source_identity_mismatch = source.is_some_and(|start|
         task.assignee.as_deref() != Some(start.assignee.as_str())
@@ -17901,6 +17949,31 @@ fn measure_no_delivery(
     for (reference, sha) in &measured {
         if !matches!(known_unmerged_factory_commits(repo, sha, &target_sha), KnownUnmergedCount::KnownZero) {
             return Err(format!("{reference}@{sha} has unmerged work or unreadable history"));
+        }
+        if !landed.is_empty() {
+            // The landed cycle is on every measured tip; only this cycle's
+            // graph, after its start and beyond the landed tips, may be empty.
+            let start = delivery.factory_branch_start.as_ref().ok_or(RECORDED)?;
+            let mut args = vec!["log".to_string(), "--format=%H%x1f%B%x1e".into(),
+                sha.clone(), target_sha.clone(), format!("^{}", start.base_sha)];
+            args.extend(landed.iter().map(|tip| format!("^{tip}")));
+            args.push("--".into());
+            let history = crate::git_evidence::git_text(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())
+                .ok_or("revalidation cycle history is unavailable")?;
+            let mut commits = Vec::new();
+            for record in history.split('\u{1e}').map(str::trim).filter(|record| !record.is_empty()) {
+                let (commit, message) = record.split_once('\u{1f}')
+                    .ok_or("revalidation cycle history is unreadable")?;
+                if message_references_task(message, &task.id)
+                    && !task_attribution::commit_claims_another_task(repo, commit, &window.identity)
+                {
+                    commits.push(commit.to_string());
+                }
+            }
+            if !commits.is_empty() {
+                return Err(no_delivery_commit_refusal(repo, &commits, &refs));
+            }
+            continue;
         }
         if !matches!(task_attribution::branch_task_claims(repo, sha, &window.identity), Some((None, _))) {
             return Err(format!("{reference}@{sha} contains task commits or unreadable ownership"));

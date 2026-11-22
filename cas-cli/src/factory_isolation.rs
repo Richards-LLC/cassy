@@ -288,6 +288,10 @@ pub fn sibling_misbinding_message(worker_name: &str, owner: &str, cwd: &str) -> 
          This copies the task's recorded tip to your own per-task branch in your registered \
          worktree, including when it is on that task's source branch; no worker checkout is \
          needed first. Then commit on the adopted branch.\n\n\
+         Adoption needs a clean worktree. Save uncommitted edits here first with \
+         `git stash push -u -m <task-id>-takeover` (or `git diff > <file>` and \
+         `git checkout -- <paths>`), then restore them on the adopted branch with \
+         `git stash apply <that stash's SHA>`.\n\n\
          Note: --no-verify does NOT bypass this guard (it only skips git hooks, not the Claude \
          Code PreToolUse harness)."
     )

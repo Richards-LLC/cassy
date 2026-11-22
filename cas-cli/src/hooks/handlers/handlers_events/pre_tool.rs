@@ -2738,6 +2738,9 @@ enum GitHeadAction {
     Navigate { reference: Option<String>, guess: bool },
     RefRewrite,
     Recover { branch: Option<String> },
+    /// `checkout [<tree-ish>] -- <paths>`: rewrites only index and worktree
+    /// files, never HEAD or a ref (cas-7e76a).
+    RestorePaths,
     Guarded,
 }
 
@@ -2797,7 +2800,13 @@ fn git_head_action(operation: &str, args: &[String]) -> GitHeadAction {
     while let Some(word) = words.next() {
         match word.as_str() {
             "--" => {
-                if operation == "checkout" && words.peek().is_some() { return GitHeadAction::Guarded; }
+                if operation == "checkout" && words.peek().is_some() {
+                    return if references.len() <= 1 && !(creates || detach || track) {
+                        GitHeadAction::RestorePaths
+                    } else {
+                        GitHeadAction::Guarded
+                    };
+                }
                 references.extend(words.cloned());
                 break;
             }
@@ -3475,6 +3484,12 @@ fn check_worker_git_commit_scope_at_target(
     // worktree containment checks above, then distinguish checkout refs from
     // ambiguous path operands using this command's actual Git identity.
     if git_target_is_head_navigation(target) {
+        return None;
+    }
+    // cas-7e76a: restoring files inside the registered worktree is the
+    // cleanup an authorized takeover needs before adoption; it cannot put a
+    // commit on whichever branch is checked out there.
+    if is_isolated && matches!(target.head_action, GitHeadAction::RestorePaths) {
         return None;
     }
 

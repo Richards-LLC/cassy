@@ -4452,6 +4452,15 @@ impl CasService {
                 format!("Failed to open prompt queue: {error}"),
             )
         })?;
+        // cas-cd0f (GH #2187): a send answered IN_PROGRESS at its deadline is
+        // reconciled by its continuation id, never by resending it.
+        if req.notification_id.is_none()
+            && let Some(id) = req.id.as_deref().map(str::trim)
+                .filter(|id| id.starts_with(crate::mcp::tools::service::server_handler::SEND_CONTINUATION_PREFIX))
+        {
+            return crate::mcp::tools::service::server_handler::send_continuation_status(&self.inner.cas_root, id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error));
+        }
         let notification_id = match req.notification_id {
             Some(id) => id,
             None => {

@@ -576,6 +576,7 @@ impl CasService {
             .unwrap_or_default();
         let registration = tool_name == "coordination" && matches!(action, "register" | "session_start");
         let continuation_id = registration.then(|| uuid::Uuid::new_v4().to_string());
+        let send = tool_name == "coordination" && matches!(action, "message" | "interrupt");
         let merge = tool_name == "factory" && action == "worktree_merge";
         // Candidate/Git/CI waits have separate local bounds, not a bound on
         // their combined duration. Persist before starting non-cancellable work.
@@ -770,6 +771,11 @@ impl CasService {
                 }
                 let elapsed = start.elapsed();
                 let commit = receipt.commit.get();
+                // cas-cd0f (GH #2187): an uncommitted send keeps running under a
+                // continuation the caller can query, instead of being aborted
+                // mid-write behind a bare UNKNOWN with no identifier.
+                let continuation_id = continuation_id.or_else(|| (send && commit.is_none())
+                    .then(|| format!("{SEND_CONTINUATION_PREFIX}{}", uuid::Uuid::new_v4())));
                 // cas-24d8: a close commits intermediate writes (a gate note,
                 // a parked anchor) long before its Closed write. Reporting
                 // those as COMMITTED told the supervisor a close was done
@@ -824,6 +830,8 @@ impl CasService {
                 } else { None };
                 let outcome = if read_recovery.is_some() {
                     "not applicable (the timed-out call was read-only)".to_string()
+                } else if let Some(id) = continuation_id.as_ref().filter(|_| send) {
+                    format!("IN_PROGRESS (the send keeps running; query coordination action=message_status id={id}, and its final outcome will appear in your inbox; do not resend)")
                 } else if let Some(id) = &continuation_id {
                     format!("{} (registration keeps running; its final outcome will appear in your inbox with continuation_id={id}; do not retry)",
                         if commit.is_some() { "COMMITTED" } else { "IN_PROGRESS" })
@@ -856,7 +864,7 @@ impl CasService {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                     message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}{pagination_hint}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if (registration && commit.is_none()) || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if read_recovery.is_some() { "NOT_APPLICABLE" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if (continuation_id.is_some() && commit.is_none()) || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if read_recovery.is_some() { "NOT_APPLICABLE" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
                         "code": read_recovery.as_ref().map(|_| "task_read_paginate"),
                         "recovery": read_recovery,
                         "continuation_id": continuation_id,
@@ -1004,7 +1012,8 @@ impl CasService {
         Ok(output)
     }
 
-    /// Keep a non-cancellable registration and its final caller notice alive.
+    /// Keep a non-cancellable registration, or a send answered IN_PROGRESS
+    /// (cas-cd0f), and its final caller notice alive.
     fn record_registration_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
@@ -1019,14 +1028,25 @@ impl CasService {
             .or_else(|| std::env::var("CAS_AGENT_NAME").ok());
         let session = std::env::var("CAS_FACTORY_SESSION").ok();
         let service = self.clone();
+        let send = continuation_id.starts_with(SEND_CONTINUATION_PREFIX);
+        let live = send.then(|| {
+            let live = std::sync::Arc::new(LiveSend { receipt: receipt.clone(), finished: std::sync::OnceLock::new() });
+            live_sends().insert(continuation_id.clone(), live.clone());
+            live
+        });
         // Backend replacement must also wait for the durable outcome, rather
         // than dropping the watcher just after its registration completed.
         let work = self.tool_work.permit();
         tokio::spawn(async move {
             let _work = work;
             let joined = handle.await;
+            if let Some(live) = &live { let _ = live.finished.set(()); }
             let summary = late_close_summary(&joined);
-            let outcome = if receipt.commit.get().is_some() { "COMMITTED" } else { "UNKNOWN" };
+            // A finished send that never reached its enqueue wrote nothing.
+            let outcome = if receipt.commit.get().is_some() { "COMMITTED" }
+                else if send { "NOT_COMMITTED" } else { "UNKNOWN" };
+            let notification_id = receipt.commit.get().and_then(|commit| commit.notification_id);
+            let recorded_id = continuation_id.clone();
             let result_status = if matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true)) { "ok" } else { "error" };
             let recorded = tokio::task::spawn_blocking(move || {
                 let agents = service.inner.open_agent_store().map_err(|error| error.message.to_string())?;
@@ -1045,17 +1065,29 @@ impl CasService {
                     "coordination action={} finished after its response. Mutation outcome: {outcome}. Continuation: {continuation_id}. Result: {summary}",
                     receipt.action(),
                 );
-                crate::supervisor_notices::enqueue_with_context(
-                    &service.inner.cas_root, &recipient, "registration_outcome", &detail,
-                    &continuation_id, Some(serde_json::json!({
-                        "continuation_id": continuation_id, "action": receipt.action(),
-                        "session_id": session_id, "agent_id": recipient.id,
-                        "mutation_outcome": outcome, "result_status": result_status,
-                    })),
-                ).map_err(|error| error.to_string())
+                let context = serde_json::json!({
+                    "continuation_id": continuation_id, "action": receipt.action(),
+                    "session_id": session_id, "agent_id": recipient.id,
+                    "mutation_outcome": outcome, "result_status": result_status,
+                    "notification_id": notification_id,
+                });
+                if send {
+                    crate::supervisor_notices::enqueue_keyed(
+                        &service.inner.cas_root, &recipient, "send_outcome", &detail,
+                        &send_outcome_key(&continuation_id), Some(context),
+                    )
+                } else {
+                    crate::supervisor_notices::enqueue_with_context(
+                        &service.inner.cas_root, &recipient, "registration_outcome", &detail,
+                        &continuation_id, Some(context),
+                    )
+                }.map_err(|error| error.to_string())
             }).await;
-            if !matches!(&recorded, Ok(Ok(()))) {
-                warn!(?recorded, "MCP registration outcome could not be queued");
+            if matches!(&recorded, Ok(Ok(()))) {
+                // The durable notice now answers message_status for this id.
+                live_sends().remove(&recorded_id);
+            } else {
+                warn!(?recorded, "MCP late mutation outcome could not be queued");
             }
         });
     }
@@ -1259,6 +1291,80 @@ impl CasService {
 
         "UNKNOWN (the response deadline elapsed before Cassy could confirm a committed write; re-query state before retrying)".to_string()
     }
+}
+
+/// cas-cd0f (GH #2187): continuation ids of sends answered IN_PROGRESS at the
+/// response deadline carry this prefix, so message_status can tell them from
+/// numeric notification ids and peer message ids.
+pub(crate) const SEND_CONTINUATION_PREFIX: &str = "send-";
+
+fn send_outcome_key(continuation_id: &str) -> String {
+    format!("send-outcome:{continuation_id}")
+}
+
+/// A send that outlived its response, until its outcome notice is durable.
+struct LiveSend {
+    receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
+    finished: std::sync::OnceLock<()>,
+}
+
+fn live_sends() -> std::sync::MutexGuard<'static, HashMap<String, std::sync::Arc<LiveSend>>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::sync::Arc<LiveSend>>>> =
+        std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Reconcile a send continuation without resending: the running send's own
+/// receipt while it is live in this process, else its durable outcome notice.
+/// No notice and no live send means this server cannot know (for example it
+/// restarted mid-send), and the answer says UNKNOWN rather than guessing.
+pub(crate) fn send_continuation_status(
+    cas_root: &std::path::Path,
+    continuation_id: &str,
+) -> Result<rmcp::model::CallToolResult, String> {
+    let live = live_sends().get(continuation_id).cloned();
+    let (outcome, notification_id) = if let Some(live) = live {
+        match live.receipt.commit.get() {
+            Some(commit) => ("COMMITTED", commit.notification_id),
+            None if live.finished.get().is_some() => ("NOT_COMMITTED", None),
+            None => ("IN_PROGRESS", None),
+        }
+    } else {
+        let notice = crate::store::open_supervisor_queue_store(cas_root)
+            .and_then(|store| Ok(store.get_by_transition_key(&send_outcome_key(continuation_id))?))
+            .map_err(|error| format!("Failed to query send outcome: {error}"))?;
+        let context = notice
+            .and_then(|notice| serde_json::from_str::<serde_json::Value>(&notice.payload).ok())
+            .map(|payload| payload["context"].clone());
+        match context {
+            Some(context) => (
+                match context["mutation_outcome"].as_str() {
+                    Some("COMMITTED") => "COMMITTED",
+                    Some("NOT_COMMITTED") => "NOT_COMMITTED",
+                    _ => "UNKNOWN",
+                },
+                context["notification_id"].as_i64(),
+            ),
+            None => ("UNKNOWN", None),
+        }
+    };
+    let guidance = match outcome {
+        "COMMITTED" => format!(
+            "the send committed as notification_id {}; do not resend; query message_status notification_id={} for delivery",
+            notification_id.unwrap_or_default(), notification_id.unwrap_or_default()),
+        "NOT_COMMITTED" => "the send ended without writing a message; it is safe to send it once more".into(),
+        "IN_PROGRESS" => "the send is still running; query again; do not resend".into(),
+        _ => "this server holds no record of the send (it may have restarted mid-send); check the recipient's inbox before resending".into(),
+    };
+    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+        format!("Send {continuation_id}: {outcome}: {guidance}."),
+    )]);
+    answer.structured_content = Some(serde_json::json!({
+        "continuation_id": continuation_id,
+        "mutation_outcome": outcome,
+        "notification_id": notification_id,
+    }));
+    Ok(answer)
 }
 
 pub(crate) fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {

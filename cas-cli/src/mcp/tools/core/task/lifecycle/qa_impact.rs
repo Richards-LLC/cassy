@@ -243,6 +243,9 @@ mod checkout_tests {
         std::fs::write(worker.join("app/feature.rs"), "pub fn feature() {}\n").unwrap();
         git(&worker, &["add", "."]);
         git(&worker, &["commit", "-qm", "worker metadata"]);
+        // Start creates its lane from the declared target, whose metadata is
+        // newer than the primary checkout's currently checked-out main.
+        git(&worker, &["branch", "epic/metadata"]);
         env.set("CAS_ROOT", &root);
         env.set("CAS_CLONE_PATH", &worker);
         env.set("CAS_AGENT_NAME", "reader");
@@ -260,7 +263,7 @@ mod checkout_tests {
         task.notes = "Repro: caller supplied fixture".into();
         task.labels = vec!["from-finding".into(), "severity:broken".into(), "reach:secondary".into()];
         task.deliverables.work_target = Some(cas_types::WorkTarget {
-            repo_selector: "project:worker-metadata-fixture".into(), target_branch: "main".into(),
+            repo_selector: "project:worker-metadata-fixture".into(), target_branch: "epic/metadata".into(),
         });
         core.open_task_store().unwrap().add(&task).unwrap();
         (dir, CasService::new(core, #[cfg(feature = "mcp-proxy")] None), task, worker)
@@ -284,7 +287,8 @@ mod checkout_tests {
             "action":"start", "id":task.id, "brief":false,
         })).unwrap())).await.unwrap();
         assert_eq!(started.is_error, Some(false));
-        assert!(serde_json::to_string(&started).unwrap().contains("WORKER-J"));
+        let started = serde_json::to_string(&started).unwrap();
+        assert!(started.contains("WORKER-J"), "{started}");
         // A genuinely missing worker registry must not borrow the primary's.
         std::fs::remove_file(worker.join("docs/qa/journeys.yaml")).unwrap();
         let answer = service.task(Parameters(serde_json::from_value(serde_json::json!({
@@ -310,8 +314,19 @@ mod checkout_tests {
     #[tokio::test]
     async fn cas_598f_finding_labels_validate_the_assigned_registry() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let (dir, service, task, _worker) = fixture(&mut env);
+        let (dir, _worker_service, task, _worker) = fixture(&mut env);
         registry(dir.path(), "PRIMARY-J");
+        // Priority changes remain supervisor-only. The supervisor's checkout
+        // also must not replace the task's assigned worker registry.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "supervisor");
+        env.set("CAS_CLONE_PATH", dir.path());
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        let mut supervisor = cas_types::Agent::new_with_role("supervisor-session".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        supervisor.pid = Some(std::process::id());
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
         let updated = service.task(Parameters(serde_json::from_value(serde_json::json!({
             "action":"update", "id":task.id, "labels":"severity:broken,reach:main,journey:WORKER-J",
         })).unwrap())).await.unwrap();

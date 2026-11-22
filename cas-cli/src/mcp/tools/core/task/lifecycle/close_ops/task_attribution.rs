@@ -1194,12 +1194,22 @@ fn final_snapshot_delivery_ranges(
     }
     let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", &tip])?;
     let parents: Vec<_> = parents.split_whitespace().collect();
-    let [_, _, target_parent] = parents.as_slice() else {
+    let [_, first_parent, target_parent] = parents.as_slice() else {
         return Some(ranges);
     };
-    if git_text(repo, &["diff", "--name-only", target_parent, &tip, "--"])?.is_empty() {
-        return Some(ranges);
-    }
+    // GH #2222/#2236: merging duplicate content can leave both parents
+    // identical to the parked tree. Its target-parent delta is empty, but
+    // the task's earlier content still lies after their common base. Require
+    // both snapshots to match so a merge that drops one side's work cannot
+    // claim this recovery. Ordinary range and content fences still apply.
+    let comparison = if git_text(repo, &["diff", "--name-only", target_parent, &tip, "--"])?.is_empty() {
+        if !git_text(repo, &["diff", "--name-only", first_parent, &tip, "--"])?.is_empty() {
+            return Some(ranges);
+        }
+        git_text(repo, &["merge-base", first_parent, target_parent])?
+    } else {
+        target_parent.to_string()
+    };
     // The recorded anchor binds the earlier cycle after a restart. Match the
     // merge-tip content proof's creation floor, keeping the immutable start
     // exclusion and foreign-task fences from ordinary range selection.
@@ -1207,7 +1217,7 @@ fn final_snapshot_delivery_ranges(
         not_before: window.task_floor,
         ..window.clone()
     };
-    task_delivery_ranges(repo, target_parent, &anchored_window, Some(&tip))
+    task_delivery_ranges(repo, &comparison, &anchored_window, Some(&tip))
 }
 
 pub(super) fn final_snapshot_delivery_base(
@@ -1666,7 +1676,7 @@ fn merge_tip_content_presence_selected(
     let mut commits = match explicit_commits {
         Some(commits) => commits.to_vec(),
         None => {
-            let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
+            let ranges = final_snapshot_delivery_ranges(repo, target, window, merge_tip)?;
             attributed_content_commits(repo, merge_tip, window, identity, &ranges)?
         }
     };

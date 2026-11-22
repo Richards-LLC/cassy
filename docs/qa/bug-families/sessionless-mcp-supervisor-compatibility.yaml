@@ -1,0 +1,3 @@
+title: Direct snapshot supervisor resolution preserves legacy None callers without changing named-session isolation
+tasks: [cas-1841]
+journeys: [FACTORY-SUPERVISE, FACTORY-CLOSE]

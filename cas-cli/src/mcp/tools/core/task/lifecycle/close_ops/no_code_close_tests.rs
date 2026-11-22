@@ -3358,6 +3358,82 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
         .collect::<Vec<_>>().join("\n")
 }
 
+/// GH #2233: a terminal task can arrive before its lease cleanup (for
+/// example through peer sync). Both direct starts and queue repair must heal
+/// that stale ownership, while retaining the single unfinished task fence.
+#[tokio::test]
+async fn cancelled_work_does_not_block_next_start_gh2233() {
+    let mut env = TestEnvGuard::temp_home();
+    for daemon in [false, true] {
+        for state in ["cancelled", "cancelled-stale-lease", "closed-stale-lease", "assigned", "leased"] {
+            let f = queue_control_fixture(&mut env);
+            let previous = "cas-8488-current";
+            let next = "cas-8488-one";
+            let mut successor = f.task(next);
+            successor.execution_note = Some("no-code".into());
+            successor.external_ref = Some(PROOF.into());
+            f.put(&successor);
+            queue_control(&f, Some(vec![next])).await;
+            let agents = open_agent_store(&f.cas_dir()).unwrap();
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            match state {
+                "cancelled" | "cancelled-stale-lease" => {
+                    call(&f.supervisor, serde_json::json!({
+                        "action":"cancel", "id":previous, "reason":"Superseded by peer delivery",
+                    })).await;
+                    assert_eq!(f.task(previous).status, TaskStatus::Cancelled);
+                }
+                "closed-stale-lease" => {
+                    // Terminal projection arriving before lease cleanup.
+                    let mut task = f.task(previous);
+                    task.status = TaskStatus::Closed;
+                    f.put(&task);
+                }
+                "assigned" => { agents.release_lease(previous, "nocode-worker-session").unwrap(); }
+                "leased" => {
+                    let mut task = f.task(previous);
+                    task.status = TaskStatus::Open;
+                    f.put(&task);
+                }
+                _ => unreachable!(),
+            }
+            if state == "cancelled-stale-lease" {
+                claim(&f, previous);
+            }
+            env.set("CAS_AGENT_ROLE", "worker");
+            let unfinished = matches!(state, "assigned" | "leased");
+            if daemon {
+                crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+            } else {
+                let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+                    "action":"start", "id":next,
+                })).unwrap())).await;
+                if unfinished {
+                    let error = result.unwrap_err();
+                    assert!(error.message.contains("G-08"), "{state}: {error}");
+                    // Execute the suggested hold action through the real
+                    // handler; terminal work must never need this remedy.
+                    call(&f.worker, serde_json::json!({
+                        "action":"update", "id":previous, "status":"blocked",
+                    })).await;
+                    assert_eq!(f.task(previous).status, TaskStatus::Blocked);
+                } else {
+                    result.unwrap_or_else(|error| panic!("{state}: {error}"));
+                }
+            }
+            assert_eq!(f.task(next).status,
+                if unfinished { TaskStatus::Open } else { TaskStatus::InProgress },
+                "daemon={daemon}, state={state}");
+            if !unfinished {
+                assert!(agents.list_active_leases().unwrap().iter()
+                    .filter(|lease| lease.agent_id == "nocode-worker-session")
+                    .all(|lease| lease.task_id == next));
+                assert_eq!(agents.get("nocode-worker-session").unwrap().active_tasks, 1);
+            }
+        }
+    }
+}
+
 /// GH #1760: resuming blocked, untouched work through the queue binds its
 /// fresh lane before a first commit, without discarding earlier delivery.
 #[tokio::test]
@@ -3974,5 +4050,107 @@ fn shared_queue_checkout_rebinds_only_executable_work_gh2022() {
             assert_eq!(crate::factory_isolation::classify_worker_binding(&worker.name,
                 crate::factory_isolation::branch_at(f.dir.path()).as_deref()), crate::factory_isolation::WorkerBinding::Own);
         }
+    }
+}
+
+/// GH #2250/#2274: the worker may already have parked B, or only started
+/// B without a commit, when a relayed review correction is pushed on A's
+/// recorded source branch. B's lease must not acquire A's identified repair.
+#[tokio::test]
+async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
+    let mut env = TestEnvGuard::temp_home();
+    for b_parked in [true, false] {
+        let f = fixture(&mut env, "epic/next");
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-a0a0";
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["switch", "-c", &lane, "origin/epic/next"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let mut a = assigned(id, TaskType::Bug, "epic/next");
+        a.status = TaskStatus::Open;
+        f.put(&a);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        std::fs::write(checkout.join("repair.md"), "initial delivery\n").unwrap();
+        git(&checkout, &["add", "repair.md"]);
+        git(&checkout, &["commit", "-qm", "fix(cas-a0a0): initial delivery"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        let close = serde_json::json!({"action":"close", "id":id, "reason":"Delivery ready"});
+        let first = call(&f.worker, close.clone()).await;
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{first}");
+        let recorded = f.task(id).deliverables.factory_branch_anchor.unwrap();
+
+        let mut b = assigned("cas-b0b0", TaskType::Bug, "epic/next");
+        b.status = TaskStatus::Open;
+        f.put(&b);
+        call(&f.worker, serde_json::json!({"action":"start", "id":b.id})).await;
+        // Separate the lease clocks explicitly; Git timestamps must not depend
+        // on whether two starts happen to fall in the same host clock tick.
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        for (task, time) in [(id, "2025-01-01T00:00:00Z"), (b.id.as_str(), "2025-01-02T00:00:00Z")] {
+            conn.execute("UPDATE task_lease_history SET timestamp=?1 WHERE task_id=?2", rusqlite::params![time, task]).unwrap();
+        }
+        if b_parked {
+            std::fs::write(checkout.join("b.md"), "task B\n").unwrap();
+            git(&checkout, &["add", "b.md"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-b0b0): delivery B"]);
+            let branch = git(&checkout, &["branch", "--show-current"]);
+            git(&checkout, &["push", "-q", "origin", &branch]);
+            let response = call(&f.worker, serde_json::json!({"action":"close", "id":b.id, "reason":"Delivery B ready"})).await;
+            assert_eq!(f.task(&b.id).status, TaskStatus::AwaitingMerge, "{response}");
+        }
+        let b_before = f.task(&b.id);
+        git(&checkout, &["switch", &lane]);
+        for subject in ["fix(cas-b0b0): foreign repair\n\nContext: cas-a0a0", "fix: unnamed repair", "fix(cas-a0a0): restore review correction"] {
+            git(&checkout, &["reset", "--hard", &recorded]);
+            std::fs::write(checkout.join("repair.md"), format!("{subject}\n")).unwrap();
+            git(&checkout, &["add", "repair.md"]);
+            git(&checkout, &["commit", "-qm", subject]);
+            let own = subject.starts_with("fix(cas-a0a0)");
+            if own {
+                // GH #2274: an epic sync after the repair imports a sibling's
+                // delivery without changing which task owns the repair.
+                git(repo, &["switch", "epic/next"]);
+                std::fs::write(repo.join("target.md"), "integrated sibling\n").unwrap();
+                git(repo, &["add", "target.md"]);
+                git(repo, &["commit", "-qm", "fix(cas-c0c0): target progress"]);
+                git(repo, &["push", "-q", "origin", "epic/next"]);
+                git(&checkout, &["merge", "--no-ff", "-qm", "sync declared target", "origin/epic/next"]);
+            }
+            git(&checkout, &["push", "-q", "--force", "origin", &lane]);
+            let tip = git(&checkout, &["rev-parse", "HEAD"]);
+            let response = call(&f.worker, close.clone()).await;
+            assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+            assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(),
+                Some(if own { tip.as_str() } else { recorded.as_str() }),
+                "b_parked={b_parked}, subject={subject}: {response}");
+            assert_eq!(crate::gates::codes_in(&response).contains(&"G-60"), !own, "{response}");
+            let b_after = f.task(&b.id);
+            assert_eq!(b_after.status, b_before.status);
+            assert_eq!(b_after.deliverables.factory_branch_anchor, b_before.deliverables.factory_branch_anchor);
+        }
+        // Attribution does not grant worker review authority. The supervisor
+        // returns A through request_changes; hold unfinished B before restart.
+        let start = serde_json::json!({"action":"start", "id":id});
+        let error = f.worker.task(Parameters(serde_json::from_value(start.clone()).unwrap())).await.unwrap_err();
+        assert!(crate::gates::codes_in(&error.message).contains(&"G-05"));
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let returned = call(&f.supervisor, serde_json::json!({"action":"request_changes", "id":id, "reason":"Correct the reviewed delivery"})).await;
+        assert_eq!(f.task(id).status, TaskStatus::Open, "{returned}");
+        env.set("CAS_AGENT_ROLE", "worker");
+        if !b_parked {
+            call(&f.worker, serde_json::json!({"action":"update", "id":b.id, "status":"blocked"})).await;
+        }
+        // First start delivers the unread correction decision without mutation.
+        let _ = f.worker.task(Parameters(serde_json::from_value(start.clone()).unwrap())).await;
+        let resumed = call(&f.worker, start).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{resumed}");
+        assert_eq!(git(&checkout, &["branch", "--show-current"]), lane);
+        assert!(agents.list_active_leases().unwrap().iter()
+            .filter(|lease| lease.agent_id == "nocode-worker-session")
+            .all(|lease| lease.task_id == id));
     }
 }

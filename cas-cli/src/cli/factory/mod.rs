@@ -398,6 +398,22 @@ fn apply_worker_spec_names(
     Ok(())
 }
 
+/// cas-dc08 (N1): every final initial worker name, after `--worker-spec`
+/// names replace generated ones, stays clear of registered workers, factory
+/// branches and the names launched beside it.
+fn refuse_overlapping_worker_names(
+    names: &mut crate::factory_isolation::WorkerNameRegistry,
+    worker_names: &[String],
+) -> Result<()> {
+    for name in worker_names {
+        if let Some(overlap) = names.overlap(name) {
+            bail!("{overlap} No worker was launched.");
+        }
+        names.workers.push(name.clone());
+    }
+    Ok(())
+}
+
 impl Default for FactoryArgs {
     fn default() -> Self {
         Self {
@@ -1788,8 +1804,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 
     // cas-dc08 (N1): generated worker names skip any that would share a
     // registered worker's or a factory branch's namespace.
-    let names = crate::factory_isolation::WorkerNameRegistry::load(&preflight.cas_root, &project_root).ok();
-    let reject = |name: &str| names.as_ref().is_some_and(|names| names.overlap(name).is_some());
+    let mut names = crate::factory_isolation::WorkerNameRegistry::load(&preflight.cas_root, &project_root)
+        .map_err(|error| anyhow::anyhow!("cannot launch: {error}"))?;
+    let reject = |name: &str| names.overlap(name).is_some();
     let (supervisor_name, mut worker_names) = if is_minions {
         use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
         let sup = generate_minion_supervisor();
@@ -1881,6 +1898,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             (specs, fallback_model, None)
         }
     };
+    refuse_overlapping_worker_names(&mut names, &worker_names)?;
 
     if let Some(home) = dirs::home_dir() {
         crate::account_registry::resolve_worker_accounts(&mut resolved_worker_specs, &home)?;
@@ -3598,5 +3616,45 @@ mod tests {
             apply_worker_spec_names(&mut names, &[named(Some("lead"))], "lead").is_err(),
             "a worker may not take the supervisor's name"
         );
+    }
+
+    /// cas-dc08 (N1): a name a `--worker-spec` entry gives an initial worker
+    /// is checked after it replaces the generated one, against registered
+    /// workers, factory branches and the other names in the same launch.
+    #[test]
+    fn worker_spec_names_keep_clear_of_other_namespaces_cas_dc08() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["-c", "user.name=f", "-c", "user.email=f@example.test", "commit", "--allow-empty", "-m", "base"]);
+        git(&["update-ref", "refs/remotes/origin/factory/calm-lark", "HEAD"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        crate::store::open_agent_store(&root).unwrap().register(&cas_types::Agent::new_with_role(
+            "swift-id".into(), "swift".into(), cas_types::AgentRole::Worker)).unwrap();
+        let spec = |name: &str| cas_mux::WorkerSpec {
+            name: Some(name.to_string()),
+            ..cas_mux::WorkerSpec::builtin_default()
+        };
+        let launch = |spec_names: &[&str]| {
+            let mut generated = vec!["quick-otter-12".to_string(); spec_names.len()];
+            let specs: Vec<_> = spec_names.iter().map(|name| spec(name)).collect();
+            apply_worker_spec_names(&mut generated, &specs, "lead")?;
+            let mut names = crate::factory_isolation::WorkerNameRegistry::load(&root, repo).map_err(anyhow::Error::msg)?;
+            refuse_overlapping_worker_names(&mut names, &generated)
+        };
+        launch(&["brave-owl-88", "mild-fox-1"]).expect("clear names launch");
+        for (taken, why) in [
+            (&["swift-hawk-3"][..], "registered worker swift"),
+            (&["calm-lark-3"][..], "branch factory/calm-lark"),
+            (&["mild-fox-1", "mild-fox-1-x"][..], "the first name of this launch"),
+        ] {
+            let error = launch(taken).expect_err(why).to_string();
+            assert!(error.contains("WORKER_NAME_OVERLAPS"), "{why}: {error}");
+        }
     }
 }

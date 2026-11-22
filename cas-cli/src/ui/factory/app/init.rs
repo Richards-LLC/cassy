@@ -31,6 +31,40 @@ fn factory_session_for_mux() -> Option<String> {
     std::env::var("CAS_FACTORY_SESSION").ok()
 }
 
+/// cas-dc08 (N1): the daemon's names for a fleet whose launcher supplied
+/// none. Generated names skip any that would share a registered worker's or a
+/// factory branch's namespace, and an unreadable registry stops the launch.
+fn fallback_names(
+    cas_dir: &std::path::Path,
+    cwd: &std::path::Path,
+    minions_theme: bool,
+    workers: usize,
+    supervisor_name: Option<String>,
+    worker_names: Vec<String>,
+) -> anyhow::Result<(String, Vec<String>)> {
+    let registry = if supervisor_name.is_none() || worker_names.is_empty() {
+        Some(
+            crate::factory_isolation::WorkerNameRegistry::load(cas_dir, cwd)
+                .map_err(|error| anyhow::anyhow!("cannot generate worker names: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let reject = |name: &str| registry.as_ref().is_some_and(|names| names.overlap(name).is_some());
+    if minions_theme && supervisor_name.is_none() && worker_names.is_empty() {
+        use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
+        return Ok((generate_minion_supervisor(), generate_minion_unique(workers, &reject)));
+    }
+    let all_names = generate_unique(workers + 1, &reject);
+    let sup = supervisor_name.unwrap_or_else(|| all_names[0].clone());
+    let workers = if worker_names.is_empty() {
+        all_names[1..].to_vec()
+    } else {
+        worker_names
+    };
+    Ok((sup, workers))
+}
+
 impl FactoryApp {
     /// Create a new factory app with the given configuration.
     pub fn new(config: FactoryConfig) -> anyhow::Result<Self> {
@@ -39,26 +73,14 @@ impl FactoryApp {
         super::super::session::validate_factory_project(&config.cwd)?;
         let cas_dir = find_cas_root_from(&config.cwd)?;
 
-        let (supervisor_name, worker_names) = if config.minions_theme
-            && config.supervisor_name.is_none()
-            && config.worker_names.is_empty()
-        {
-            use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
-            let sup = generate_minion_supervisor();
-            let workers = generate_minion_unique(config.workers, &|_| false);
-            (sup, workers)
-        } else {
-            let all_names = generate_unique(config.workers + 1, &|_| false);
-            let sup = config
-                .supervisor_name
-                .unwrap_or_else(|| all_names[0].clone());
-            let workers = if config.worker_names.is_empty() {
-                all_names[1..].to_vec()
-            } else {
-                config.worker_names
-            };
-            (sup, workers)
-        };
+        let (supervisor_name, worker_names) = fallback_names(
+            &cas_dir,
+            &config.cwd,
+            config.minions_theme,
+            config.workers,
+            config.supervisor_name,
+            config.worker_names,
+        )?;
 
         let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
 
@@ -886,6 +908,36 @@ mod tests {
         // An intentionally rootless pane still refuses before launch.
         let rootless = worker(&fleet(None));
         assert!(env_value(&rootless, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_some());
+    }
+
+    /// cas-dc08 (N1): the daemon's fallback names skip a candidate that would
+    /// own another worker's `factory/` branch by syntax, and an unreadable
+    /// registry stops the launch instead of generating unchecked names.
+    #[test]
+    fn daemon_fallback_names_keep_clear_of_factory_branches_cas_dc08() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["-c", "user.name=f", "-c", "user.email=f@example.test", "commit", "--allow-empty", "-m", "base"]);
+        git(&["update-ref", "refs/remotes/origin/factory/kevin-hotfix", "HEAD"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+
+        // Every minion name is asked for, so an unchecked draw includes `kevin`.
+        let (_, workers) = fallback_names(&root, repo, true, 20, None, Vec::new()).unwrap();
+        assert_eq!(workers.len(), 20, "{workers:?}");
+        assert!(!workers.iter().any(|name| name == "kevin"), "{workers:?}");
+
+        let outside = tempfile::tempdir().unwrap();
+        assert!(fallback_names(&root, outside.path(), true, 1, None, Vec::new()).is_err());
+        assert!(
+            fallback_names(&root, outside.path(), true, 1, Some("lead".into()), vec!["named".into()]).is_ok(),
+            "launcher-supplied names read no registry"
+        );
     }
 
     fn env_value<'a>(config: &'a cas_mux::PtyConfig, key: &str) -> Option<&'a str> {

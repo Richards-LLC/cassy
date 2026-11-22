@@ -13873,9 +13873,9 @@ mod spawn_lifecycle_tests {
         std::fs::write(repo.join("base"), "fixture").unwrap();
         git(&["add", "base"]);
         git(&["commit", "-m", "fixture"]);
-        let local = "occupied-local";
-        let remote = "occupied-origin";
-        let fresh = "fresh-worker";
+        let local = "quick-otter-12";
+        let remote = "jolly-panda-42";
+        let fresh = "brave-owl-88";
         git(&["branch", &format!("factory/{local}")]);
         git(&["update-ref", &format!("refs/remotes/origin/factory/{remote}"), "HEAD"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
@@ -13893,13 +13893,16 @@ mod spawn_lifecycle_tests {
         })).unwrap();
         let ctx = crate::ops::fleet::FleetContext::operator("collision-fixture");
         // cas-dc08 (N1): generated names also skip any that would share a
-        // registered worker's or a factory branch's namespace; a branch of
-        // the same name's own known task does not block it.
+        // custom-named worker's namespace (registered `swift`, origin
+        // `factory/brave-hawk`) or own another's branch
+        // (`factory/calm-lark-3-hotfix`); a branch of the same name's own
+        // known task does not block it.
         crate::store::open_agent_store(&root).unwrap().register(&cas_types::Agent::new_with_role(
             "swift-id".into(), "swift".into(), cas_types::AgentRole::Worker)).unwrap();
-        git(&["update-ref", "refs/remotes/origin/factory/taken-owner-x", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/factory/brave-hawk", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/factory/calm-lark-3-hotfix", "HEAD"]);
         git(&["update-ref", &format!("refs/remotes/origin/factory/{fresh}-cas-spawn-epic"), "HEAD"]);
-        let mut candidates = [local, remote, "occupied-local-7", "swift-falcon-7", "taken", fresh].into_iter();
+        let mut candidates = [local, remote, "brave-hawk-5", "swift-falcon-7", "calm-lark-3", fresh].into_iter();
         service.factory_spawn_workers_in_with_name_source(&ctx, request(None), None,
             &mut || candidates.next().expect("bounded fixture candidates").to_owned()).await.expect("spawn is admitted");
         let queue = crate::store::open_spawn_queue_store(&root).unwrap();

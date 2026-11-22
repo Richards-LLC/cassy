@@ -5156,6 +5156,8 @@ starts a byte page of that same text; follow its `next=` cursor until `end`.
 The page header is separate from the body, and concatenated bodies reproduce
 the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
 boundaries. Note summary cursors address the full `task notes` response.
+`task list` does not support offset pagination: a supplied `offset`, including
+zero, returns `INVALID_PARAMS`. Omit it and use filters or a larger `limit`.
 For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
 context. Start's default still performs the same claim and epic lifecycle work.
 Complete start advisories, including worktree directory instructions, are saved

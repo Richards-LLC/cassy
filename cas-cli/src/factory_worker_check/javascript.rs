@@ -2918,12 +2918,12 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         );
     }
 
-    /// GH #1977, #2000, #1971: park asks only for tests the task's own
-    /// commits changed in the delivered tree.
-    /// GH #2221: a catalogue-driven spec whose JSON changed refuses static
-    /// selection, so the caller widens to the whole spec instead of omitting cases.
+    /// GH #2221: a spec generating tests from a JSON catalogue owes whole-spec
+    /// proof when the catalogue alone changes, when its import switches to
+    /// another existing catalogue, or when both spec and catalogue change.
     #[test]
     fn changed_json_catalogue_refuses_static_selection_of_its_spec() {
+        use super::super::widened::Scope;
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let output = Command::new("git").current_dir(repo.path())
@@ -2934,28 +2934,43 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
         let spec = "src/__scenarios__/acceptance.spec.ts";
+        let catalogue = "src/__scenarios__/scenarios.json";
         let write = |path: &str, body: &str| {
             std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
             std::fs::write(repo.path().join(path), body).unwrap();
         };
-        let source = |metadata: &str| format!("import cases from './scenarios.json';\n\
+        let source = |data: &str, metadata: &str| format!("import cases from './{data}';\n\
             it('the baseline lists only real scenario tests', () => {{ {metadata} }});\n\
             for (const [channel, listed] of cases) {{ const test = listed ? it.failing : it; test(channel, async () => {{}}); }}\n");
+        let commit = |message: &str| {
+            git(&["add", "."]);
+            git(&["commit", "--quiet", "-m", message]);
+            git(&["rev-parse", "HEAD"])
+        };
         git(&["init", "--quiet", "-b", "main"]);
-        write("src/__scenarios__/scenarios.json", "[[\"sms\", false]]");
-        write(spec, &source(""));
-        git(&["add", "."]);
-        git(&["commit", "--quiet", "-m", "base"]);
-        let base = git(&["rev-parse", "HEAD"]);
-        write("src/__scenarios__/scenarios.json", "[[\"sms\", false], [\"email\", true]]");
-        write(spec, &source("expect(1).toBe(1);"));
-        git(&["commit", "--quiet", "-am", "harness and catalogue"]);
-        let head = git(&["rev-parse", "HEAD"]);
-        let error = changed_tests(repo.path(), &base, &head, &[spec.into()], None).unwrap_err();
-        assert!(format!("{error:#}").contains("src/__scenarios__/scenarios.json"), "{error:#}");
-        assert_eq!(super::super::widened::scope(repo.path(), spec), super::super::widened::Scope::File(spec.into()));
+        write(catalogue, "[[\"sms\", false]]");
+        write("src/__scenarios__/legacy.json", "[[\"fax\", true]]");
+        write(spec, &source("scenarios.json", ""));
+        let base = commit("base");
+
+        write(catalogue, "[[\"sms\", false], [\"email\", true]]");
+        let catalogue_only = commit("catalogue only");
+        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into()], None).unwrap();
+        assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into())]));
+
+        write(spec, &source("legacy.json", "expect(1).toBe(1);"));
+        let switched = commit("switch catalogue");
+        assert!(changed_tests(repo.path(), &catalogue_only, &switched, &[spec.into()], None).is_err());
+
+        write(catalogue, "[[\"sms\", true]]");
+        write(spec, &source("scenarios.json", "expect(2).toBe(2);"));
+        let both = commit("harness and catalogue");
+        assert!(changed_tests(repo.path(), &base, &both, &[spec.into()], None).is_err());
+        assert_eq!(super::super::widened::scope(repo.path(), spec), Scope::File(spec.into()));
     }
 
+    /// GH #1977, #2000, #1971: park asks only for tests the task's own
+    /// commits changed in the delivered tree.
     #[test]
     fn park_requires_only_tests_the_delivery_changed_at_its_tip() {
         let repo = tempfile::tempdir().unwrap();

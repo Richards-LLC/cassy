@@ -4835,18 +4835,15 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]), train_before);
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), train_before);
 
-    // cas-d8ab: origin is unreachable, and charlie's delivery is already in
-    // the local target. The merge says containment is unverified, instead of
-    // re-running the merge and push to end in NOT PUSHED.
+    // Origin is unreachable, and charlie's delivery is already in the local
+    // target. Local containment cannot authorize publication without origin.
     run_git(&["config", "--unset", "remote.origin.uploadpack"], &repo.root);
     let local_before = git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]);
     let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
     run_git(&["remote", "set-url", "origin", remote.path().join("gone.git").to_str().unwrap()], &repo.root);
-    let offline = runtime.block_on(service.factory(Parameters(request("charlie")))).unwrap();
-    let offline = get_text(&offline);
-    // pin: the operator-facing wording is the cas-d8ab acceptance criterion.
-    assert!(offline.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{offline}");
-    assert!(!offline.contains("NOT PUSHED") && !offline.contains("PUSH NOT CONFIRMED"), "{offline}");
+    let offline = runtime.block_on(service.factory(Parameters(request("charlie"))))
+        .expect_err("unreachable origin cannot verify this parked source");
+    assert!(cas::gates::codes_in(offline.message.as_ref()).contains(&"G-97"), "{offline}");
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), local_before, "the local target did not move");
     assert_eq!(git_stdout(remote.path(), &["for-each-ref"]), origin_refs, "origin did not move");
 

@@ -2428,7 +2428,10 @@ mod tests {
         assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
         assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new() }));
         assert_eq!(widened::scope(repo.path(), "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
-        assert_eq!(widened::scope(repo.path(), "e2e/journeys/hub-double-runtime.ts"), Scope::Package(String::new()));
+        let runtime = "e2e/journeys/hub-double-runtime.ts";
+        let scopes = [widened::scope(repo.path(), runtime)];
+        assert_eq!(widened::commands(Path::new("/cas"), repo.path(), &[runtime.into()], &scopes),
+            [format!("cas factory worker-check --cas-root /cas -- vitest related --run {runtime}")]);
         assert!(playwright_importers(repo.path(), "src/shared.ts").is_empty());
     }
 

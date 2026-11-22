@@ -182,6 +182,10 @@ impl LateClose {
         })
     }
 
+    pub(super) fn id(&self) -> &str {
+        &self.pending.as_ref().expect("pending close continuation").journal.id
+    }
+
     pub(super) fn finish(mut self, note: String, failed: bool, retry_peer_park: bool) -> Result<(), String> {
         let mut pending = self.pending.take().unwrap();
         pending.journal.note = Some(note);

@@ -12,6 +12,13 @@ const commandButton = (page: Page, id: string) => commandPalette(page).getByRole
 const commandButtons = (page: Page) => commandPalette(page).getByRole("button", { name: /^\/[a-z]+ · / });
 const composer = (page: Page) => page.getByRole("textbox", { name: "Your message", exact: true });
 const sendButton = (page: Page) => page.getByRole("button", { name: /^Send to the .+ supervisor$/ });
+const conversationList = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" });
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => conversationList(page).getByRole("button", { name: /^cas-src on / });
+const receiptRegion = (page: Page) => page.getByRole("region", { name: "Supervisor command receipts", exact: true });
+const commandReceipts = (page: Page) => receiptRegion(page).getByRole("article");
+const conversationLog = (page: Page) => page.getByRole("log");
+const toast = (page: Page, text: string) => page.getByRole("status").filter({ hasText: text });
 
 async function captureReload(page: Page, name: string, width: number): Promise<void> {
   const dir = process.env.QA_ARTIFACTS;
@@ -51,22 +58,22 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       await journey.stage("Run Finish from the header menu", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await conversationRow(page).click();
         await openCommands(page);
         await commandButton(page, "finish").click();
         await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
         await expect.poll(() => mutations().length).toBe(1);
         const request = mutations()[0].body as { client_ref: string; command: string };
         expect(request.command).toBe("finish");
-        const receipt = page.locator(".supervisor-command-receipt");
+        const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         if (!phone) {
-          const [status, transcript] = await Promise.all([receipt.boundingBox(), receipt.locator("..").boundingBox()]);
+          const [status, transcript] = await Promise.all([receipt.boundingBox(), receiptRegion(page).boundingBox()]);
           expect(status!.width).toBeLessThan(transcript!.width * 0.9);
         }
         await captureReload(page, "finish-menu-requested", viewport.width);
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
-        await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
+        await expect(commandReceipts(page)).toHaveCount(0);
       });
       await journey.stage("Pick Finish from /fin autocomplete and settle its outcome", async () => {
         await input.fill("/fin");
@@ -81,12 +88,12 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(commandPalette(page)).toBeHidden();
         const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
         // Replay the daemon's short timeout before the incident's 103-second completion.
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "unconfirmed", detail: "Outcome not observed yet", output: "", interactive: false } } });
-        await expect(page.locator(".supervisor-command-receipt")).toHaveAttribute("data-phase", "unconfirmed");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "unconfirmed", detail: "Outcome not observed yet", output: "", interactive: false } } });
+        await expect(commandReceipts(page)).toHaveAttribute("data-phase", "unconfirmed");
         const before = statusReads();
         await expect.poll(statusReads).toBeGreaterThan(before);
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
-        await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
+        await expect(commandReceipts(page)).toHaveCount(0);
         expect(mutations()).toHaveLength(2);
         await captureReload(page, "finish-autocomplete-completed", viewport.width);
       });
@@ -96,27 +103,28 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     test("HUB-J27 standby shows the badge and Resume clears it (cas-0699)", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
-      const row = page.getByRole("navigation", { name: "Choose a supervisor" })
-        .getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
+      const row = conversationRow(page);
+      const standbyBadge = conversationList(page).getByText("Standby", { exact: true });
+      const resume = conversationList(page).getByRole("button", { name: "Resume", exact: true });
       await journey.stage("Go on standby from the header menu", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator(".conversation-standby")).toHaveCount(0);
+        await conversationRow(page).click();
+        await expect(standbyBadge).toHaveCount(0);
         await openCommands(page);
         await commandButton(page, "standby").click();
         await page.getByRole("alertdialog").getByRole("button", { name: "Standby", exact: true }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         expect(hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body).toMatchObject({ command: "standby", confirmed: true });
         if (viewport.width < 600) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
-        await expect(row.locator(".conversation-standby")).toBeVisible();
-        await expect(page.locator("[data-resume-standby]")).toBeVisible();
+        await expect(row.getByText("Standby", { exact: true })).toBeVisible();
+        await expect(resume).toBeVisible();
       });
       await journey.stage("Resume clears the badge", async () => {
-        await page.locator("[data-resume-standby]").click();
+        await resume.click();
         await expect.poll(() => hub.sends.length).toBe(1);
         expect(hub.sends[0]).toMatchObject({ session: PELICAN, target: machine.sessions[0]!.supervisor });
-        await expect(page.locator(".conversation-standby")).toHaveCount(0);
-        await expect(page.locator("[data-resume-standby]")).toHaveCount(0);
+        await expect(standbyBadge).toHaveCount(0);
+        await expect(resume).toHaveCount(0);
       });
     });
     test("HUB-J27 completed Claude turn accepts commands once and shows a compact native command receipt (cas-99e7)", journeyPart, async ({ page, journey }) => {
@@ -129,26 +137,28 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
       await journey.stage("Read the completed turn and a native command receipt without XML", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator(".working-turn .phase-line")).toHaveAttribute("data-active", "false");
-        const receipt = page.locator(".native-command-receipt");
-        await expect(receipt).toContainText("/mcp reconnect cas");
-        await expect(page.locator('.thread [role="log"]')).not.toContainText("<command-name>");
-        await expect(receipt).not.toHaveClass(/bub/);
+        await conversationRow(page).click();
+        await expect(conversationLog(page).getByRole("status")).toHaveAttribute("data-active", "false");
+        // The terminal's command reads as one compact line, not a sent bubble "from Terminal".
+        await expect(conversationLog(page).getByText("/mcp reconnect cas", { exact: true })).toBeVisible();
+        await expect(conversationLog(page)).not.toContainText("<command-name>");
+        await expect(conversationLog(page).getByText("from Terminal")).toHaveCount(0);
       });
       await journey.stage("Reload Cassy once from the idle Claude supervisor", async () => {
         const input = composer(page);
-        await input.fill("/mcp"); await input.press("Enter");
+        await input.fill("/mcp");
+        await expect(commandButton(page, "mcp")).toBeVisible();
+        await input.press("Enter");
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
         expect(frames).toHaveLength(1);
         const request = frames[0]!.body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         // A finished command leaves a self-clearing toast, not a card (cas-95ea).
-        await expect(page.getByRole("status").filter({ hasText: "Cassy reloaded: PID 2202" })).toBeVisible();
-        await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
-        await expect(page.locator("#toast")).toBeEmpty({ timeout: 5_000 });
+        await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
+        await expect(commandReceipts(page)).toHaveCount(0);
+        await expect(toast(page, "Cassy reloaded: PID 2202")).toHaveCount(0, { timeout: 5_000 });
         expect(hub.sends).toHaveLength(0);
       });
       await journey.stage("Dismiss a stuck queued Finish through the daemon before Exit (cas-f1a2)", async () => {
@@ -158,14 +168,14 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
         const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1]!.body as { client_ref: string; command: string };
         expect(request.command).toBe("finish");
-        const receipt = page.locator(`[data-command-ref="${request.client_ref}"]`);
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Waiting for an empty prompt", output: "", interactive: false } } });
+        const receipt = commandReceipts(page).filter({ hasText: "/finish" });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Waiting for an empty prompt", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         await receipt.getByRole("button", { name: "Dismiss command status", exact: true }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommandCancel").length).toBe(1);
         expect(hub.frames.find(frame => frame.kind === "SupervisorCommandCancel")!.body).toEqual({ client_ref: request.client_ref });
         await expect(receipt).toBeVisible();
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "cancelled", detail: "Cancelled before submission", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "cancelled", detail: "Cancelled before submission", output: "", interactive: false } } });
         await expect(receipt).toHaveCount(0);
         expect(hub.sends).toHaveLength(0);
       });
@@ -184,34 +194,37 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
+      const versionOnRow = (version: string | RegExp) => page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true })
+        .getByRole("button", { name: /^cas-src on /, includeHidden: true }).getByText(version);
       await journey.stage("See Reload Cassy on the older supervisor card without opening a menu", async () => {
         await journey.open();
-        await expect(page.locator('[data-reload-cassy="direct"]')).toBeVisible();
-        await expect(page.locator(".supervisor-version")).toContainText("9.99.1");
+        await expect(conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true })).toBeVisible();
+        await expect(conversationRow(page).getByText("9.99.1")).toBeVisible();
         await captureReload(page, "card", viewport.width);
       });
       await journey.stage("Reload from the card and wait for the replacement receipt and catalog", async () => {
-        await page.locator('[data-reload-cassy="direct"]').click();
+        await conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true }).click();
         await expect.poll(() => mutations().length).toBe(1);
         const request = mutations()[0].body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
-        const receipt = page.locator(".supervisor-command-receipt");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload is queued until this turn ends.", output: "", interactive: false } } });
+        const receipt = commandReceipts(page);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload is queued until this turn ends.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
-        await expect(page.locator(".supervisor-version")).toContainText("9.99.1");
+        // A phone now shows the conversation; the list row behind it keeps the old version.
+        await expect(versionOnRow("9.99.1")).toHaveCount(1);
         machine.sessions[0]!.mcp_version = "9.99.2";
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
-        await expect(page.locator("#toast")).toContainText("Cassy reloaded: PID 2202");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
+        await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         await captureReload(page, "reloaded-toast", viewport.width);
         // In step with its machine the row shows no version (cas-da546).
-        await expect(page.locator(".supervisor-version")).toHaveCount(0);
-        await expect(page.locator('[data-reload-cassy="direct"]')).toBeHidden();
+        await expect(versionOnRow(/\d+\.\d+\.\d+/)).toHaveCount(0);
+        await expect(conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true })).toBeHidden();
         expect(hub.sends).toHaveLength(0);
       });
       await journey.stage("Open the header dropdown beside its button, then submit typed mcp without chat", async () => {
         // On a phone the palette opens under the overflow toggle it was chosen from.
-        const toggle = page.locator(phone ? "#conversation-more" : "#conversation-commands");
+        const toggle = page.getByRole("button", { name: phone ? "More conversation actions" : "Supervisor commands", exact: true });
         await openCommands(page);
         const palette = commandPalette(page);
         await expect(commandButton(page, "mcp")).toContainText(/\S/);
@@ -233,10 +246,10 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = mutations()[1].body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
         expect(hub.sends).toHaveLength(0);
-        const receipt = page.locator(".supervisor-command-receipt");
+        const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 3303, version 9.99.2 (previous PID 2202).", output: "", interactive: false } } });
-        await expect(page.locator("#toast")).toContainText("PID 3303, version 9.99.2");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 3303, version 9.99.2 (previous PID 2202).", output: "", interactive: false } } });
+        await expect(toast(page, "PID 3303, version 9.99.2")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         expect(mutations()).toHaveLength(2);
       });
@@ -246,13 +259,16 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       await journey.stage("Dismiss a refused busy reload without sending chat or retrying it", async () => {
         await journey.open();
-        await page.locator(".conversation-row").click();
+        await conversationRow(page).click();
         await composer(page).fill("/mcp");
+        // Until the session reports command support the palette says so and
+        // Send runs nothing; wait for the command to be offered, as a user would.
+        await expect(commandButton(page, "mcp")).toBeVisible();
         await sendButton(page).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const request = hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body as { client_ref: string };
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "refused", detail: "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.", output: "", interactive: false } } });
-        const receipt = page.locator(".supervisor-command-receipt");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "refused", detail: "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.", output: "", interactive: false } } });
+        const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "refused");
         await receipt.getByRole("button", { name: "Dismiss command status" }).click();
         await expect(receipt).toHaveCount(0);
@@ -264,11 +280,11 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await sendButton(page).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
         const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1].body as { client_ref: string };
-        const receipt = page.locator(".supervisor-command-receipt");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload queued for the end of this turn.", output: "", interactive: false } } });
+        const receipt = commandReceipts(page);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload queued for the end of this turn.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2.", output: "", interactive: false } } });
-        await expect(page.locator("#toast")).toContainText("Cassy reloaded: PID 2202");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2.", output: "", interactive: false } } });
+        await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         expect(hub.sends).toHaveLength(0);
       });
@@ -284,7 +300,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         // command the moment it connects, without the text changing.
         const releaseAttach = hub.holdAttach(PELICAN);
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await conversationRow(page).click();
         await expect(page.getByRole("button", { name: phone ? "More conversation actions" : "Supervisor commands", exact: true })).toBeVisible();
         await input.fill("/us");
         await expect(commandPalette(page)).toBeVisible();
@@ -297,7 +313,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect.poll(() => mutations().length).toBe(1);
         const request = mutations()[0].body as { client_ref: string; command: string; confirmed: boolean };
         expect(request.command).toBe("usage"); ref = request.client_ref;
-        await expect(page.locator(".supervisor-command-receipt")).toHaveAttribute("data-phase", "submitted");
+        await expect(commandReceipts(page)).toHaveAttribute("data-phase", "submitted");
         expect(hub.sends).toHaveLength(0);
         await expect(input).toBeFocused();
         expect(await page.evaluate(() => {
@@ -306,12 +322,12 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         })).toBe(1);
       });
       await journey.stage("Read the observed native result without resending the command", async () => {
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Model: GPT-6.1-Sol\nContext window: 93% left\n<untrusted>", interactive: false } } });
-        const receipt = page.locator(".supervisor-command-receipt");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Model: GPT-6.1-Sol\nContext window: 93% left\n<untrusted>", interactive: false } } });
+        const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "observed");
-        await receipt.locator("details > summary").click();
-        await expect(receipt.locator("pre")).toContainText("<untrusted>");
-        await expect(receipt.locator("untrusted")).toHaveCount(0);
+        await receipt.getByText("Harness output", { exact: true }).click();
+        // The literal tag is text: markup in harness output never becomes an element.
+        await expect(receipt.getByRole("group")).toContainText("<untrusted>");
         expect(mutations()).toHaveLength(1);
       });
       await journey.stage("Send pasted paths and unknown slash text as messages (cas-62ea)", async () => {
@@ -334,8 +350,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = mutations()[1].body as { client_ref: string; command: string };
         expect(request.command).toBe("usage");
         expect(hub.sends).toHaveLength(4);
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Usage", interactive: false } } });
-        await expect(page.locator(".supervisor-command-receipt").last()).toHaveAttribute("data-phase", "observed");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Usage", interactive: false } } });
+        await expect(commandReceipts(page).last()).toHaveAttribute("data-phase", "observed");
       });
       await journey.stage("Cancel Finish by keyboard from a right-aligned confirmation (cas-c009)", async () => {
         await input.fill("/finish"); await input.press("Enter");
@@ -373,8 +389,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect.poll(() => mutations().length).toBe(3);
         const request = mutations()[2].body as { client_ref: string; command: string; confirmed: boolean };
         expect(request).toMatchObject({ command: "finish", confirmed: true });
-        const receipt = page.locator(".supervisor-command-receipt").filter({ hasText: "/finish" });
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Finish is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet.", output: "", interactive: false } } });
+        const receipt = commandReceipts(page).filter({ hasText: "/finish" });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Finish is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         await expect(receipt).toContainText("Nothing has been typed yet");
         expect(mutations()).toHaveLength(3);
@@ -383,16 +399,16 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const cancelFailure = "supervisor command failed: already submitted";
         hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: cancelFailure } });
         // The daemon's error payload must reach the row before counting polls.
-        await expect(receipt.locator("p")).toHaveText(cancelFailure);
+        await expect(receipt.getByRole("paragraph")).toHaveText(cancelFailure);
         const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
         const before = statusReads();
         await expect.poll(statusReads).toBeGreaterThan(before);
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         hub.send(PELICAN, { OperatorReply: { notification_id: 88001, reply_to: null, message: "Handoff saved and background monitor stopped.", summary: "Finish reply", device_id: "journey-device", kind: "answer", session: PELICAN } });
-        await expect(page.locator('.thread [role="log"]')).toContainText("Handoff saved and background monitor stopped.");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.", output: "", interactive: false } } });
-        await expect(page.locator("#toast")).toContainText("The harness completed the Finish request.");
+        await expect(conversationLog(page)).toContainText("Handoff saved and background monitor stopped.");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.", output: "", interactive: false } } });
+        await expect(toast(page, "The harness completed the Finish request.")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         expect(mutations()).toHaveLength(3);
       });
@@ -401,7 +417,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await commandButton(page, "clear").click();
         const dialog = page.getByRole("alertdialog");
         await expect(dialog).toContainText("cas-src");
-        const clearConsequence = await page.locator("#supervisor-command-palette-consequence").innerText();
+        const clearConsequence = await dialog.getByRole("paragraph").innerText();
         expect(clearConsequence).toMatch(/\S/);
         await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
         expect(mutations()).toHaveLength(3);
@@ -409,12 +425,12 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await input.fill("/exit"); await input.press("Enter");
         await expect(dialog).toBeVisible();
         // Exit states its own consequence (not Clear's), and the dialog is described by it.
-        const exitConsequence = page.locator("#supervisor-command-palette-consequence");
+        const exitConsequence = dialog.getByRole("paragraph");
         await expect(exitConsequence).toHaveText(/\S/);
         expect(await exitConsequence.innerText()).not.toBe(clearConsequence);
         await expect(dialog).toHaveAccessibleDescription(await exitConsequence.innerText());
         await expect(dialog).toContainText("cas-src");
-        await expect(dialog.locator('[data-command-confirm="exit"]')).toBeVisible();
+        await expect(dialog.getByRole("button", { name: "Exit", exact: true })).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await page.keyboard.press("ArrowRight");
         await expect(dialog.getByRole("button", { name: "Exit", exact: true })).toBeFocused();
@@ -425,16 +441,17 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
       await journey.stage("Remove the stopped session after Exit without claiming an unobserved command result", async () => {
         const request = mutations()[3].body as { client_ref: string };
-        const receipt = page.locator(".supervisor-command-receipt").filter({ hasText: "/exit" });
+        const receipt = commandReceipts(page).filter({ hasText: "/exit" });
         hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
         const session = machine.sessions[0]!;
         session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: [...session.workers], orphans: [], unverified: [] };
         session.liveness = "stale_metadata"; session.workers = [];
         await hub.announceCatalog(machine.id);
-        await expect(page.locator("#conversation-list .conversation-row")).toHaveCount(0);
+        await expect(conversationRow(page)).toHaveCount(0);
         await expect(composer(page)).toBeHidden();
-        await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
+        // No banner reports the stopped session's machine connection as lost.
+        await expect(page.getByRole("status").filter({ hasText: machine.label })).toHaveCount(0);
         // The catalog's stop removes navigation, without inferring harness
         // execution from a missing row or displaying an endless command retry.
         expect(mutations()).toHaveLength(4);
@@ -447,7 +464,7 @@ test("HUB-J27 explain commands without control rights and keep Raw output usable
   const hub = await journey.hub({ machines: [{ ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) }], paired: ["atlas"], commands: [PELICAN], scopes: { atlas: SCOPES.filter(scope => scope !== "pane-input") } });
   await journey.stage("Open the quick controls and read the permission explanation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page).click();
     await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
     // Without command control the palette explains why and offers no command to run.
     const palette = commandPalette(page);

@@ -314,6 +314,48 @@ pub(super) fn reassigned_branch_start(
 }
 
 impl CasCore {
+    /// GH #1437, #2312: start binds a reassigned task to the new lane only
+    /// once that lane inherits every prior tip. A lane cut fresh after a
+    /// transfer inherits them only when the worker later merges the old
+    /// lane. Re-run the same ancestry-gated succession before park so the
+    /// delivery is measured on the lane the assignee actually pushed.
+    /// Returns the persisted row when it rebound; any doubt keeps the start.
+    pub(crate) fn rebind_inherited_start_before_park(
+        &self,
+        tasks: &dyn cas_store::TaskStore,
+        task: &cas_types::Task,
+    ) -> Option<cas_types::Task> {
+        let start = task.deliverables.factory_branch_start.as_ref()?;
+        if task.status != TaskStatus::InProgress || task.task_type == TaskType::Epic {
+            return None;
+        }
+        let worker = self.open_agent_store().ok()?
+            .get(&self.get_registered_agent_id_read_only().ok()?).ok()?;
+        if worker.role != AgentRole::Worker
+            || task.assignee.as_deref() != Some(worker.name.as_str())
+            || start.assignee == worker.name
+        {
+            return None;
+        }
+        let checkout = worker.metadata.get("clone_path")
+            .filter(|path| !path.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| close_ops::resolve_system_b_worktree_path(&self.cas_root, &worker.name))?;
+        let branch = crate::factory_isolation::branch_at(&checkout)?;
+        if branch == start.branch
+            || crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch))
+                != crate::factory_isolation::WorkerBinding::Own
+        {
+            return None;
+        }
+        let (rebound_start, audit) =
+            reassigned_branch_start(&self.cas_root, &checkout, task, &worker, &branch, false)?;
+        let mut rebound = task.clone();
+        rebound.deliverables.factory_branch_start = Some(rebound_start);
+        audit.persist(&self.cas_root, tasks, task, &mut rebound).ok()?;
+        tasks.get(&task.id).ok()
+    }
+
     pub(crate) fn rebind_task_branch(
         &self,
         id: &str,

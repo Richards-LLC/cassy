@@ -8142,6 +8142,9 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        if let Some(rebound) = self.rebind_inherited_start_before_park(task_store.as_ref(), &task) {
+            task = rebound;
+        }
 
         // gate-audit[train_target]: G-100 Reject a dead integration target before
         // receipts, test-shape, lane CI, hooks or verifier dispatch. Published

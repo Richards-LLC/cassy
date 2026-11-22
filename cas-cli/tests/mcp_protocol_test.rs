@@ -1973,7 +1973,9 @@ fn zz_explore_reconnect_72dc() {
     // Scenario B: open the replacement, then close the old one.
     let mut third = McpTestClient::spawn_command_capturing_stderr(supervisor());
     assert!(third.initialize().error.is_none());
+    eprintln!("=== B: replacement open, old still open\n{}", status());
     third.call_tool("system", json!({"action":"version"}));
+    eprintln!("=== B: after replacement tool call\n{}", status());
     close(second);
     std::thread::sleep(std::time::Duration::from_secs(2));
     eprintln!("=== B: after overlapping reconnect\n{}", status());
@@ -1981,5 +1983,12 @@ fn zz_explore_reconnect_72dc() {
     eprintln!("hb: {:?}", hb.result.as_ref().map(|r| r.to_string().chars().take(300).collect::<String>()));
     std::thread::sleep(std::time::Duration::from_secs(1));
     eprintln!("=== B: after heartbeat\n{}", status());
+    for entry in std::fs::read_dir(sandbox.path().join(".cas/logs")).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        for line in text.lines().filter(|l| l.contains("egistered") || l.contains("pid") || l.contains("Repair") || l.contains("shutdown") || l.contains("unregister")) {
+            eprintln!("LOG {}: {}", path.file_name().unwrap().to_string_lossy(), line.chars().take(400).collect::<String>());
+        }
+    }
     panic!("explore");
 }

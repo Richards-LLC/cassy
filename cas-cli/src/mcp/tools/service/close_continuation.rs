@@ -136,8 +136,9 @@ impl Pending {
 
 pub(super) struct LateClose {
     pending: Option<Pending>,
-    work: Option<ToolWorkPermit>,
+    // Drop order matters: release worker ownership before signaling idle.
     _worker_guard: Option<std::sync::Arc<File>>,
+    work: Option<ToolWorkPermit>,
 }
 
 impl LateClose {

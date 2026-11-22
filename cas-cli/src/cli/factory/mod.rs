@@ -747,6 +747,8 @@ pub enum TrainCommand {
         train: String,
         #[arg(value_enum)]
         operation: OwnerTransferAction,
+        /// Authority ref tip, or `unenrolled` for the first prepare; a stale
+        /// value is refused with the current authority and generation.
         #[arg(long)]
         expected_authority: String,
         #[arg(long)]

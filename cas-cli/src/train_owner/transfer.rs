@@ -106,8 +106,12 @@ impl CasCore {
             return Err(refusal("TRAIN_TRANSFER_CONFLICT: incomplete transfer scope or audit data"));
         }
         let repo = crate::train_guardrails::train_repo_root(&self.cas_root, train).map_err(|e| e.to_string())?;
-        let mut snapshot = super::authority(&self.cas_root, train)?
-            .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: enroll the train before transferring it")?;
+        let (mut snapshot, enrolled_now) = match super::authority(&self.cas_root, train)? {
+            Some(snapshot) => (snapshot, false),
+            None if request.operation == Action::Prepare =>
+                (self.enroll_for_transfer(train, &repo, &actor, request, checks)?, true),
+            None => return Err(refusal("TRAIN_TRANSFER_FENCE_UNAVAILABLE: prepare enrolls the train; it has no authority yet")),
+        };
         let accepted_retry = request.operation == Action::Accept && snapshot.record.phase == Phase::Active
             && snapshot.record.accepted.as_ref().is_some_and(|a| a.transfer_id == request.transfer_id
                 && a.prior_generation == request.expected_generation && a.generation == snapshot.record.generation);
@@ -116,11 +120,11 @@ impl CasCore {
             && snapshot.record.transfer.as_ref().is_some_and(|t| t.id == request.transfer_id
                 && Some(t.successor.owner.as_str()) == request.successor.as_deref());
         let git = crate::worktree::GitOperations::new(repo.clone());
-        if (!accepted_retry && snapshot.record.generation != request.expected_generation)
+        if !enrolled_now && ((!accepted_retry && snapshot.record.generation != request.expected_generation)
             || (snapshot.tip != request.expected_authority
-                && (!(accepted_retry || prepared_retry) || !git.is_ancestor(&request.expected_authority, &snapshot.tip)))
+                && (!(accepted_retry || prepared_retry) || !git.is_ancestor(&request.expected_authority, &snapshot.tip))))
         {
-            return Err(refusal("TRAIN_TRANSFER_CONFLICT: expected authority or generation changed"));
+            return Err(stale_scope(&snapshot.tip, &snapshot.record.generation));
         }
         let expected_actor = if request.operation == Action::Accept && !accepted_retry {
             snapshot.record.transfer.as_ref().filter(|t| t.id == request.transfer_id)
@@ -156,6 +160,38 @@ impl CasCore {
             "phase": result.record.phase, "owner": result.record.identity.owner, "transfer_id": request.transfer_id}))
     }
 }
+
+/// Names the current compare-and-swap values so the caller can retry with
+/// them; neither is a capability, and authentication still decides.
+fn stale_scope(authority: &str, generation: &str) -> String {
+    refusal(format!("TRAIN_TRANSFER_CONFLICT: expected authority or generation changed \
+        (current authority={authority} generation={generation})"))
+}
+
+impl CasCore {
+    /// The first prepare enrolls the train under its current legacy owner.
+    /// Enrollment leases the exact remote target, so it cannot bless a write
+    /// that lands concurrently; that write surfaces as divergence instead.
+    fn enroll_for_transfer(&self, train: &Task, repo: &Path, actor: &Agent, request: &Request,
+        checks: &impl TransferChecks) -> Result<Snapshot, String>
+    {
+        let generation = crate::factory_session_scope::require_train_owner(&self.cas_root, train, actor)?;
+        if request.expected_authority != UNENROLLED || request.expected_generation != generation {
+            return Err(stale_scope(UNENROLLED, &generation));
+        }
+        let target = train.effective_epic_branch().filter(|branch| branch.starts_with("epic/"))
+            .ok_or_else(|| refusal("TRAIN_TRANSFER_CONFLICT: train target must be an epic branch"))?;
+        let owner = train.epic_verification_owner.as_deref().unwrap_or_default();
+        let identity = super::identity(actor, owner)?;
+        let tip = crate::worktree::GitOperations::new(repo.to_path_buf()).fetch_merge_target(target)
+            .map_err(|e| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {e}"))?
+            .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train target is not published")?;
+        Snapshot::enroll(repo, &authenticated_project(&self.cas_root)?, &train.id, target, &identity, &tip, Some(&tip), checks)
+    }
+}
+
+/// `expected_authority` for a train that has never been enrolled.
+pub(crate) const UNENROLLED: &str = "unenrolled";
 
 fn authenticated_project(root: &Path) -> Result<String, String> {
     crate::cloud::resolve_canonical_id(root).ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: project identity missing".into())

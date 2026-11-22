@@ -45,6 +45,7 @@ impl Snapshot {
         checks: &impl TransferChecks,
     ) -> Result<Self, String> {
         if project.trim().is_empty()
+            || !target.starts_with("epic/")
             || actor.owner.trim().is_empty()
             || actor.incarnation.trim().is_empty()
         {

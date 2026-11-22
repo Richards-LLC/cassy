@@ -115,6 +115,35 @@ fn record_commit(repo: &Path, parent: Option<&str>, record: &Record) -> Result<S
     command(repo, &args, Some(format!("Train authority: {}\n", record.operation).as_bytes()))
 }
 
+/// The authority fencing `branch`, if any. Enrollment admits only `epic/`
+/// targets, so other branches answer without a network read. Read failures
+/// refuse: an unknown fence never falls back to an unfenced write.
+pub(crate) fn fencing(repo: &Path, branch: &str) -> Result<Option<Snapshot>, String> {
+    if !branch.starts_with("epic/") || !GitOperations::new(repo.to_path_buf()).has_origin_remote() {
+        return Ok(None);
+    }
+    let refs = command(repo, &["ls-remote", "--refs", "origin", "refs/cas/train-owner/*"], None)?;
+    for name in refs.lines().filter_map(|line| line.split_once('\t').map(|(_, name)| name)) {
+        let Some(train) = name.strip_prefix("refs/cas/train-owner/") else { continue };
+        let snapshot = Snapshot::read(repo, train)?;
+        if snapshot.record.target == branch {
+            return Ok(Some(snapshot));
+        }
+    }
+    Ok(None)
+}
+
+/// Every write to an enrolled target goes through [`Snapshot::publish`].
+pub(crate) fn refuse_unfenced(repo: &Path, branch: &str) -> Result<(), String> {
+    match fencing(repo, branch)? {
+        Some(snapshot) => Err(crate::gates::tag("G-113", format!(
+            "TRAIN_OWNER_FENCE_REQUIRED: {branch} is fenced by train {}; only its owner's fenced publication may write it",
+            snapshot.record.train,
+        ))),
+        None => Ok(()),
+    }
+}
+
 impl Snapshot {
     pub(crate) fn audited(mut self, audit: serde_json::Value) -> Self {
         self.transition_audit = Some(audit);
@@ -166,6 +195,11 @@ impl Snapshot {
     }
 
     pub(crate) fn publish(&self, git: &GitOperations, actor: &Identity, head: &str) -> Result<TargetPushOutcome, String> {
+        self.publish_as(git, actor, head, false)
+    }
+
+    /// `proven_merge` keeps the merge path's G-160 combined-tree validation.
+    pub(crate) fn publish_as(&self, git: &GitOperations, actor: &Identity, head: &str, proven_merge: bool) -> Result<TargetPushOutcome, String> {
         let live = Self::read(&git.repo_root, &self.record.train)?;
         if live.record.generation != self.record.generation || live.record.identity != *actor {
             return Err(crate::gates::tag("G-113", "TRAIN_OWNER_GENERATION_CHANGED: owner/incarnation/generation changed"));
@@ -189,7 +223,7 @@ impl Snapshot {
         let next_tip = record_commit(&git.repo_root, Some(&self.tip), &next)?;
         let update = AtomicUpdate { reference: self.reference.clone(), expected: self.tip.clone(), next: next_tip.clone() };
         let outcome = git.publish_pinned_source_with_lease(
-            &next.target, &head, Some(&live.record.target_sha), false, Some(&update), TIMEOUT,
+            &next.target, &head, Some(&live.record.target_sha), proven_merge, Some(&update), TIMEOUT,
         );
         if outcome.is_published() {
             let confirmed = Self::read(&git.repo_root, &next.train)?;

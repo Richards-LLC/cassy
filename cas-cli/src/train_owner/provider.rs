@@ -118,11 +118,22 @@ impl<P: Provider> TransferChecks for GitHubChecks<P> {
             "active_runs": 0, "run_scope": "repository", "observed_at": chrono::Utc::now()}))
     }
 
-    fn publishers_stopped(&self, _snapshot: &Snapshot) -> Result<Value, String> {
-        // An authenticated transfer command is not positive coverage of old
-        // daemons/credentials. Enrollment and quiescence stay held until the
-        // runtime participation inventory can establish that boundary.
-        Err("TRAIN_TRANSFER_QUIESCENCE_REQUIRED: publication runtime coverage is not established".into())
+    fn publishers_stopped(&self, snapshot: &Snapshot) -> Result<Value, String> {
+        // Current runtimes publish an enrolled target only through
+        // Snapshot::publish, which leases the exact Active authority tip in
+        // the same atomic push. Recording a non-Active phase moves that tip,
+        // so every in-flight or later current-runtime publication is refused
+        // by the remote. Enrollment creates the authority while leasing the
+        // exact target. Raw or pre-fence writers are not stopped by this:
+        // they surface as target divergence and hold until operator adoption.
+        use crate::worktree::git::train_authority::Phase;
+        let enrolling = snapshot.tip.is_empty();
+        if !enrolling && snapshot.record.phase == Phase::Active {
+            return Err("TRAIN_TRANSFER_QUIESCENCE_REQUIRED: the recorded authority still admits publication".into());
+        }
+        Ok(json!({"fence": "atomic-authority-lease", "authority": snapshot.tip,
+            "phase": snapshot.record.phase, "target_sha": snapshot.record.target_sha,
+            "unfenced_writers": "detected as target divergence; held until operator adoption"}))
     }
 }
 

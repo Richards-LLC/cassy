@@ -176,6 +176,59 @@ pub(crate) fn require_owner(
     Ok(live.record.generation)
 }
 
+/// The owner's fence for publishing an enrolled target, found from the Git
+/// authority rather than task rows. `None` means the target is not enrolled.
+pub(crate) fn publication_fence(
+    core: &crate::mcp::CasCore,
+    repo: &Path,
+    target: &str,
+) -> Result<Option<(Snapshot, Identity)>, String> {
+    let Some(fenced) = crate::worktree::git::train_authority::fencing(repo, target)? else {
+        return Ok(None);
+    };
+    let train = core.open_task_store().map_err(|e| e.to_string())?
+        .get(&fenced.record.train).map_err(|e| e.to_string())?;
+    let actor = core.resolve_live_supervisor_authority().map_err(|e| {
+        crate::gates::tag("G-113", format!("TRAIN_OWNER_GENERATION_CHANGED: {e:?}"))
+    })?;
+    // May refresh an authenticated predecessor's incarnation; read it back.
+    require_owner(&core.cas_root, &train, &actor, &fenced)?;
+    let live = authority(&core.cas_root, &train)?
+        .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: authority disappeared")?;
+    let identity = identity(&actor, &live.record.identity.owner)?;
+    Ok(Some((live, identity)))
+}
+
+/// Daemon publication for the recorded owner, without a supervisor caller.
+/// It requires that exact registered process to be live in this store; it
+/// never mints, refreshes or infers an identity from names or heartbeats.
+pub(crate) fn local_owner_fence(
+    root: &Path,
+    repo: &Path,
+    target: &str,
+) -> Result<Option<(Snapshot, Identity)>, String> {
+    let Some(fenced) = crate::worktree::git::train_authority::fencing(repo, target)? else {
+        return Ok(None);
+    };
+    let recorded = &fenced.record.identity;
+    let held = || crate::gates::tag("G-113", "TRAIN_OWNER_GENERATION_CHANGED: the recorded owner process is not live here");
+    let (agent_id,): (String,) = serde_json::from_str::<(String, serde_json::Value, serde_json::Value,
+        serde_json::Value, serde_json::Value, serde_json::Value)>(&recorded.incarnation)
+        .map(|tuple| (tuple.0,)).map_err(|_| held())?;
+    let agent = crate::store::open_agent_store(root).map_err(|e| e.to_string())?
+        .get(&agent_id).map_err(|_| held())?;
+    if agent.role != AgentRole::Supervisor || !agent.is_alive()
+        || identity(&agent, &recorded.owner).ok().as_ref() != Some(recorded)
+    {
+        return Err(held());
+    }
+    if fenced.record.phase != Phase::Active {
+        return Err(crate::gates::tag("G-113", "TRAIN_OWNER_DRAINING: train publications are held"));
+    }
+    let identity = recorded.clone();
+    Ok(Some((fenced, identity)))
+}
+
 pub(crate) fn generation_matches(
     root: &Path,
     train: &Task,

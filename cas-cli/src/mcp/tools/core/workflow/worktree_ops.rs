@@ -5982,8 +5982,11 @@ impl CasCore {
                     ) {
                         return Err(crate::worktree::GitError::CommandFailed(crate::gates::tag("G-110", message)));
                     }
+                    let fence = crate::train_owner::publication_fence(self, &cwd, &branch)
+                        .map_err(crate::worktree::GitError::CommandFailed)?;
                     let outcome = manager.git().publish_merge_candidate(
                         &branch, head, premerge_approval.is_none() && transactional_delivery.is_none(),
+                        fence.as_ref().map(|(authority, actor)| (authority, actor)),
                     );
                     let published = match &outcome {
                         crate::worktree::git::TargetPushOutcome::Pushed { sha }

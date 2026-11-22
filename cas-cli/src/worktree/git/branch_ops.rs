@@ -820,6 +820,7 @@ impl GitOperations {
     /// Pushes the specified branch to the 'origin' remote. If the branch doesn't exist
     /// on origin yet, it will be created. Uses -u to set up tracking.
     pub fn push_branch(&self, branch: &str) -> Result<()> {
+        super::train_authority::refuse_unfenced(&self.repo_root, branch).map_err(GitError::CommandFailed)?;
         let output = Command::new("git")
             .args(["push", "-u", "origin", branch])
             .current_dir(&self.repo_root)
@@ -1116,10 +1117,18 @@ impl GitOperations {
         branch: &str,
         head: &str,
         reconcile_peer: bool,
+        fence: Option<(&super::train_authority::Snapshot, &super::train_authority::Identity)>,
     ) -> TargetPushOutcome {
         let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
         if !self.has_origin_remote() {
             return TargetPushOutcome::NoRemote;
+        }
+        // An enrolled train advances target and authority in one atomic push.
+        // A peer that moved either is a conflict to re-admit, never to merge.
+        if let Some((authority, actor)) = fence {
+            return authority.publish_as(self, actor, head, true).unwrap_or_else(|reason| TargetPushOutcome::NotPushed {
+                sha: Some(head.into()), remote_sha: self.resolve_commit(&format!("origin/{branch}")), reason,
+            });
         }
         let remote_ref = format!("origin/{branch}");
         let expected = match self.resolve_commit(&remote_ref) {
@@ -1273,6 +1282,13 @@ impl GitOperations {
                 reason: "pinned source does not resolve".into(),
             };
         };
+        if authority.is_none()
+            && let Err(reason) = super::train_authority::refuse_unfenced(&self.repo_root, branch)
+        {
+            return TargetPushOutcome::NotPushed {
+                sha: Some(local_sha), remote_sha: self.resolve_commit(&remote_ref), reason,
+            };
+        }
         // GH #1386: pre-push hooks read the working tree, not the refspec.
         // Validate a clean checkout of exactly the commit we will publish;
         // unrelated supervisor files/dependencies must not affect the hook.

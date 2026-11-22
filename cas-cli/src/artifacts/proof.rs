@@ -936,6 +936,79 @@ mod tests {
     use super::*;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
 
+    /// GH #2292: file-count growth belongs in an artifact, never a task row.
+    /// Both the full manifest and optional failures retain their detail while
+    /// the synced summary stays bounded and the peer restores the last file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evidence_sync_notes_stay_bounded_over_5000_files_cas_591f() {
+        use wiremock::matchers::body_partial_json;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for optional_failures in [false, true] {
+            let server = MockServer::start().await;
+            let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(body_partial_json(serde_json::json!({"name":"evidence-sync-report.json"})))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "artifact_id":"cloud-report", "upload_url":format!("{}/report",server.uri()),
+                    "required_headers":{},
+                }))).mount(&server).await;
+            let captured = uploaded.clone();
+            Mock::given(method("PUT")).and(path("/report"))
+                .respond_with(move |request: &wiremock::Request| {
+                    *captured.lock().unwrap() = request.body.clone();
+                    ResponseTemplate::new(200)
+                }).mount(&server).await;
+            Mock::given(method("POST")).and(path("/api/artifacts/cloud-report/complete"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url":null})))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path("/api/artifacts/cloud-report/url"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id":"cloud-report", "url":format!("{}/report",server.uri()),
+                }))).mount(&server).await;
+            let captured = uploaded.clone();
+            Mock::given(method("GET")).and(path("/report"))
+                .respond_with(move |_: &wiremock::Request| {
+                    ResponseTemplate::new(200).set_body_bytes(captured.lock().unwrap().clone())
+                }).mount(&server).await;
+            let task = cas_types::Task::new("cas-591f-fixture".into(), "large evidence tree".into());
+            let parking = PeerReviewer::new(&server.uri(), task);
+            env.set("CAS_ROOT", &parking.root);
+            let dir = parking.evidence_dir();
+            std::fs::create_dir_all(dir.join("captures")).unwrap();
+            std::fs::create_dir_all(dir.join("srt/node_modules/dependency")).unwrap();
+            for index in 0..5000 {
+                std::fs::write(dir.join(format!("captures/{index:04}.txt")), b"").unwrap();
+            }
+            for index in 0..100 {
+                std::fs::write(dir.join(format!("srt/node_modules/dependency/{index}.js")), b"").unwrap();
+            }
+            if optional_failures {
+                for index in 0..96 {
+                    std::fs::write(dir.join(format!("optional-{index:03}-{}.log", "x".repeat(180))), b"not uploaded").unwrap();
+                }
+            }
+            let (parked, report) = tokio::task::spawn_blocking(move || {
+                publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
+                let parked = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
+                assert!(parked.notes.len() < 16 * 1024,
+                    "evidence sync appended {} bytes for 5,000 files", parked.notes.len());
+                let report: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(dir.join("evidence-sync-report.json")).unwrap()).unwrap();
+                (parked, report)
+            }).await.unwrap();
+            assert_eq!(report["manifest"]["files"].as_array().unwrap().len(), 5000);
+            assert_eq!(report["skipped"].as_array().unwrap().len(), if optional_failures { 96 } else { 0 });
+            assert_eq!(report["excluded"].as_array().unwrap().len(), 1);
+            let owner = PeerReviewer::new(&server.uri(), parked);
+            env.set("CAS_ROOT", &owner.root);
+            tokio::task::spawn_blocking(move || {
+                materialize_peer_evidence(&owner.root, &owner.task).unwrap();
+                assert_eq!(std::fs::read(owner.evidence_dir().join("captures/4999.txt")).unwrap(), b"");
+                assert!(!owner.evidence_dir().join("srt/node_modules").exists());
+            }).await.unwrap();
+        }
+    }
+
     /// cas-5f96: an older park must not revert a subsequently published ledger.
     /// A sealed park refuses that revision; a newer park still replaces old bytes.
     #[tokio::test(flavor = "multi_thread")]

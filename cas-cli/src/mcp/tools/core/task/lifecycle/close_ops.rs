@@ -17559,6 +17559,18 @@ pub(crate) fn resolve_close_delivery_branch(
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);
     }
+    // cas-db91 (GH #1698): a lane bound by rebind (e.g. `-r2`) before its
+    // first commit is still this task's lane. The per-task name may hold the
+    // earlier build; never fall back to it while the recorded start exists.
+    if let Some(start) = task.deliverables.factory_branch_start.as_ref()
+        && start.assignee == assignee
+        && start.branch != format!("factory/{assignee}")
+        && is_safe_git_refname(&start.branch)
+        && let Some(branch) = [start.branch.clone(), format!("origin/{}", start.branch)]
+            .into_iter().find(|branch| git_ref_exists(repo_path, branch))
+    {
+        return Ok(branch);
+    }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
         return Ok(branch);
     }

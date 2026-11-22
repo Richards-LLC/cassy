@@ -1263,6 +1263,8 @@ impl CasCore {
         let fast_lane =
             crate::fast_lane::owns_review(&self.cas_root, task, repo, Some((source, target)));
         if task.task_type == cas_types::TaskType::Epic
+            // Temporary sabotage: prove GH #1969 regression sees a local review bypass.
+            || task.delivery_mode == cas_types::DeliveryMode::LocalMerge
             || (task.depth == cas_types::TaskDepth::Light && !fast_lane)
             || !config.verification_enabled()
             || !verification_policy(supervisor_harness_from_env(), worker_harness_from_env())

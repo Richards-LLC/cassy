@@ -2774,6 +2774,7 @@ impl CasCore {
             && matches!(
                 crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
                 crate::factory_isolation::WorkerBinding::Sibling { .. }
+                    | crate::factory_isolation::WorkerBinding::Unowned
             )
         {
             let own = crate::factory_isolation::worker_task_branch(&worker.name, &task.id);

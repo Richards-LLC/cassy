@@ -1938,7 +1938,13 @@ own_task_branch() {
   esac
   case \"$suffix\" in
     \"\"|*[!A-Za-z0-9._-]*) return 1 ;;
-    [A-Za-z]*-[A-Za-z0-9]*) return 0 ;;
+    [A-Za-z]*-*) ;;
+    *) return 1 ;;
+  esac
+  # cas-ea31: same grammar as Rust is_task_id_like: the character after the
+  # first hyphen must be a letter or digit.
+  case \"${suffix#*-}\" in
+    [A-Za-z0-9]*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1981,7 +1987,13 @@ own_task_branch() {
   esac
   case \"$suffix\" in
     \"\"|*[!A-Za-z0-9._-]*) return 1 ;;
-    [A-Za-z]*-[A-Za-z0-9]*) return 0 ;;
+    [A-Za-z]*-*) ;;
+    *) return 1 ;;
+  esac
+  # cas-ea31: same grammar as Rust is_task_id_like: the character after the
+  # first hyphen must be a letter or digit.
+  case \"${suffix#*-}\" in
+    [A-Za-z0-9]*) return 0 ;;
     *) return 1 ;;
   esac
 }

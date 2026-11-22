@@ -35,7 +35,7 @@ fn branch_update_work_target(
     }
 }
 
-/// A plain target edit cannot authorize replacing a divergent recorded base.
+/// A plain target edit cannot authorize replacing an untouched divergent base.
 /// Keep the old lane until the supervisor explicitly binds its replacement.
 fn divergent_unparked_target(
     cas_root: &std::path::Path,
@@ -51,6 +51,16 @@ fn divergent_unparked_target(
         || task.deliverables.factory_branch_anchor.is_some()
     { return None; }
     let context = super::repo_context::resolve_repo_context(cas_root, target).ok()?;
+    // Nonempty or rewritten deliveries retain their start and use the existing
+    // explicit rebind checks. Only a known untouched source needs this refusal.
+    let source_tips: Vec<_> = ["refs/heads", "refs/remotes/origin"].into_iter()
+        .filter_map(|namespace| crate::git_evidence::resolve_branch_sha(
+            &context.repo_root, &format!("{namespace}/{}", start.branch),
+        ))
+        .collect();
+    if source_tips.is_empty() || source_tips.iter().any(|tip| tip != &start.base_sha) {
+        return None;
+    }
     let reference = super::lifecycle::close_ops::preferred_diff_target_ref_for_delivery(
         &context.repo_root, &target.target_branch, task.delivery_mode,
     );
@@ -2133,15 +2143,22 @@ impl CasCore {
                     "action":"rebind_branch", "id":task.id, "branch":branch, "reason":reason,
                 });
                 let prefix = self.guidance_prefix();
+                let mut recovery = serde_json::json!({
+                    "target_update":target_update, "branch":branch, "base":base, "rebind":rebind,
+                });
+                let prepare = if task.status == TaskStatus::Open {
+                    recovery["start"] = serde_json::json!({"action":"start", "id":task.id});
+                    format!("The assigned worker first runs `{prefix}task action=start id={}` on the unchanged old lane. ", task.id)
+                } else { String::new() };
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(crate::gates::tag("G-151", format!(
-                        "WORK TARGET MIGRATION REQUIRED: task {} has a recorded start outside {base}. No task fields were changed. Preserve its old branch and any dirty or foreign work; do not reset it. A live supervisor runs `{prefix}task action=update id={} proof_scope_fix=true target_branch={} reason=\"<approval>\"`. Create a clean replacement branch `{branch}` from `{base}`, then the supervisor runs `{prefix}task action=rebind_branch id={} branch={branch} reason=\"<approval>\"` before the worker starts again. Rebind refuses dirty work or an old lane with unpreserved delivery.",
+                        "WORK TARGET MIGRATION REQUIRED: task {} has a recorded start outside {base}. No task fields were changed. Preserve its old branch and any dirty or foreign work; do not reset it. {prepare}A live supervisor runs `{prefix}task action=update id={} proof_scope_fix=true target_branch={} reason=\"<approval>\"`. Create a clean replacement branch `{branch}` from `{base}`, then the supervisor runs `{prefix}task action=rebind_branch id={} branch={branch} reason=\"<approval>\"` before the worker starts again. Rebind refuses dirty work or an old lane with unpreserved delivery.",
                         task.id, task.id, target.target_branch, task.id,
                     ))),
                     data: Some(serde_json::json!({
                         "rule_id":"unparked_target_base_migration",
-                        "recovery":{"target_update":target_update, "branch":branch, "base":base, "rebind":rebind},
+                        "recovery":recovery,
                     })),
                 });
             }

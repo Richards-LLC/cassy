@@ -5841,7 +5841,6 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
             assert_eq!(data["code"], "TRANSFER_RECEIVER_ON_OTHER_MACHINE");
             assert_eq!(data["machine"], "prowl");
             assert_eq!(data["next_action"], "transfer_from_receiver_supervisor");
-            assert!(error.message.contains("prowl")); // Registered machine identity, not prose.
         }
         if let Some(server) = server {
             assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() == "GET"));

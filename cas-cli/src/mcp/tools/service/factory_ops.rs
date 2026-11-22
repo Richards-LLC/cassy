@@ -2819,6 +2819,10 @@ impl CasService {
         })?;
         let requested_delivery_mode = validate_delivery_mode(req.delivery_mode.as_deref())
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        if req.branch.is_some() && req.task_id.is_none() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "spawn_workers branch requires task_id; persist the task target before requesting its launch branch"));
+        }
 
         let workers_len = spawn_worker_entries_len(req.workers.as_deref())
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
@@ -2919,6 +2923,22 @@ impl CasService {
                     ),
                 )
             })?;
+            if let Some(requested) = req.branch.as_deref() {
+                let epic = task_store.get_parent_epic(task_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                let target = crate::mcp::tools::core::task::repo_context::effective_task_work_target(&task, epic.as_ref());
+                let effective = target.as_ref().map(|target| target.target_branch.as_str());
+                let normalize = crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch;
+                if requested.trim().is_empty() || effective.is_none_or(|target| normalize(requested) != normalize(target)) {
+                    let mut error = Self::error(ErrorCode::INVALID_PARAMS, format!(
+                        "Spawn target mismatch for {task_id}: requested branch {requested:?}, effective task target {}. Nothing was queued. Persist the intended target with task action=update id={task_id} target_branch=<branch>, then retry spawn_workers. A spawn brief does not change delivery authority.",
+                        effective.unwrap_or("(undeclared)"),
+                    ));
+                    error.data = Some(serde_json::json!({"code":"spawn_target_mismatch", "task_id":task_id,
+                        "requested_branch":requested, "effective_target":effective}));
+                    return Err(error);
+                }
+            }
             // cas-bc25: a repair for recorded failing tests needs its class audit.
             if let Some(class) = crate::mcp::tools::core::task::repair_class::require_class(
                 task_store.as_ref(),

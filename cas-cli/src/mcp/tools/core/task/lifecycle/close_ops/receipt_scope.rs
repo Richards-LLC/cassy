@@ -1477,7 +1477,9 @@ raise SystemExit(1 if failed else 0)
         env.set("CAS_FACTORY_BUILD_GUARD", "off");
         env.remove("CAS_SESSION_ID");
         let root = tempfile::tempdir().unwrap();
-        let repo = root.path().join("worktrees/worker");
+        // cas-253d: the fixture runner reports resolved paths; macOS temp
+        // roots (/tmp, /var) are symlinks, so keep the checkout physical.
+        let repo = root.path().canonicalize().unwrap().join("worktrees/worker");
         let write = |path: &str, body: &str| {
             let file = repo.join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();

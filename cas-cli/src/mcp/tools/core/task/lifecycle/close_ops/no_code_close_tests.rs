@@ -4293,3 +4293,80 @@ async fn revalidated_landed_task_closes_without_delivery_and_frees_queue_gh1695(
     assert!(result.is_ok(), "{closed}\n---\n{result:?}");
     assert_eq!(f.task(&next.id).status, TaskStatus::InProgress);
 }
+
+/// GH #1437: worker A parked, a supervisor transferred the task to worker B
+/// and requested changes, and B redid the work on a fresh branch from the
+/// target. Once B's branch merges, the task closes without an override and
+/// QA batch evidence binds B's merged tip, never A's declined anchor.
+#[tokio::test]
+async fn transferred_redo_on_fresh_branch_closes_after_merge_gh1437() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    let id = "cas-1437a";
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    agents.register(&Agent::new_with_role("gone-session".into(), "gone-worker".into(), AgentRole::Worker)).unwrap();
+
+    // Worker A's parked delivery on its own lane.
+    let old_lane = format!("factory/gone-worker-{id}");
+    git(repo, &["checkout", "-q", "-b", &old_lane, "main"]);
+    std::fs::write(repo.join("fix.rs"), "pub fn first_attempt() {}\n").unwrap();
+    git(repo, &["add", "fix.rs"]);
+    git(repo, &["commit", "-q", "-m", &format!("fix({id}): first attempt")]);
+    let declined = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", &old_lane]);
+    git(repo, &["checkout", "-q", "main"]);
+    let mut task = assigned(id, TaskType::Bug, "main");
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("gone-worker".into());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: "gone-worker".into(), branch: old_lane.clone(),
+        base_sha: git(repo, &["rev-parse", "main"]),
+    });
+    task.deliverables.factory_branch_anchor = Some(declined.clone());
+    task.deliverables.parked_branch = Some(old_lane.clone());
+    f.put(&task);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let moved = call(&f.supervisor, serde_json::json!({
+        "action":"transfer", "id":id, "to_agent":WORKER, "supervisor_override":true,
+        "reason":"Worker A shut down",
+    })).await;
+    assert_eq!(f.task(id).assignee.as_deref(), Some(WORKER), "{moved}");
+    let returned = call(&f.supervisor, serde_json::json!({
+        "action":"request_changes", "id":id, "reason":"Redo on a fresh branch",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Open, "{returned}");
+
+    // Worker B redoes the work on a fresh branch cut from the target.
+    env.set("CAS_AGENT_ROLE", "worker");
+    let lane = format!("{LANE}-{id}");
+    git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+    // The incident's path: A's tip is not inherited, so start keeps A's source.
+    assert_eq!(f.task(id).deliverables.factory_branch_start.unwrap().branch, old_lane, "{started}");
+    std::fs::write(checkout.join("fix.rs"), "pub fn redone() {}\n").unwrap();
+    git(&checkout, &["add", "fix.rs"]);
+    git(&checkout, &["commit", "-q", "-m", &format!("fix({id}): redo")]);
+    let redo = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let parked = call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"Redone on a fresh branch",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{started}\n---\n{parked}");
+    assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(), Some(redo.as_str()), "{parked}");
+    assert!(f.task(id).deliverables.declined_factory_anchors().contains(&declined));
+
+    git(repo, &["merge", "-q", "--no-ff", "-m", "Merge B's redo", &lane]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let anchor = crate::qa_batch::resolved_delivery_anchor(repo, &f.task(id), "main");
+    assert_eq!(anchor.as_deref(), Some(redo.as_str()), "{parked}");
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let closed = call(&f.supervisor, serde_json::json!({
+        "action":"close", "id":id, "reason":"B's redo merged",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Closed, "{closed}");
+}

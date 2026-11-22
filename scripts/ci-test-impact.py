@@ -737,7 +737,7 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
                 head_log = Path(destination).with_suffix(".head.log")
                 head_log.write_text("")
                 cargo = os.environ.get("CARGO", "cargo")
-                status = timed_command([cargo, *invocation], "head_test_seconds", head_log, dict(os.environ), cwd=root)
+                status = timed_command([cargo, *invocation], "head_test_seconds", head_log, dict(os.environ, TMPDIR=symlinked_tmpdir()), cwd=root)
                 head_text = strip_ansi(head_log.read_text())
                 at_head = {failure_key(f) for f in parse_failures(head_text)}
                 if not sum(map(int, re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:", head_text))):
@@ -763,7 +763,8 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
                     build += [arg for target in targets for arg in (["--lib"] if target == packages[0] else ["--test", target])]
                 identity = lambda f: f["package"] if f["binary"] == f["package"] else f"{f['package']}::{f['binary']}"
                 expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in pending)
-                env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
+                # The replays run under the lane phase's symlinked TMPDIR (cas-2e53).
+                env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"), TMPDIR=symlinked_tmpdir())
                 cargo = os.environ.get("CARGO", "cargo")
                 log = Path(destination).with_suffix(".log")
                 log.with_suffix(".build.log").write_text("")

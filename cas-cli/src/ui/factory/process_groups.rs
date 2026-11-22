@@ -813,7 +813,7 @@ mod tests {
             fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
         }
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::physical_tempdir();
         let db_path = temp.path().join("cas.db");
         fs::write(&db_path, b"sentinel").unwrap();
         // The cas-named child reports readiness after exec and after FD 9

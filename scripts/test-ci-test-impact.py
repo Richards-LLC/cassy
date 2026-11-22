@@ -461,6 +461,7 @@ path="tests/builtin_archive_portability_test.rs"
         fake = self.root / "fake-cargo"
         calls = self.root / "output/cargo.calls"
         fake.write_text('#!/bin/sh\nmkdir -p "$(dirname "$CALLS")"; printf "%s\\n" "$*" >> "$CALLS"\n'
+                        '[ -L "$TMPDIR" ] && printf "%s\\n" "$*" >> "$CALLS.symlinked"\n'
                         'case "$*" in *" list "*|"nextest list"*) echo \'{"rust-suites":{"cas":{"testcases":{"alpha::t":{"ignored":false,"filter-match":{"status":"matches"}}}}}}\' ;;\n'
                         '*binary_id*) case "$PWD" in *lane-impact-base*) printf base > "$SHARED_ARTIFACT"; fails="$BASE_FAILS" ;; *) fails="$HEAD_FAILS" ;; esac;'
                         ' if [ -n "$fails" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi; echo "        PASS [   0.01s] cas::beta_test beta_test::breaks" ;;\n'
@@ -512,6 +513,10 @@ path="tests/builtin_archive_portability_test.rs"
         runs = calls.read_text().splitlines()
         replay_runs = [line for line in runs[runs.index(ring_run) + 1:] if "nextest run" in line]
         self.assertEqual(replay_runs[0], ring_run)
+        # cas-2e53: every lane run and attribution replay sees a symlinked
+        # TMPDIR, so a raw-vs-resolved temp path comparison fails on Linux too.
+        symlinked = calls.with_name("cargo.calls.symlinked").read_text().splitlines()
+        self.assertEqual([line for line in runs if "nextest run" in line], [line for line in symlinked if "nextest run" in line])
         del env["DETERMINISTIC"]
         # cas-ae6ae: nextest printed the FAIL twice (inline and under Summary),
         # yet one run is one observation. Passing on the head rerun and at base

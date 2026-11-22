@@ -497,7 +497,12 @@ fn scan_worktree_processes(
     registry_pids: &HashSet<u32>,
     deregistered_worker_worktrees: &HashSet<PathBuf>,
 ) -> Vec<OrphanProcess> {
-    let worktrees = cas_root.join("worktrees");
+    // /proc reports a physical cwd; resolve the roots it is matched against
+    // so a project reached through a symlink still finds its orphans (cas-2e53).
+    let physical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let worktrees = physical(cas_root.join("worktrees").as_path());
+    let deregistered_worker_worktrees: Vec<PathBuf> =
+        deregistered_worker_worktrees.iter().map(|worktree| physical(worktree.as_path())).collect();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -1090,7 +1095,7 @@ mod tests {
         );
         let found = found.unwrap();
         assert_eq!(found.disposition, OrphanDisposition::Reapable);
-        assert!(found.cwd.starts_with(&worktree));
+        assert!(found.cwd.starts_with(worktree.canonicalize().unwrap()));
         assert!(report.render().contains(&pid.to_string()));
 
         // Dry run (the default posture) must not kill anything.

@@ -34,7 +34,7 @@ pub(crate) struct Fixture {
 impl Fixture {
     pub(crate) fn new() -> Self {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let repo = tempfile::tempdir().unwrap();
+        let repo = crate::test_paths::physical_tempdir();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "-q", "--bare"]);
         git(repo.path(), &["init", "-q", "-b", "epic/test"]);

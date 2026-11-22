@@ -161,8 +161,8 @@ struct SpawnVerification {
     request_id: Option<i64>,
     launched_at: Instant,
     /// When registration was first observed. Retaining this record for the
-    /// short post-registration window lets PaneExited and pane-error polling
-    /// downgrade an optimistic `registered` result to a durable failure.
+    /// post-registration window (through Claude's first-prompt grace when no
+    /// turn has started) lets polling downgrade registration to a durable failure.
     registered_at: Option<Instant>,
     /// cas-28a4 (GH #84): task this spawn promised to pre-assign. Carried to
     /// registration so the binding is re-confirmed (and the worker briefed)

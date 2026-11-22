@@ -6758,7 +6758,7 @@ impl FactoryDaemon {
                                     agent,
                                 )
                         });
-                        // gate[W-16 watchdog]: Post-registration harness exit or disappearance
+                        // gate[W-16 watchdog]: Post-registration harness exit, disappearance or first-prompt timeout
                         if process_exited {
                             return Some((
                                 worker.clone(),
@@ -6777,6 +6777,31 @@ impl FactoryDaemon {
                         return Some((worker.clone(), VerificationAction::Confirmed));
                     }
                     if boot_window_elapsed {
+                        // Registration and a repainting TUI do not prove the first prompt ran.
+                        // Keep Claude's boot watch through its existing first-prompt grace.
+                        let awaiting_first_prompt = self.app.harness_for(worker) == cas_mux::SupervisorCli::Claude
+                            && !active_agents.iter().filter(|agent| agent.name == *worker
+                                && agent.factory_session.as_deref() == Some(self.session_name.as_str()))
+                                .any(|agent| {
+                                    let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+                                        self.app.cas_dir(), agent) else { return false };
+                                    let observed = crate::mcp::tools::service::harness_observation::latest_turn_observations(
+                                        &path, cas_mux::SupervisorCli::Claude);
+                                    [observed.wake, observed.reaction, observed.completion].into_iter().flatten()
+                                        .any(|turn| turn.at >= chrono::DateTime::<chrono::Utc>::from(verification.launched_wall))
+                                });
+                        if awaiting_first_prompt {
+                            if verification.registered_at.is_some_and(|registered_at|
+                                now.saturating_duration_since(registered_at) >= CLAUDE_FIRST_PROMPT_GRACE)
+                            {
+                                return Some((worker.clone(), VerificationAction::Failed(crate::gates::tag("W-16", format!(
+                                    "Worker did not take its first prompt within {} seconds after registration; no turn from this launch was observed. Inspect the worker's startup output, then recycle the worker or reassign its task.{}",
+                                    CLAUDE_FIRST_PROMPT_GRACE.as_secs(),
+                                    pane_tail.as_deref().map(|tail| format!("\n\nLast worker pane output:\n{tail}")).unwrap_or_default(),
+                                )))));
+                            }
+                            return None;
+                        }
                         return Some((worker.clone(), VerificationAction::Expired));
                     }
                 } else if let Some(registered_at) = verification.registered_at {
@@ -6885,7 +6910,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 verification.request_id,
                 &worker,
-                None,
+                verification.task_id.as_deref(),
                 "register",
                 success,
                 &detail,
@@ -20648,6 +20673,94 @@ mod tests {
                 assert!(!output.stdout.windows(b"fixture-secret-4cdd".len())
                     .any(|bytes| bytes == b"fixture-secret-4cdd"));
             }
+        }
+    }
+
+    /// GH #2234: registration is not proof that the launch took its first prompt.
+    #[tokio::test]
+    async fn first_prompt_timeout_is_task_bound_and_preserves_live_progress_cas_3b23() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (has_pane, takes_prompt) in [(true, false), (false, false), (true, true)] {
+            let temp = tempfile::tempdir().unwrap();
+            let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+            let worker = "first-prompt-worker";
+            let task_id = "cas-first-prompt";
+            let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            let mut task = Task::new(task_id.into(), "await first prompt".into());
+            task.assignee = Some(worker.into());
+            tasks.add(&task).unwrap();
+            let spawns = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+            let request = spawns.enqueue_spawn(1, &[], false, None,
+                Some(&daemon.session_name), Some(task_id)).unwrap();
+            spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Registered,
+                Some(worker), None).unwrap();
+            daemon.app.mux.set_worker_spec(worker, cas_mux::WorkerSpec::builtin_default());
+            if has_pane {
+                let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
+                    command: "sh".into(), args: vec!["-c".into(), "read line".into()],
+                    cwd: Some(temp.path().to_path_buf()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+                }).unwrap();
+                daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+                    worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
+                ).unwrap());
+            }
+            let launched_wall = std::time::SystemTime::now() - Duration::from_secs(400);
+            crate::factory_hook_canary::record_session_start(&cas_dir, worker, "first-prompt-session").unwrap();
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+            let mut agent = cas_types::Agent::new("first-prompt-agent".into(), worker.into());
+            agent.role = cas_types::AgentRole::Worker;
+            agent.factory_session = Some(daemon.session_name.clone());
+            agent.pid = Some(std::process::id());
+            crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
+            agent.metadata.insert("clone_path".into(), temp.path().display().to_string());
+            let account = temp.path().join("claude-account");
+            agent.metadata.insert("worker_account_dir".into(), account.display().to_string());
+            agents.register(&agent).unwrap();
+            let transcript = account.join("projects")
+                .join(temp.path().to_str().unwrap().replace(['/', '.'], "-"))
+                .join(format!("{}.jsonl", agent.id));
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            // Even a recent write of an old turn cannot activate this launch.
+            let turn = |at: chrono::DateTime<chrono::Utc>| format!("{}\n", serde_json::json!({
+                "type":"user", "timestamp":at.to_rfc3339(),
+                "message":{"role":"user", "content":"first prompt"},
+            }));
+            std::fs::write(&transcript, turn(chrono::DateTime::<chrono::Utc>::from(launched_wall) - chrono::Duration::seconds(1))).unwrap();
+            daemon.spawn_verifications.insert(worker.into(), SpawnVerification {
+                request_id: Some(request), launched_at: Instant::now() - Duration::from_secs(400),
+                registered_at: Some(Instant::now() - Duration::from_secs(61)),
+                task_id: Some(task_id.into()), launched_wall,
+            });
+            daemon.reconcile_spawn_verifications().await;
+            assert!(daemon.spawn_verifications.contains_key(worker));
+            assert!(!daemon.dead_workers.contains(worker));
+            if takes_prompt {
+                std::fs::write(&transcript, turn(chrono::Utc::now())).unwrap();
+            }
+            daemon.spawn_verifications.get_mut(worker).unwrap().registered_at =
+                Some(Instant::now() - Duration::from_secs(301));
+            daemon.reconcile_spawn_verifications().await;
+            assert!(!daemon.spawn_verifications.contains_key(worker));
+            assert_eq!(daemon.dead_workers.contains(worker), !takes_prompt);
+            let row = spawns.recent_spawn_lifecycle(&daemon.session_name, 10).unwrap()
+                .into_iter().find(|row| row.id == request).unwrap();
+            assert_eq!(row.state, if takes_prompt { cas_store::SpawnLifecycleState::Registered }
+                else { cas_store::SpawnLifecycleState::Failed });
+            let task = tasks.get(task_id).unwrap();
+            assert_eq!(task.status, TaskStatus::Open);
+            assert_eq!(task.assignee.as_deref(), if has_pane && !takes_prompt { None } else { Some(worker) });
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            let notices = || queue.peek_all(20).unwrap().into_iter()
+                .filter(|row| crate::prompt_revalidation::parse_blocker_envelope(&row.prompt)
+                    .is_some_and(|envelope| envelope.task_id.as_deref() == Some(task_id)))
+                .collect::<Vec<_>>();
+            assert_eq!(notices().len(), usize::from(!takes_prompt));
+            // A later sweep/reopen sees the same durable outcome, never a new alarm.
+            daemon.reconcile_spawn_verifications().await;
+            assert_eq!(notices().len(), usize::from(!takes_prompt));
+            assert_eq!(agents.get(&agent.id).unwrap().status,
+                if takes_prompt { AgentStatus::Active } else { AgentStatus::Stale });
         }
     }
 

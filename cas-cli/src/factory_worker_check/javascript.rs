@@ -2003,10 +2003,12 @@ fn validate_report_with_inherited(
             bail!("{runner} stability report was unsuccessful");
         }
     }
-    // A template identity is proved when every row it selected passed.
+    // A template identity is proved when every row it selected passed. Distinct
+    // rows may share one runtime name (GH #2138, #2225); each passed, so the
+    // name holds at least one passing result per repeat.
     for test in tests {
         let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
-        if rows.peek().is_none() || rows.any(|(_, count)| *count != repeats) {
+        if rows.peek().is_none() || rows.any(|(_, count)| *count < repeats) {
             bail!(
                 "{runner} stability requires {repeats} passing results: {} :: {}",
                 test.path,

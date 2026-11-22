@@ -1521,6 +1521,64 @@ fn a_never_silent_worker_sees_a_claimed_message_at_its_next_tool_boundary_cas_b5
     assert!(again.hook_specific_output.is_none(), "a surfaced message is delivered once");
 }
 
+/// GH #2062: a worker's blocker reached a supervisor mid tool call and stayed
+/// gated with no wake attempt for 342 s. The daemon's re-offer claims the
+/// row, which hides it from hooks, so a tool boundary inside that window
+/// found nothing and advanced its mail cursor past the row's only inbox
+/// signal. When the declined wake parked the row and released the claim,
+/// no later tool boundary looked again.
+#[test]
+fn a_blocker_parked_behind_a_busy_supervisor_surfaces_at_its_next_tool_boundary_gh2062() {
+    const SUPERVISOR: &str = "loyal-bear-96";
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
+    let project = TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let store = store_at_root(&cas_root);
+    let transcript = project.path().join("session.jsonl");
+    let mut hook = input("supervisor");
+    hook.cwd = project.path().to_string_lossy().into_owned();
+    hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
+    hook.prompt_id = Some("turn-1".into());
+    std::fs::write(
+        &transcript,
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"turn-1\",\"timestamp\":\"{}\",\"message\":{{\"content\":\"review the train\"}}}}\n",
+            hook.session_id,
+            (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+        ),
+    )
+    .unwrap();
+    crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
+    hook.hook_event_name = "PostToolUse".into();
+    hook.tool_name = Some("Bash".into());
+
+    let blocker = "Measurement report awaits credentialed result JSON";
+    let id = store.enqueue_with_session(WORKER, SUPERVISOR, blocker, SESSION).unwrap();
+    // A tool boundary inside the daemon's claim window sees nothing.
+    assert!(store.claim_recipient_transport(id, SUPERVISOR).unwrap());
+    assert!(crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap().hook_specific_output.is_none());
+    // The enqueue's signal predates that drain's cursor.
+    std::fs::write(
+        cas_root.join("inbox-signal").join(cas_store::inbox_signal_file_name(SUPERVISOR)),
+        "0",
+    )
+    .unwrap();
+    // The wake is declined for the in-flight tool call; the row is parked.
+    store.record_wake_gate_decline(id, "tool call in flight").unwrap();
+    store
+        .park_for_busy_recipient(id, Some("tool call in flight"), chrono::Utc::now() + chrono::Duration::seconds(30))
+        .unwrap();
+
+    let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    let Some(HookSpecificOutput::PostToolUse { additional_context: Some(context) }) = output.hook_specific_output else {
+        panic!("the parked blocker must surface at the supervisor's next tool boundary");
+    };
+    assert!(context.contains(blocker), "{context}");
+    let report = store.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
+}
+
 /// cas-7ce4: after cas-b5ad a busy Claude worker sees a claimed message at a
 /// tool boundary, and Claude Code then renders the teams copy it held as the
 /// next turn's teammate message. That turn must say the message was already

@@ -1402,43 +1402,33 @@ impl CasService {
             "operator".to_string()
         } else if role == "worker" {
             if target.eq_ignore_ascii_case("supervisor") {
-                resolve_supervisor_name().ok_or_else(|| {
-                    // GH #1171: say which supervisors are live, so the worker
-                    // can address its own by name instead of parking.
-                    let live: Vec<String> = crate::store::open_agent_store(&self.inner.cas_root)
-                        .ok()
-                        .and_then(|store| store.list(None).ok())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|agent| {
-                            agent.role == cas_types::AgentRole::Supervisor
-                                && matches!(
-                                    agent.status,
-                                    cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
-                                )
-                        })
-                        .map(|agent| match agent.factory_session.as_deref() {
-                            Some(session) if !session.trim().is_empty() => {
-                                format!("{} (session {session})", agent.name)
-                            }
-                            _ => format!("{} (no session)", agent.name),
-                        })
-                        .collect();
-                    let session = factory_session.as_deref().unwrap_or("none");
-                    Self::error(
-                        ErrorCode::INVALID_REQUEST,
-                        if live.is_empty() {
-                            format!(
-                                "Cannot resolve 'supervisor' for factory session {session}: no supervisor is registered on this clone."
-                            )
-                        } else {
-                            format!(
-                                "Cannot resolve 'supervisor' for factory session {session}: none of the live supervisors on this clone belongs to it ({}). Address your supervisor by name.",
-                                live.join(", ")
-                            )
-                        },
-                    )
-                })?
+                let agents = self.inner.open_agent_store()?.list(None).map_err(|error|
+                    Self::error(ErrorCode::INTERNAL_ERROR, format!("Could not read supervisor registry: {error}")))?;
+                crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor_from_agents(
+                    &agents, factory_session.as_deref(),
+                ).map_err(|reason| {
+                    let supervisors: Vec<_> = agents.iter()
+                        .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+                        .map(|agent| serde_json::json!({
+                            "id": agent.id, "name": agent.name, "factory_session": agent.factory_session,
+                            "status": agent.status, "live": crate::supervisor_notices::is_live(agent),
+                            "last_heartbeat": agent.last_heartbeat,
+                        })).collect();
+                    let detail = match reason {
+                        "owner_unavailable" => "the registered owner is unavailable or its heartbeat has expired; restore that supervisor or rebind the worker",
+                        "ambiguous_owner" => "multiple live supervisor names could own this session; resolve the competing registrations",
+                        _ => "no live owner is registered for this session; restore its supervisor or repair the session binding",
+                    };
+                    let mut error = Self::error(ErrorCode::INVALID_REQUEST, crate::gates::tag("H-45", format!(
+                        "Cannot resolve 'supervisor' for factory session {}: {detail}.",
+                        factory_session.as_deref().unwrap_or("none"),
+                    )));
+                    error.data = Some(serde_json::json!({
+                        "rule_id": "worker_supervisor_unresolved", "reason": reason,
+                        "factory_session": factory_session, "supervisors": supervisors,
+                    }));
+                    error
+                })?.name
             } else if target.eq_ignore_ascii_case("all_workers") {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
@@ -6941,10 +6931,17 @@ mod cas_89e1_post_merge_message_type_tests {
 
         // GH #2232: an Active row with an expired heartbeat used to be listed
         // as live in the same refusal that claimed no supervisor belonged.
+        let mut task = Task::new("cas-owner-report".into(), "report status".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let mut status = message_request_to("supervisor");
+        status.kind = Some("status".into());
+        status.task_id = Some(task.id);
         let mut expired = agents.get(&supervisor_a.id).unwrap();
         expired.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(601);
         agents.update(&expired).unwrap();
-        let error = service.message_send(message_request_to("supervisor")).await.unwrap_err();
+        let error = service.message_send(status.clone()).await.unwrap_err();
         let data = error.data.unwrap();
         assert_eq!(data["rule_id"], "worker_supervisor_unresolved");
         assert_eq!(data["reason"], "owner_unavailable");
@@ -6955,13 +6952,18 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(owner["status"], "active");
         assert_eq!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().len(), 2);
 
+        expired.status = cas_types::AgentStatus::Shutdown;
         expired.last_heartbeat = chrono::Utc::now();
+        agents.update(&expired).unwrap();
+        let error = service.message_send(status.clone()).await.unwrap_err();
+        assert_eq!(error.data.unwrap()["reason"], "owner_unavailable");
+        expired.status = cas_types::AgentStatus::Active;
         agents.update(&expired).unwrap();
         let mut competing = Agent::new("competing-owner-id".into(), "competing-owner".into());
         competing.role = AgentRole::Supervisor;
         competing.factory_session = Some("factory-a".into());
         agents.register(&competing).unwrap();
-        let error = service.message_send(message_request_to("supervisor")).await.unwrap_err();
+        let error = service.message_send(status).await.unwrap_err();
         assert_eq!(error.data.unwrap()["reason"], "ambiguous_owner");
         assert_eq!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().len(), 2);
     }

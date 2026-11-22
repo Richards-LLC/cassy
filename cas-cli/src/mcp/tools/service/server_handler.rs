@@ -405,6 +405,42 @@ fn first_tool_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
     })
 }
 
+fn committed_task_answer(
+    receipt: &super::mutation_receipt::Receipt,
+    description: &str,
+) -> rmcp::model::CallToolResult {
+    let (followup, kind) = match receipt.action() {
+        "start" => (
+            "Assignment accepted. Start follow-up continues in the background; read task notes for START CONTEXT and close checks when it finishes. Do not retry start.".to_string(),
+            "start_context",
+        ),
+        "close" => (
+            "Remaining close follow-up continues in the background; read task notes for its outcome. Do not retry.".to_string(),
+            "close_outcome",
+        ),
+        action => (
+            format!("Remaining {action} follow-up continues in the background; read task notes for its outcome. Do not retry."),
+            "task_notes",
+        ),
+    };
+    let recovery = receipt.task_id().map(|id| serde_json::json!({
+        "kind": kind, "tool": "task",
+        "arguments": {"action": "notes", "id": id, "offset": 0, "limit": 1600},
+    }));
+    let hint = receipt.task_id().map(|id| format!(
+        "\nRead: task action=notes id={id} offset=0 limit=1600"
+    )).unwrap_or_default();
+    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
+        "COMMITTED: {description}. {followup}{hint}\nTiming (inclusive, + running): {}",
+        receipt.timings(),
+    ))]);
+    answer.structured_content = Some(serde_json::json!({
+        "mutation_outcome": "COMMITTED", "action": receipt.action(),
+        "task_id": receipt.task_id(), "recovery": recovery,
+    }));
+    answer
+}
+
 fn refusal_text(joined: &Result<ToolResult, tokio::task::JoinError>) -> Option<&str> {
     match joined {
         Ok(Ok(result)) if result.is_error == Some(true) => first_tool_text(result),
@@ -711,16 +747,25 @@ impl CasService {
                         action = receipt.action(),
                     ) + &format!("\nTiming (inclusive, + running): {}", receipt.timings()))]));
                 }
-                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
-                    "COMMITTED: {description}. Remaining close follow-up continues in the background; \
-                     read task notes for its outcome. Do not retry.\nTiming (inclusive, + running): {}",
-                    receipt.timings(),
-                ))]))
+                Ok(committed_task_answer(&receipt, &description))
             }
             Won::Deadline => {
                 if let Some(durable) = merge_receipt {
                     let answer = durable.answer(&receipt);
                     durable.watch(self.clone(), handle, receipt);
+                    return Ok(answer);
+                }
+                // A terminal start is already accepted, even if the total
+                // response budget wins before its post-commit grace expires.
+                if tool_name == "task" && action == "start" && receipt.terminal.get().is_some() {
+                    let description = receipt.outcome.get().cloned()
+                        .or_else(|| receipt.commit.get().map(|commit| commit.description.clone()))
+                        .unwrap_or_else(|| "start committed".into());
+                    let answer = committed_task_answer(&receipt, &description);
+                    tokio::spawn(async move {
+                        let _ = handle.await;
+                        log_post_commit("task", &receipt, "finished in the background");
+                    });
                     return Ok(answer);
                 }
                 let elapsed = start.elapsed();
@@ -758,7 +803,28 @@ impl CasService {
                     // is not followed by a late write the caller never sees.
                     handle.abort();
                 }
-                let outcome = if let Some(id) = &continuation_id {
+                // Full task history can outlive the response budget. Give read-only
+                // callers an executable bounded request rather than a blind retry.
+                // A notes append is a mutation, even with read options attached.
+                let read_recovery = if commit.is_none() && tool_name == "task"
+                    && (matches!(action, "show" | "get") || (action == "notes"
+                        && arguments.is_some_and(|args| args.get("notes").is_none_or(serde_json::Value::is_null))))
+                {
+                    arguments.and_then(|args| {
+                        let id = args.get("id")?.as_str()?;
+                        let offset = args.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                        let limit = args.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(1600).clamp(4, 1600);
+                        Some(serde_json::json!({
+                            "tool": "task", "arguments": {
+                                "action": action, "id": id, "full": false,
+                                "offset": offset, "limit": limit,
+                            },
+                        }))
+                    })
+                } else { None };
+                let outcome = if read_recovery.is_some() {
+                    "not applicable (the timed-out call was read-only)".to_string()
+                } else if let Some(id) = &continuation_id {
                     format!("{} (registration keeps running; its final outcome will appear in your inbox with continuation_id={id}; do not retry)",
                         if commit.is_some() { "COMMITTED" } else { "IN_PROGRESS" })
                 } else {
@@ -772,12 +838,19 @@ impl CasService {
                 } else {
                     String::new()
                 };
+                let pagination_hint = read_recovery.as_ref().map(|recovery| {
+                    let args = &recovery["arguments"];
+                    format!(" Use pagination: task action={action} id={} full=false offset={} limit={}; follow next= from each page.",
+                        args["id"].as_str().unwrap_or_default(), args["offset"], args["limit"])
+                }).unwrap_or_default();
                 warn!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, budget_ms = budget.as_millis() as u64, mutation_outcome = %outcome, "MCP response deadline elapsed");
                 Err(rmcp::ErrorData {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
+                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}{pagination_hint}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if registration && commit.is_none() { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if registration && commit.is_none() { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if read_recovery.is_some() { "NOT_APPLICABLE" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "code": read_recovery.as_ref().map(|_| "task_read_paginate"),
+                        "recovery": read_recovery,
                         "continuation_id": continuation_id,
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
@@ -1108,6 +1181,10 @@ impl CasService {
         ))]);
         answer.structured_content = Some(serde_json::json!({
             "mutation_outcome": outcome, "continuation_id": continuation_id, "task_id": task_id,
+            "action": receipt.action(), "recovery": {
+                "kind": "close_outcome", "tool": "task",
+                "arguments": {"action": "notes", "id": task_id, "offset": 0, "limit": 1600},
+            },
             "elapsed_ms": start.elapsed().as_millis() as u64, "budget_ms": budget.as_millis() as u64,
             "timings": timings,
         }));
@@ -1732,17 +1809,29 @@ mod tests {
                 sender.task(Parameters(request)).await.unwrap();
                 std::future::pending().await
             };
-            let error = service
+            let result = service
                 .call_with_deadline(
                     "task",
                     arguments.as_object(),
                     std::time::Duration::from_millis(100),
                     call,
                 )
-                .await
-                .unwrap_err();
+                .await;
 
-            assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
+            let data = if arguments["action"] == "start" {
+                // A terminal start now acknowledges assignment acceptance.
+                // Create/note deadline errors still report their own commits.
+                let answer = result.unwrap();
+                assert_eq!(answer.is_error, Some(false));
+                let data = answer.structured_content.unwrap();
+                assert_eq!(data["action"], "start");
+                assert_eq!(data["task_id"], "cas-note");
+                assert_eq!(data["recovery"]["kind"], "start_context");
+                data
+            } else {
+                result.unwrap_err().data.unwrap()
+            };
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
         }
         assert_eq!(tasks.list(None).unwrap().len(), 2);
         assert_eq!(tasks.get("cas-note").unwrap().status, crate::types::TaskStatus::InProgress);
@@ -2837,6 +2926,119 @@ mod tests {
                 .unwrap()
                 .contains("mail already injected by transport")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cas_108b_committed_task_actions_preserve_identity_and_recovery() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        for (action, id, status, kind, deadline) in [
+            ("start", "cas-start", cas_types::TaskStatus::InProgress, "start_context", false),
+            ("notes", "cas-notes", cas_types::TaskStatus::Open, "task_notes", false),
+            ("close", "cas-close", cas_types::TaskStatus::Closed, "close_outcome", false),
+            ("start", "cas-start-deadline", cas_types::TaskStatus::InProgress, "start_context", true),
+        ] {
+            tasks.add(&cas_types::Task::new(id.into(), "slow task operation".into())).unwrap();
+            let args = serde_json::json!({"action":action, "id":id});
+            let store = tasks.clone();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            let (finished, continued) = tokio::sync::oneshot::channel();
+            let answer = service.call_with_deadline_and_grace(
+                "task", args.as_object(), std::time::Duration::from_secs(55),
+                if deadline { std::time::Duration::from_secs(60) } else { std::time::Duration::ZERO }, async move {
+                    let mut task = store.get(id).unwrap();
+                    task.status = status;
+                    store.update(&task).unwrap();
+                    mutation_receipt::task_terminal_committed(id);
+                    held.await.unwrap();
+                    store.append_note(id, "caller-provided follow-up payload").unwrap();
+                    finished.send(()).unwrap();
+                    Ok(rmcp::model::CallToolResult::success(vec![]))
+                },
+            ).await.unwrap();
+            let data = answer.structured_content.as_ref().expect("machine recovery receipt");
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
+            assert_eq!(data["action"], action);
+            assert_eq!(data["task_id"], id);
+            assert_eq!(data["recovery"]["kind"], kind);
+            assert_eq!(data["recovery"]["tool"], "task");
+            assert_eq!(data["recovery"]["arguments"], serde_json::json!({
+                "action":"notes", "id":id, "offset":0, "limit":1600,
+            }));
+            assert_eq!(tasks.get(id).unwrap().status, status);
+            assert!(tasks.get(id).unwrap().notes.is_empty());
+            resume.send(()).unwrap();
+            continued.await.unwrap();
+            // Recovery uses the real task dispatcher and reads the one durable payload.
+            use rmcp::handler::server::wrapper::Parameters;
+            let read = service.task(Parameters(serde_json::from_value(
+                data["recovery"]["arguments"].clone(),
+            ).unwrap())).await.unwrap();
+            assert_eq!(read.is_error, Some(false));
+            assert_eq!(tasks.get(id).unwrap().notes.matches("caller-provided follow-up payload").count(), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cas_108b_slow_task_reads_return_executable_pagination() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let mut task = cas_types::Task::new("cas-slow-read".into(), "large task".into());
+        task.notes = "caller supplied history\n".repeat(1000);
+        tasks.add(&task).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        for (index, (action, offset, limit)) in [("show", 0, 1600), ("get", 0, 1600), ("notes", 0, 1600), ("notes", 32, 2000)].into_iter().enumerate() {
+            let args = serde_json::json!({"action":action, "id":task.id, "full":true, "offset":offset, "limit":limit});
+            let sender = service.clone();
+            let request = serde_json::from_value(args.clone()).unwrap();
+            let error = service.call_with_deadline(
+                "task", args.as_object(), std::time::Duration::from_secs(55 * (index as u64 + 1)), async move {
+                    let read = sender.task(Parameters(request)).await.unwrap();
+                    assert_eq!(read.is_error, Some(false));
+                    std::future::pending().await
+                },
+            ).await.unwrap_err();
+            let data = error.data.unwrap();
+            assert_eq!(data["mutation_outcome"], "NOT_APPLICABLE");
+            assert_eq!(data["code"], "task_read_paginate");
+            assert_eq!(data["recovery"]["tool"], "task");
+            assert_eq!(data["recovery"]["arguments"], serde_json::json!({
+                "action":action, "id":task.id, "full":false, "offset":offset, "limit":1600,
+            }));
+            let read = service.task(Parameters(serde_json::from_value(
+                data["recovery"]["arguments"].clone(),
+            ).unwrap())).await.unwrap();
+            assert_eq!(read.is_error, Some(false));
+            assert!(super::first_tool_text(&read).unwrap().len() < 1800);
+            assert_eq!(tasks.get(&task.id).unwrap().notes, task.notes);
+        }
+        // A notes write with full=true is not a read-only retry candidate.
+        let args = serde_json::json!({"action":"notes", "id":task.id, "notes":"caller payload", "full":true});
+        let sender = service.clone();
+        let request = serde_json::from_value(args.clone()).unwrap();
+        let error = service.call_with_deadline(
+            "task", args.as_object(), std::time::Duration::from_secs(300), async move {
+                sender.task(Parameters(request)).await.unwrap();
+                std::future::pending().await
+            },
+        ).await.unwrap_err();
+        let data = error.data.unwrap();
+        assert_eq!(data["mutation_outcome"], "COMMITTED");
+        assert!(data["recovery"].is_null());
+        assert!(data["code"].is_null());
+        assert_eq!(tasks.get(&task.id).unwrap().notes.matches("caller payload").count(), 1);
     }
 
     #[tokio::test(start_paused = true)]

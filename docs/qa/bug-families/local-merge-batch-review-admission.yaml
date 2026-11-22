@@ -1,0 +1,10 @@
+title: Batch QA does not authorize unreviewed local delivery integration
+statement: >-
+  A parked local_merge delivery requiring review must keep its local target
+  unchanged and dispatch the candidate verifier before integration, including
+  in qa.mode=batch. Approval releases the reviewed delivery; rejection keeps
+  the target unchanged. Repeating the approved merge reuses its review and
+  cannot create a second merge.
+tasks: [cas-73312]
+journeys: []
+invariants: []

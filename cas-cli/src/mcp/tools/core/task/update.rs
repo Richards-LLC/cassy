@@ -1859,12 +1859,13 @@ impl CasCore {
         if req.labels.is_some()
             && crate::finding_triage::has_undeclared_main_reach(&main_journeys, &triaged_labels)
         {
+            // gate[G-161 update]: Finding main reach requires a declared live main journey
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-161", format!(
                     "FINDING UPDATE REJECTED: reach:main requires journey:<id> naming a declared live main journey in the project's QA registry. Add the journey axis before retrying; no task fields were changed. Priority remains P{}.",
                     task.priority.0,
-                )),
+                ))),
                 data: Some(serde_json::json!({
                     "rule_id": "finding_main_journey_required", "axis": "journey", "priority": task.priority.0,
                 })),

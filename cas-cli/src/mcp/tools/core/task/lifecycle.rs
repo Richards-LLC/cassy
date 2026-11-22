@@ -4084,7 +4084,8 @@ impl CasCore {
         // spawn receipts. Empty when nothing matches.
         let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
         // cas-96a7: the predicted QA impact is reference context, not a
-        // start-only instruction. It is saved and shown, but in a brief start
+        // start-only instruction (bisected: brief starts overflowed from train
+        // merge 818665b8ec, which added it here; 9abfce90a2 was green). It is saved and shown, but in a brief start
         // it is clipped with the other context instead of pushing the close
         // checks past the response budget.
         let predicted_impact = format!("\n\n{}", qa_impact::predicted(self, &task));

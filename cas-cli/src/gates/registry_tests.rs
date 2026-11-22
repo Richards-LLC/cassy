@@ -530,7 +530,9 @@ fn delivery_touches_audited_site() {
         return;
     };
     let registry = REGISTRY.iter().map(|r| (r.code.into(), r.stage.into(), r.title.into(), r.source.into())).collect::<Vec<_>>();
-    let root = crate::test_paths::crate_root().join("..");
+    // The guard names the checkout it checks; the compiled one is the default.
+    let root = std::env::var_os("CAS_GATE_AUDIT_SELECT_ROOT").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::test_paths::crate_root().join(".."));
     let touched = gate_audit::touches_audited(&root, &base, &registry).unwrap_or_else(|error| {
         eprintln!("gate-audit select: {error}; selecting the registry tests");
         true

@@ -3591,15 +3591,27 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
         // cas-19792: cas-978ed's unclassified bool parameter went red only in
-        // lane CI. When the probe (gates::registry_tests) finds an audited
-        // change, the ordinary guarded run adds the registry scan.
-        fake_cargo(&fake, r#"[ -z "${CAS_GATE_AUDIT_SELECT_OUT:-}" ] || printf 1 > "$CAS_GATE_AUDIT_SELECT_OUT"
+        // lane CI. The guard's run of the real selection probe
+        // (gates::registry_tests) reads the committed fixture diff; an audited
+        // change adds the registry scan to the ordinary guarded run.
+        env.set("CAS_TEST_SELECTION_PROBE", std::env::current_exe().unwrap());
+        fake_cargo(&fake, r#"if [ -n "${CAS_GATE_AUDIT_SELECT_OUT:-}" ]; then
+    "$CAS_TEST_SELECTION_PROBE" --exact gates::registry_tests::delivery_touches_audited_site >/dev/null 2>&1 || exit 12
+fi
 printf '%s\n' "$*" >> target/invocations
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
-        std::fs::remove_file(repo.join("target/invocations")).ok();
-        execute_at(&root, &args, &repo, &fake).unwrap();
-        let invocations = std::fs::read_to_string(repo.join("target/invocations")).unwrap();
-        assert!(invocations.lines().nth(1).unwrap().ends_with("test(gates::registry_tests)"), "{invocations}");
+        for (path, source, registry) in [
+            ("cas-cli/src/notes.rs", "pub fn notes() -> usize { 1 }\n", false),
+            ("cas-cli/src/merge.rs",
+             "pub fn merge(pushed_proof: bool) -> Result<(), String> { if pushed_proof { return Err(\"x\".into()); } Ok(()) }\n", true),
+        ] {
+            std::fs::write(repo.join(path), source).unwrap();
+            fixture_commit_as(&repo, path);
+            std::fs::remove_file(repo.join("target/invocations")).ok();
+            execute_at(&root, &args, &repo, &fake).unwrap();
+            let invocations = std::fs::read_to_string(repo.join("target/invocations")).unwrap();
+            assert_eq!(invocations.lines().nth(1).unwrap().ends_with("test(gates::registry_tests)"), registry, "{path}: {invocations}");
+        }
     }
 
     /// cas-2bdf: merging the moved target into a parked delivery voided its

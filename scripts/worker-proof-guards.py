@@ -53,6 +53,7 @@ def main():
         verified(args.verified_script, args.cargo,
                  ['nextest', 'run', '-p', 'cas', '--lib', '-E', f'{GUARD_FILTER} | {SELECTOR_FILTER}'],
                  guard_count, extra={'CAS_GATE_AUDIT_SELECT_BASE': base,
+                                     'CAS_GATE_AUDIT_SELECT_ROOT': str(repo),
                                      'CAS_GATE_AUDIT_SELECT_OUT': str(answer)})
         tests = int(guard_count.read_text().strip())
         if not answer.is_file() or answer.read_text().strip() != '0':

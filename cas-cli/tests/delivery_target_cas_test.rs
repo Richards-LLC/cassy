@@ -796,7 +796,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             blocked.deliverables.parked_branch = Some(format!("factory/{worker}"));
             blocked.deliverables.factory_branch_anchor = Some(original_tip.clone());
             task_store.update(&blocked).unwrap();
-            cas_store::create_verification_dispatch(
+            let review = cas_store::create_verification_dispatch(
                 &cas_root, &task.id, &worker_id, &supervisor_id,
                 chrono::Utc::now() + chrono::Duration::minutes(10),
             ).unwrap();
@@ -806,6 +806,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
             assert_eq!(serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(), blocked_snapshot,
                 "refusing a parked delivery must not mutate its recorded evidence");
+            cas_store::timeout_verification_dispatch(&cas_root, &task.id, review.deadline_at).unwrap();
             cas_store::invalidate_verification_dispatch_for_new_cycle(&cas_root, &task.id).unwrap();
             task_store.update(&original).unwrap();
             run_git(&["commit", "--allow-empty", "-m", "cas-dead: foreign task work"], &worker_path);

@@ -1997,6 +1997,46 @@ async fn no_code_qa_on_foreign_task_branch_closes_on_portable_proof_gh1177() {
     }
 }
 
+/// GH #2247: a supplemental read-only wait must resume without replacing the
+/// exact proof already submitted for the no-code delivery.
+#[tokio::test]
+async fn blocked_supplemental_work_resumes_without_invalidating_proof_gh2247() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    let id = "cas-bd3d";
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.priority = cas_types::Priority(0);
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PROOF.into());
+    f.put(&task);
+    claim(&f, id);
+    call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"Read-only delivery submitted for review",
+    })).await;
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
+        .unwrap().expect("close must submit an exact verification boundary");
+    let delivery = cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap();
+    let before = f.task(id);
+    call(&f.worker, serde_json::json!({"action":"update", "id":id, "status":"blocked"})).await;
+    assert_eq!(f.task(id).status, TaskStatus::Blocked);
+
+    // Follow the existing generic worker recovery sequence after approval.
+    call(&f.worker, serde_json::json!({"action":"update", "id":id, "status":"open"})).await;
+    call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    let resumed = f.task(id);
+    assert_eq!(resumed.status, TaskStatus::InProgress);
+    assert_eq!(resumed.external_ref, before.external_ref);
+    assert_eq!(serde_json::to_value(resumed.deliverables).unwrap(),
+        serde_json::to_value(before.deliverables).unwrap());
+    assert_eq!(serde_json::to_value(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()).unwrap(),
+        serde_json::to_value(Some(dispatch)).unwrap());
+    assert_eq!(serde_json::to_value(cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap()).unwrap(),
+        serde_json::to_value(delivery).unwrap());
+}
+
 #[tokio::test]
 async fn no_code_qa_evidence_on_foreign_task_branch_measures_no_code_paths_gh1177() {
     let mut env = TestEnvGuard::temp_home();

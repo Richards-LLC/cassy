@@ -2508,6 +2508,57 @@ process.exit(ok ? 0 : 1);
         assert_eq!(passing().receipts().len(), 1);
     }
 
+    /// A stand-in Playwright: lists or runs the `.spec.ts` files under its
+    /// config's testDir that the positional pattern names ("No tests found" otherwise).
+    const STAND_IN_PLAYWRIGHT: &str = r#"#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
+const config = path.resolve(at('--config')), dir = path.join(path.dirname(config), require(config).testDir);
+const pattern = new RegExp(a[a.length - 1]), repeats = a.includes('--list') ? 0 : Number(at('--repeat-each'));
+const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(dir, f)) : [];
+const listed = files.filter((file) => pattern.test(file)), root = path.dirname(config);
+const result = { status: 'passed', retry: 0 }, test = { expectedStatus: 'passed', projectName: 'chromium', results: [result] };
+const report = { config: { rootDir: root }, errors: listed.length ? [] : [{ message: 'No tests found' }], suites: listed.map((file) => ({
+  title: path.relative(root, file), column: 0, suites: [],
+  specs: [{ file: path.relative(root, file), title: 'hermetic sign in', tests: Array(repeats).fill(test) }] })) };
+if (a.includes('--list')) console.log(JSON.stringify(report));
+else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
+process.exit(listed.length ? 0 : 1);
+"#;
+
+    /// GH #2294: Commander journeys import `test` from their local `./journey`
+    /// fixture, so the spec never names `@playwright/test`; beside a Vitest
+    /// config the walk dropped Playwright and G-61 prescribed Vitest, which
+    /// cannot run them. The Playwright config that lists the spec decides.
+    #[test]
+    fn spec_importing_a_local_fixture_is_prescribed_playwright_gh2294() {
+        let repo = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = repo.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("hub-web/package.json", "{}");
+        write("hub-web/vitest.config.ts", "export default {};");
+        write("hub-web/playwright.config.js", "module.exports = { testDir: 'e2e/journeys' };");
+        write("hub-web/node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo.path().join("hub-web/node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        write("hub-web/e2e/journeys/journey.ts", "import { test as base } from '@playwright/test';\nexport const test = base;\n");
+        let journey = "hub-web/e2e/journeys/catalog-refresh.spec.ts";
+        write(journey, "import { test } from './journey';\ntest('catalog refresh', async () => {});\n");
+        // A plain unit test beside both configs still belongs to Vitest.
+        let unit = "hub-web/src/catalog.test.ts";
+        write(unit, "test('catalog', () => {});\n");
+
+        let prescribed = super::super::stability::rerun_commands(
+            Path::new("/cas"), repo.path(), &[id(journey, "catalog refresh"), id(unit, "catalog")]);
+        assert_eq!(prescribed, [
+            format!("`cas factory worker-check --cas-root /cas -- playwright {journey}`"),
+            format!("`cas factory worker-check --cas-root /cas -- vitest {unit}`"),
+        ]);
+    }
+
     /// GH #2195: tests/e2e specs belong to playwright.hermetic.config.js, but
     /// the capped run and its prescribed command used the default config,
     /// which lists no such spec, so no stability proof could be earned.
@@ -2531,23 +2582,7 @@ process.exit(ok ? 0 : 1);
         write("package.json", "{}");
         write("playwright.config.js", "module.exports = { testDir: 'e2e' };");
         write("playwright.hermetic.config.js", "module.exports = { testDir: 'tests/e2e' };");
-        // A stand-in Playwright: lists or runs the `.spec.ts` files under its
-        // config's testDir that the positional pattern names ("No tests found" otherwise).
-        write("node_modules/.bin/playwright", r#"#!/usr/bin/env node
-const fs = require('fs'), path = require('path');
-const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
-const config = path.resolve(at('--config')), dir = path.join(path.dirname(config), require(config).testDir);
-const pattern = new RegExp(a[a.length - 1]), repeats = a.includes('--list') ? 0 : Number(at('--repeat-each'));
-const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(dir, f)) : [];
-const listed = files.filter((file) => pattern.test(file)), root = path.dirname(config);
-const result = { status: 'passed', retry: 0 }, test = { expectedStatus: 'passed', projectName: 'chromium', results: [result] };
-const report = { config: { rootDir: root }, errors: listed.length ? [] : [{ message: 'No tests found' }], suites: listed.map((file) => ({
-  title: path.relative(root, file), column: 0, suites: [],
-  specs: [{ file: path.relative(root, file), title: 'hermetic sign in', tests: Array(repeats).fill(test) }] })) };
-if (a.includes('--list')) console.log(JSON.stringify(report));
-else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
-process.exit(listed.length ? 0 : 1);
-"#);
+        write("node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let spec = "tests/e2e/sign-in.spec.ts";

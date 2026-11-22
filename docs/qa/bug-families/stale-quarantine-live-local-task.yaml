@@ -1,10 +1,11 @@
-title: A stale quarantine entry for a live local task no longer blocks its sync
+title: A stale quarantine entry for a later local task no longer blocks its sync
 statement: >-
-  The quarantine ledger is keyed by bare task id. An entry whose id names a
-  local task stamped with this project's identity is ignored by pull, push and
-  the board, so peer parks and status updates apply and queued pushes survive.
-  Ids with no local owner, or a local row from another project or without an
-  origin, stay quarantined.
+  The quarantine ledger is keyed by bare task id and a decision applies to the
+  row that existed when it was taken. An entry older than a local task stamped
+  with this project's identity is ignored by pull, push and the board, so peer
+  parks and status updates apply and queued pushes survive. Rows that already
+  existed when quarantined, and ids with a foreign or unattributed local row,
+  stay quarantined.
 tasks: [cas-3d8b]
 journeys: [FACTORY-MERGE]
 invariants: []

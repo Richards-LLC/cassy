@@ -122,45 +122,51 @@ impl SyncQueue {
     /// returns a set rather than a Vec.
     ///
     /// The ledger is keyed by bare id and short task ids collide across
-    /// projects, so an entry whose id names a live local task stamped with this
-    /// project's identity is stale (cas-3d8b, GH #1000): honoring it hid the
-    /// task's peer updates from every pull and deleted its queued pushes.
-    /// Such entries stay in the ledger but are not reported as quarantined.
+    /// projects. A decision applies to the row that existed when it was taken,
+    /// so an entry older than a local task stamped with this project's
+    /// identity is stale (cas-3d8b, GH #1000): honoring it hid that task's peer
+    /// updates from every pull and deleted its queued pushes. Such entries stay
+    /// in the ledger but are not reported as quarantined.
     pub fn quarantined_ids(&self, entity_type: &str) -> Result<BTreeSet<String>, CasError> {
-        let rows = {
+        type Row = (String, Option<String>, Option<String>, String);
+        let rows: Vec<Row> = {
             let conn = self.conn.lock().unwrap();
             let is_task = entity_type == QUARANTINE_TASK;
+            let plain = "SELECT entity_id, NULL, NULL, quarantined_at
+                         FROM quarantined_rows WHERE entity_type = ?1";
             // The tasks table lives beside the queue; without it nothing is owned.
-            let sql = if is_task {
-                "SELECT q.entity_id, t.origin_project FROM quarantined_rows q
-                 LEFT JOIN tasks t ON t.id = q.entity_id WHERE q.entity_type = ?1"
-            } else {
-                "SELECT entity_id, NULL FROM quarantined_rows WHERE entity_type = ?1"
-            };
-            let mut stmt = match conn.prepare(sql) {
+            let owned = "SELECT q.entity_id, t.origin_project, t.created_at, q.quarantined_at
+                         FROM quarantined_rows q LEFT JOIN tasks t ON t.id = q.entity_id
+                         WHERE q.entity_type = ?1";
+            let mut stmt = match conn.prepare(if is_task { owned } else { plain }) {
                 Ok(stmt) => stmt,
-                Err(_) if is_task => conn.prepare(
-                    "SELECT entity_id, NULL FROM quarantined_rows WHERE entity_type = ?1",
-                )?,
+                Err(_) if is_task => conn.prepare(plain)?,
                 Err(error) => return Err(error.into()),
             };
             stmt.query_map(params![entity_type], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Result<_, _>>()?
         };
         let local = rows
             .iter()
-            .any(|(_, origin)| origin.is_some())
+            .any(|(_, origin, _, _)| origin.is_some())
             .then(|| crate::cloud::resolve_canonical_id(&self.cas_dir))
             .flatten();
+        let at = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw).ok();
         Ok(rows
             .into_iter()
-            .filter(|(_, origin)| {
-                !matches!((origin, &local), (Some(origin), Some(local))
-                    if origin != "unknown" && crate::cloud::project_ids_match(origin, local))
+            .filter(|(_, origin, created, quarantined)| {
+                let newer = created
+                    .as_deref()
+                    .and_then(at)
+                    .zip(at(quarantined))
+                    .is_some_and(|(created, quarantined)| created > quarantined);
+                !(newer
+                    && matches!((origin, &local), (Some(origin), Some(local))
+                        if origin != "unknown" && crate::cloud::project_ids_match(origin, local)))
             })
-            .map(|(id, _)| id)
+            .map(|(id, ..)| id)
             .collect())
     }
 

@@ -3023,8 +3023,11 @@ impl HistoryStore for SqliteHistoryStore {
         // names the replacement file and its mtime says nothing about the
         // process being recorded. Never persist that mtime as proof.
         let trusted_binary_mtime = epoch.trusted_binary_mtime();
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
+        // GH #2183: this reads before it writes. A DEFERRED transaction must
+        // then upgrade, which SQLite refuses without the busy handler when
+        // another process writes first, so a reconnect burst lost the epoch
+        // and the live MCP's version stayed unknown. Take the lock up front.
+        let tx = shared_db::begin_immediate_pooled(&self.conn)?;
 
         // Identity lookup rather than `ON CONFLICT`, because the uniqueness
         // constraint is an *expression* index (`COALESCE(pid, -1)`) and naming

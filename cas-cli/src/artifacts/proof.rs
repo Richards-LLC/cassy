@@ -641,7 +641,10 @@ pub(crate) fn publish_routed_evidence(
     for (index, segment) in task.deliverables.parked_close_reason.as_deref().unwrap_or_default().split('`').enumerate() {
         let tokens = if index % 2 == 1 { vec![segment] } else { segment.split_whitespace().collect() };
         for token in tokens {
-            let token = token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\''));
+            // Prose wraps a cited path: "(target/x.log)." or "…/LEDGER.md.".
+            let wrapper = |c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\'');
+            let token = token.trim_start_matches(wrapper)
+                .trim_end_matches(|c: char| wrapper(c) || matches!(c, '.' | ':' | '!' | '?'));
             let token = token.split_once('=').map_or(token, |(_, value)| value);
             let expanded = crate::qa_evidence::expand_home(token);
             let path = if expanded.is_absolute() { expanded } else { proof_repo.join(expanded) };

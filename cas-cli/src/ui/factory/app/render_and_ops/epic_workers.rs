@@ -4396,6 +4396,118 @@ mod spawn_base_tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn replacement_spawn_checks_structured_target_before_queueing_gh2137() {
+        use cas_store::SpawnQueueStore;
+        use cas_types::{Agent, AgentRole, Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        init_repo(repo);
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["branch", "epic/parked-old"]);
+        git(&["switch", "-c", "develop"]);
+        commit_file(repo, "develop-only", "current develop history");
+        git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        let develop = head_sha(repo, "develop");
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gh2137\"\n").unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+        let tasks = open_task_store_cached(&root).unwrap();
+        let mut epic = Task::new("cas-gh2137-epic".into(), "Inherited lane".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/parked-old".into());
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:gh2137".into(), target_branch: "main".into(),
+        });
+        tasks.add(&epic).unwrap();
+        let mut task = Task::new("cas-gh2137".into(), "Replacement assignment".into());
+        task.assignee = Some("retired-worker".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:gh2137".into(), target_branch: "epic/parked-old".into(),
+        });
+        tasks.add(&task).unwrap();
+        tasks.add_dependency(&Dependency::new(task.id.clone(), epic.id, DependencyType::ParentChild)).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("gh2137-supervisor".into());
+        let agents = open_agent_store(&root).unwrap();
+        agents.register(&Agent::new_with_role("gh2137-supervisor".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = crate::mcp::tools::CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = crate::mcp::tools::CasService::new(core);
+        let ctx = crate::ops::fleet::FleetContext::operator("gh2137-session");
+        let request = |branch: &str| serde_json::from_value(serde_json::json!({
+            "action":"spawn_workers", "count":1, "cli":"grok", "isolate":true,
+            "task_id":task.id, "worker_names":"replacement", "branch":branch,
+            "spawn_brief":"Use the previously parked epic lane after reviewing the assignment.",
+        })).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let before = serde_json::to_value(tasks.get(&task.id).unwrap()).unwrap();
+        for branch in ["develop", "origin/develop"] {
+            let error = service.factory_spawn_workers_in(&ctx, request(branch)).await
+                .expect_err("conflicting structured launch target must refuse before enqueue");
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            let data = error.data.unwrap();
+            assert_eq!(data["code"], "spawn_target_mismatch");
+            assert_eq!(data["task_id"], task.id);
+            assert_eq!(data["requested_branch"], branch);
+            assert_eq!(data["effective_target"], "epic/parked-old");
+            assert!(queue.peek(10).unwrap().is_empty());
+            assert_eq!(serde_json::to_value(tasks.get(&task.id).unwrap()).unwrap(), before);
+            assert!(!root.join("worktrees/replacement").exists());
+        }
+        // Persist the correction through the supported operation. Brief prose
+        // still mentions the old lane and cannot override the structured target.
+        let supervisor = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        supervisor.set_agent_id_for_testing("gh2137-supervisor".into());
+        supervisor.cas_task_update_with_target(
+            serde_json::from_value(serde_json::json!({"id":task.id})).unwrap(),
+            None, Some("develop"), false, None, None,
+        ).await.unwrap();
+        assert!(tasks.get(&task.id).unwrap().deliverables.work_target_pinned);
+        service.factory_spawn_workers_in(&ctx, request("origin/develop")).await.unwrap();
+        let queued = queue.peek(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].task_id.as_deref(), Some(task.id.as_str()));
+        let target = task_epic_base(&root, repo, &task.id);
+        assert_eq!(resolve_spawn_base(&target, Some("epic/parked-old"), "main").0, "develop");
+        let checkout = root.join("worktrees/replacement");
+        std::fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+        crate::worktree::GitOperations::new(repo.to_path_buf())
+            .create_worktree(&checkout, "factory/replacement", Some("origin/develop")).unwrap();
+        let mut worker = Agent::new_with_role("gh2137-worker".into(), "replacement".into(), AgentRole::Worker);
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.register(&worker).unwrap();
+        assert!(assign_task_to_new_worker(&root, &task.id, &worker.name));
+        env.set("CAS_AGENT_ROLE", "worker");
+        let worker_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        worker_core.set_agent_id_for_testing(worker.id);
+        let start = || Parameters(crate::mcp::tools::IdRequest { id: task.id.clone() });
+        worker_core.cas_task_start(start()).await.unwrap();
+        let started = tasks.get(&task.id).unwrap();
+        assert_eq!(started.status, TaskStatus::InProgress);
+        assert_eq!(started.deliverables.factory_branch_start.as_ref().unwrap().base_sha, develop);
+
+        let output = Command::new("git").args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "commit", "--allow-empty", "-m", "cas-foreign: unrelated work"]).current_dir(&checkout).output().unwrap();
+        assert!(output.status.success());
+        let foreign_tip = head_sha(&checkout, "HEAD");
+        let mut resumed = started;
+        resumed.status = TaskStatus::Open;
+        tasks.update(&resumed).unwrap();
+        let error = worker_core.cas_task_start(start()).await.expect_err("foreign commits remain protected");
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("[G-10]"), "{error}");
+        assert_eq!(head_sha(&checkout, "HEAD"), foreign_tip);
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+    }
+
     #[test]
     fn cas_bfa1_spawn_batch_advances_local_base_once() {
         let temp = TempDir::new().unwrap();

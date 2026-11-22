@@ -2415,6 +2415,102 @@ async fn granted_commit_inside_no_ff_import_keeps_the_merge_gh1988() {
     assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD"]), merge);
 }
 
+/// GH #1593/#2159/#2197: an audited fresh task branch can replace a retired
+/// park or a refused first park, without replacing a live review or park.
+#[tokio::test]
+async fn blocked_retarget_rebind_publishes_and_reparks_gh1593() {
+    for case in ["retargeted", "park-refused", "pending-review", "blocked-park", "parked"] {
+        let mut env = TestEnvGuard::temp_home();
+        let mut f = fixture_with_surface(&mut env, "docs/delivery.md", false);
+        let repo = f.dir.path();
+        let root = repo.join(".cas");
+        let tasks = open_task_store(&root).unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        let mut worker = agents.get("recovery-session").unwrap();
+        worker.metadata.insert("clone_path".into(), f.worker_path.display().to_string());
+        agents.update(&worker).unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", WORKER);
+        env.set("CAS_AGENT_ID", "recovery-session");
+        env.set("CAS_CLONE_PATH", &f.worker_path);
+        git(&f.worker_path, &["reset", "-q", "--hard", "main"]);
+        let mut task = start_on_lane(tasks.as_ref(), &git(repo, &["rev-parse", "main"]));
+        task.depth = cas_types::TaskDepth::Light;
+        task.demo_statement.clear();
+        tasks.update(&task).unwrap();
+        std::fs::create_dir_all(f.worker_path.join("docs")).unwrap();
+        f.final_tip = commit_file(&f.worker_path, "docs/delivery.md", &format!("fix({TASK}): own delivery"));
+        let original_tip = f.final_tip.clone();
+        let mut captured = tasks.get(TASK).unwrap();
+        captured.deliverables.factory_branch_anchor = Some(original_tip.clone());
+        tasks.update(&captured).unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", BRANCH]);
+        if case != "park-refused" { close(&f).await; }
+        let supervisor = CasCore::with_daemon(root.clone(), None, None);
+        supervisor.set_agent_id_for_testing("supervisor-session".into());
+        let target = if matches!(case, "retargeted" | "pending-review") {
+            git(repo, &["switch", "-qc", "staging", "main"]);
+            commit_file(repo, "target.txt", "staging base");
+            git(repo, &["push", "-q", "origin", "staging"]);
+            git(repo, &["switch", "-q", "main"]);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            supervisor.cas_task_update_with_target(
+                serde_json::from_value(serde_json::json!({"id": TASK})).unwrap(),
+                None, Some("staging"), true, Some("Carry the parked delivery to staging"), None,
+            ).await.unwrap();
+            "staging"
+        } else { "main" };
+        if case != "parked" {
+            let mut held = tasks.get(TASK).unwrap();
+            held.status = TaskStatus::Blocked;
+            tasks.update(&held).unwrap();
+        }
+        if case == "pending-review" {
+            cas_store::create_verification_dispatch(&root, TASK, "recovery-session", "supervisor-session",
+                chrono::Utc::now() + chrono::Duration::hours(1)).unwrap();
+        }
+        let replacement = format!("{BRANCH}-{TASK}-r2");
+        git(&f.worker_path, &["switch", "-qc", &replacement, target]);
+        git(&f.worker_path, &["cherry-pick", &original_tip]);
+        let before = tasks.get(TASK).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let result = supervisor.rebind_task_branch(TASK, &replacement, "Approve the fresh replacement delivery");
+        let permitted = matches!(case, "retargeted" | "park-refused");
+        assert_eq!(result.is_ok(), permitted, "{case}: {result:?}");
+        if !permitted {
+            assert_eq!(result.unwrap_err().code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(serde_json::to_value(tasks.get(TASK).unwrap()).unwrap(), serde_json::to_value(before).unwrap());
+            continue;
+        }
+        let rebound = tasks.get(TASK).unwrap();
+        assert_eq!(rebound.deliverables.factory_branch_start.as_ref().unwrap().branch, replacement);
+        assert!(rebound.deliverables.parked_branch.is_none());
+        assert!(rebound.deliverables.historical_factory_branch_anchors.contains(&original_tip));
+        env.set("CAS_AGENT_ROLE", "worker");
+        f.core.cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+            id: TASK.into(), brief: Some(true), force: None,
+        })).await.unwrap();
+        let hook = serde_json::from_value(serde_json::json!({
+            "session_id":"recovery-session", "cwd":f.worker_path,
+            "tool_name":"Bash", "tool_input":{"command":"git push -u origin HEAD"},
+        })).unwrap();
+        let guard = crate::hooks::handle_pre_tool_use(&hook, Some(&root)).unwrap();
+        assert_eq!(serde_json::to_value(guard).unwrap().pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(serde_json::Value::as_str), Some("allow"));
+        git(&f.worker_path, &["push", "-q", "-u", "origin", "HEAD"]);
+        f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let parked = close(&f).await;
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(replacement.as_str()));
+        assert_eq!(parked.deliverables.factory_branch_start.as_ref().unwrap().work_target.target_branch, target);
+        assert_eq!(git(repo, &["rev-parse", BRANCH]), original_tip);
+        assert_eq!(git(repo, &["rev-parse", &format!("origin/{BRANCH}")]), original_tip);
+        assert_eq!(git(repo, &["rev-parse", &format!("origin/{replacement}")]), f.final_tip);
+    }
+}
+
 /// GH #1888 (cas-f45f): the returned task's start records the worker lane,
 /// while task start cut an empty `factory/<worker>-<task>` ref at the target
 /// tip and checked it out. A ref merely named for the task is not its

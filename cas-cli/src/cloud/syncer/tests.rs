@@ -6312,18 +6312,42 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     assert!(reviewer_tasks.get(&parked.id).unwrap().updated_at > builder_tasks.get(&parked.id).unwrap().updated_at);
     let builder_pusher = CloudSyncer::new_for_project(builder_queue, (*builder_config).clone(),
         CloudSyncerConfig::default(), "review-project".into(), &owner);
-    let pushed = builder_pusher.push_team("review-team").unwrap();
-    assert!(pushed.errors.is_empty(), "{pushed:?}");
-    assert!(pushed.pushed_tasks > 0);
-    assert_eq!(remote.lock().unwrap()[&parked.id]["status"], "awaiting_merge");
-    let pulled = pusher.pull_team("review-team", "review-project",
-        &*crate::store::open_store_local(&reviewer).unwrap(), &*reviewer_tasks,
-        &*crate::store::open_rule_store_local(&reviewer).unwrap(),
-        &*crate::store::open_skill_store_local(&reviewer).unwrap()).unwrap();
-    assert!(pulled.errors.is_empty(), "{pulled:?}");
-    let received = reviewer_tasks.get(&parked.id).unwrap();
-    assert_eq!(received.status, TaskStatus::AwaitingMerge);
-    assert_eq!(received.deliverables.factory_branch_anchor, Some("b".repeat(40)));
-    assert!(received.notes.contains(bookkeeping));
+    let baseline = reviewer_tasks.get(&parked.id).unwrap();
+    let decision_block = baseline.notes.split("\n\n").rev().find(|block|
+        block.contains(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)).unwrap();
+    let park_block = repair.notes.split("\n\n").rev().find(|block|
+        block.contains(crate::mcp::tools::core::task::audit::PARKED_STATE)).unwrap();
+    for case in ["no-ack", "park-before-ack", "new-owner-decision", "valid"] {
+        let mut incoming = repair.clone();
+        let mut receiver = baseline.clone();
+        match case {
+            "no-ack" => incoming.notes = incoming.notes.split("\n\n")
+                .filter(|block| block.trim() != decision_block.trim()).collect::<Vec<_>>().join("\n\n"),
+            "park-before-ack" => incoming.notes = format!("{park_block}\n\n{}",
+                incoming.notes.split("\n\n").filter(|block| block.trim() != park_block.trim())
+                    .collect::<Vec<_>>().join("\n\n")),
+            "new-owner-decision" => receiver.notes.push_str(&format!("\n\n{}",
+                cas_store::request_changes_audit_note(chrono::Utc::now(), "A new owner review", "Keep the correction branch"))),
+            _ => {}
+        }
+        let current = builder_tasks.get(&parked.id).unwrap();
+        builder_writer.update_if_current(&incoming, &current).unwrap();
+        let current = reviewer_tasks.get(&parked.id).unwrap();
+        reviewer_tasks.update_if_current(&receiver, &current).unwrap();
+        assert!(reviewer_tasks.get(&parked.id).unwrap().updated_at > builder_tasks.get(&parked.id).unwrap().updated_at);
+        let pushed = builder_pusher.push_team("review-team").unwrap();
+        assert!(pushed.errors.is_empty(), "{case}: {pushed:?}");
+        assert!(pushed.pushed_tasks > 0);
+        assert_eq!(remote.lock().unwrap()[&parked.id]["status"], "awaiting_merge");
+        let pulled = pusher.pull_team("review-team", "review-project",
+            &*crate::store::open_store_local(&reviewer).unwrap(), &*reviewer_tasks,
+            &*crate::store::open_rule_store_local(&reviewer).unwrap(),
+            &*crate::store::open_skill_store_local(&reviewer).unwrap()).unwrap();
+        assert!(pulled.errors.is_empty(), "{case}: {pulled:?}");
+        let received = reviewer_tasks.get(&parked.id).unwrap();
+        assert_eq!(received.status, if case == "valid" { TaskStatus::AwaitingMerge } else { TaskStatus::Open }, "{case}");
+        if case == "valid" { assert_eq!(received.deliverables.factory_branch_anchor, Some("b".repeat(40))); }
+        assert!(received.notes.contains(bookkeeping));
+    }
 
 }

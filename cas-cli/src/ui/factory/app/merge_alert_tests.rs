@@ -756,23 +756,48 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
 }
 
 /// cas-f767 (GH #2132): a capped check refused for memory pressure records a
-/// capacity wait with a 120 s retry and exits 1. Each exit re-armed the idle
-/// relay, paging the supervisor five times in fifteen minutes for one worker.
+/// capacity wait with a 120 s retry and its detached job exits 1. Each exit
+/// re-armed the idle relay, paging the supervisor five times in fifteen
+/// minutes for one worker. Replays that episode on controlled timestamps.
 #[test]
 fn cas_f767_recorded_capacity_wait_keeps_the_idle_relay_quiet() {
+    use cas_store::SupervisorQueueStore;
     let mut f = Fixture::new();
     f.in_progress();
     f.ci(Some("failure"));
-    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
-    let mut worker = agents.get("merge-w").unwrap();
-    worker.metadata.insert("clone_path".into(), f.repo.path().display().to_string());
-    agents.register(&worker).unwrap();
-    f.app.merge_alert_retries.now = Some(Utc::now());
-    crate::factory_capacity_wait::record_refusal(&f.app.cas_dir, f.repo.path(),
-        "memory PSI some avg10 19.43% exceeds 10.00%", Utc::now()).unwrap().expect("wait recorded");
-    assert!(f.relay().is_empty(), "a scheduled capacity retry is a wait, not an idle worker");
-    crate::factory_capacity_wait::admitted(&f.app.cas_dir, f.repo.path()).unwrap();
-    assert_eq!(f.relay().len(), 1, "once admitted, the real failure still relays");
+    let cas_dir = f.app.cas_dir.clone();
+    let repo = f.repo.path().to_path_buf();
+    let log = repo.join("detached.log");
+    std::fs::write(&log, "").unwrap();
+    let exit = |code: i32, at: chrono::DateTime<Utc>| {
+        let run = crate::factory_worker_runs::register(&cas_dir, &repo, &log, at).unwrap().expect("worker run");
+        crate::factory_worker_runs::finish(&cas_dir, &run, code, at).unwrap();
+    };
+    let now = Utc::now();
+    let since = now - chrono::Duration::minutes(22);
+    // Every 2 minutes for 22 minutes: refusal, then the job's EXIT 1.
+    for retry in 0..=11 {
+        let at = since + chrono::Duration::minutes(2 * retry);
+        crate::factory_capacity_wait::record_refusal(&cas_dir, &repo,
+            "memory PSI some avg10 19.43% exceeds 10.00%", at).unwrap().expect("wait recorded");
+        exit(1, at);
+        f.app.merge_alert_retries.now = Some(at);
+        assert!(f.relay().is_empty(), "denied exit {retry} is a scheduled capacity retry, not an idle worker");
+    }
+    // The long wait still escalates once, through capacity reconciliation.
+    let mut supervisor = cas_types::Agent::new_with_role("merge-sup".into(), "merge-sup".into(),
+        cas_types::AgentRole::Supervisor);
+    supervisor.factory_session = crate::store::open_agent_store(&cas_dir).unwrap().get("merge-w").unwrap().factory_session;
+    crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+    assert_eq!(crate::factory_capacity_wait::reconcile(&cas_dir, None, now).unwrap(), 1, "20-minute wait escalates");
+    assert_eq!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().pending_count("merge-sup").unwrap(), 1);
+    assert!(f.relay().is_empty(), "escalation is the capacity notice, not an extra idle page");
+    // Once admitted, a real test failure relays.
+    crate::factory_capacity_wait::admitted(&cas_dir, &repo).unwrap();
+    exit(101, now);
+    let failed = f.relay();
+    assert_eq!(failed.len(), 1, "an admitted failing run still relays");
+    assert!(failed[0].text.contains("EXIT 101"), "the relay names the failed run: {}", failed[0].text);
 }
 
 /// A worker waiting on its own pushed CI is not stalled, even if repeated

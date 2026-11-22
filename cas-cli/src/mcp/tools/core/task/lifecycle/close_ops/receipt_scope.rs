@@ -182,13 +182,14 @@ pub(super) fn park_refusals(
                 stability::rerun_commands(cas_root, proof_repo, &missing).join("; "),
             )));
         }
-        let missing = crate::factory_worker_check::widened::missing(&passing, &widened);
+        let covering = crate::factory_worker_check::widened::covering(proof_repo, head, changed_paths, &widened);
+        let missing = crate::factory_worker_check::widened::missing(&passing, &widened, &covering);
         if !missing.is_empty() {
             // Classification is uncertain, but the broader capped receipt is
             // proven missing. Park reads proof; it never starts a test process.
             refusals.push(crate::gates::tag("G-61", format!(
                 "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require five passes.",
-                task.id, crate::factory_worker_check::widened::commands(cas_root, proof_repo, changed_paths, &missing).join("; ")
+                task.id, crate::factory_worker_check::widened::commands(cas_root, proof_repo, changed_paths, &missing, &covering).join("; ")
             )));
         }
     }
@@ -1320,9 +1321,9 @@ mod tests {
             std::fs::write(repo.join(path), source.replace("appendFileSync('runs', 'x');", "throw new Error('seeded');")).unwrap();
             git(&["commit", "-qam", "failing delivery"]);
             let failed = git(&["rev-parse", "HEAD"]);
-            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes, &Default::default()), scopes);
             assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());
-            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes, &Default::default()), scopes);
             assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", Some(&[(base, failed.clone())])).is_empty());
         }
         // GH #2175: the widened Playwright producer feeds the same park reader.
@@ -1379,7 +1380,7 @@ raise SystemExit(1 if failed else 0)
             let result = javascript::execute(root.path(), &args, &repo, &[]);
             assert_eq!(result.is_ok(), inherited, "{result:?}");
             let scopes = [widened::Scope::File(path.into())];
-            let missing = widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes);
+            let missing = widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes, &Default::default());
             let repairs: Vec<_> = tasks.list(None).unwrap().into_iter()
                 .filter(|task| task.labels.iter().any(|label| label == "release-repair")).collect();
             if inherited {
@@ -1454,7 +1455,7 @@ raise SystemExit(1 if failed else 0)
                     widened::Proof { runner: "nextest".into(), scope: expected_scope, reason: "widened:fixture-unclassified-input".into() }, 1).unwrap();
             }
             let passing = PassingTests::new(root.path(), repo.path(), &head);
-            assert!(widened::missing(&passing, &scopes).is_empty(), "{row}");
+            assert!(widened::missing(&passing, &scopes, &Default::default()).is_empty(), "{row}");
             assert_eq!(stability::missing(&passing, &tests), tests, "{row}");
             if !tests.is_empty() {
                 assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
@@ -1465,6 +1466,75 @@ raise SystemExit(1 if failed else 0)
             assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
         }
         assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// GH #2266, #2224: a migration rename, a catalogue edit and a fixture
+    /// edit widen the package; park names the specs that read those inputs
+    /// in one runnable command and accepts their whole-file passes for it.
+    #[test]
+    fn package_proof_resolves_and_accepts_covering_specs_gh2266() {
+        use crate::factory_worker_check::{stability, widened};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("worktrees/worker");
+        let write = |path: &str, body: &str| {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        };
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&repo)
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let specs = ["apps/backend/src/__scenarios__/acceptance.spec.ts", "apps/backend/test/migration-timestamps.spec.ts",
+            "apps/backend/test/patterns.spec.ts"];
+        write("apps/backend/package.json", "{}");
+        write("apps/backend/prisma/migrations/1_init/migration.sql", "CREATE TABLE a (id int);\n");
+        write("apps/backend/src/__scenarios__/scenarios.json", "[[\"sms\", false]]");
+        write("apps/backend/test/fixtures/patterns.ts", "export const pattern = /^a$/;\n");
+        write(specs[0], "import cases from './scenarios.json';\nfor (const [name] of cases) it(name, () => {});\n");
+        write(specs[1], "import { readdirSync } from 'fs';\nimport { join } from 'path';\n\
+            it('orders migrations', () => { readdirSync(join(__dirname, '../prisma/migrations')); });\n");
+        write(specs[2], "import { pattern } from './fixtures/patterns';\nit('matches', () => { pattern.test('a'); });\n");
+        write("apps/backend/src/unrelated.spec.ts", "import { x } from '../lib/x';\nit('unrelated', () => { void x; });\n");
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]); git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
+        git(&["mv", "apps/backend/prisma/migrations/1_init", "apps/backend/prisma/migrations/2_init"]);
+        write("apps/backend/src/__scenarios__/scenarios.json", "[[\"sms\", false], [\"email\", true]]");
+        write("apps/backend/test/fixtures/patterns.ts", "export const pattern = /^a+$/;\n");
+        git(&["commit", "-qam", "rename migration, extend catalogue, widen fixture"]);
+        std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = ["apps/backend/prisma/migrations/2_init/migration.sql", "apps/backend/src/__scenarios__/scenarios.json",
+            "apps/backend/test/fixtures/patterns.ts"].map(String::from).to_vec();
+        let task = Task::new("cas-5afc".into(), "covering spec proof".into());
+        let (_, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+        assert_eq!(scopes, [widened::Scope::Package("apps/backend".into())]);
+        let covering = widened::covering(&repo, &head, &paths, &scopes);
+        assert_eq!(covering.get(&scopes[0]).map(Vec::as_slice), Some(&specs.map(String::from)[..]));
+        // Every prescribed command targets exactly the covering specs.
+        let commands = widened::commands(root.path(), &repo, &paths, &scopes, &covering);
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let (_, args) = command.split_once(" -- ").unwrap();
+            assert_eq!(args.split_whitespace().filter(|arg| arg.ends_with(".ts")).collect::<Vec<_>>(), specs, "{command}");
+        }
+        let g61 = |head: &str| park_refusals(root.path(), &repo, &task, &paths, head, "main", None).iter()
+            .any(|reply| crate::gates::codes_in(reply).contains(&"G-61"));
+        let pass = |spec: &str| widened::record(root.path(), &repo, &head, widened::Proof {
+            runner: "jest".into(), scope: widened::Scope::File(spec.into()), reason: "widened:no static changed-test selection".into(),
+        }, 1).unwrap();
+        assert!(g61(&head));
+        pass(specs[0]);
+        pass(specs[1]);
+        assert!(g61(&head), "two of three covering specs must not prove the package");
+        pass(specs[2]);
+        assert!(!g61(&head));
     }
 
     /// Source advice, native related selection and the park reader share one
@@ -1558,7 +1628,7 @@ sys.exit(0 if ok else 1)
         let paths = vec![source.to_owned()];
         let task = Task::new("cas-1587".into(), "related source proof".into());
         let scopes = vec![widened::scope(&repo, source)];
-        let commands = widened::commands(root.path(), &repo, &paths, &scopes);
+        let commands = widened::commands(root.path(), &repo, &paths, &scopes, &Default::default());
         assert_eq!(commands.len(), 1);
         // These bytes are the runnable command consumed by worker-check.
         let (_, command) = commands[0].split_once(" -- ").unwrap();
@@ -1577,20 +1647,20 @@ sys.exit(0 if ok else 1)
         let runs = std::fs::read_to_string(repo.join(format!("{package}/target/executed.jsonl"))).unwrap();
         let executed = runs.lines().map(|line| serde_json::from_str::<Vec<String>>(line).unwrap()).collect::<Vec<_>>();
         assert_eq!(executed, [vec![repo.join(&consumer).to_str().unwrap().to_owned()]]);
-        assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes).is_empty());
+        assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes, &Default::default()).is_empty());
         assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
         // A receipt for this source cannot cover a second source in the package.
         let other_source = format!("{package}/src/other.ts");
         write(&other_source, "export const value = 3;\n");
         let other = widened::scope(&repo, &other_source);
-        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()]), [other]);
+        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()], &Default::default()), [other]);
         std::fs::remove_file(repo.join(&other_source)).unwrap();
         // A failing related spec must withdraw the old proof at the new tip.
         write(&consumer, &consumer_source.replace("void value;", "throw 0;"));
         git(&["commit", "-qam", "related failure"]);
         let failed = git(&["rev-parse", "HEAD"]);
         assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());
-        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes, &Default::default()), scopes);
         assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", None).is_empty());
     }
 

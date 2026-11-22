@@ -5115,7 +5115,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let owner_root = dir.path().join("owner-store");
         let passing = PassingTests::new(&owner_root, &owner, &head).with_synced(&task.deliverables.test_receipts);
         assert!(stability::missing(&passing, &[identity.clone()]).is_empty());
-        assert!(widened::missing(&passing, &[scope.clone()]).is_empty());
+        assert!(widened::missing(&passing, &[scope.clone()], &Default::default()).is_empty());
         assert_eq!(passing.packages(), ["fixture"]);
         // Worker-authored proof is scoped to the immutable Git inputs, and
         // neither relative traversal nor fewer than five passes grants credit.
@@ -5137,7 +5137,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let refused = PassingTests::new(&owner_root, &owner, &new_head).with_synced(&rebound);
         assert!(refused.packages().is_empty());
         assert_eq!(stability::missing(&refused, &[identity.clone()]), [identity]);
-        assert_eq!(widened::missing(&refused, &[scope.clone()]), [scope]);
+        assert_eq!(widened::missing(&refused, &[scope.clone()], &Default::default()), [scope]);
     }
 
     fn passing_test_identities(

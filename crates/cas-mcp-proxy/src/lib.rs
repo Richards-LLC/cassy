@@ -3561,6 +3561,8 @@ for line in sys.stdin:
                 state = mode if mode in ("outcome_unknown", "not_posted") else ("not_posted" if mode == "not_posted_detail" else "posted")
                 with open(state_path, "w") as handle:
                     json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch", "diagnostic": mode == "not_posted_detail"}, handle)
+                if mode == "unreceived":
+                    os.remove(state_path)
                 if mode == "transport_rollback":
                     with open(log + ".schema", "w") as handle:
                         handle.write("legacy")
@@ -3673,6 +3675,7 @@ for line in sys.stdin:
         for (schema, mode, expected) in [("modern", "posted", "posted"), ("modern", "transport", "posted"),
             ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "not_posted", "not_posted"),
             ("modern", "not_posted_detail", "not_posted"),
+            ("modern", "managed_not_posted", "not_posted"), ("modern", "unreceived", "not_posted"),
             ("modern", "post_only", "posted"), ("modern", "post_only_not_posted", "not_posted"),
             ("modern", "post_only_supervisor", "posted"), ("modern", "lookup_denied", "outcome_unknown"),
             ("modern", "rejected", "not_posted"), ("modern", "mismatch", "outcome_unknown"),
@@ -3707,8 +3710,13 @@ for line in sys.stdin:
                 assert!(engine.call_tool(&caller, "violet", "violet_read",
                     Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await.is_err());
             }
-            let text = if mode == "post_only_not_posted" { "not_posted" } else { mode };
+            let text = if matches!(mode, "post_only_not_posted" | "managed_not_posted") { "not_posted" } else { mode };
             let mut args = serde_json::json!({"channel": "C123", "kind": "message", "text": text});
+            if mode == "managed_not_posted" {
+                args["reply_to"] = "1760616000.123456".into();
+                args["coordination_operation_id"] = "00007e91-1111-4111-8111-000000007e91".into();
+                args["expected_generation"] = 5.into();
+            }
             if mode == "transport" {
                 args["request_id"] = Value::String("00000091-2222-4222-8222-000000000091".into());
             }
@@ -3746,6 +3754,19 @@ for line in sys.stdin:
                 assert_eq!(body["error"], serde_json::json!({"code":"occurrence_not_eligible", "retryable":false,
                     "message":"Provider rejected the occurrence", "detail":{"occurrence_id":"fixture-occurrence"}}));
                 assert_eq!(body["post_response"]["error"]["detail"]["stage"], "provider_preflight");
+            }
+            // GH #1968: a not_posted Violet gives no cause for still names one
+            // and the next step; only a request Violet never received is
+            // retried with the same request_id.
+            let next = match mode {
+                "not_posted" | "post_only_not_posted" => Some(("provider_unreported", false, "new_request_id")),
+                "managed_not_posted" => Some(("provider_unreported", false, "new_reply_intent")),
+                "unreceived" => Some(("request_not_found", true, "resend_same_request_id")),
+                _ => None,
+            };
+            if let Some((reason, retryable, action)) = next {
+                assert_eq!((body["error"]["code"].as_str(), body["error"]["reason"].as_str(), body["error"]["retryable"].as_bool(),
+                    body["error"]["next_action"].as_str()), (Some("not_posted"), Some(reason), Some(retryable), Some(action)), "{mode}: {body}");
             }
             assert_eq!(body["request_id"], request_id);
             if mode == "transport" {

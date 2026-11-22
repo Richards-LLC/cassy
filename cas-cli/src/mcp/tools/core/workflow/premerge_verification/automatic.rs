@@ -650,7 +650,11 @@ fn review(
     // cas-2b80b: keep what the harness printed, so a refused response can be
     // diagnosed from the dispatch audit instead of rerunning the review.
     std::fs::write(&stdout_log, &result.stdout).map_err(|e| e.to_string())?;
-    if !result.status.success() {
+    // GH #2141: a provider safety refusal is this dispatch's infrastructure
+    // ERROR, never a code verdict; the refused output stays in the logs.
+    let refused = !result.status.success()
+        && (provider_policy_refusal(&result.stderr) || provider_policy_refusal(&result.stdout));
+    if !result.status.success() && !refused {
         return Err(format!(
             "harness exited {}; stderr tail ({}):\n{}",
             result.status,
@@ -658,7 +662,12 @@ fn review(
             tail(&result.stderr),
         ));
     }
-    let bytes = if output.exists() {
+    let bytes = if refused {
+        serde_json::json!({"status": "error", "summary": format!(
+            "{PROVIDER_POLICY_CODE}: the provider's safety filter refused this review before any verdict; refused output kept at {}",
+            stderr_log.display(),
+        )}).to_string().into_bytes()
+    } else if output.exists() {
         std::fs::read(output).map_err(|e| e.to_string())?
     } else {
         result.stdout
@@ -688,10 +697,14 @@ fn review(
         return Err("invalid terminal verifier status".into());
     }
     std::fs::write(output, &bytes).map_err(|e| e.to_string())?;
-    let held = (request.status != "approved").then(|| format!(
-        "Automatic verifier recorded {}: {}. Findings: {}. The close stays held; answer or resolve this exact verdict on dispatch {}.",
-        request.status, request.summary, request.issues.as_deref().unwrap_or("[]"), dispatch.id,
-    ));
+    let held = (request.status != "approved").then(|| if refused {
+        format!("Automatic verifier recorded an infrastructure ERROR, not a code verdict: {}. {}", request.summary, direct_verdict(dispatch))
+    } else {
+        format!(
+            "Automatic verifier recorded {}: {}. Findings: {}. The close stays held; answer or resolve this exact verdict on dispatch {}.",
+            request.status, request.summary, request.issues.as_deref().unwrap_or("[]"), dispatch.id,
+        )
+    });
     let verifier = CasCore::with_daemon(core.cas_root.clone(), None, core.daemon.clone());
     verifier
         .bind_agent_identity(
@@ -714,12 +727,24 @@ fn review(
     // A candidate verdict continues or holds its merge and notifies there.
     // A close dispatch's approval resumes its close; anything else needs
     // the owner, who would otherwise never see this daemon-recorded verdict.
+    // A refusal holds either kind until the supervisor records the verdict.
     if let Some(held) = held
-        && candidate_for_dispatch(&core.cas_root, dispatch)?.is_none()
+        && (refused || candidate_for_dispatch(&core.cas_root, dispatch)?.is_none())
     {
         attention(core, dispatch, &held)?;
     }
     Ok(())
+}
+
+/// The provider's safety filter refused the review prompt itself (GH #2141,
+/// Codex `exec`). It is the provider's wording, not a Cassy code, and only
+/// decides that the run is infrastructure; it never becomes a code verdict.
+const PROVIDER_POLICY_REFUSAL: &str = "flagged for possible cybersecurity risk";
+const PROVIDER_POLICY_CODE: &str = "verifier_provider_policy";
+
+fn provider_policy_refusal(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).lines()
+        .any(|line| line.trim_start().starts_with("ERROR:") && line.contains(PROVIDER_POLICY_REFUSAL))
 }
 
 /// The final eight lines within a 2 KiB window, redacted. The full output
@@ -1422,6 +1447,52 @@ mod tests {
         let recovered = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
         assert!(!owns(&root, &recovered));
         assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
+    }
+
+    /// GH #2141: Codex's safety filter refused a review of a credential-read
+    /// guard; the harness exited 1 and the dispatch was released with no
+    /// review. The refusal is now the dispatch's infrastructure ERROR, its
+    /// output stays on disk, and the supervisor gets the exact-dispatch route.
+    #[test]
+    fn provider_policy_refusal_is_an_infrastructure_error_with_a_supervisor_route_gh_2141() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let daemon = crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
+            cas_root: root.clone(),
+            ..Default::default()
+        });
+        let core = CasCore::with_daemon(root.clone(), None, Some(std::sync::Arc::new(daemon)));
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-2141-guard".into(), "Credential-read guard".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("verdict.json");
+        // The captured provider failure from the incident.
+        let mut refused = Command::new("sh");
+        refused.args(["-c", "echo 'ERROR: This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.' >&2; exit 1"]);
+        launch_with_preparation(&core, &task, &dispatch, output.clone(), move |_| Ok((refused, None)))
+            .unwrap().unwrap().join().unwrap();
+
+        let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+        assert_eq!(verdict.status, VerificationStatus::Error);
+        assert!(verdict.summary.starts_with(PROVIDER_POLICY_CODE), "{}", verdict.summary);
+        let pending = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(pending.state, cas_types::VerificationDispatchState::Pending);
+        assert!(std::fs::read_to_string(output.with_file_name("harness.log")).unwrap().contains(PROVIDER_POLICY_REFUSAL));
+        let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert!(prompts[0].prompt.contains(&format!("dispatch_id={}", dispatch.id)), "{:?}", prompts[0]);
     }
 
     #[test]

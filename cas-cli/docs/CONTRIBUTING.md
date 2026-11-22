@@ -389,6 +389,16 @@ Paths, shell commands and arbitrary filesystem reads are not accepted.
 
 ## Coordination messages and reminders
 
+Worker `target=supervisor` routing and its diagnostics use the same registry
+snapshot and heartbeat liveness policy. A registered but unavailable owner
+does not fall through to another supervisor. Multiple live pane names are
+ambiguous; same-name restart rows retain successor ordering. Session metadata
+cannot select a supervisor stamped to another factory session.
+An unresolved message returns `rule_id=worker_supervisor_unresolved`, a
+`reason` (`owner_unavailable`, `ambiguous_owner`, `no_session_owner` or
+`no_factory_session`) and supervisor rows with status, session, heartbeat and
+`live`. Restore the owner or repair the binding before retrying.
+
 An authenticated worker sends `coordination action=message target=supervisor
 kind=respawn task_id=<task> summary="Context checkpoint" message="<return contract>"`
 after committing/pushing and writing `HANDOFF.md` in its task artifact directory.
@@ -1113,6 +1123,13 @@ For example, `issues.repo = "example/downstream"` alone still files Cassy bugs
 in `Richards-LLC/cassy`, agreeing with `cas config get issues.components.cassy`.
 The checkout's inferred origin is never a Cassy filing target.
 
+Matching an open task also requires component ownership. A matching GitHub
+remote work target qualifies; otherwise the task must belong to the current
+project and that project must be Cassy's source or explicitly use the selected
+component tracker. A different explicit work target is excluded. A product
+task containing the refusal cannot suppress the component report. Matching
+component issues or tasks still receive the new evidence instead of duplicates.
+
 Legacy opt-out: a raw, explicitly blank or whitespace-only
 `[issues.components] cassy` value in config.toml permits a nonblank stored
 `issues.repo` fallback. If the project override is also blank or absent, the
@@ -1594,6 +1611,13 @@ After approving a worker's fresh delivery branch, a live registered supervisor
 can run `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"`.
 Use the caller harness's normal tool prefix. The task must be unparked and keep
 its assignee and declared target; use `request_changes` first for a parked delivery.
+After an approved `proof_scope_fix` retarget, retained branch/anchor history does
+not prevent recovery while Blocked. The worker can prepare a clean
+`factory/<worker>-<task>-r2` branch at the corrected target with its delivery;
+the supervisor rebinds it, then the worker resumes, pushes the fresh branch and
+parks normally. Blocked commit capture before a successful first park is also
+recoverable. Pending review, merge authority and an unretired prior park still
+refuse rebinding; neither history nor active proof may be overwritten.
 The assigned worker must have the existing replacement branch checked out cleanly
 in its registered repository. Canonical worker branches, the worker's per-task
 branch, and that per-task branch with a recovery suffix are supported. Cassy
@@ -2174,6 +2198,17 @@ behavior.
 
 ### Ordered worker task queues
 
+`factory action=spawn_workers task_id=<id> branch=origin/develop` checks the
+requested branch against the task's effective persisted target before queueing.
+For `task_ids`, it checks the first task, which controls the initial spawn base.
+`develop`, `origin/develop`, `refs/heads/develop` and
+`refs/remotes/origin/develop` name the same target. A disagreement returns
+`spawn_target_mismatch` with the task, requested branch and effective target;
+it changes neither the task nor the spawn queue. Persist the intended correction
+with `task action=update id=<id> target_branch=develop`, then retry. A
+`spawn_brief` supplies instructions but cannot retarget a task. Omitting
+`branch` keeps target selection under the task's existing authority.
+
 Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
 Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
 Ordered spawns default to `isolate=true`; explicit `isolate=false` is refused.
@@ -2249,8 +2284,14 @@ blocking pool. Once publication or the checked Closed/AwaitingMerge disposition
 commits, the response adds no post-commit grace: it names that outcome while
 close follow-up, dispatch and notes finish in the background. A committed park
 is still awaiting merge. Gate/audit writes alone do not certify a close, and a
-close still evaluating gates reports `IN_PROGRESS` at its deadline. The final
-continuation outcome is recorded in task notes. Receipts and tracing include
+close still evaluating gates reports `IN_PROGRESS` at its deadline. Retained
+closes return a normal, non-error MCP result with structured `mutation_outcome`,
+`continuation_id`, `task_id`, `elapsed_ms`, `budget_ms` and `timings`. Only a
+checked Closed/AwaitingMerge disposition reports `COMMITTED`; intermediate
+writes remain `IN_PROGRESS`. Read `task action=show id=<task_id>` instead of
+retrying the close. The final `CLOSE_OUTCOME` task note carries the same
+continuation identity, including a late refusal or successful park.
+Receipts and tracing include
 inclusive merge-tree, push, close-gate, dispatch and note timings; `+` means a
 phase is still running and zero means no measured work in that phase yet.
 
@@ -5156,6 +5197,8 @@ starts a byte page of that same text; follow its `next=` cursor until `end`.
 The page header is separate from the body, and concatenated bodies reproduce
 the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
 boundaries. Note summary cursors address the full `task notes` response.
+`task list` does not support offset pagination: a supplied `offset`, including
+zero, returns `INVALID_PARAMS`. Omit it and use filters or a larger `limit`.
 For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
 context. Start's default still performs the same claim and epic lifecycle work.
 Complete start advisories, including worktree directory instructions, are saved
@@ -5171,6 +5214,15 @@ Default show retains Type and Demo for builtin gates, and names full-only sectio
 (including dependencies, design, deliverables and terminal outcomes) explicitly.
 
 ## Durable task artifacts
+
+Park publication stores its complete per-file manifest, skipped uploads and
+excluded trees in `evidence-sync-report.json` under the task artifacts directory.
+Synced task notes contain counts, at most twenty sampled paths and the report
+path, under sixteen KiB per summary. Large manifests use a verified artifact
+reference; reviewers fetch the complete manifest before restoring its files.
+Small and legacy inline `EVIDENCE_SYNC` notes retain their existing semantics.
+Automatic scans prune `node_modules`, `.git`, `vendor` and `.venv` trees and
+ignore generated evidence reports. Explicit close citations remain required.
 
 `factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).
 New task evidence lives in `<base>/<project-key>/<task-id>/`; assignment briefs

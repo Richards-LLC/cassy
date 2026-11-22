@@ -779,9 +779,14 @@ pub(crate) fn reconcile_members(
                     let _registry_version = &approval.registry_version;
                 }
                 if exempt && !task.deliverables.green_merge_commit.as_deref().is_some_and(|merge| {
-                    task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Green
-                        && ancestor(repo, anchor, merge) == Some(true)
+                    ancestor(repo, anchor, merge) == Some(true)
                         && ancestor(repo, merge, &inventory.scope.final_release_sha) == Some(true)
+                        // Advisory records CI at merge time. A docs lane can
+                        // finish later; resolve only this immutable anchor,
+                        // without rewriting history during a cut preview.
+                        && (task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Green
+                            || (task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Advisory
+                                && crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(anchor, repo) == "success"))
                 }) {
                     return Err("LANE_CI_MISSING".into());
                 }

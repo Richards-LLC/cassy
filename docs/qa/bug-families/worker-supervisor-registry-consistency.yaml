@@ -1,0 +1,3 @@
+title: Worker supervisor selection and diagnostics share liveness and reject unavailable ambiguous or foreign session owners
+tasks: [cas-e901]
+journeys: [FACTORY-SUPERVISE]

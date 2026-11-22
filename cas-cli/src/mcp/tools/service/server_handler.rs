@@ -405,6 +405,42 @@ fn first_tool_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
     })
 }
 
+fn committed_task_answer(
+    receipt: &super::mutation_receipt::Receipt,
+    description: &str,
+) -> rmcp::model::CallToolResult {
+    let (followup, kind) = match receipt.action() {
+        "start" => (
+            "Assignment accepted. Start follow-up continues in the background; read task notes for START CONTEXT and close checks when it finishes. Do not retry start.".to_string(),
+            "start_context",
+        ),
+        "close" => (
+            "Remaining close follow-up continues in the background; read task notes for its outcome. Do not retry.".to_string(),
+            "close_outcome",
+        ),
+        action => (
+            format!("Remaining {action} follow-up continues in the background; read task notes for its outcome. Do not retry."),
+            "task_notes",
+        ),
+    };
+    let recovery = receipt.task_id().map(|id| serde_json::json!({
+        "kind": kind, "tool": "task",
+        "arguments": {"action": "notes", "id": id, "offset": 0, "limit": 1600},
+    }));
+    let hint = receipt.task_id().map(|id| format!(
+        "\nRead: task action=notes id={id} offset=0 limit=1600"
+    )).unwrap_or_default();
+    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
+        "COMMITTED: {description}. {followup}{hint}\nTiming (inclusive, + running): {}",
+        receipt.timings(),
+    ))]);
+    answer.structured_content = Some(serde_json::json!({
+        "mutation_outcome": "COMMITTED", "action": receipt.action(),
+        "task_id": receipt.task_id(), "recovery": recovery,
+    }));
+    answer
+}
+
 fn refusal_text(joined: &Result<ToolResult, tokio::task::JoinError>) -> Option<&str> {
     match joined {
         Ok(Ok(result)) if result.is_error == Some(true) => first_tool_text(result),
@@ -684,7 +720,7 @@ impl CasService {
                     return Ok(answer);
                 }
                 if tool_name == "task" && receipt.action() == "close" {
-                    self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
+                    return self.close_continuation_answer(handle, receipt, start, budget);
                 } else if !matches!(
                     (tool_name, receipt.action()),
                     ("factory", "worktree_merge")
@@ -711,16 +747,25 @@ impl CasService {
                         action = receipt.action(),
                     ) + &format!("\nTiming (inclusive, + running): {}", receipt.timings()))]));
                 }
-                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
-                    "COMMITTED: {description}. Remaining close follow-up continues in the background; \
-                     read task notes for its outcome. Do not retry.\nTiming (inclusive, + running): {}",
-                    receipt.timings(),
-                ))]))
+                Ok(committed_task_answer(&receipt, &description))
             }
             Won::Deadline => {
                 if let Some(durable) = merge_receipt {
                     let answer = durable.answer(&receipt);
                     durable.watch(self.clone(), handle, receipt);
+                    return Ok(answer);
+                }
+                // A terminal start is already accepted, even if the total
+                // response budget wins before its post-commit grace expires.
+                if tool_name == "task" && action == "start" && receipt.terminal.get().is_some() {
+                    let description = receipt.outcome.get().cloned()
+                        .or_else(|| receipt.commit.get().map(|commit| commit.description.clone()))
+                        .unwrap_or_else(|| "start committed".into());
+                    let answer = committed_task_answer(&receipt, &description);
+                    tokio::spawn(async move {
+                        let _ = handle.await;
+                        log_post_commit("task", &receipt, "finished in the background");
+                    });
                     return Ok(answer);
                 }
                 let elapsed = start.elapsed();
@@ -739,11 +784,11 @@ impl CasService {
                 let task_close = tool_name == "task"
                     && receipt.action() == "close"
                     && receipt.task_id().is_some();
-                let close_unfinished = task_close && receipt.terminal.get().is_none();
+                if task_close {
+                    return self.close_continuation_answer(handle, receipt, start, budget);
+                }
                 if let Some(id) = &continuation_id {
                     self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
-                } else if task_close {
-                    self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
                 } else if commit.is_some()
                     && matches!(
                         (tool_name, receipt.action()),
@@ -758,17 +803,30 @@ impl CasService {
                     // is not followed by a late write the caller never sees.
                     handle.abort();
                 }
-                let outcome = if let Some(id) = &continuation_id {
+                // Full task history can outlive the response budget. Give read-only
+                // callers an executable bounded request rather than a blind retry.
+                // A notes append is a mutation, even with read options attached.
+                let read_recovery = if commit.is_none() && tool_name == "task"
+                    && (matches!(action, "show" | "get") || (action == "notes"
+                        && arguments.is_some_and(|args| args.get("notes").is_none_or(serde_json::Value::is_null))))
+                {
+                    arguments.and_then(|args| {
+                        let id = args.get("id")?.as_str()?;
+                        let offset = args.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                        let limit = args.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(1600).clamp(4, 1600);
+                        Some(serde_json::json!({
+                            "tool": "task", "arguments": {
+                                "action": action, "id": id, "full": false,
+                                "offset": offset, "limit": limit,
+                            },
+                        }))
+                    })
+                } else { None };
+                let outcome = if read_recovery.is_some() {
+                    "not applicable (the timed-out call was read-only)".to_string()
+                } else if let Some(id) = &continuation_id {
                     format!("{} (registration keeps running; its final outcome will appear in your inbox with continuation_id={id}; do not retry)",
                         if commit.is_some() { "COMMITTED" } else { "IN_PROGRESS" })
-                } else if close_unfinished && commit.is_some() {
-                    format!(
-                        "IN_PROGRESS (the close has not committed: only intermediate writes have, so the task's status is unchanged so far; the close keeps running in the background and records its final outcome as a {LATE_CLOSE_NOTE_MARKER} task note — re-query with task action=show before retrying)"
-                    )
-                } else if close_unfinished {
-                    format!(
-                        "IN_PROGRESS (nothing has committed yet, so the task's status is unchanged so far; the close keeps running in the background and records its final outcome as a {LATE_CLOSE_NOTE_MARKER} task note — re-query with task action=show before retrying)"
-                    )
                 } else {
                     self.mutation_timeout_outcome(tool_name, arguments, commit)
                 };
@@ -780,12 +838,19 @@ impl CasService {
                 } else {
                     String::new()
                 };
+                let pagination_hint = read_recovery.as_ref().map(|recovery| {
+                    let args = &recovery["arguments"];
+                    format!(" Use pagination: task action={action} id={} full=false offset={} limit={}; follow next= from each page.",
+                        args["id"].as_str().unwrap_or_default(), args["offset"], args["limit"])
+                }).unwrap_or_default();
                 warn!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, budget_ms = budget.as_millis() as u64, mutation_outcome = %outcome, "MCP response deadline elapsed");
                 Err(rmcp::ErrorData {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
+                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}{pagination_hint}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if (registration && commit.is_none()) || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if registration && commit.is_none() { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if read_recovery.is_some() { "NOT_APPLICABLE" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "code": read_recovery.as_ref().map(|_| "task_read_paginate"),
+                        "recovery": read_recovery,
                         "continuation_id": continuation_id,
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
@@ -1095,13 +1160,44 @@ impl CasService {
         })
     }
 
+    /// A retained close is ordinary progress, even when its phases exceed the
+    /// response budget. The journal exists before its identity is returned.
+    fn close_continuation_answer(
+        &self,
+        handle: tokio::task::JoinHandle<ToolResult>,
+        receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
+        start: std::time::Instant,
+        budget: std::time::Duration,
+    ) -> ToolResult {
+        let outcome = if receipt.terminal.get().is_some() { "COMMITTED" } else { "IN_PROGRESS" };
+        let description = receipt.outcome.get().map(|value| format!("{value}. ")).unwrap_or_default();
+        let (continuation_id, _) = self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
+        let task_id = receipt.task_id().expect("close continuation task id");
+        let timings = receipt.timings();
+        let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
+            "{outcome}: {description}Close work continues in the background. Continuation: {continuation_id}. \
+             Read `task action=show id={task_id}` for its {LATE_CLOSE_NOTE_MARKER} outcome. Do not retry.\n\
+             Timing (inclusive, + running): {timings}",
+        ))]);
+        answer.structured_content = Some(serde_json::json!({
+            "mutation_outcome": outcome, "continuation_id": continuation_id, "task_id": task_id,
+            "action": receipt.action(), "recovery": {
+                "kind": "close_outcome", "tool": "task",
+                "arguments": {"action": "notes", "id": task_id, "offset": 0, "limit": 1600},
+            },
+            "elapsed_ms": start.elapsed().as_millis() as u64, "budget_ms": budget.as_millis() as u64,
+            "timings": timings,
+        }));
+        Ok(answer)
+    }
+
     fn record_late_close_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
         receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
         start: std::time::Instant,
         budget: std::time::Duration,
-    ) -> Result<tokio::task::JoinHandle<()>, rmcp::ErrorData> {
+    ) -> Result<(String, tokio::task::JoinHandle<()>), rmcp::ErrorData> {
         let task_id = receipt.task_id().ok_or_else(|| Self::error(
             rmcp::model::ErrorCode::INTERNAL_ERROR, "Close continuation has no task id",
         ))?.to_string();
@@ -1110,9 +1206,10 @@ impl CasService {
         let continuation = super::close_continuation::LateClose::begin(self, &task_id)
             .map_err(|error| Self::error(rmcp::model::ErrorCode::INTERNAL_ERROR,
                 format!("Close may still be running, but its continuation journal could not be saved: {error}. Re-query task state before retrying.")))?;
+        let id = continuation.id().to_owned();
         let disposition = if receipt.terminal.get().is_some() { "COMMITTED" } else { "IN_PROGRESS" };
         let service = self.clone();
-        Ok(tokio::spawn(async move {
+        Ok((id, tokio::spawn(async move {
             let joined = handle.await;
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
@@ -1163,7 +1260,7 @@ impl CasService {
                     warn!(error = %error, "MCP late close outcome recorder ended abnormally")
                 }
             }
-        }))
+        })))
     }
 
     fn mutation_timeout_outcome(
@@ -1712,17 +1809,29 @@ mod tests {
                 sender.task(Parameters(request)).await.unwrap();
                 std::future::pending().await
             };
-            let error = service
+            let result = service
                 .call_with_deadline(
                     "task",
                     arguments.as_object(),
                     std::time::Duration::from_millis(100),
                     call,
                 )
-                .await
-                .unwrap_err();
+                .await;
 
-            assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
+            let data = if arguments["action"] == "start" {
+                // A terminal start now acknowledges assignment acceptance.
+                // Create/note deadline errors still report their own commits.
+                let answer = result.unwrap();
+                assert_eq!(answer.is_error, Some(false));
+                let data = answer.structured_content.unwrap();
+                assert_eq!(data["action"], "start");
+                assert_eq!(data["task_id"], "cas-note");
+                assert_eq!(data["recovery"]["kind"], "start_context");
+                data
+            } else {
+                result.unwrap_err().data.unwrap()
+            };
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
         }
         assert_eq!(tasks.list(None).unwrap().len(), 2);
         assert_eq!(tasks.get("cas-note").unwrap().status, crate::types::TaskStatus::InProgress);
@@ -1911,37 +2020,84 @@ mod tests {
         }
     }
 
-    /// cas-24d8: a close that committed only an intermediate write (a gate
-    /// note, a parked anchor) before the deadline has not closed anything.
-    /// It must not be reported as COMMITTED.
+    /// Whole-close response budget spans preflight, evidence sync and follow-up.
+    /// A retained execution has a durable identity, not a transport failure.
     #[tokio::test]
     async fn close_deadline_after_an_intermediate_write_reports_in_progress_cas_24d8() {
         use crate::mcp::server::CasCore;
-        use crate::mcp::tools::service::CasService;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let service = CasService::new(
-            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            CasCore::with_daemon(temp.path().join(".cas"), None, None),
             #[cfg(feature = "mcp-proxy")]
             None,
         );
-        let arguments = serde_json::json!({"action":"close", "id":"cas-park"});
-        let close = async {
-            super::super::mutation_receipt::task_committed("cas-park");
-            std::future::pending().await
-        };
-        let error = service
-            .call_with_deadline(
-                "task",
-                arguments.as_object(),
-                std::time::Duration::from_millis(20),
-                close,
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
-
+        std::fs::create_dir_all(&service.inner.cas_root).unwrap();
         let tasks = service.inner.open_task_store().unwrap();
+        for (id, intermediate, committed) in [
+            ("cas-preflight", false, false),
+            ("cas-evidence", true, false),
+            ("cas-followup", true, true),
+        ] {
+            tasks.add(&crate::types::Task::new(id.into(), "slow close".into())).unwrap();
+            let arguments = serde_json::json!({"action":"close", "id":id});
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let started = calls.clone();
+            let store = tasks.clone();
+            let (release, held) = tokio::sync::oneshot::channel();
+            let outcome = serde_json::json!({"task_id":id, "status":"awaiting_merge"}).to_string();
+            let supplied_outcome = outcome.clone();
+            let refusal = serde_json::json!({"code":"MERGE_REQUIRED", "task_id":id}).to_string();
+            let supplied_refusal = refusal.clone();
+            let answer = service.call_with_deadline(
+                "task", arguments.as_object(), std::time::Duration::from_millis(20), async move {
+                    started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _phase = mutation_receipt::phase(if intermediate { "close_gates" } else { "preflight" });
+                    if intermediate { mutation_receipt::task_committed(id); }
+                    if committed {
+                        let mut task = store.get(id).unwrap();
+                        task.status = crate::types::TaskStatus::AwaitingMerge;
+                        store.update(&task).unwrap();
+                        mutation_receipt::task_disposition_committed(id, &supplied_outcome);
+                    }
+                    held.await.unwrap();
+                    if !committed {
+                        let mut task = store.get(id).unwrap();
+                        task.status = crate::types::TaskStatus::AwaitingMerge;
+                        store.update(&task).unwrap();
+                        mutation_receipt::task_disposition_committed(id, &supplied_outcome);
+                    }
+                    // Older parks returned this error even after committing.
+                    Ok(CasCore::tool_error(supplied_refusal))
+                },
+            ).await.expect("retained close must return a normal tool result");
+            assert_eq!(answer.is_error, Some(false));
+            let data = answer.structured_content.unwrap();
+            assert_eq!(data["mutation_outcome"], if committed { "COMMITTED" } else { "IN_PROGRESS" });
+            assert_eq!(data["task_id"], id);
+            let continuation = data["continuation_id"].as_str().unwrap();
+            uuid::Uuid::parse_str(continuation).unwrap();
+            let journal = service.inner.cas_root.join("close-continuations").join(format!("{continuation}.json"));
+            let pending: serde_json::Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(pending["id"], continuation);
+            assert_eq!(pending["task_id"], id);
+            assert!(pending["note"].is_null());
+            assert_eq!(tasks.get(id).unwrap().status, if committed {
+                crate::types::TaskStatus::AwaitingMerge
+            } else { crate::types::TaskStatus::Open });
+            release.send(()).unwrap();
+            service.tool_work.wait_idle().await;
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, crate::types::TaskStatus::AwaitingMerge);
+            assert_eq!(task.notes.matches(&format!("CLOSE_OUTCOME: continuation={continuation}")).count(), 1);
+            // Exact caller payloads identify the original committed disposition.
+            assert!(task.notes.contains(&outcome), "{}", task.notes);
+            assert!(!task.notes.contains(&refusal), "{}", task.notes);
+            assert!(!journal.exists());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
         for (id, status, disposition) in [
             ("cas-closed", crate::types::TaskStatus::Closed, "closed"),
             ("cas-parked", crate::types::TaskStatus::AwaitingMerge, "parked awaiting_merge"),
@@ -1968,9 +2124,11 @@ mod tests {
             ).await.expect("a durable disposition answers before held follow-up");
             let elapsed = started.elapsed();
             tokio::time::resume();
-            let text = format!("{answer:?}");
             assert_eq!(answer.is_error, Some(false));
-            assert!(text.contains(disposition), "{text}");
+            let data = answer.structured_content.unwrap();
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
+            assert_eq!(data["task_id"], id);
+            uuid::Uuid::parse_str(data["continuation_id"].as_str().unwrap()).unwrap();
 
             assert!(elapsed < std::time::Duration::from_secs(1), "committed close waited {elapsed:?}");
             assert_eq!(tasks.get(id).unwrap().status, status);
@@ -2047,9 +2205,10 @@ mod tests {
             let service = CasService::new(CasCore::with_daemon(root.into(), None, None),
                 #[cfg(feature = "mcp-proxy")] None);
             let args = serde_json::json!({"action":"close", "id":"cas-crash"});
-            let error = service.call_with_deadline("task", args.as_object(),
-                std::time::Duration::from_millis(20), std::future::pending()).await.unwrap_err();
-            assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+            let answer = service.call_with_deadline("task", args.as_object(),
+                std::time::Duration::from_millis(20), std::future::pending()).await.unwrap();
+            assert_eq!(answer.is_error, Some(false));
+            assert_eq!(answer.structured_content.unwrap()["mutation_outcome"], "IN_PROGRESS");
             std::process::exit(0);
         }
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -2065,7 +2224,7 @@ mod tests {
         let receipt = super::super::mutation_receipt::Receipt::new("task", "close", Some("cas-lost"));
         let handler = tokio::spawn(std::future::pending());
         let abort_handler = handler.abort_handle();
-        let watcher = service.record_late_close_outcome(
+        let (_, watcher) = service.record_late_close_outcome(
             handler, receipt, std::time::Instant::now(), std::time::Duration::from_secs(55),
         ).unwrap();
         super::super::close_continuation::recover(&root);
@@ -2086,7 +2245,7 @@ mod tests {
         let receipt = super::super::mutation_receipt::Receipt::new("task", "close", Some("cas-panic"));
         let handler = tokio::spawn(async { panic!("injected handler loss") });
         service.record_late_close_outcome(handler, receipt, std::time::Instant::now(),
-            std::time::Duration::from_secs(55)).unwrap().await.unwrap();
+            std::time::Duration::from_secs(55)).unwrap().1.await.unwrap();
         assert_eq!(tasks.get("cas-panic").unwrap().notes.matches("CLOSE_OUTCOME:").count(), 1);
 
         tasks.add(&crate::types::Task::new("cas-crash".into(), "backend exit".into())).unwrap();
@@ -2118,7 +2277,7 @@ mod tests {
         let store = tasks.clone();
         let (release, held) = tokio::sync::oneshot::channel();
         tokio::time::pause();
-        let error = service.call_with_deadline_and_grace("task", args.as_object(),
+        let answer = service.call_with_deadline_and_grace("task", args.as_object(),
             std::time::Duration::from_millis(10), std::time::Duration::ZERO, async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 let mut task = store.get("cas-committed-deadline").unwrap();
@@ -2127,9 +2286,10 @@ mod tests {
                 super::super::mutation_receipt::task_disposition_committed(&task.id, "closed");
                 held.await.unwrap();
                 Ok(rmcp::model::CallToolResult::success(vec![]))
-            }).await.unwrap_err();
+            }).await.unwrap();
         tokio::time::resume();
-        assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
+        assert_eq!(answer.is_error, Some(false));
+        assert_eq!(answer.structured_content.unwrap()["mutation_outcome"], "COMMITTED");
         release.send(()).unwrap();
         service.tool_work.wait_idle().await;
         let committed = tasks.get("cas-committed-deadline").unwrap();
@@ -2181,7 +2341,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             Ok(CasCore::tool_error(park_reply(refusals)))
         };
-        let error = service
+        let answer = service
             .call_with_deadline(
                 "task",
                 arguments.as_object(),
@@ -2189,9 +2349,10 @@ mod tests {
                 close,
             )
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+        assert_eq!(answer.is_error, Some(false));
+        assert_eq!(answer.structured_content.unwrap()["mutation_outcome"], "IN_PROGRESS");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let notes = loop {
@@ -2255,7 +2416,7 @@ mod tests {
             service.record_late_close_outcome(
                 handle, receipt, std::time::Instant::now() - std::time::Duration::from_millis(142_500),
                 std::time::Duration::from_secs(55),
-            ).unwrap().await.unwrap();
+            ).unwrap().1.await.unwrap();
             let task = tasks.get(id).unwrap();
             assert_eq!(task.status, crate::types::TaskStatus::AwaitingMerge);
             // These are exact caller payloads, not assertions on human wording.
@@ -2765,6 +2926,119 @@ mod tests {
                 .unwrap()
                 .contains("mail already injected by transport")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cas_108b_committed_task_actions_preserve_identity_and_recovery() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        for (action, id, status, kind, deadline) in [
+            ("start", "cas-start", cas_types::TaskStatus::InProgress, "start_context", false),
+            ("notes", "cas-notes", cas_types::TaskStatus::Open, "task_notes", false),
+            ("close", "cas-close", cas_types::TaskStatus::Closed, "close_outcome", false),
+            ("start", "cas-start-deadline", cas_types::TaskStatus::InProgress, "start_context", true),
+        ] {
+            tasks.add(&cas_types::Task::new(id.into(), "slow task operation".into())).unwrap();
+            let args = serde_json::json!({"action":action, "id":id});
+            let store = tasks.clone();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            let (finished, continued) = tokio::sync::oneshot::channel();
+            let answer = service.call_with_deadline_and_grace(
+                "task", args.as_object(), std::time::Duration::from_secs(55),
+                if deadline { std::time::Duration::from_secs(60) } else { std::time::Duration::ZERO }, async move {
+                    let mut task = store.get(id).unwrap();
+                    task.status = status;
+                    store.update(&task).unwrap();
+                    mutation_receipt::task_terminal_committed(id);
+                    held.await.unwrap();
+                    store.append_note(id, "caller-provided follow-up payload").unwrap();
+                    finished.send(()).unwrap();
+                    Ok(rmcp::model::CallToolResult::success(vec![]))
+                },
+            ).await.unwrap();
+            let data = answer.structured_content.as_ref().expect("machine recovery receipt");
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
+            assert_eq!(data["action"], action);
+            assert_eq!(data["task_id"], id);
+            assert_eq!(data["recovery"]["kind"], kind);
+            assert_eq!(data["recovery"]["tool"], "task");
+            assert_eq!(data["recovery"]["arguments"], serde_json::json!({
+                "action":"notes", "id":id, "offset":0, "limit":1600,
+            }));
+            assert_eq!(tasks.get(id).unwrap().status, status);
+            assert!(tasks.get(id).unwrap().notes.is_empty());
+            resume.send(()).unwrap();
+            continued.await.unwrap();
+            // Recovery uses the real task dispatcher and reads the one durable payload.
+            use rmcp::handler::server::wrapper::Parameters;
+            let read = service.task(Parameters(serde_json::from_value(
+                data["recovery"]["arguments"].clone(),
+            ).unwrap())).await.unwrap();
+            assert_eq!(read.is_error, Some(false));
+            assert_eq!(tasks.get(id).unwrap().notes.matches("caller-provided follow-up payload").count(), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cas_108b_slow_task_reads_return_executable_pagination() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let mut task = cas_types::Task::new("cas-slow-read".into(), "large task".into());
+        task.notes = "caller supplied history\n".repeat(1000);
+        tasks.add(&task).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        for (index, (action, offset, limit)) in [("show", 0, 1600), ("get", 0, 1600), ("notes", 0, 1600), ("notes", 32, 2000)].into_iter().enumerate() {
+            let args = serde_json::json!({"action":action, "id":task.id, "full":true, "offset":offset, "limit":limit});
+            let sender = service.clone();
+            let request = serde_json::from_value(args.clone()).unwrap();
+            let error = service.call_with_deadline(
+                "task", args.as_object(), std::time::Duration::from_secs(55 * (index as u64 + 1)), async move {
+                    let read = sender.task(Parameters(request)).await.unwrap();
+                    assert_eq!(read.is_error, Some(false));
+                    std::future::pending().await
+                },
+            ).await.unwrap_err();
+            let data = error.data.unwrap();
+            assert_eq!(data["mutation_outcome"], "NOT_APPLICABLE");
+            assert_eq!(data["code"], "task_read_paginate");
+            assert_eq!(data["recovery"]["tool"], "task");
+            assert_eq!(data["recovery"]["arguments"], serde_json::json!({
+                "action":action, "id":task.id, "full":false, "offset":offset, "limit":1600,
+            }));
+            let read = service.task(Parameters(serde_json::from_value(
+                data["recovery"]["arguments"].clone(),
+            ).unwrap())).await.unwrap();
+            assert_eq!(read.is_error, Some(false));
+            assert!(super::first_tool_text(&read).unwrap().len() < 1800);
+            assert_eq!(tasks.get(&task.id).unwrap().notes, task.notes);
+        }
+        // A notes write with full=true is not a read-only retry candidate.
+        let args = serde_json::json!({"action":"notes", "id":task.id, "notes":"caller payload", "full":true});
+        let sender = service.clone();
+        let request = serde_json::from_value(args.clone()).unwrap();
+        let error = service.call_with_deadline(
+            "task", args.as_object(), std::time::Duration::from_secs(300), async move {
+                sender.task(Parameters(request)).await.unwrap();
+                std::future::pending().await
+            },
+        ).await.unwrap_err();
+        let data = error.data.unwrap();
+        assert_eq!(data["mutation_outcome"], "COMMITTED");
+        assert!(data["recovery"].is_null());
+        assert!(data["code"].is_null());
+        assert_eq!(tasks.get(&task.id).unwrap().notes.matches("caller payload").count(), 1);
     }
 
     #[tokio::test(start_paused = true)]

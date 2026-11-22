@@ -1624,10 +1624,7 @@ fn describe_target_reconcile(
                  the push may be rejected as non-fast-forward."
             )
         }
-        // cas-26c7: origin has not moved, so there is nothing to reconcile and
-        // nothing to refuse. Say what is unpublished and where it goes, and do
-        // NOT hand over the divergence recipe — `git merge origin/<target>` is
-        // a no-op in this state, and force-pushing would be actively wrong.
+        // A containment-only receipt preserves an unpublished local target.
         TargetReconcile::AheadOfRemote {
             local,
             remote,
@@ -1635,15 +1632,48 @@ fn describe_target_reconcile(
         } => format!(
             "\nTarget sync: local {target_branch} is {ahead} commit(s) ahead of origin/\
              {target_branch} ({} vs {}) and origin holds nothing it lacks, so this is not a \
-             divergence. Merged against local {target_branch}; the {ahead} earlier commit(s) plus \
-             this merge still have to reach origin the normal way for this branch (a push, or a \
-             pull request where the branch is protected).",
+             divergence. These existing target commits remain local and require a separate \
+             explicit publication decision.",
             short_sha(local),
             short_sha(remote)
         ),
         // Refused before the merge, so it never reaches a receipt.
         TargetReconcile::Diverged { .. } => String::new(),
     }
+}
+
+/// A delivery merge never grants publication authority over existing target
+/// work. Preserve both refs and name the exact unpublished commit range.
+fn target_ahead_error(repo: &std::path::Path, target: &str, local: &str, remote: &str) -> String {
+    let range = format!("{remote}..{local}");
+    let commits = crate::git_evidence::git_text(repo, &["log", "--format=%H %s", &range, "--"])
+        .unwrap_or_else(|| format!("{range} (commit listing unavailable)"));
+    format!(
+        "TARGET_AHEAD_OF_ORIGIN: local {target} at {local} contains unrelated unpublished commits beyond origin/{target} at {remote}. No target push was attempted.\n\nLocal-only commits:\n{commits}\n\nReview and publish this existing target work separately with explicit authorization, or preserve it on another branch before restoring the target to origin. Then retry worktree_merge. Both target refs and the delivery source are retained."
+    )
+}
+
+/// The delivery's own commits (and its one integration merge) are authorized;
+/// other unpublished target history needs a separate publication decision.
+fn unrelated_target_history(
+    repo: &std::path::Path,
+    git: &crate::worktree::GitOperations,
+    target: &str,
+    local: &str,
+    source: &str,
+) -> Option<String> {
+    let remote = git.resolve_commit(&format!("origin/{target}"))?;
+    if local == remote || !git.is_ancestor(&remote, local) { return None; }
+    let delivery_only = (|| {
+        let source = git.resolve_commit(source)?;
+        let other = crate::git_evidence::git_text(repo,
+            &["rev-list", "--max-count=2", local, "--not", &remote, &source, "--"])?;
+        if other.is_empty() { return Some(true); }
+        if other != local { return Some(false); }
+        let parents = crate::git_evidence::git_text(repo, &["show", "-s", "--format=%P", local, "--"])?;
+        Some(parents == format!("{remote} {source}"))
+    })().unwrap_or(false);
+    (!delivery_only).then(|| target_ahead_error(repo, target, local, &remote))
 }
 
 /// Render the typed, resumable PR handoff for a GH013-protected default branch.
@@ -5267,6 +5297,16 @@ impl CasCore {
             }
         }
 
+        if target_fetched
+            && premerge_approval.is_none()
+            && let Some(local) = manager.git().resolve_commit(&worktree.parent_branch)
+            && let Some(message) = unrelated_target_history(
+                &cwd, manager.git(), &worktree.parent_branch, &local, &worktree.branch,
+            )
+        {
+            return Ok(Self::tool_error(crate::gates::tag("G-110", message)));
+        }
+
         // Validate the retry's immutable identity before authorizing a new
         // transaction. A moved delivery must not acquire MergeAuthorized.
         let parked_source_tip = transactional_delivery.as_ref()
@@ -5761,6 +5801,15 @@ impl CasCore {
                     *behind,
                 ))));
             }
+            if premerge_approval.is_none()
+                && let crate::worktree::git::TargetReconcile::AheadOfRemote { local, .. } = &reconcile
+                && let Some(message) = unrelated_target_history(
+                    &cwd, manager.git(), &worktree.parent_branch, local,
+                    parked_source_tip.as_deref().unwrap_or(&worktree.branch),
+                )
+            {
+                return Ok(Self::tool_error(crate::gates::tag("G-110", message)));
+            }
             reconcile_note = describe_target_reconcile(&worktree.parent_branch, &reconcile);
 
             // Origin may have delivered this source while the local target
@@ -5928,6 +5977,7 @@ impl CasCore {
             unpublished_merge_base = attempted_target_tip.clone();
             let merge_result = if publish_before_ref {
                 let branch = worktree.parent_branch.clone();
+                let publication_source = parked_source_tip.as_deref().unwrap_or(&worktree.branch).to_string();
                 let mut publish = |head: &str, base: &str| {
                     if let Some((receipt, _)) = transactional_delivery.as_ref() {
                         if base != receipt.target_sha {
@@ -5948,6 +5998,13 @@ impl CasCore {
                     }
                     if let Some(approval) = premerge_approval.as_ref() {
                         approval.verify_landing(head).map_err(crate::worktree::GitError::CommandFailed)?;
+                    }
+                    // Run detached landing validation first: it must preserve
+                    // concurrent writers even when the local target is ahead.
+                    if let Some(message) = unrelated_target_history(
+                        &cwd, manager.git(), &branch, base, &publication_source,
+                    ) {
+                        return Err(crate::worktree::GitError::CommandFailed(crate::gates::tag("G-110", message)));
                     }
                     let outcome = manager.git().publish_merge_candidate(
                         &branch, head, premerge_approval.is_none() && transactional_delivery.is_none(),
@@ -6248,6 +6305,13 @@ impl CasCore {
             // commit, do not retry the rejected direct push of the different
             // local merge commit; the remote ancestry is the authoritative PR
             // landing proof and the delivery can reconcile normally.
+            // Receipt identity and typed failure state above precede network
+            // access. A reconciled delivery still needs fresh publication evidence.
+            if reconciled_delivery && reconciled_publication.is_none() && early_target_push.is_none() {
+                manager.git().fetch_merge_target(&receipt.target_branch)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-110",
+                        format!("Cannot refresh publication target {}: {error}. No target push was attempted.", receipt.target_branch))))?;
+            }
             let default_branch = manager.git().detect_default_branch();
             let remote_target = format!("origin/{}", receipt.target_branch);
             let pr_landed_sha = (receipt.target_branch == default_branch)
@@ -6272,6 +6336,13 @@ impl CasCore {
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
                         manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), Some(&target_tip), error,
                     )))?;
+            }
+            if reconciled_publication.is_none() && early_target_push.is_none() && pr_landed_sha.is_none()
+                && let Some(message) = unrelated_target_history(
+                    &cwd, manager.git(), &receipt.target_branch, &target_tip, &receipt.commit_sha,
+                )
+            {
+                return Ok(Self::tool_error(crate::gates::tag("G-110", message)));
             }
             let push_outcome = if let Some((_, outcome)) = early_target_push.take() {
                 outcome
@@ -6447,6 +6518,14 @@ impl CasCore {
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
                         manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), merge_commit.as_deref(), error,
                     )))?;
+                if let Some(message) = unrelated_target_history(
+                    &cwd, manager.git(), &worktree.parent_branch, &landed, &approval.candidate.source_sha,
+                ) {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
+                        manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(),
+                        merge_commit.as_deref(), crate::gates::tag("G-110", message),
+                    )));
+                }
             }
             Some(landed)
         } else { None };
@@ -8211,43 +8290,6 @@ mod tests {
         assert!(note.contains("c2698df216cd"), "{note}");
     }
 
-    /// cas-26c7. What the operator actually reads for an ahead-only target.
-    /// The measured failure was not the classification alone — it was that the
-    /// message handed over a recovery that cannot work when `behind` is zero,
-    /// so following it produced the identical refusal on retry.
-    #[test]
-    fn an_ahead_only_target_message_states_the_unpublished_work_without_a_no_op_remedy() {
-        let note = describe_target_reconcile(
-            "main",
-            &TargetReconcile::AheadOfRemote {
-                local: "42d81bd9aaaabbbbccccddddeeeeffff00001111".to_string(),
-                remote: "c2698df216cd9abe7db530ec1d035f6a378d1d06".to_string(),
-                ahead: 2,
-            },
-        );
-
-        // Says what is true: how much is unpublished, and which two tips.
-        assert!(note.contains("2 commit(s) ahead"), "{note}");
-        assert!(note.contains("42d81bd9aaaa"), "{note}");
-        assert!(note.contains("c2698df216cd"), "{note}");
-        assert!(note.contains("not a divergence"), "{note}");
-
-        // Must not hand over the divergence recovery: `git merge origin/main`
-        // is a no-op here, and following it is what created the loop.
-        assert!(!note.contains("git merge origin/"), "{note}");
-        assert!(!note.contains("TARGET_DIVERGED_FROM_ORIGIN"), "{note}");
-        assert!(
-            !note.to_lowercase().contains("force-push")
-                && !note.to_lowercase().contains("force push"),
-            "an unpublished target must never invite a force-push: {note}"
-        );
-        // And it must not imply the work already reached origin.
-        assert!(
-            !note.contains("pushed to origin"),
-            "the commits are still unpublished: {note}"
-        );
-    }
-
     /// The other half of the same contract: a real divergence must still be
     /// refused before any merge, and must keep the recovery that does work
     /// there, so narrowing the classification did not weaken the guard.
@@ -9581,8 +9623,11 @@ mod cas_6b42_peer_delivery_tests {
     /// delivery that soundwave's store still showed in progress. That merge
     /// names the peer instead of "branch missing"; once the park syncs, the
     /// pushed branch resolves at the recorded tip without a local worktree.
-    #[test]
-    fn a_peer_machine_delivery_merges_from_origin_at_its_recorded_tip_cas_6b42() {
+    #[tokio::test]
+    async fn a_peer_machine_delivery_merges_from_origin_at_its_recorded_tip_cas_6b42() {
+        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+        for team in [false, true] {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let (origin, repo) = (dir.path().join("origin.git"), dir.path().join("work"));
@@ -9608,6 +9653,7 @@ mod cas_6b42_peer_delivery_tests {
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         env.set("CAS_ROOT", &cas_dir);
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='cas-src'\n").unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
         agents.register(&cas_types::Agent::new_with_role(
             "sup-soundwave".into(), "calm-koala-86".into(), cas_types::AgentRole::Supervisor,
@@ -9625,6 +9671,7 @@ mod cas_6b42_peer_delivery_tests {
             target_branch: "main".into(),
         };
         let mut task = cas_types::Task::new("cas-aa10".into(), "Startup brief submits".into());
+        task.origin_project = Some("cas-src".into());
         task.status = cas_types::TaskStatus::InProgress;
         task.assignee = Some("lively-eagle-82".into());
         task.deliverables.work_target = Some(work_target.clone());
@@ -9635,10 +9682,91 @@ mod cas_6b42_peer_delivery_tests {
             .err().expect("a locally in-progress peer delivery is never merged here");
         assert!(refused.message.contains("prowl-machine-cas-6b42") && refused.message.contains("lively-eagle-82"), "{refused:?}");
 
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.deliverables.parked_branch = Some(branch.into());
-        task.deliverables.factory_branch_anchor = Some(anchor.clone());
-        crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+        // GH #2214: the train owner's later note must not hide the builder's
+        // completed park. Exercise actual stores and HTTP pull rather than
+        // fabricating AwaitingMerge in the merge owner's store.
+        let builder = tempfile::tempdir().unwrap();
+        let builder_root = crate::store::init_cas_dir(builder.path()).unwrap();
+        let builder_tasks = crate::store::open_task_store_local(&builder_root).unwrap();
+        let mut parked = task.clone();
+        let parked_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        parked.status = cas_types::TaskStatus::AwaitingMerge;
+        parked.deliverables.record_park(Some(branch), Some(&anchor), parked.assignee.as_deref());
+        parked.notes = crate::mcp::tools::core::task::audit::parked_note(parked_at, "MERGE REQUIRED");
+        parked.updated_at = parked_at;
+        builder_tasks.add(&parked).unwrap();
+        let parked = builder_tasks.get(&parked.id).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        task.title = "Newer owner bookkeeping".into();
+        tasks.add(&task).unwrap();
+        let owner_note = "[2026-11-21 22:00] Train owner bookkeeping after peer park";
+        tasks.append_note(&task.id, owner_note).unwrap();
+        let baseline = tasks.get(&task.id).unwrap();
+        assert!(baseline.updated_at > parked.updated_at);
+        let server = MockServer::start().await;
+        let endpoint = if team { "/api/teams/park-team/sync/pull" } else { "/api/sync/pull" };
+        let queue = std::sync::Arc::new(SyncQueue::open(&cas_dir).unwrap());
+        queue.init().unwrap();
+        let entries = crate::store::open_store_local(&cas_dir).unwrap();
+        let rules = crate::store::open_rule_store_local(&cas_dir).unwrap();
+        let skills = crate::store::open_skill_store_local(&cas_dir).unwrap();
+        for case in ["cycle", "foreign", "branch", "assignee", "target", "start", "declined", "no-audit", "rework", "open", "local-wins", "valid"] {
+            let mut receiver = baseline.clone();
+            let mut incoming = parked.clone();
+            match case {
+                "cycle" => receiver.deliverables.delivery_cycle += 1,
+                "foreign" => incoming.origin_project = Some("another-project".into()),
+                "branch" => incoming.deliverables.parked_branch = Some("factory/another-worker".into()),
+                "assignee" => incoming.assignee = Some("another-worker".into()),
+                "target" => incoming.deliverables.work_target.as_mut().unwrap().target_branch = "epic/other".into(),
+                "start" => incoming.deliverables.factory_branch_start.as_mut().unwrap().base_sha = "c".repeat(40),
+                "declined" => receiver.deliverables.declined_factory_branch_anchors = Some(vec![anchor.clone()]),
+                "no-audit" => incoming.notes.clear(),
+                "rework" => receiver.notes.push_str(&format!("\n\n[{}] {} actor=owner reason=rework",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"), crate::mcp::tools::core::task::audit::REOPENED)),
+                "open" => receiver.status = cas_types::TaskStatus::Open,
+                _ => {}
+            }
+            // Each row is an independent fixture. A stale unguarded reset
+            // correctly unions prior notes (cas-3045), which would leak the
+            // preceding rework decision into the next case.
+            let current = tasks.get(&receiver.id).unwrap();
+            tasks.update_if_current(&receiver, &current).unwrap();
+            server.reset().await;
+            Mock::given(method("GET")).and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tasks":[incoming], "team_id":"park-team", "pulled_at":chrono::Utc::now().to_rfc3339(), "status":"ok"
+                }))).mount(&server).await;
+            let syncer = CloudSyncer::new_for_project(queue.clone(), CloudConfig {
+                endpoint:server.uri(), token:Some("fixture-token".into()), ..Default::default()
+            }, CloudSyncerConfig {
+                team_conflict_resolution: if case == "local-wins" { crate::cloud::ConflictResolution::LocalWins }
+                    else { crate::cloud::ConflictResolution::KeepRecent }, ..Default::default()
+            }, "cas-src".into(), &cas_dir);
+            let result = if team {
+                syncer.pull_team("park-team", "cas-src", &*entries, &*tasks, &*rules, &*skills)
+            } else {
+                syncer.pull(&*entries, &*tasks, &*rules, &*skills,
+                    &*crate::store::open_spec_store(&cas_dir).unwrap(), &*crate::store::open_event_store(&cas_dir).unwrap(),
+                    &*crate::store::open_prompt_store(&cas_dir).unwrap(), &*crate::store::open_file_change_store(&cas_dir).unwrap(),
+                    &*crate::store::open_commit_link_store(&cas_dir).unwrap())
+            }.unwrap();
+            assert!(result.errors.is_empty(), "{case}: {result:?}");
+            let resolves = case == "valid" || (case == "local-wins" && !team);
+            assert_eq!(core.parked_delivery_for_worker("lively-eagle-82").is_ok(), resolves, "team={team} {case}");
+            let received = tasks.get(&task.id).unwrap();
+            assert_eq!(received.title, receiver.title);
+            if !resolves { assert!(received.lifecycle_matches(&receiver), "team={team} {case}"); }
+        }
+        task = tasks.get(&task.id).unwrap();
+        // Drive the same G-96 resolver which rejects the incident's unsynced
+        // InProgress row, then consume the exact pushed branch/anchor below.
+        let bound = core.parked_delivery_for_worker("lively-eagle-82")
+            .expect("Cloud park reaches merge admission");
+        assert_eq!(bound.0.id, task.id);
+        assert!(task.notes.contains(owner_note));
+        assert_eq!(task.deliverables.parked_branch.as_deref(), Some(branch));
+        assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
         let source = core.task_merge_source(&repo, Some(&task), "lively-eagle-82").unwrap();
         let manager = crate::worktree::WorktreeManager::new(&repo, Default::default()).unwrap();
         let remote = core
@@ -9684,6 +9812,7 @@ mod cas_6b42_peer_delivery_tests {
         assert!(refused.message.contains("[G-96]"));
         assert_eq!(git(&repo, &["rev-parse", branch]), local);
         assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
+        }
     }
 
     /// GH #1689/#1692: an epic child whose task target is the repository's

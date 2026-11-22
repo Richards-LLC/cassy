@@ -61,7 +61,10 @@ impl FactoryTestEnv {
 
     fn with_agent_id_and_env(agent_id: &str, env_guard: Option<EnvGuard>) -> Self {
         let temp = TempDir::new().expect("Failed to create temp dir");
-        let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
+        // cas-253d: macOS temp roots (/tmp, /var) are symlinks, and host
+        // retention refuses symlinked ancestors; keep the project physical.
+        let cas_root = init_cas_dir(&temp.path().canonicalize().expect("canonical temp dir"))
+            .expect("Failed to init CAS dir");
 
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing(agent_id.to_string());
@@ -78,7 +81,8 @@ impl FactoryTestEnv {
     fn without_agent_id() -> Self {
         let env_guard = EnvGuard::ensure_isolated_home();
         let temp = TempDir::new().expect("Failed to create temp dir");
-        let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
+        let cas_root = init_cas_dir(&temp.path().canonicalize().expect("canonical temp dir"))
+            .expect("Failed to init CAS dir");
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         let service = CasService::new(core, None);
         Self {
@@ -6858,12 +6862,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         named.force = Some(true);
         named.dry_run = Some(false);
         named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
-        // Exact-path admission deliberately rejects aliases, including macOS
-        // /var -> /private/var. Canonicalize the fixture service's root too.
-        let core = CasCore::with_daemon(env.cas_root.canonicalize().unwrap(), None, None);
-        core.set_agent_id_for_testing("test-agent-id".to_string());
-        let service = CasService::new(core, None);
-        let result = service.factory_request(Parameters(named)).await.unwrap();
+        let result = env.service.factory_request(Parameters(named)).await.unwrap();
         let text = get_text(&result);
         assert!(!target.exists(), "native exact-path reclaim must succeed: {text}");
         assert_eq!(std::fs::read(orphan.join("source.rs")).unwrap(), b"uncommitted source");
@@ -7223,22 +7222,11 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 
 /// A real verdict frees disposable build output immediately, keeping the small
 /// source checkout available for the existing two-hour audit grace period.
-fn review_target_env() -> FactoryTestEnv {
-    let mut env = FactoryTestEnv::with_server_supervisor();
-    // Match the canonical owner path written by scratch-checkout; macOS's
-    // temporary directory otherwise reaches the /var -> /private/var alias.
-    env.cas_root = env.cas_root.canonicalize().unwrap();
-    let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
-    core.set_agent_id_for_testing("test-supervisor-id".into());
-    env.service = CasService::new(core, None);
-    env
-}
-
 #[tokio::test]
 async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     use fs2::FileExt;
     use notify::Watcher;
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "verdict-target");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -7345,7 +7333,7 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
 #[tokio::test]
 async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
     use fs2::FileExt;
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     let mut failures = Vec::new();
     init_sync_repo(&env, "interrupted-review-trash");
     let project = env.cas_root.parent().unwrap();
@@ -7485,7 +7473,7 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
 /// remains protected even after a task closes or an earlier dispatch times out.
 #[tokio::test]
 async fn test_gc_preserves_active_review_target_cas_f275() {
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "active-review-target");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -7561,7 +7549,7 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
 /// target until the task closed (25 GB for one task on the live store).
 #[tokio::test]
 async fn test_gc_reclaims_superseded_walk_of_open_task_cas_49163() {
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "superseded-walk");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -7621,7 +7609,7 @@ async fn test_gc_reclaims_superseded_walk_of_open_task_cas_49163() {
 /// SQLite task state and the public factory GC handler.
 #[tokio::test]
 async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
-    let env = review_target_env();
+    let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "review-control");
     let project = env.cas_root.parent().unwrap();
     // Real Cargo output is ignored; untracked reviewer notes are not.
@@ -7895,8 +7883,10 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
 async fn test_gc_retains_file_written_after_dirty_probe_cas_75ae() {
     const CHILD: &str = "REVIEW_GC_RACE_CHILD_75AE";
     if std::env::var_os(CHILD).is_none() {
-        let home = TempDir::new().unwrap();
-        let bin = home.path().join("bin");
+        let home_dir = TempDir::new().unwrap();
+        // cas-253d: host retention refuses symlinked ancestors such as macOS /tmp.
+        let home = home_dir.path().canonicalize().unwrap();
+        let bin = home.join("bin");
         std::fs::create_dir(&bin).unwrap();
         let inherited_path = std::env::var_os("PATH").unwrap();
         let real_git = std::env::split_paths(&inherited_path)
@@ -7932,10 +7922,10 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
         command
             .args(["--exact", filter, "--nocapture"])
             .env(CHILD, "1")
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("REVIEW_GC_REAL_GIT_75AE", real_git)
-            .env("REVIEW_GC_RACE_CONTROL_75AE", home.path().join("armed"))
+            .env("REVIEW_GC_RACE_CONTROL_75AE", home.join("armed"))
             .env("PATH", path);
         clear_account_selectors(&mut command);
         let output = command.output().unwrap();

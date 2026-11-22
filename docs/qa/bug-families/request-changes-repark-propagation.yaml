@@ -1,0 +1,11 @@
+title: Corrective park reaches the owner after request_changes
+statement: >-
+  A real request_changes and builder re-park round trip through independent
+  stores, production syncing writers, CloudSyncer push/pull and a stateful
+  HTTP backend. The owner may retain a newer bookkeeping clock, but imports
+  the completed same-cycle park only after its exact latest review decision
+  was acknowledged before that canonical park. Missing acknowledgement,
+  reversed ordering, newer owner review and ordinary Open tasks stay held.
+tasks: [cas-6725]
+journeys: []
+invariants: []

@@ -198,6 +198,83 @@ fn epic_row(repo: &Path, task: &Task) -> EpicChildBranchStatus {
     collect_epic_branch_statuses(std::slice::from_ref(task), "main", repo).remove(0)
 }
 
+/// GH #2222/#2236: the recorded tip can be the target itself, or a
+/// same-tree merge of duplicate docs work. Neither shape loses its ancestors.
+#[test]
+fn integrated_exact_and_same_tree_anchors_keep_ancestor_content_gh2222_gh2236() {
+    for (same_tree, reverted, foreign) in [(false, false, false), (true, false, false), (true, true, false), (true, false, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base = commit(repo, "obsolete.rs", "old();\n", "seed obsolete source");
+        git(repo, &["checkout", "-qb", "factory/worker"]);
+        git(repo, &["rm", "obsolete.rs"]);
+        let content = commit(repo, "docs/guide.md", "delivered guide\n",
+            if foreign { "docs(cas-beef): replace obsolete source" } else { "docs: replace obsolete source" });
+        let content = if reverted {
+            git(repo, &["revert", "--no-edit", &content]);
+            git(repo, &["rev-parse", "HEAD"])
+        } else { content };
+        if same_tree {
+            git(repo, &["checkout", "-qb", "remote-tip", &base]);
+            git(repo, &["cherry-pick", &format!("{base}..{content}")]);
+            git(repo, &["commit", "--amend", "-qm", "docs: duplicate remote guide"]);
+            git(repo, &["checkout", "-q", "factory/worker"]);
+            git(repo, &["merge", "--no-ff", "remote-tip", "-m", "Merge remote branch tip (same tree)"]);
+        }
+        let anchor = git(repo, &["rev-parse", "HEAD"]);
+        if same_tree {
+            assert_eq!(git(repo, &["rev-parse", &format!("{anchor}^{{tree}}")]),
+                git(repo, &["rev-parse", &format!("{content}^{{tree}}")]))
+        }
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "--ff-only", "factory/worker"]);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), anchor);
+        let mut task = Task {
+            id: "cas-test1".into(), title: "docs delivery".into(),
+            status: TaskStatus::AwaitingMerge, assignee: Some("worker".into()),
+            created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            ..Default::default()
+        };
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: task.created_at, task_floor: task.created_at,
+            basis: "integrated unnamed docs cycle",
+            identity: task_commit_identity(&task, None),
+        };
+        let outcome = || run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &TaskCloseRequest { id: task.id.clone(), no_delivery: None, reason: None,
+                supervisor_override: None, search_manifest: None, commit_receipt: None,
+                stranded_branch_override: None },
+            "main", repo, TaskCommitAttribution { receipt: None, window: Some(&window) },
+        );
+        if reverted || foreign {
+            let rejected = outcome();
+            assert!(matches!(&rejected, MergeStateGateOutcome::Reject(message)
+                if crate::gates::codes_in(message).contains(&"G-56")),
+                "reverted={reverted}, foreign={foreign}: {rejected:?}");
+            continue;
+        }
+        for advanced in [false, true] {
+            if advanced {
+                commit(repo, "unrelated.md", "target moves\n", "unrelated target advance");
+            }
+            let result = outcome();
+            assert!(matches!(result, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),
+                "same_tree={same_tree}, advanced={advanced}: {result:?}");
+        }
+        // Reachability is unchanged when the content is actually removed.
+        git(repo, &["rm", "docs/guide.md"]);
+        git(repo, &["commit", "-qm", "drop delivered guide"]);
+        let dropped = outcome();
+        assert!(matches!(&dropped, MergeStateGateOutcome::Reject(message)
+            if crate::gates::codes_in(message).contains(&"G-56")), "{dropped:?}");
+    }
+}
+
 #[test]
 fn identical_minified_snapshot_close_and_epic_proof_cas_5f0b() {
     let (dir, task, _) = fixture(false, false);

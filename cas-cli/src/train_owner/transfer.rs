@@ -124,7 +124,7 @@ impl CasCore {
             snapshot.record.transfer.as_ref().filter(|t| t.id == request.transfer_id)
                 .map(|t| t.successor.clone()).ok_or("TRAIN_TRANSFER_CONFLICT: transfer id changed")?
         } else { snapshot.record.identity.clone() };
-        let (authenticated, identity) = (snapshot, expected_actor);
+        let (authenticated, identity) = authenticate(&self.cas_root, &repo, &actor, snapshot, &expected_actor)?;
         snapshot = authenticated.audited(json!({
             "request_id": request.request_id, "reason": request.reason, "actor": actor.id,
             "incarnation": identity.incarnation, "train": train.id, "project": authenticated_project(&self.cas_root)?,

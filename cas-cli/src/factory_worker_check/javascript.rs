@@ -191,11 +191,15 @@ pub(crate) fn changed_tests(
                 })
                 .collect();
         }
-        // GH #2221: tests generated from a changed JSON catalogue have no
-        // changed source line, so only a whole-spec run proves them.
-        let tip = String::from_utf8(show(repo, head, path)?.unwrap_or_default())?;
-        if let Some(data) = changed_data_import(repo, base, head, path, &tip)? {
-            bail!("{path} generates tests from changed {data}; a static selection would omit them");
+        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
+        let old = show(repo, base, path)?
+            .map(String::from_utf8)
+            .transpose()?
+            .unwrap_or_default();
+        // GH #2221: tests generated from a changed or newly selected JSON
+        // catalogue have no changed test line, so only a whole-spec run proves them.
+        if let Some(data) = changed_data_import(repo, base, head, path, &source, &old)? {
+            bail!("{path} generates tests from {data}, which the delivery changed or newly selected; a static selection would omit them");
         }
         // A restored file has no delivered test change. Do not require
         // runtime identities for callbacks merely present in its final tree.
@@ -207,11 +211,6 @@ pub(crate) fn changed_tests(
         if path.ends_with(".vue") {
             bail!("Vue component {path} requires related-test proof");
         }
-        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
-        let old = show(repo, base, path)?
-            .map(String::from_utf8)
-            .transpose()?
-            .unwrap_or_default();
         let test_file = self::test_file(path);
         let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
             Ok(all) => all,
@@ -242,16 +241,21 @@ pub(crate) fn changed_tests(
     Ok(selected.into_iter().collect())
 }
 
-/// The changed JSON file this test source imports by relative path, if any.
-fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str) -> Result<Option<String>> {
+/// The catalogue that changes this source's generated tests, if any: a JSON
+/// file it imports by relative path that the delivery changed, or a JSON
+/// import the delivery added, removed or switched.
+fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str, old: &str) -> Result<Option<String>> {
+    let imported = json_imports(path, source)?;
+    let _ = old;
     let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
-    if changed.trim().is_empty() {
-        return Ok(None);
-    }
-    let changed: BTreeSet<&str> = changed.lines().collect();
+    Ok(changed.lines().find(|data| imported.contains(*data)).map(str::to_owned))
+}
+
+/// Repository paths of the JSON files a source imports by relative literal.
+fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
     let directory = Path::new(path).parent().unwrap_or(Path::new(""));
     let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s]+\.json)["'`]"#)?;
-    for capture in literal.captures_iter(source) {
+    Ok(literal.captures_iter(source).filter_map(|capture| {
         let mut resolved = PathBuf::new();
         for part in directory.join(&capture[1]).components() {
             match part {
@@ -260,11 +264,31 @@ fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: 
                 other => resolved.push(other),
             }
         }
-        if let Some(found) = resolved.to_str().filter(|found| changed.contains(found)) {
-            return Ok(Some(found.to_owned()));
+        resolved.to_str().map(str::to_owned)
+    }).collect())
+}
+
+/// GH #2221: the test files at `head` that import the changed catalogue
+/// `data` by relative path. Its generated tests have no changed source line.
+pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec<String>> {
+    let Some(name) = Path::new(data).file_name().and_then(|name| name.to_str()) else { return Ok(Vec::new()) };
+    let output = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0").current_dir(repo)
+        .args(["grep", "-l", "-F", "-e", name, head]).output()?;
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        bail!("git grep {name} {head} failed");
+    }
+    let prefix = format!("{head}:");
+    let mut specs = Vec::new();
+    for spec in String::from_utf8(output.stdout)?.lines().filter_map(|line| line.strip_prefix(&prefix)) {
+        if !javascript(spec) || !test_match(spec, runner_hint(repo, spec)) {
+            continue;
+        }
+        let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
+        if json_imports(spec, &source)?.contains(data) {
+            specs.push(spec.to_owned());
         }
     }
-    Ok(None)
+    Ok(specs)
 }
 
 fn show(repo: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {

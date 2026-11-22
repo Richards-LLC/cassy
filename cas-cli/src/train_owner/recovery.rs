@@ -34,8 +34,7 @@ impl CasCore {
     pub(crate) fn train_owner_recover_checked(&self, train_id: &str, request: &Request,
         context: &InvocationContext, checks: &impl TransferChecks) -> Result<Value, String>
     {
-        // RED sabotage: H-41 call intentionally omitted until refusal is observed.
-        let _ = context;
+        crate::cli::config::operator_ops::require_operator_context(context).map_err(|e| e.to_string())?;
         if [&request.expected_authority, &request.expected_generation, &request.expected_target,
             &request.reason, &request.evidence, &request.stopped_or_fenced].iter().any(|s| s.trim().is_empty())
             || uuid::Uuid::parse_str(&request.request_id).is_err()

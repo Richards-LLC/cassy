@@ -955,7 +955,8 @@ mod tests {
                 let prepared = received.try_recv().ok();
                 if mode == "good" {
                     assert!(prepared.as_ref().is_some_and(|result| result.is_ok()),
-                        "parent={parent_scope} attempt={attempt}: {prepared:?}");
+                        "parent={parent_scope} attempt={attempt}: {prepared:?}; notices={:?}",
+                        crate::store::open_prompt_queue_store(&core.cas_root).unwrap().peek_all(10).unwrap());
                     assert_eq!(prepared.unwrap().unwrap(), bytes, "parent={parent_scope} attempt {attempt}");
                     assert!(cas_store::SqliteArtifactStore::open(&core.cas_root).unwrap().get(&record.id).unwrap().is_some());
                     let input = std::fs::read_to_string(core.cas_root.join("prompt.txt")).unwrap();

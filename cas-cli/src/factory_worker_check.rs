@@ -1387,7 +1387,7 @@ fn classified_test_records(
             // cas-23b1: embedded builtin docs have their own contract checks;
             // every other proof input still invalidates the Rust receipt.
             let builtin_doc = path.starts_with("cas-cli/src/builtins/")
-                && (path.ends_with(".md") || path == "cas-cli/src/builtins/reference-history.json");
+                && (path.ends_with(".md") || *path == "cas-cli/src/builtins/reference-history.json");
             !builtin_doc && proof_inputs.contains(*path)
         }).cloned().collect::<BTreeSet<_>>();
         if !inputs.is_empty() {

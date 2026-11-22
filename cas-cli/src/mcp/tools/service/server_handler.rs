@@ -1869,6 +1869,46 @@ mod tests {
         assert_eq!(settled["notification_id"], rows[0].id);
     }
 
+    /// cas-cd0f review: a send that finishes after its deadline is reported
+    /// NOT_COMMITTED (safe to resend) only when it errored without recording a
+    /// write. A success without a receipt was reported safe to resend, which
+    /// invited a duplicate; a write followed by a failure is still committed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_send_outcome_needs_a_recorded_write_cas_cd0f() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_NAME", "slow-sender");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        core.register_agent("slow-sender-id".into(), "slow-sender".into(), None).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action": "message", "target": "peer", "summary": "s", "message": "m"});
+        for (wrote, errored, expected) in [(false, false, "UNKNOWN"), (true, true, "COMMITTED"), (false, true, "NOT_COMMITTED")] {
+            let (resume, blocked) = std::sync::mpsc::channel::<()>();
+            let future = async move {
+                mutation_receipt::run_on_blocking_pool(async move {
+                    blocked.recv().unwrap();
+                    if wrote { mutation_receipt::message_ref_committed("peer-outbox:7"); }
+                    let text = vec![rmcp::model::ContentBlock::text("sent")];
+                    Ok(if errored { rmcp::model::CallToolResult::error(text) } else { rmcp::model::CallToolResult::success(text) })
+                }).await.unwrap()
+            };
+            let error = service.call_with_deadline("coordination", arguments.as_object(),
+                std::time::Duration::from_millis(50), future).await.unwrap_err();
+            let continuation = error.data.unwrap()["continuation_id"].as_str().unwrap().to_string();
+            resume.send(()).unwrap();
+            service.tool_work.wait_idle().await;
+            let request = serde_json::from_value(serde_json::json!({"action": "message_status", "id": continuation})).unwrap();
+            let status = service.coordination(Parameters(request)).await.unwrap().structured_content.unwrap();
+            assert_eq!(status["mutation_outcome"], expected, "wrote={wrote} errored={errored}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn registration_deadline_surfaces_blocked_late_commit_cas_1550() {
         use crate::mcp::server::CasCore;

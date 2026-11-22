@@ -1516,7 +1516,9 @@ impl ProxyEngine {
         let result = if violet_message
             && let Some(request_id) = arguments.as_ref().and_then(|args| args.get("request_id")).and_then(Value::as_str)
         {
-            self.reconcile_violet_message(caller, dispatch_kind, request_id, arguments.as_ref(), result).await
+            let managed = arguments.as_ref().and_then(|args| args.get("coordination_operation_id"))
+                .and_then(Value::as_str).is_some_and(|id| !id.is_empty());
+            self.reconcile_violet_message(caller, dispatch_kind, request_id, managed, arguments.as_ref(), result).await
         } else {
             result
         };
@@ -1609,6 +1611,7 @@ impl ProxyEngine {
         caller: &ProxyCaller,
         dispatch_kind: ProxyDispatchKind,
         request_id: &str,
+        managed: bool,
         resend: Option<&serde_json::Map<String, Value>>,
         original: Result<rmcp::model::CallToolResult>,
     ) -> Result<rmcp::model::CallToolResult> {
@@ -1644,7 +1647,7 @@ impl ProxyEngine {
                 let mut params = rmcp::model::CallToolRequestParams::new("violet_post");
                 params.arguments = Some(arguments.clone());
                 let resent = self.call_upstream(config::VIOLET_SERVER, params).await;
-                return Box::pin(self.reconcile_violet_message(caller, dispatch_kind, request_id, None, resent)).await;
+                return Box::pin(self.reconcile_violet_message(caller, dispatch_kind, request_id, managed, None, resent)).await;
             }
             if matches!(state, "posted" | "not_posted") {
                 if let Some(mut receipt) = lookup.get("receipt").filter(|body| body.is_object()).cloned()
@@ -1661,8 +1664,25 @@ impl ProxyEngine {
                     body["ok"] = Value::Bool(false);
                     body["request_id"] = Value::String(request_id.into());
                     if !body["error"].is_object() {
-                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": false,
-                            "message": "Violet confirmed that this request did not post."});
+                        // GH #1968: Violet may confirm not_posted without a
+                        // cause. Name it, and the one safe next step: a
+                        // request Violet never received is resent under its
+                        // own request_id (Violet dedupes by it); a refused one
+                        // needs a new request_id, and a managed reply also a
+                        // new reply intent on the current claim.
+                        let reason = body["reason"].as_str().filter(|reason| !reason.is_empty())
+                            .unwrap_or("provider_unreported").to_string();
+                        let unreceived = reason == "request_not_found";
+                        let (next_action, message) = match (unreceived, managed) {
+                            (true, _) => ("resend_same_request_id",
+                                "Violet never received this request. Retry violet_post with the same request_id and unchanged arguments; never use a new ID."),
+                            (false, true) => ("new_reply_intent",
+                                "Violet confirmed this reply did not post and gave no reason. Register a new factory action=reply_intent on your current claim, then violet_post its fields with a new request_id."),
+                            (false, false) => ("new_request_id",
+                                "Violet confirmed this request did not post and gave no reason. Post again with a new request_id."),
+                        };
+                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": unreceived,
+                            "reason": reason, "next_action": next_action, "message": message});
                     }
                     if let Some(prior) = prior { body["post_response"] = prior; }
                     return Ok(violet_result(body));

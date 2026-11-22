@@ -6313,9 +6313,9 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     let builder_pusher = CloudSyncer::new_for_project(builder_queue, (*builder_config).clone(),
         CloudSyncerConfig::default(), "review-project".into(), &owner);
     let baseline = reviewer_tasks.get(&parked.id).unwrap();
-    let decision_block = baseline.notes.split("\n\n").rev().find(|block|
+    let decision_block = baseline.notes.rsplit("\n\n").find(|block|
         block.contains(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)).unwrap();
-    let park_block = repair.notes.split("\n\n").rev().find(|block|
+    let park_block = repair.notes.rsplit("\n\n").find(|block|
         block.contains(crate::mcp::tools::core::task::audit::PARKED_STATE)).unwrap();
     for case in ["no-ack", "park-before-ack", "new-owner-decision", "valid"] {
         let mut incoming = repair.clone();

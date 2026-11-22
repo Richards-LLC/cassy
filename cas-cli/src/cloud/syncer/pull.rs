@@ -1637,7 +1637,7 @@ fn receipted_park_projection(local: &Task, remote: &Task) -> Option<Task> {
     // this owner's exact request_changes and then parked that cycle can
     // supersede it; an unrelated Open row or a later decision stays held.
     if local.status == TaskStatus::Open {
-        let decision = local.notes.split("\n\n").rfind(|block|
+        let decision = local.notes.rsplit("\n\n").find(|block|
             lifecycle_audit_note(block).is_some_and(|(_, event)|
                 event.starts_with(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)))?;
         let mut after = remote.notes.split("\n\n").skip_while(|block| block.trim() != decision.trim());

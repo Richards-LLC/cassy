@@ -6938,6 +6938,32 @@ mod cas_89e1_post_merge_message_type_tests {
             .find(|row| row.target == "supervisor-b")
             .expect("explicit supervisor target remains accepted");
         assert_eq!(explicit_row.factory_session.as_deref(), Some("factory-b"));
+
+        // GH #2232: an Active row with an expired heartbeat used to be listed
+        // as live in the same refusal that claimed no supervisor belonged.
+        let mut expired = agents.get(&supervisor_a.id).unwrap();
+        expired.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(601);
+        agents.update(&expired).unwrap();
+        let error = service.message_send(message_request_to("supervisor")).await.unwrap_err();
+        let data = error.data.unwrap();
+        assert_eq!(data["rule_id"], "worker_supervisor_unresolved");
+        assert_eq!(data["reason"], "owner_unavailable");
+        let owner = data["supervisors"].as_array().unwrap().iter()
+            .find(|row| row["id"] == supervisor_a.id).unwrap();
+        assert_eq!(owner["factory_session"], "factory-a");
+        assert_eq!(owner["live"], false);
+        assert_eq!(owner["status"], "active");
+        assert_eq!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().len(), 2);
+
+        expired.last_heartbeat = chrono::Utc::now();
+        agents.update(&expired).unwrap();
+        let mut competing = Agent::new("competing-owner-id".into(), "competing-owner".into());
+        competing.role = AgentRole::Supervisor;
+        competing.factory_session = Some("factory-a".into());
+        agents.register(&competing).unwrap();
+        let error = service.message_send(message_request_to("supervisor")).await.unwrap_err();
+        assert_eq!(error.data.unwrap()["reason"], "ambiguous_owner");
+        assert_eq!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().len(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7445,7 +7471,12 @@ mod cas_89e1_post_merge_message_type_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn worker_supervisor_target_never_borrows_another_sessions_supervisor_gh_1171() {
-        let _env = TestEnvGuard::temp_home();
+        let env = TestEnvGuard::temp_home();
+        let sessions = env.home().join(".cas/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        // Stale session metadata cannot overrule the live registry's owner.
+        std::fs::write(sessions.join("factory-a.json"),
+            r#"{"name":"factory-a","supervisor":{"name":"supervisor-b"},"workers":[]}"#).unwrap();
         let temp = tempfile::tempdir().expect("temporary Cassy root");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).expect("Cassy root");
@@ -7466,11 +7497,11 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect_err("another session's supervisor is not this worker's");
 
-        assert!(
-            error.message.contains("supervisor-b"),
-            "the refusal names the live supervisors that can be addressed by name: {}",
-            error.message
-        );
+        let data = error.data.unwrap();
+        assert_eq!(data["reason"], "no_session_owner");
+        assert_eq!(data["supervisors"][0]["name"], "supervisor-b");
+        assert_eq!(data["supervisors"][0]["factory_session"], "factory-b");
+        assert!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

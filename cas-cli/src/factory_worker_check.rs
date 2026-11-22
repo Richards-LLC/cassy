@@ -1681,13 +1681,22 @@ fn is_test_or_build_input_path(path: &str) -> bool {
     )
 }
 
+/// GH #2288: the per-task changelog, product-overview and bug-family fragments
+/// the close gate asks for. Release tooling owns their checks, so one counts
+/// as a Rust proof input only when a Rust source names it, never by extension.
+fn close_doc_fragment(path: &str) -> bool {
+    ["changelog.d/", "docs/product-overview.d/", "docs/qa/bug-families/"].iter()
+        .any(|dir| path.strip_prefix(dir).is_some_and(|name| !name.contains('/')))
+        && [".md", ".yaml", ".yml"].iter().any(|extension| path.ends_with(extension))
+}
+
 /// Read the delivered tree once per close and batch its Rust sources once.
 fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<String>) -> Option<BTreeSet<String>> {
     if changed.is_empty() { return Some(BTreeSet::new()); }
     let tree = delivered_tree(repo, head)?;
     let mut inputs = BTreeSet::new();
     let external = changed.iter().filter(|path| {
-        if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
+        if !close_doc_fragment(path) && (is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path)) {
             inputs.insert((*path).clone()); false
         } else { true }
     }).cloned().collect::<Vec<_>>();

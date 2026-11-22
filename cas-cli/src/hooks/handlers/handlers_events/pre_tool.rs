@@ -3486,12 +3486,6 @@ fn check_worker_git_commit_scope_at_target(
     if git_target_is_head_navigation(target) {
         return None;
     }
-    // cas-7e76a: restoring files inside the registered worktree is the
-    // cleanup an authorized takeover needs before adoption; it cannot put a
-    // commit on whichever branch is checked out there.
-    if is_isolated && matches!(target.head_action, GitHeadAction::RestorePaths) {
-        return None;
-    }
 
     // Resolve HEAD once. Protected branches retain the established WORKER
     // COMMIT GUARD contract before identity-specific checks run. A rebase is
@@ -3625,6 +3619,11 @@ fn check_worker_git_commit_scope_at_target(
     {
         match crate::factory_isolation::classify_worker_binding(&registered_name, Some(&branch)) {
             crate::factory_isolation::WorkerBinding::Own => {}
+            // cas-7e76a: restoring files inside the registered worktree is
+            // the cleanup an authorized takeover needs before adoption; it
+            // cannot put a commit on the sibling's branch.
+            crate::factory_isolation::WorkerBinding::Sibling { .. }
+                if is_isolated && matches!(target.head_action, GitHeadAction::RestorePaths) => {}
             crate::factory_isolation::WorkerBinding::Sibling { owner } => {
                 return Some(crate::factory_isolation::sibling_misbinding_message(
                     &registered_name,

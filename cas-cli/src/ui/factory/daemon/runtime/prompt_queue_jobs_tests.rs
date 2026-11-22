@@ -1264,14 +1264,21 @@ fn a_carried_batch_keeps_its_passenger_out_of_a_fresh_selection() {
     assert_eq!(initial.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
     let facts = initial.facts.remove(&lead.id).unwrap();
     assert_eq!(facts.message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
+    let mut delayed = QueueSelection {
+        rows: facts.message_batch.clone(),
+        facts: HashMap::from([(passenger.id, initial.facts.remove(&passenger.id).unwrap())]),
+        ..initial
+    };
     let writer = TestWriter::start(true);
     let mut jobs = jobs_on(&writer);
     for row in [&lead, &passenger] {
         assert!(!jobs.claim_resolved(&cas_dir, "s", row.id, "lead", "lead"));
     }
     jobs.carry_claimed_row(lead.clone(), facts);
-    let fresh = passenger.clone();
-    jobs.submit_select(request(&cas_dir), move |_, _| Ok(QueueSelection { rows: vec![fresh], ..Default::default() }));
+    jobs.submit_select(request(&cas_dir), move |_, generation| {
+        delayed.generation = generation;
+        Ok(delayed)
+    });
     settle(&mut jobs, |jobs| !jobs.select_in_flight());
     let selection = jobs.take_selection().unwrap();
     assert!(selection.rows.is_empty(), "the carry owns its passenger: {:?}",

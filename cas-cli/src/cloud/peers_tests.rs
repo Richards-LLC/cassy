@@ -75,6 +75,8 @@ fn identity_metadata_carries_role_repo_focus_session_and_host() {
     );
     assert_eq!(meta.get(META_HOSTNAME).map(String::as_str), Some("box-a"));
     assert!(!meta.contains_key(key));
+    agent.machine_id = Some("machine-a".into());
+    agent.cc_session_id = Some("harness-a".into());
     agent.pid = Some(std::process::id());
     crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
     let registered = identity_metadata(&agent, Some(REPO), None, None);

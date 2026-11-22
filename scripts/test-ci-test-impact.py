@@ -626,18 +626,39 @@ path="tests/builtin_archive_portability_test.rs"
 
     # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
     def test_lane_attributes_merged_target_breakage_at_latest_contained_target(self):
+        self.put("cas-cli/src/alpha.rs", "pub fn value() {}\n#[test] fn broken() { crate::gamma::other(); }\n")
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
         self.git("checkout", "-qb", "delivery")
         self.select("cas-cli/src/alpha.rs")
         state = self.root / "output/lane.json"
         ref = "refs/cas/delivery-base/lane"
         self.git("update-ref", ref, self.base)
+        # The executable boundary selects the alpha unit test from the actual
+        # own/base filters, then evaluates its dependency in that checkout.
+        fake = self.root / "fake-cargo"
+        self.put("fake-cargo", '#!/bin/sh\n'
+                 '[ "$2" != --version ] || { echo "cargo-nextest fixture"; exit 0; }\n'
+                 'expression=; previous=\nfor arg in "$@"; do\n'
+                 ' [ "$previous" != -E ] || expression="$arg"; previous="$arg"\ndone\n'
+                 'matches=false\ncase "$expression" in\n'
+                 ' *"and not"*) ;; *"test(/^alpha::/)"*|*"test(=alpha::broken)"*) matches=true ;; esac\n'
+                 'if [ "$2" = list ]; then\n'
+                 ' status=mismatch; [ "$matches" != true ] || status=matches\n'
+                 ' printf \'{"rust-suites":{"cas":{"testcases":{"alpha::broken":{"ignored":false,"filter-match":{"status":"%s"}}}}}}\\n\' "$status"; exit 0\nfi\n'
+                 '[ "$matches" = true ] || { echo "Summary [ 0.01s] 0 tests run: 0 passed"; exit 0; }\n'
+                 'if grep -Fq "panic!()" cas-cli/src/gamma.rs; then\n'
+                 ' echo "        FAIL [ 0.01s] cas alpha::broken"\n'
+                 ' echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100\nfi\n'
+                 'echo "Summary [ 0.01s] 1 test run: 1 passed"\n', executable=True)
+        env = dict(os.environ, CARGO=str(fake), GITHUB_REPOSITORY="", GH_TOKEN="", GITHUB_TOKEN="")
         def plan_with(target, record=ref, zero=""):
             command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", target, "--history", str(self.history), "--out", str(state), "--recorded-base-ref", record, "--zero-base-ref", zero]
-            self.assertEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
+            self.assertEqual(subprocess.run(command, cwd=self.root, env=env, capture_output=True).returncode, 0)
             return json.loads(state.read_text())
         before = plan_with(self.base)
         self.git("checkout", "-qb", "train", self.base)
-        self.put("cas-cli/src/gamma.rs", "// train-owned change breaks gamma\n")
+        self.put("cas-cli/src/gamma.rs", "pub fn other() { panic!(); }\n")
         self.put(".claude/settings.json", "{}\n")
         self.commit()
         target = self.git("rev-parse", "HEAD")
@@ -647,20 +668,15 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertEqual(after["plan"]["paths"], ["cas-cli/src/alpha.rs"])
         self.assertEqual(after["plan"]["commands"], before["plan"]["commands"])
         self.assertEqual(after["plan"]["base"], target)
-        receipt = state.with_name("own-receipt.json")
-        failure = {"package": "cas", "binary": "gamma_test", "test": "gamma_test::broken"}
-        receipt.write_text(json.dumps({"failures": [failure], "configuration": {},
-            "invocation": ["nextest", "run", "-p", "cas", "--test", "gamma_test"]}))
-        # Use the actual checked-out source to determine the Cargo boundary's
-        # result. The old recorded base passes; merged train content fails both
-        # on the lane and at the latest target commit it already contains.
-        fake = self.root / "fake-cargo"
-        self.put("fake-cargo", '#!/bin/sh\n[ "$2" != list ] || exit 0\n'
-                 'if grep -q "breaks gamma" cas-cli/src/gamma.rs; then\n'
-                 ' echo "        FAIL [ 0.01s] cas::gamma_test gamma_test::broken"\n'
-                 ' echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100\nfi\n'
-                 'echo "Summary [ 0.01s] 1 test run: 1 passed"\n', executable=True)
-        env = dict(os.environ, CARGO=str(fake), GITHUB_REPOSITORY="", GH_TOKEN="", GITHUB_TOKEN="")
+        own = subprocess.run([str(HERE / "ci-test-impact.py"), "lane", "--phase", "own",
+            "--out", str(state)], cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(own.returncode, 0, own.stdout + own.stderr)
+        receipt = json.loads(state.with_name("own-receipt.json").read_text())
+        failure = {"package": "cas", "binary": "cas", "test": "alpha::broken"}
+        self.assertEqual(receipt["failures"], [failure])
+        self.assertEqual(receipt["configuration"], after["plan"]["configuration"])
+        self.assertEqual(receipt["invocation"], ["nextest", "run", *after["split"]["build"],
+            "-E", after["split"]["own"], "--no-fail-fast"])
         attributed = subprocess.run([str(HERE / "ci-test-impact.py"), "lane", "--phase", "attribute",
             "--out", str(state), "--receipt", "own"], cwd=self.root, env=env, capture_output=True, text=True)
         attribution = json.loads(state.with_name("own-attribution.json").read_text())

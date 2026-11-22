@@ -384,6 +384,8 @@ pub(crate) struct QueueSelection {
 pub(crate) enum ClaimOutcome {
     /// The transport claim was taken: the row may be injected on its next pass.
     Claimed(cas_store::ClaimToken),
+    /// The held claim's recipient state was re-read after control took it.
+    Rechecked(cas_store::ClaimToken),
     /// The recipient already has the row: a delivered handoff, a hook or a
     /// poll (review M2), or explicitly settled its own copy. This control
     /// result does not create transport or body evidence.
@@ -1319,7 +1321,7 @@ impl QueueJobs {
     /// Cancel a prepared batch member if its leader was consumed meanwhile.
     /// Late pending completions follow the existing stale-generation release path.
     pub(crate) fn cancel_unadmitted_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
-        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(claim_token),_)) = self.claims.remove(&(row,recipient.to_string())) {
+        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(claim_token) | ClaimOutcome::Rechecked(claim_token),_)) = self.claims.remove(&(row,recipient.to_string())) {
             self.submit_stamp(cas_dir,row,recipient,0,QueueStamp::ReleaseClaim { claim_token });
         }
     }
@@ -1644,7 +1646,7 @@ impl QueueJobs {
                         // A claim nobody takes is released by `expire_claims`.
                         self.claims
                             .insert(key, ClaimState::Ready(done.outcome, Instant::now()));
-                    } else if let ClaimOutcome::Claimed(claim_token) = done.outcome {
+                    } else if let ClaimOutcome::Claimed(claim_token) | ClaimOutcome::Rechecked(claim_token) = done.outcome {
                         // Review M1: a superseded or expired job's claim is
                         // never left holding the row.
                         tracing::debug!(
@@ -2093,7 +2095,18 @@ impl QueueJobs {
             return ClaimStep::Waiting;
         };
         match outcome {
-            ClaimOutcome::Claimed(token) => ClaimStep::Claimed(token),
+            ClaimOutcome::Claimed(token) => {
+                // A named inbox poll may have taken over this reservation
+                // while its job result waited for the next control pass.
+                // Re-read on the store lane; never inject from that old result.
+                self.submit_claim_recheck(cas_dir, session, row, recipient, target, token);
+                if matches!(self.exec, Exec::Inline(_)) {
+                    self.apply_completions();
+                    return self.claim_for_inject(cas_dir, session, row, recipient, target);
+                }
+                ClaimStep::Waiting
+            },
+            ClaimOutcome::Rechecked(token) => ClaimStep::Claimed(token),
             ClaimOutcome::HandedOff => ClaimStep::HandedOff,
             ClaimOutcome::NotClaimed | ClaimOutcome::Stale => ClaimStep::NotClaimed,
             ClaimOutcome::Failed(error) => {
@@ -2131,6 +2144,14 @@ impl QueueJobs {
     }
 
     fn submit_claim(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str) {
+        self.submit_claim_job(cas_dir, session, row, recipient, target, None);
+    }
+
+    fn submit_claim_recheck(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str, token: cas_store::ClaimToken) {
+        self.submit_claim_job(cas_dir, session, row, recipient, target, Some(token));
+    }
+
+    fn submit_claim_job(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str, held: Option<cas_store::ClaimToken>) {
         let generation = self.generation();
         let ready = Arc::clone(&self.ready);
         let spec = JobSpec {
@@ -2153,20 +2174,45 @@ impl QueueJobs {
             ClaimState::Pending(generation),
         );
         let submitted = self.submit_job(spec, false, move || {
-            let done = run_claim_for_inject(
+            let done = if let Some(token) = held {
+                let result = (|| -> anyhow::Result<ClaimOutcome> {
+                    let queue = job_thread_prompt_queue(&job_dir)?;
+                    let Some(fresh) = queue.queued_prompt(row)? else { return Ok(ClaimOutcome::Stale); };
+                    if fresh.target != job_target || fresh.factory_session.as_deref().is_some_and(|session| session != job_session) {
+                        return Ok(ClaimOutcome::Stale);
+                    }
+                    if matches!(queue.recipient_delivery(row, &job_recipient)?, Some(cas_store::RecipientDelivery::Settled(_)))
+                        || queue.recipient_handed_off(row, &job_recipient)? {
+                        return Ok(ClaimOutcome::HandedOff);
+                    }
+                    if fresh.processed_at.is_some()
+                        || queue.recipient_receipt(row, &job_recipient)? != Some(cas_store::SurfacingSource::TransportClaimed) {
+                        return Ok(ClaimOutcome::Stale);
+                    }
+                    Ok(ClaimOutcome::Rechecked(token))
+                })();
+                let outcome = result.unwrap_or_else(|error| ClaimOutcome::Failed(error.to_string()));
+                if !matches!(outcome, ClaimOutcome::Rechecked(_)) {
+                    defer_stamp(&job_dir, row, &job_recipient, &QueueStamp::ReleaseClaim { claim_token:token }, "prepared claim retired");
+                }
+                ClaimDone { row, recipient:job_recipient.clone(), generation, cas_dir:job_dir.clone(), outcome, retargeted:vec![] }
+            } else { run_claim_for_inject(
                 &job_dir,
                 &job_session,
                 row,
                 &job_recipient,
                 &job_target,
                 generation,
-            );
+            ) };
             // Wake the loop: the row's next selection can inject it.
             ready.store(true, Ordering::Release);
             QueueJobOutcome::Claimed(done)
         });
         if !accepted(&submitted) {
             self.claims.remove(&(row, recipient.to_string()));
+            if let Some(token) = held {
+                defer_stamp(cas_dir, row, recipient, &QueueStamp::ReleaseClaim { claim_token:token }, "claim recheck refused");
+            }
         }
     }
 
@@ -2200,7 +2246,7 @@ impl QueueJobs {
                 if now.saturating_duration_since(*since) < CLAIM_READY_TTL {
                     return true;
                 }
-                if let ClaimOutcome::Claimed(token) = outcome {
+                if let ClaimOutcome::Claimed(token) | ClaimOutcome::Rechecked(token) = outcome {
                     released.push((*row, recipient.clone(), *token));
                 }
                 false

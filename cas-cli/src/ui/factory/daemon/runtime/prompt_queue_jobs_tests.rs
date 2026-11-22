@@ -1283,8 +1283,8 @@ fn a_carried_batch_keeps_its_passenger_out_of_a_fresh_selection() {
     let batch = jobs.take_selection().expect("the carried batch comes back");
     assert_eq!(batch.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
     assert_eq!(batch.facts[&lead.id].message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
-    assert!(matches!(jobs.claim_for_inject(&cas_dir, "s", passenger.id, "lead", "lead"),
-        ClaimStep::Claimed(_)), "the passenger's claim is still the batch's");
+    settle(&mut jobs, |jobs| matches!(jobs.claim_for_inject(&cas_dir, "s", passenger.id, "lead", "lead"),
+        ClaimStep::Claimed(_)));
 }
 
 

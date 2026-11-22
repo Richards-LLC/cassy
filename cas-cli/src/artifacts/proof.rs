@@ -545,6 +545,12 @@ fn ledger_citations(dir: &Path) -> Option<std::collections::BTreeSet<String>> {
     Some(names)
 }
 
+/// Evidence trees Cassy's own gates read from the task evidence directory,
+/// so a peer reviewer needs them whole: the QA bundle, whose files resolve
+/// relative to `qa/` (`qa_evidence::resolve_bundle_file`), and terminal-qa
+/// receipts, found by walking `terminal-qa/` (`validate_terminal_qa`).
+const VERIFIER_TREES: [&str; 2] = ["qa/", "terminal-qa/"];
+
 /// What a routed build's park published: its evidence directory and the
 /// exact bytes the reviewing machine must hold before review (cas-e571).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -675,13 +681,15 @@ pub(crate) fn publish_routed_evidence(
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     // A park publishes declared evidence only: top-level files, close-reason
-    // citations and ledger citations. A nested file nothing cites (a copied
+    // citations, ledger citations and the trees Cassy's verifier reads
+    // (cas-e571). Any other nested file nothing cites (a copied
     // source checkout, raw captures already bundled) is listed, never uploaded.
     let ledger = ledger_citations(&dir);
     let ledger_cites = |name: &str| ledger.as_ref().is_some_and(|cited| cited.iter().any(|entry| {
         name.strip_prefix(entry.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     }));
-    let declared = |name: &str| !name.contains('/') || cited_names.contains(name) || ledger_cites(name);
+    let declared = |name: &str| !name.contains('/') || cited_names.contains(name) || ledger_cites(name)
+        || VERIFIER_TREES.iter().any(|tree| name.starts_with(tree));
     // Routed builds require their ledger's citations, or without a ledger
     // every declared file.
     let required = |name: &str| cited_names.contains(name)
@@ -1434,7 +1442,8 @@ mod tests {
     /// owner, holding only the synced task notes, restores each at the path the
     /// ledger cites; an artifact it cannot fetch never blocks the dispatch.
     /// cas-fd1c (GH #2212): the ledger cell lists several paths and cites the
-    /// capture directory, while uncited raw captures stay unpublished.
+    /// capture directory, an uncited terminal-qa receipt still travels, and
+    /// uncited raw captures stay unpublished.
     #[tokio::test(flavor = "multi_thread")]
     async fn ordinary_park_evidence_reaches_the_merge_owner_at_cited_paths_gh2079() {
         use wiremock::matchers::body_partial_json;
@@ -1444,8 +1453,9 @@ mod tests {
             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
             | --- | --- | --- | --- | --- | --- | --- | --- |\n\
             | M01 | home | ok [source: a.rs:1] | visible: ok | PASS | fixture | web-green.log; proof | - |\n";
-        let evidence: [(&str, &[u8]); 3] = [("proof/shot.png", b"\x89PNG capture"),
-            ("web-green.log", b"web: PASS\n"), ("LEDGER.md", ledger.as_bytes())];
+        let evidence: [(&str, &[u8]); 4] = [("proof/shot.png", b"\x89PNG capture"),
+            ("web-green.log", b"web: PASS\n"), ("LEDGER.md", ledger.as_bytes()),
+            ("terminal-qa/status/report.md", b"terminal-qa: PASS\n")];
         let raw = "raw/requests/0001.json";
         for (index, (name, bytes)) in evidence.iter().enumerate() {
             let leaf = Path::new(name).file_name().unwrap().to_str().unwrap();

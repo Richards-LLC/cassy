@@ -1806,7 +1806,7 @@ impl FactoryApp {
                         DirectorEvent::WorkerIdle { active_task, .. } => active_task.as_ref(),
                         _ => None,
                     };
-                    if merge_alert::worker_has_pending_reminder(
+                    if crate::ui::factory::director::worker_has_pending_reminder(
                         &unfiltered_data, worker, active.map(|task| task.task_id.as_str()), merge_now,
                     ) || worker_waits.get(worker).is_some_and(|read| {
                         active.is_some_and(|task| task.task_id == read.task) && read.waiting

@@ -884,6 +884,14 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             _ => None,
         },
         Commands::Factory(crate::cli::factory::FactoryArgs {
+            command: Some(crate::cli::factory::FactoryCommands::Train {
+                command: crate::cli::factory::TrainCommand::OwnerTransfer {
+                    operation: crate::cli::factory::OwnerTransferAction::Force
+                        | crate::cli::factory::OwnerTransferAction::AdoptTarget, ..
+                },
+            }), ..
+        }) => Some("Recovering train publication authority (`cas factory train owner-transfer`)"),
+        Commands::Factory(crate::cli::factory::FactoryArgs {
             command: Some(crate::cli::factory::FactoryCommands::DesignReviewLift { .. }), ..
         }) => Some("Lifting an epic design review pause (`cas factory design-review-lift`)"),
         Commands::Factory(crate::cli::factory::FactoryArgs {

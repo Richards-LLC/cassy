@@ -639,6 +639,8 @@ fn train_transfer_operator_recovery_requires_h41_and_exact_scope_cas_6456() {
             "--evidence", "evidence", "--stopped-or-fenced", "all prior publishers"];
         if operation == "force" { args.extend(["--transfer-id", "transfer", "--successor", "owner-b"]); }
         assert!(<crate::cli::Cli as clap::Parser>::try_parse_from(args.clone()).is_ok());
+        let words = args[1..].iter().map(|word| word.to_string()).collect::<Vec<_>>();
+        assert!(crate::config::operator_policy::operator_only_cas_invocation(&words).is_some());
         args.extend(["--supervisor-override"]);
         assert!(<crate::cli::Cli as clap::Parser>::try_parse_from(args).is_err());
     }

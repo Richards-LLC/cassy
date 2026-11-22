@@ -1983,6 +1983,7 @@ fn zz_explore_reconnect_72dc() {
     eprintln!("hb: {:?}", hb.result.as_ref().map(|r| r.to_string().chars().take(300).collect::<String>()));
     std::thread::sleep(std::time::Duration::from_secs(1));
     eprintln!("=== B: after heartbeat\n{}", status());
+    eprintln!("THIRD: {}", third.stderr_buf.as_ref().unwrap().lock().unwrap().lines().filter(|l| l.contains("Eager")).collect::<Vec<_>>().join(" / "));
     for entry in std::fs::read_dir(sandbox.path().join(".cas/logs")).unwrap() {
         let path = entry.unwrap().path();
         let text = std::fs::read_to_string(&path).unwrap_or_default();

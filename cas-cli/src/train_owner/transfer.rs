@@ -58,7 +58,7 @@ fn resolve_successor(root: &Path, caller: &Agent, id: &str) -> Result<Identity, 
     registered_remote_identity(&rows, &project, &caller.id, id)
 }
 
-fn registered_remote_identity(rows: &[crate::cloud::coordinator::AgentInfo], project: &str, caller: &str, id: &str) -> Result<Identity, String> {
+fn registered_remote_identity(rows: &[crate::cloud::AgentInfo], project: &str, caller: &str, id: &str) -> Result<Identity, String> {
     let user = crate::cloud::peers::caller_user_id(rows, Some(caller))?;
     let peers = crate::cloud::peers::repo_peers(rows, project, &[], None, chrono::Utc::now());
     let row = rows.iter().find(|row| row.id == id)
@@ -172,7 +172,7 @@ mod tests {
         successor.cc_session_id = Some("peer-harness".into());
         successor.pid = Some(std::process::id());
         crate::mcp::daemon::stamp_pid_fingerprint(&mut successor, std::process::id());
-        let row: crate::cloud::coordinator::AgentInfo = serde_json::from_value(json!({
+        let row: crate::cloud::AgentInfo = serde_json::from_value(json!({
             "id": successor.id, "name": successor.name, "agent_type": "primary", "status": "active",
             "pid": successor.pid, "session_id": null, "machine_id": successor.machine_id,
             "last_heartbeat": chrono::Utc::now().to_rfc3339(), "active_tasks": 0, "user_id": "account",

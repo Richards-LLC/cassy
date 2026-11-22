@@ -4,7 +4,9 @@ statement: >-
   delivery. Refusal names local-only commits and fetched origin, preserving
   local/remote target and source. Equal and behind ordinary targets still
   merge; transactional execution and local-merge reconciliation cannot publish
-  unrelated target work.
+  unrelated target work. The delivery's own ancestry and single integration
+  merge remain authorized. Typed source-drift failure precedes origin reads;
+  detached reviewed validation preserves concurrent writers before refusal.
 tasks: [cas-76da]
 journeys: []
 invariants: []

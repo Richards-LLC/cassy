@@ -1625,8 +1625,31 @@ fn target_ahead_error(repo: &std::path::Path, target: &str, local: &str, remote:
     let commits = crate::git_evidence::git_text(repo, &["log", "--format=%H %s", &range, "--"])
         .unwrap_or_else(|| format!("{range} (commit listing unavailable)"));
     format!(
-        "TARGET_AHEAD_OF_ORIGIN: local {target} at {local} contains unpublished commits beyond origin/{target} at {remote}. No delivery merge or target push was attempted.\n\nLocal-only commits:\n{commits}\n\nReview and publish this existing target work separately with explicit authorization, or preserve it on another branch before restoring the target to origin. Then retry worktree_merge. Both target refs and the delivery source are retained."
+        "TARGET_AHEAD_OF_ORIGIN: local {target} at {local} contains unrelated unpublished commits beyond origin/{target} at {remote}. No target push was attempted.\n\nLocal-only commits:\n{commits}\n\nReview and publish this existing target work separately with explicit authorization, or preserve it on another branch before restoring the target to origin. Then retry worktree_merge. Both target refs and the delivery source are retained."
     )
+}
+
+/// The delivery's own commits (and its one integration merge) are authorized;
+/// other unpublished target history needs a separate publication decision.
+fn unrelated_target_history(
+    repo: &std::path::Path,
+    git: &crate::worktree::GitOperations,
+    target: &str,
+    local: &str,
+    source: &str,
+) -> Option<String> {
+    let remote = git.resolve_commit(&format!("origin/{target}"))?;
+    if local == remote || !git.is_ancestor(&remote, local) { return None; }
+    let delivery_only = (|| {
+        let source = git.resolve_commit(source)?;
+        let other = crate::git_evidence::git_text(repo,
+            &["rev-list", "--max-count=2", local, "--not", &remote, &source, "--"])?;
+        if other.is_empty() { return Some(true); }
+        if other != local { return Some(false); }
+        let parents = crate::git_evidence::git_text(repo, &["show", "-s", "--format=%P", local, "--"])?;
+        Some(parents == format!("{remote} {source}"))
+    })().unwrap_or(false);
+    (!delivery_only).then(|| target_ahead_error(repo, target, local, &remote))
 }
 
 /// Render the typed, resumable PR handoff for a GH013-protected default branch.
@@ -5250,22 +5273,14 @@ impl CasCore {
             }
         }
 
-        if transactional_delivery.is_some() {
-            let refreshed = manager.git().fetch_merge_target(&worktree.parent_branch)
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-110",
-                    format!("Cannot refresh publication target {}: {error}. No merge or push was attempted.", worktree.parent_branch))))?;
-            target_fetched = refreshed.is_some();
-        }
         if target_fetched
-            && let (Some(local), Some(remote)) = (
-                manager.git().resolve_commit(&worktree.parent_branch),
-                manager.git().resolve_commit(&format!("origin/{}", worktree.parent_branch)),
+            && premerge_approval.is_none()
+            && let Some(local) = manager.git().resolve_commit(&worktree.parent_branch)
+            && let Some(message) = unrelated_target_history(
+                &cwd, manager.git(), &worktree.parent_branch, &local, &worktree.branch,
             )
-            && local != remote && manager.git().is_ancestor(&remote, &local)
         {
-            return Ok(Self::tool_error(crate::gates::tag("G-110", target_ahead_error(
-                &cwd, &worktree.parent_branch, &local, &remote,
-            ))));
+            return Ok(Self::tool_error(crate::gates::tag("G-110", message)));
         }
 
         // Validate the retry's immutable identity before authorizing a new
@@ -5762,10 +5777,14 @@ impl CasCore {
                     *behind,
                 ))));
             }
-            if let crate::worktree::git::TargetReconcile::AheadOfRemote { local, remote, .. } = &reconcile {
-                return Ok(Self::tool_error(crate::gates::tag("G-110", target_ahead_error(
-                    &cwd, &worktree.parent_branch, local, remote,
-                ))));
+            if premerge_approval.is_none()
+                && let crate::worktree::git::TargetReconcile::AheadOfRemote { local, .. } = &reconcile
+                && let Some(message) = unrelated_target_history(
+                    &cwd, manager.git(), &worktree.parent_branch, local,
+                    parked_source_tip.as_deref().unwrap_or(&worktree.branch),
+                )
+            {
+                return Ok(Self::tool_error(crate::gates::tag("G-110", message)));
             }
             reconcile_note = describe_target_reconcile(&worktree.parent_branch, &reconcile);
 
@@ -5934,6 +5953,7 @@ impl CasCore {
             unpublished_merge_base = attempted_target_tip.clone();
             let merge_result = if publish_before_ref {
                 let branch = worktree.parent_branch.clone();
+                let publication_source = parked_source_tip.as_deref().unwrap_or(&worktree.branch).to_string();
                 let mut publish = |head: &str, base: &str| {
                     if let Some((receipt, _)) = transactional_delivery.as_ref() {
                         if base != receipt.target_sha {
@@ -5954,6 +5974,13 @@ impl CasCore {
                     }
                     if let Some(approval) = premerge_approval.as_ref() {
                         approval.verify_landing(head).map_err(crate::worktree::GitError::CommandFailed)?;
+                    }
+                    // Run detached landing validation first: it must preserve
+                    // concurrent writers even when the local target is ahead.
+                    if let Some(message) = unrelated_target_history(
+                        &cwd, manager.git(), &branch, base, &publication_source,
+                    ) {
+                        return Err(crate::worktree::GitError::CommandFailed(crate::gates::tag("G-110", message)));
                     }
                     let outcome = manager.git().publish_merge_candidate(
                         &branch, head, premerge_approval.is_none() && transactional_delivery.is_none(),
@@ -6254,6 +6281,13 @@ impl CasCore {
             // commit, do not retry the rejected direct push of the different
             // local merge commit; the remote ancestry is the authoritative PR
             // landing proof and the delivery can reconcile normally.
+            // Receipt identity and typed failure state above precede network
+            // access. A reconciled delivery still needs fresh publication evidence.
+            if reconciled_delivery && reconciled_publication.is_none() && early_target_push.is_none() {
+                manager.git().fetch_merge_target(&receipt.target_branch)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-110",
+                        format!("Cannot refresh publication target {}: {error}. No target push was attempted.", receipt.target_branch))))?;
+            }
             let default_branch = manager.git().detect_default_branch();
             let remote_target = format!("origin/{}", receipt.target_branch);
             let pr_landed_sha = (receipt.target_branch == default_branch)
@@ -6278,6 +6312,13 @@ impl CasCore {
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
                         manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), Some(&target_tip), error,
                     )))?;
+            }
+            if reconciled_publication.is_none() && early_target_push.is_none() && pr_landed_sha.is_none()
+                && let Some(message) = unrelated_target_history(
+                    &cwd, manager.git(), &receipt.target_branch, &target_tip, &receipt.commit_sha,
+                )
+            {
+                return Ok(Self::tool_error(crate::gates::tag("G-110", message)));
             }
             let push_outcome = if let Some((_, outcome)) = early_target_push.take() {
                 outcome
@@ -6453,6 +6494,14 @@ impl CasCore {
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
                         manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), merge_commit.as_deref(), error,
                     )))?;
+                if let Some(message) = unrelated_target_history(
+                    &cwd, manager.git(), &worktree.parent_branch, &landed, &approval.candidate.source_sha,
+                ) {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
+                        manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(),
+                        merge_commit.as_deref(), crate::gates::tag("G-110", message),
+                    )));
+                }
             }
             Some(landed)
         } else { None };

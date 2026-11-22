@@ -246,7 +246,9 @@ pub(crate) fn changed_tests(
 /// import the delivery added, removed or switched.
 fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str, old: &str) -> Result<Option<String>> {
     let imported = json_imports(path, source)?;
-    let _ = old;
+    if let Some(switched) = imported.symmetric_difference(&json_imports(path, old)?).next() {
+        return Ok(Some(switched.clone()));
+    }
     let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
     Ok(changed.lines().find(|data| imported.contains(*data)).map(str::to_owned))
 }

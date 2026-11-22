@@ -3868,7 +3868,8 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
 
         write(embedded, "tasks: [cas-new]\n");
         fixture_commit_as(&repo, "docs: embedded family");
-        let passing = PassingTests::new(&root, &repo, &fixture_head(&repo));
+        let voided = fixture_head(&repo);
+        let passing = PassingTests::new(&root, &repo, &voided);
         assert_eq!(stability::missing(&passing, &[keeper.clone()]), [keeper.clone()]);
         assert_eq!(stability::invalidated(&passing, &[keeper]), [(tested, Some(vec![embedded.to_owned()]))]);
     }

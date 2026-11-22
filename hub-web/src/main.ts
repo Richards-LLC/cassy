@@ -1023,6 +1023,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         });
       }
       render();
+      // The open conversation's command palette reads this connection too.
+      if (machine.id === selectedMachineId && wasLive !== (state.phase === "live")) slashCommands?.palette.sync();
     },
     onAttachState: (session, state) => {
       const key = sessionKey(machine.id, session);
@@ -1057,7 +1059,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         if (recovered.length) void acknowledgeAttentionGroup(recovered);
       }
       else restateAttachmentNotes(document, machine.id);
-      if (selectedMachineId === machine.id && selectedSession === session) render();
+      if (selectedMachineId === machine.id && selectedSession === session) {
+        render();
+        // A slash command typed before the socket was live lists its commands
+        // the moment it connects, without the operator changing the text.
+        if (attachWasLive !== (state.phase === "live")) slashCommands?.palette.sync();
+      }
       // The list row and the footer read the session's connection too.
       else renderConversationList();
     },
@@ -2113,7 +2120,7 @@ function openConnectionLog(machineId: string): void {
     dialog.id = "connection-log";
     dialog.className = "connection-log";
     dialog.setAttribute("aria-label", "Connection log");
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow"></p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence"></p><pre>Running diagnostics…</pre></details></section>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow"></p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" data-testid="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical" data-testid="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence" data-testid="connection-log-evidence"></p><pre data-testid="connection-log-output">Running diagnostics…</pre></details></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
@@ -2212,6 +2219,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     if (!banner) {
       banner = document.createElement("div");
       banner.className = "terminal-disconnected-banner";
+      banner.dataset.testid = "terminal-disconnected-banner";
       grid.prepend(banner);
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
@@ -2231,6 +2239,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       // Announce the cause once; adjacent recovery controls stay discoverable
       // without becoming part of the live-region announcement.
       words.setAttribute("role", "status");
+      words.setAttribute("aria-label", "Outage");
       banner.replaceChildren(words);
     }
     // cas-a6f0: still live but its heartbeats go unanswered: not lost yet.
@@ -2654,7 +2663,7 @@ function syncControlHolder(): void {
     if (note) { note.remove(); scheduleConversationLayout(); }
     return;
   }
-  if (!note) { note = document.createElement("span"); note.id = "conversation-control"; host.append(note); }
+  if (!note) { note = document.createElement("span"); note.id = "conversation-control"; note.dataset.testid = "conversation-control"; host.append(note); }
   if (note.dataset.holder === holder) return;
   note.dataset.holder = holder;
   const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
@@ -3054,6 +3063,7 @@ function toast(message: string, scope?: { thread?: string; until?: () => boolean
     output = document.createElement("div");
     output.id = "toast";
     output.setAttribute("role", "status");
+    output.setAttribute("aria-label", "Notice");
     document.body.append(output);
   }
   output.textContent = message;
@@ -4708,17 +4718,17 @@ function render(captureDraft = true, stoppedSelection = false): void {
   app.innerHTML = `
     ${browserNotice ? `<p class="browser-unsupported" role="alert">${escapeHtml(browserNotice)}</p>` : ""}
     <div id="conversation-shell-anchor" hidden></div>
-    <dialog id="command-palette" class="command-palette">
+    <dialog id="command-palette" class="command-palette" aria-label="Commands">
       <section>
         <header><strong>Commands</strong><button id="command-palette-close" type="button" aria-label="Close command palette">×</button></header>
         <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or conversation">
-        <div class="palette-commands">
+        <div class="palette-commands" data-testid="palette-commands">
           <section class="palette-group" data-palette-group="conversations" aria-labelledby="palette-group-conversations">
-            <h3 id="palette-group-conversations" class="palette-group-heading">Conversations</h3>
+            <h3 id="palette-group-conversations" class="palette-group-heading" data-testid="palette-group-heading">Conversations</h3>
             ${sessionCommands || '<p class="palette-empty">No live conversations yet.</p>'}
           </section>
           <section class="palette-group" data-palette-group="machines" aria-labelledby="palette-group-machines">
-            <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
+            <h3 id="palette-group-machines" class="palette-group-heading" data-testid="palette-group-heading">Machines</h3>
             ${launchAvailability() === "ready" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>New session</span><small>Start a supervisor on a project</small></button>' : ""}
             <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
             ${selectedMachineId && selectedSession ? `<button type="button" class="palette-command" data-palette-action="quality"><span>Quality</span><small>${escapeHtml(conversationLabel(selectedMachineId, selectedSession))}, release over release</small></button>` : ""}
@@ -4726,14 +4736,14 @@ function render(captureDraft = true, stoppedSelection = false): void {
             ${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info"><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>` : ""}
           </section>
           <section class="palette-group" data-palette-group="appearance" aria-labelledby="palette-group-appearance">
-            <h3 id="palette-group-appearance" class="palette-group-heading">Appearance</h3>
-            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span><span class="palette-check" aria-hidden="true" hidden>✓</span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
+            <h3 id="palette-group-appearance" class="palette-group-heading" data-testid="palette-group-heading">Appearance</h3>
+            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span><span class="palette-check" data-testid="palette-check" aria-hidden="true" hidden>✓</span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small data-testid="palette-command-hint">${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
           </section>
           <details class="palette-group palette-advanced" data-palette-group="advanced">
-            <summary class="palette-group-heading">Advanced</summary>
+            <summary class="palette-group-heading" data-testid="palette-group-heading">Advanced</summary>
             <button type="button" class="palette-command" data-palette-action="dormant"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
           </details>
-          <p class="palette-empty" id="palette-no-match" role="status" hidden></p>
+          <p class="palette-empty" id="palette-no-match" role="status" aria-label="No match" hidden></p>
         </div>
       </section>
     </dialog>
@@ -4795,12 +4805,12 @@ function conversationRegions(preservedGrid: HTMLElement | undefined, threadKey: 
     template.innerHTML = markup;
     return template.content.firstElementChild as HTMLElement;
   };
-  const grid = preservedGrid ?? build(`<section id="conversation-stage" class="conversation-stage"${threadKey ? ` data-session-key="${escapeAttr(threadKey)}"` : ""}><div class="empty"></div></section>`);
+  const grid = preservedGrid ?? build(`<section id="conversation-stage" class="conversation-stage" data-testid="conversation-stage"${threadKey ? ` data-session-key="${escapeAttr(threadKey)}"` : ""}><div class="empty"></div></section>`);
   return {
     grid,
     composer: build(composerMarkup(supervisor)),
-    status: build('<div id="status-view"></div>'),
-    attention: build('<section id="attention-panel" class="attention-panel"></section>'),
+    status: build('<div id="status-view" data-testid="status-view"></div>'),
+    attention: build('<section id="attention-panel" class="attention-panel" data-testid="attention-panel"></section>'),
   };
 }
 
@@ -5264,7 +5274,7 @@ function syncProgressSheetWhere(): void {
   let line = document.querySelector<HTMLElement>(".conversation-context .context-sheet-where");
   const where = progressSheetOpen() ? conversationWhere() : "";
   if (!where || !heading) { line?.remove(); return; }
-  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; heading.after(line); }
+  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; line.dataset.testid = "context-sheet-where"; heading.after(line); }
   if (line.textContent !== where) line.textContent = where;
 }
 /** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
@@ -5478,6 +5488,7 @@ function fleetAnnouncer(): HTMLElement {
     region.id = "fleet-ops-announcer";
     region.className = "sr-only";
     region.setAttribute("role", "status");
+    region.setAttribute("aria-label", "Fleet results");
     document.body.append(region);
   }
   return region;
@@ -5880,6 +5891,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   const chip = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
     span.className = `status-chip status-chip--${statusClass(value)}`;
+    span.dataset.testid = "status-chip";
     span.textContent = statusLabel(value);
     return span;
   };
@@ -5910,7 +5922,7 @@ function renderStatus(status?: Record<string, unknown>): void {
       const identity = offer ?? [...fleetOps.pending.values()].at(-1) ?? [...fleetOps.notes.values()].at(-1);
       revealPhoneNotice = Boolean(identity && identity !== revealedPhoneNotice);
       revealedPhoneNotice = identity;
-      undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo();
+      undo.id = "fleet-phone-undo"; undo.dataset.testid = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo();
     } else {
       revealedPhoneNotice = undefined;
       if (undo) container.append(undo);
@@ -5919,7 +5931,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   }
   if (workers.length > 0) container.append(sectionLabel("Workers", workers.length));
   for (const worker of workers) {
-    const row = document.createElement("article"); row.className = "status-row status-agent";
+    const row = document.createElement("article"); row.className = "status-row status-agent"; row.dataset.testid = "status-agent";
     const line = document.createElement("div"); line.className = "status-line";
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
     const avatar = document.createElement("template");
@@ -5951,7 +5963,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (!group.tasks.length) continue;
     container.append(sectionLabel(group.label === "In progress" ? "Tasks in progress" : group.label, group.tasks.length));
     for (const task of group.tasks) {
-      const row = document.createElement("article"); row.className = "status-row status-task";
+      const row = document.createElement("article"); row.className = "status-row status-task"; row.dataset.testid = "status-task";
       const line = document.createElement("div"); line.className = "status-line";
       const taskChip = chip(task.delivery_state === "merged" ? "Merged, closing" : task.status);
       if (statusLabel(task.status) === "In progress" && task.delivery_state !== "merged") taskChip.textContent = "Task in progress";

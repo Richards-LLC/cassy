@@ -157,6 +157,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
 
   const headline = document.createElement("p");
   headline.className = "attention-title";
+  headline.dataset.testid = "attention-title";
   if (card.content.enrichmentPending) headline.setAttribute("aria-label", "Summary pending AI enrichment");
   headline.textContent = card.content.headline;
   article.append(eyebrow, headline);
@@ -165,6 +166,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   if (detail) {
     const detailLine = document.createElement("p");
     detailLine.className = "attention-detail";
+    detailLine.dataset.testid = "attention-detail";
     detailLine.textContent = detail;
     article.append(detailLine);
   }
@@ -207,6 +209,7 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
   toggle.append(severityDot(group.worstSeverity));
   const label = document.createElement("span");
   label.className = "attention-group-label";
+  label.dataset.testid = "attention-group-label";
   const groupLabel = group.overflow ? group.machineLabel : ownerLabel(group.cards[0]!.latest, options);
   label.textContent = groupLabel;
   const count = document.createElement("span");

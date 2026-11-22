@@ -389,6 +389,16 @@ Paths, shell commands and arbitrary filesystem reads are not accepted.
 
 ## Coordination messages and reminders
 
+Worker `target=supervisor` routing and its diagnostics use the same registry
+snapshot and heartbeat liveness policy. A registered but unavailable owner
+does not fall through to another supervisor. Multiple live pane names are
+ambiguous; same-name restart rows retain successor ordering. Session metadata
+cannot select a supervisor stamped to another factory session.
+An unresolved message returns `rule_id=worker_supervisor_unresolved`, a
+`reason` (`owner_unavailable`, `ambiguous_owner`, `no_session_owner` or
+`no_factory_session`) and supervisor rows with status, session, heartbeat and
+`live`. Restore the owner or repair the binding before retrying.
+
 An authenticated worker sends `coordination action=message target=supervisor
 kind=respawn task_id=<task> summary="Context checkpoint" message="<return contract>"`
 after committing/pushing and writing `HANDOFF.md` in its task artifact directory.

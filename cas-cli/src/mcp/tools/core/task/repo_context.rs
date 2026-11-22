@@ -1043,7 +1043,7 @@ pub(crate) fn resolve_repo_context(
     // The caller's checkout is direct repository evidence. Resolve it before
     // unrelated host roots can exhaust the scan budget or stall on storage.
     // Explicit bindings above remain authoritative, including stale refusals.
-    let local = candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET));
+    let local = candidate_probe::probe_own(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET));
     if let Ok(Some(local)) = &local
         && local.identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)

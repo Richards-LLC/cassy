@@ -1195,7 +1195,7 @@ impl<'a> PassingTests<'a> {
 
     fn classified(&self) -> &(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>) {
         self.records.get_or_init(|| {
-            let (mut records, voided) = classified_test_records(self.cas_root, self.repo, self.head, self.target);
+            let (mut records, voided) = passing_test_records(self.cas_root, self.repo, self.head, self.target);
             for synced in self.synced {
                 let Ok(stability) = synced.stability.clone().map(serde_json::from_value::<stability::Proof>).transpose() else { continue };
                 let Ok(widened) = synced.widened.clone().map(serde_json::from_value::<widened::Proof>).transpose() else { continue };
@@ -1305,19 +1305,9 @@ pub(crate) fn passing_test_packages_against(
 /// documentation-only delivery commit while keeping proof tied to its tested
 /// tree. Builtin Markdown and reference history use CI's contract/doc-hygiene
 /// proof instead of invalidating Rust receipts. With a target, commits already
-/// on it are not part of the range.
-#[cfg(test)]
+/// on it are not part of the range. Also returns the ancestor receipts it
+/// refused and why.
 fn passing_test_records(
-    cas_root: &Path,
-    repo: &Path,
-    head: &str,
-    target: Option<&str>,
-) -> Vec<(String, Option<String>, TestReceipt)> {
-    classified_test_records(cas_root, repo, head, target).0
-}
-
-/// `passing_test_records` plus the ancestor receipts it refused and why.
-fn classified_test_records(
     cas_root: &Path,
     repo: &Path,
     head: &str,
@@ -5228,7 +5218,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         head: &str,
     ) -> Vec<(String, String, String, u64)> {
         // cas-7b2d: inspect receipt data independently of display provenance.
-        passing_test_records(root, repo, head, None)
+        passing_test_records(root, repo, head, None).0
             .into_iter()
             .map(|(head, package, test)| (head, package.expect("fixture records a Rust package"), test.filter, test.count))
             .collect()

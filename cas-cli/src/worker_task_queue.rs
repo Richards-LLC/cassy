@@ -149,8 +149,8 @@ pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: 
 /// it, would lose its tree mid-run.
 pub(crate) fn admit_checkout_switch(root: &Path, worker: &Agent, task_id: &str) -> Result<(), McpError> {
     let Some(busy) = queue_checkout_busy(root, worker) else { return Ok(()) };
-    // gate[G-161 start]: Task start waits while the worker's checkout is busy
-    Err(error(crate::gates::tag("G-161", format!(
+    // gate[G-165 start]: Task start waits while the worker's checkout is busy
+    Err(error(crate::gates::tag("G-165", format!(
         "Cannot start {task_id} yet: {busy}. A queued start resumes on its own once that clears; \
          finish or stop it, then retry `task action=start id={task_id}`."
     ))))
@@ -799,7 +799,7 @@ impl CasCore {
             }
         }
         // cas-22c6: a busy checkout refuses inside the start below
-        // (admit_checkout_switch, G-161); the cursor stays due for repair.
+        // (admit_checkout_switch, G-165); the cursor stays due for repair.
         let mut reserved_epoch = None;
         let result = async {
             let mut task = tasks.get(&id).map_err(error)?;

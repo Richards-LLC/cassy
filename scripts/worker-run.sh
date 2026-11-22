@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # cas-22c6 (GH #2286): a proof script that reads a factory worker's checkout
-# holds it for its whole life, so a queued task start waits (G-161) instead of
+# holds it for its whole life, so a queued task start waits (G-165) instead of
 # switching the tree under the run. Source this file, call
 # `worker_run_begin <dir inside the checkout>` before reading the tree, and call
 # `worker_run_end "$status"` from the script's EXIT trap. HUP, INT and TERM exit

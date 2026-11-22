@@ -3447,12 +3447,12 @@ async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
     assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "the checkout moved mid-run");
     let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
         .unwrap().get("queue-session", WORKER).unwrap();
-    assert!(queue.notes.iter().any(|note| crate::gates::codes_in(note).contains(&"G-161")), "{:?}", queue.notes);
+    assert!(queue.notes.iter().any(|note| crate::gates::codes_in(note).contains(&"G-165")), "{:?}", queue.notes);
     // A direct start of the deferred successor takes the same admission.
     let direct = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
         "action":"start", "id":next.id,
     })).unwrap())).await.unwrap_err();
-    assert!(crate::gates::codes_in(&direct.message).contains(&"G-161"), "{direct:?}");
+    assert!(crate::gates::codes_in(&direct.message).contains(&"G-165"), "{direct:?}");
     assert_eq!(f.task(&next.id).status, TaskStatus::Open);
     assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "a direct start moved the checkout mid-run");
     journey.finish();

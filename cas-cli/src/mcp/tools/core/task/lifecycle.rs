@@ -2989,7 +2989,7 @@ impl CasCore {
                     // cas-22c6 (GH #2286): queued or direct, a start that
                     // would move this checkout's branch or HEAD waits while a
                     // detached run reads it or it holds uncommitted work
-                    // (G-161). A start that keeps the checkout as it is, such
+                    // (G-165). A start that keeps the checkout as it is, such
                     // as a same-branch resume, is never refused here. Every
                     // move below runs before the task, lease or checkout
                     // records change; artifact-only shared starts skip this

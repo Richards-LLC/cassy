@@ -120,14 +120,48 @@ impl SyncQueue {
 
     /// Ids quarantined for one entity type. Read on every board query, so it
     /// returns a set rather than a Vec.
+    ///
+    /// The ledger is keyed by bare id and short task ids collide across
+    /// projects, so an entry whose id names a live local task stamped with this
+    /// project's identity is stale (cas-3d8b, GH #1000): honoring it hid the
+    /// task's peer updates from every pull and deleted its queued pushes.
+    /// Such entries stay in the ledger but are not reported as quarantined.
     pub fn quarantined_ids(&self, entity_type: &str) -> Result<BTreeSet<String>, CasError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT entity_id FROM quarantined_rows WHERE entity_type = ?1")?;
-        let ids = stmt
-            .query_map(params![entity_type], |row| row.get::<_, String>(0))?
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        Ok(ids)
+        let rows = {
+            let conn = self.conn.lock().unwrap();
+            let is_task = entity_type == QUARANTINE_TASK;
+            // The tasks table lives beside the queue; without it nothing is owned.
+            let sql = if is_task {
+                "SELECT q.entity_id, t.origin_project FROM quarantined_rows q
+                 LEFT JOIN tasks t ON t.id = q.entity_id WHERE q.entity_type = ?1"
+            } else {
+                "SELECT entity_id, NULL FROM quarantined_rows WHERE entity_type = ?1"
+            };
+            let mut stmt = match conn.prepare(sql) {
+                Ok(stmt) => stmt,
+                Err(_) if is_task => conn.prepare(
+                    "SELECT entity_id, NULL FROM quarantined_rows WHERE entity_type = ?1",
+                )?,
+                Err(error) => return Err(error.into()),
+            };
+            stmt.query_map(params![entity_type], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let local = rows
+            .iter()
+            .any(|(_, origin)| origin.is_some())
+            .then(|| crate::cloud::resolve_canonical_id(&self.cas_dir))
+            .flatten();
+        Ok(rows
+            .into_iter()
+            .filter(|(_, origin)| {
+                !matches!((origin, &local), (Some(origin), Some(local))
+                    if origin != "unknown" && crate::cloud::project_ids_match(origin, local))
+            })
+            .map(|(id, _)| id)
+            .collect())
     }
 
     /// Every quarantined row of one entity type, for `doctor` reporting.

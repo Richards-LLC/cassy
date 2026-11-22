@@ -5751,6 +5751,79 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
     }
 }
 
+/// cas-ea31 / cas-7e76a takeover cases 2-4, replayed from Nov 21.
+/// Case 2: the receiver already sits on one of the task's branches, just not
+/// the first that resolves. Case 3: after a review return cleared the anchor,
+/// the prior worker's task branch is at the train base while the parked lane
+/// holds the delivery and a later task (also with the receiver reset to the
+/// delivery tip, GH #2073). Case 4: the receiver is at a newer
+/// train tip with no work of its own; with an own commit it is still refused.
+#[tokio::test]
+async fn transfer_adopt_branch_takeover_cases_cas_ea31() {
+    let mut failures = Vec::new();
+    for case in ["receiver-on-candidate", "anchor-in-history", "receiver-at-delivery-after-return",
+        "receiver-at-train-tip", "receiver-own-work"] {
+        let mut env = TestEnvGuard::temp_home();
+        let BranchAdoptionFixture { temp, destination, service, mut task, receiver, tip, .. } =
+            branch_adoption_fixture(&mut env);
+        let root = temp.path();
+        let dest = destination.path();
+        let tasks = open_task_store(&root.join(".cas")).unwrap();
+        let base = branch_transfer_git(root, &["rev-parse", &format!("{tip}~1")]);
+        match case {
+            "receiver-on-candidate" => {
+                let handoff = "factory/old-worker-cas-branch1100";
+                branch_transfer_git(root, &["branch", handoff, &tip]);
+                branch_transfer_git(dest, &["switch", handoff]);
+                task.deliverables.handoff_branches.push(handoff.into());
+            }
+            // GH #2073: after a review return the receiver was reset to the
+            // delivery tip and was still refused as diverging.
+            "anchor-in-history" | "receiver-at-delivery-after-return" => {
+                if case == "receiver-at-delivery-after-return" {
+                    branch_transfer_git(dest, &["reset", "--hard", &tip]);
+                }
+                branch_transfer_git(root, &["branch", "factory/test-agent-cas-branch1100", &base]);
+                std::fs::write(root.join("later-task.txt"), "separate work").unwrap();
+                branch_transfer_git(root, &["add", "later-task.txt"]);
+                branch_transfer_git(root, &["commit", "-m", "later task"]);
+                task.deliverables.factory_branch_anchor = None;
+                task.deliverables.historical_factory_branch_anchors = vec![tip.clone()];
+            }
+            _ => {
+                branch_transfer_git(dest, &["commit", "--allow-empty", "-m", "train advanced"]);
+                branch_transfer_git(dest, &["branch", "main", "HEAD"]);
+                if case == "receiver-own-work" {
+                    branch_transfer_git(dest, &["commit", "--allow-empty", "-m", "own work"]);
+                }
+            }
+        }
+        tasks.update(&task).unwrap();
+        let before = branch_transfer_git(dest, &["rev-parse", "HEAD"]);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+        })).unwrap();
+        let result = service.task(Parameters(request)).await;
+        if case == "receiver-own-work" {
+            if result.is_ok() || branch_transfer_git(dest, &["rev-parse", "HEAD"]) != before {
+                failures.push(format!("{case}: a receiver with its own unintegrated commit must be refused untouched"));
+            }
+            continue;
+        }
+        let adopted = (
+            branch_transfer_git(dest, &["branch", "--show-current"]),
+            branch_transfer_git(dest, &["rev-parse", "HEAD"]),
+            dest.join("later-task.txt").exists(),
+        );
+        if let Err(error) = result {
+            failures.push(format!("{case}: {error}"));
+        } else if adopted != ("factory/new-worker-cas-branch1100".to_string(), tip.clone(), false) {
+            failures.push(format!("{case}: adopted {adopted:?}, expected the delivery tip {tip}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 #[tokio::test]
 async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
     for mode in ["remote-roster", "remote-registered", "remote-force", "dirty", "dirty-force", "diverged", "foreign", "unrelated-branch", "ahead", "foreign-source-ahead"] {

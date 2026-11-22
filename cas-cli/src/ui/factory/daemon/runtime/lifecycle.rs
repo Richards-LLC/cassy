@@ -1791,8 +1791,12 @@ fn enqueue_worker_attention_relay_inner(
     } else {
         String::new()
     };
+    // cas-58aa (GH #2201): the recipient drain retires a task-scoped relay
+    // once its task is terminal, but it can only read the task from the tag.
+    let task_attr = task_id.filter(|id| !id.is_empty())
+        .map(|id| format!(" task_id=\"{id}\"")).unwrap_or_default();
     let mut body = format!(
-        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
+        "<worker-attention kind=\"{kind}\" worker=\"{worker}\"{task_attr} notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
     );
     // cas-207e: ready tasks or merges waiting on an actionable-idle
     // supervisor are a blocker, not routine: idle workers burn wall clock.

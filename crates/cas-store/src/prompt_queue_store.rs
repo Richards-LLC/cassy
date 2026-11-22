@@ -8267,9 +8267,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn release_orphaned_transport_claims(&self, factory_session: &str) -> Result<usize> {
-        crate::shared_db::with_write_retry(|| {
+        let recipients = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let released = conn.execute(
+            let mut released = conn.prepare(
                 "DELETE FROM prompt_queue_recipient_seen
                  WHERE source = 'transport_claimed'
                    AND delivered_at IS NULL
@@ -8280,11 +8280,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                          AND transport_delivered_at IS NULL
                          AND deferred_inbox_at IS NULL
                          AND factory_session = ?
-                   )",
-                params![factory_session],
+                   )
+                 RETURNING recipient",
             )?;
-            Ok(released)
-        })
+            let recipients = released
+                .query_map(params![factory_session], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(recipients)
+        })?;
+        // GH #2062: released rows are visible to hooks again; signal each
+        // recipient once so a boundary that checked during a claim reads them.
+        let mut signalled = std::collections::HashSet::new();
+        for recipient in &recipients {
+            if signalled.insert(recipient.as_str()) {
+                self.signal_inbox(recipient);
+            }
+        }
+        Ok(recipients.len())
     }
 
     fn retarget_operator_rows_to_successor(
@@ -8652,7 +8664,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         token: ClaimToken,
     ) -> Result<bool> {
         let seen_at = token.seen_at();
-        crate::shared_db::with_write_retry(|| {
+        let released = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let changed = conn.execute(
                 // cas-1f0c: once the Teams body fallback has sent the body,
@@ -8663,7 +8675,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![prompt_id, recipient, seen_at],
             )?;
             Ok(changed == 1)
-        })
+        })?;
+        // GH #2062: as in `park_for_busy_recipient`, a released row needs a
+        // fresh signal for the tool boundary that checked during the claim.
+        if released {
+            self.signal_inbox(recipient);
+        }
+        Ok(released)
     }
 
     fn latest_created_at_for_targets_from_sources(
@@ -10288,21 +10306,21 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         detail: Option<&str>,
         recheck_at: DateTime<Utc>,
     ) -> Result<()> {
-        crate::shared_db::with_write_retry(|| {
+        let released = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let open: Option<i64> = tx
+            let open: Option<String> = tx
                 .query_row(
-                    "SELECT id FROM prompt_queue
+                    "SELECT target FROM prompt_queue
                      WHERE id = ? AND processed_at IS NULL AND acked_at IS NULL",
                     params![prompt_id],
                     |row| row.get(0),
                 )
                 .optional()?;
-            if open.is_none() {
+            let Some(target) = open else {
                 // Surfaced, acked or terminal meanwhile: nothing to park.
-                return Ok(());
-            }
+                return Ok(None);
+            };
             Self::atomic_stage_stamp_in_tx(
                 &tx,
                 prompt_id,
@@ -10317,7 +10335,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // keeps the claim while the wake is deferred. Hooks skip claimed
             // rows, so a parked row that kept its claim would be as hidden as
             // an abandoned one. Release it here, atomically with the park.
-            tx.execute(
+            let released = tx.execute(
                 "DELETE FROM prompt_queue_recipient_seen
                  WHERE prompt_id = ?1 AND source = 'transport_claimed'
                    AND teams_body_fallback_at IS NULL
@@ -10325,8 +10343,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![prompt_id],
             )?;
             tx.commit()?;
-            Ok(())
-        })
+            Ok((released > 0).then_some(target))
+        })?;
+        // GH #2062: the released row is visible to hooks again, and a tool
+        // boundary inside the claim window has already checked past its
+        // enqueue signal. Signal again so the next boundary reads it.
+        if let Some(target) = released {
+            self.signal_inbox(&target);
+        }
+        Ok(())
     }
 
     fn list_most_retried_pending(

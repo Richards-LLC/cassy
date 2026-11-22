@@ -4569,8 +4569,8 @@ mod merge_hold_tests {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        let agents = core.open_agent_store().unwrap();
+        let lead = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let agents = lead.open_agent_store().unwrap();
         let supervisor = Agent::new_with_role("hold-supervisor".into(), "lead-2278".into(), AgentRole::Supervisor);
         let worker = Agent::new_with_role("hold-worker".into(), "worker-2278".into(), AgentRole::Worker);
         agents.register(&supervisor).unwrap();
@@ -4583,23 +4583,24 @@ mod merge_hold_tests {
         store.add(&parked).unwrap();
         let until = Utc::now() + Duration::hours(12);
         let hold = |until: chrono::DateTime<Utc>| serde_json::json!({"merge_hold": {"owner": "Ben", "reason": "GitHub review of prompt text", "until": until}});
-        let update = |patch| core.cas_task_update_with_delivery_mode(
+        let update = |core: &crate::mcp::CasCore, patch| core.cas_task_update_with_delivery_mode(
             serde_json::from_value(serde_json::json!({"id": "cas-6f92"})).unwrap(),
             None, None, false, None, Some(patch), None, None, false,
         );
         let held = || store.get_execution_state("cas-6f92").unwrap().and_then(|state| state.get("merge_hold").cloned());
 
-        core.set_agent_id_for_testing(worker.id.clone());
-        assert!(update(hold(until)).await.is_err(), "a worker cannot hold its own delivery");
-        core.set_agent_id_for_testing(supervisor.id.clone());
+        let assignee = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        assignee.set_agent_id_for_testing(worker.id.clone());
+        assert!(update(&assignee, hold(until)).await.is_err(), "a worker cannot hold its own delivery");
+        lead.set_agent_id_for_testing(supervisor.id.clone());
         for until in [Utc::now() - Duration::minutes(1), Utc::now() + Duration::days(8)] {
-            assert!(update(hold(until)).await.is_err(), "unbounded or past deadline {until}");
+            assert!(update(&lead, hold(until)).await.is_err(), "unbounded or past deadline {until}");
         }
         let forged = serde_json::json!({"merge_hold": {"owner": "Ben", "reason": "r", "until": until, "anchor": anchor}});
-        assert!(update(forged).await.is_err(), "the anchor is stamped, never supplied");
+        assert!(update(&lead, forged).await.is_err(), "the anchor is stamped, never supplied");
         assert!(held().is_none());
 
-        update(hold(until)).await.unwrap_or_else(|error| panic!("{}", error.message));
+        update(&lead, hold(until)).await.unwrap_or_else(|error| panic!("{}", error.message));
         let stored: cas_types::TaskMergeHold = serde_json::from_value(held().unwrap()).unwrap();
         assert_eq!(stored, cas_types::TaskMergeHold {
             owner: "Ben".into(), reason: "GitHub review of prompt text".into(), until,
@@ -4612,8 +4613,8 @@ mod merge_hold_tests {
         let mut working = store.get("cas-6f92").unwrap();
         working.status = TaskStatus::InProgress;
         store.update(&working).unwrap();
-        update(serde_json::json!({"merge_hold": null})).await.unwrap_or_else(|error| panic!("{}", error.message));
-        assert!(update(hold(until)).await.is_err());
+        update(&lead, serde_json::json!({"merge_hold": null})).await.unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(update(&lead, hold(until)).await.is_err());
         assert!(held().is_none());
     }
 }

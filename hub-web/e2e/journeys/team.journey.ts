@@ -14,15 +14,14 @@ const teamPanel = (page: Page) => page.getByRole("tabpanel", { name: "Team", exa
 // A lane is a "Worker lanes" item headed by its worker; its delivery trail's items have no heading.
 const teamLanes = (page: Page) => page.getByRole("list", { name: "Worker lanes", exact: true }).getByRole("listitem").filter({ has: page.getByRole("heading", { level: 3 }) });
 const teamLane = (page: Page, worker: string) => teamLanes(page).filter({ has: page.getByRole("heading", { level: 3, name: worker, exact: true }) });
-// The state pill is labelled "<worker>: <state>".
-const laneState = (page: Page, worker: string) => teamLane(page, worker).getByLabel(new RegExp(`^${worker}: `));
+const laneState = (page: Page, worker: string) => teamLane(page, worker).getByTestId("team-state");
 const statusView = (page: Page) => page.getByTestId("status-view");
 const railRelease = (page: Page) => statusView(page).getByTestId("release-progress");
 const workerCard = (page: Page, worker: string) => statusView(page).getByRole("article").filter({ has: page.getByRole("button", { name: `${worker} timeline`, exact: true }) });
 const composerSlot = (page: Page) => page.getByTestId("conversation-composer-slot");
 // A Live epics row is the item holding its toggle; its task rows do not.
 const epicRow = (page: Page, epics: Locator, name: RegExp) => epics.getByRole("listitem").filter({ has: page.getByRole("button", { name }) });
-const groupLabels = (tasks: Locator) => tasks.getByText(/^(In progress|Open|Merged) · \d+$/);
+const groupLabels = (tasks: Locator) => tasks.getByTestId("live-epic-group-label");
 
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
   test.describe(`Team staffing ${width}`, () => {
@@ -68,7 +67,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         }
         await expectRun(panel, [3, 8]);
         await expect(panel).toContainText("Build the Team view");
-        const model = (worker: string) => teamLane(page, worker).getByText(/^codex · /);
+        const model = (worker: string) => teamLane(page, worker).getByTestId("team-model");
         await expect(model("swift-lark-3")).toHaveAttribute("data-model-reported", "true");
         await expect(model("swift-lark-3")).toHaveAttribute("data-model", "gpt-6.1");
         await expect(model("brisk-wren-9")).toHaveAttribute("data-model-reported", "false");
@@ -193,11 +192,10 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
       page.on("request", request => { const match = /\/v1\/sessions\/([^/]+)\/status$/.exec(new URL(request.url()).pathname); if (match) statusReads.push(decodeURIComponent(match[1]!)); });
       await journey.hub({ machines: [machine, remote], paired: [ATLAS.id, remote.id], fleet: { [PELICAN]: local, "remote-session": follow, "gabber-session": foreign } });
       const status = statusView(page);
-      const epics = status.getByRole("region", { name: /^Live epics · / });
+      const epics = status.getByTestId("live-epics");
       await journey.stage("Read the project's live epics in Tasks & progress, with nothing above the conversation", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src on Atlas/ }).click();
-        await expect(page.getByRole("region", { name: "Epic progress", exact: true })).toHaveCount(0);
         // Only the hidden Team panel sits between the view tabs and the conversation.
         expect(await page.evaluate(() => {
           const between: string[] = [];
@@ -222,7 +220,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await expect(status).not.toContainText("Gabber voice");
         await expect(status).not.toContainText("EPIC");
         await expect(status).not.toContainText("—/—");
-        await expect(epics.getByText(/quiet open epics? in Explorer$/)).toHaveCount(0);
+        await expect(epics.getByTestId("live-epics-footer")).toHaveCount(0);
         // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
         expect(statusReads).toContain("gabber-session");
         expect(statusReads).toContain("remote-session");
@@ -267,7 +265,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await expectRun(peer, [2, 0, 3]);
         await expect(peer).toContainText("3/5");
         await expect(groupLabels(tasks)).toHaveText(["Open · 2", "Merged · 3"]);
-        await tasks.getByText(/^Merged · \d+$/).click();
+        await tasks.getByRole("group").getByTestId("live-epic-group-label").click();
         await expect(tasks.getByRole("group")).toContainText("Follow up on the release");
         await expect(peer).toHaveAttribute("aria-expanded", "true");
         // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.

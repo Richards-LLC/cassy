@@ -11,19 +11,22 @@ const conversationList = (page: Page) => page.getByRole("navigation", { name: "C
 // A row is named "<project> on <machine>, …"; the row's own controls are not.
 const conversationRow = (page: Page, project: string) => conversationList(page).getByRole("button", { name: new RegExp(`^${project} on `) });
 const connection = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
-const messageStatus = (page: Page) => page.getByRole("status", { name: "Message status" });
+const messageStatus = (page: Page) => page.getByTestId("message-status");
 const turn = (page: Page, text: string) => page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: text });
-// A held send says it waits for the connection; an acknowledged one is queued; a delivered one says so.
-const heldLine = (page: Page) => page.getByRole("log").getByRole("status").filter({ hasText: "Waiting for the connection" });
-const queuedLine = (page: Page) => page.getByRole("log").getByRole("status").filter({ hasText: /^Queued for supervisor$/ });
-const deliveredLine = (page: Page) => page.getByRole("log").getByRole("status").filter({ hasText: /^Delivered$/ });
+// A held send's waiting line, by its test id.
+const heldLine = (page: Page) => page.getByRole("log").getByTestId("conversation-held");
+/** The send's bubble is in this receipt state and shows its delivery line. */
+async function expectDeliveryLine(page: Page, text: string, state: "acknowledged" | "delivered") {
+  await expect(turn(page, text)).toHaveAttribute("data-state", state);
+  await expect(turn(page, text).getByTestId("conversation-delivered")).toBeVisible();
+}
 
 async function choose(page: Page) {
   await conversationRow(page, "cas-src").click();
   // Selecting a row can finish before the conversation has attached. Do not
   // take its hub offline while the thread is still opening (cas-05f7).
   await expect(page.getByRole("textbox", { name: "Your message" })).toBeEditable();
-  await expect(page.getByTestId("conversation-thread").getByRole("status").filter({ hasText: "Opening the conversation…" })).toHaveCount(0);
+  await expect(page.getByTestId("conversation-thread").getByTestId("empty")).not.toHaveAttribute("data-state", "loading");
 }
 async function send(page: Page, text: string) {
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -67,7 +70,7 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
     owner.queueLatest(PELICAN);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
-      await expect(queuedLine(tab)).toBeVisible();
+      await expectDeliveryLine(tab, "One instruction, one delivery", "acknowledged");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(1);
@@ -120,7 +123,7 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
   await journey.stage("A late receipt settles both tabs and removes Retry", async () => {
     (hub.sends.length ? hub : other).queueLatest(PELICAN);
     for (const tab of [page, peer]) {
-      await expect(queuedLine(tab)).toBeVisible();
+      await expectDeliveryLine(tab, "Retry this same instruction", "acknowledged");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(2);
@@ -140,7 +143,10 @@ async function captureReceiptSurface(page: Page, state: "stored" | "forwarded", 
       if (state === "stored") {
         await expect(turn(page, text)).toHaveAttribute("data-stored", "true");
         await expect(turn(page, text)).toBeVisible();
-      } else await expect(turn(page, text).getByText("Not kept on this device yet", { exact: true })).toBeVisible();
+      } else {
+        await expect(turn(page, text)).toHaveAttribute("data-stored", "false");
+        await expect(turn(page, text).getByTestId("reply-storage-receipt")).toBeVisible();
+      }
       await page.screenshot({ path: join(qa, `${state}-${colorScheme}-${size}.png`) });
     }
   }
@@ -224,7 +230,7 @@ test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line 
   });
   await journey.stage("Delivered: nothing says it will go out by itself", async () => {
     hub.deliverLatest(PELICAN);
-    await expect(deliveredLine(page)).toBeVisible();
+    await expectDeliveryLine(page, "Send this when Atlas is back", "delivered");
     await expect(status).toBeHidden();
     expect(hub.sends.map((row) => row.text)).toEqual(["Send this when Atlas is back"]);
   });
@@ -237,7 +243,7 @@ test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line 
     for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
       for (const colorScheme of ["light", "dark"] as const) {
         await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
-        await expect(deliveredLine(page)).toBeVisible();
+        await expectDeliveryLine(page, "Send this when Atlas is back", "delivered");
         await expect(status).toBeHidden();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
         await page.screenshot({ path: join(qa, `delivered-${colorScheme}-${size}.png`) });
@@ -284,7 +290,7 @@ test("HUB-J12 a held message another tab delivers clears this tab's waiting line
     await choose(second);
     await expect.poll(() => other.sends.map((row) => row.text), { timeout: 20_000 }).toEqual(["Held in the first tab"]);
     other.deliverLatest(PELICAN);
-    await expect(deliveredLine(second)).toBeVisible();
+    await expectDeliveryLine(second, "Held in the first tab", "delivered");
     await expect(messageStatus(second)).toBeHidden();
     // Nothing is held for this conversation any more, so the first tab no
     // longer says the message will go out by itself, even while still offline.

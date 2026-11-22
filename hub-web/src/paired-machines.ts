@@ -47,7 +47,7 @@ function fleetPermissionMarkup(id: string, kind: 'operate' | 'manage', name: str
   const state = gate.allowed ? 'Allowed' : gate.state;
   // cas-a217: say which permission allows Commander write grants.
   const also = kind === 'manage' ? '<p class="field-hint fleet-permission-also">Also needed to grant a task write access outside its worktree.</p>' : '';
-  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}" data-testid="fleet-permission-state">${escapeHtml(state)}</span></p>`;
+  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name" data-testid="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}" data-testid="fleet-permission-state">${escapeHtml(state)}</span></p>`;
   if (gate.allowed) return `<div class="fleet-permission" data-testid="fleet-permission" data-permission="${kind}" data-allowed="true">${head}${also}</div>`;
   const reason = `<p class="field-hint fleet-permission-reason" id="fleet-reason-${key}">${escapeHtml(gate.reason)}</p>`;
   // GH #1220: a disabled lookalike suggested a fleet action. The permission
@@ -109,7 +109,7 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" data-testid="pairing-dot" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span data-reconnecting="${state === 'Reconnecting'}" data-testid="machine-badge-state" class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta" data-testid="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnownSuffix(sessions, lastKnown)}`}</span><span title="Web client release and build">Web ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" data-testid="pairing-dot" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span data-reconnecting="${state === 'Reconnecting'}" data-testid="machine-badge-state" class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta" data-testid="hub-footer-meta"><span data-testid="hub-footer-sessions">${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnownSuffix(sessions, lastKnown)}`}</span><span title="Web client release and build">Web ${escapeHtml(build)}</span></div>`;
 }
 
 function lastKnownSuffix(sessions: number, lastKnown: boolean | number): string {
@@ -144,7 +144,7 @@ export function orderPairedMachines<T extends Pick<PairedMachineRow, 'connected'
 }
 
 export function pairedMachinesDialogMarkup(): string {
-  return `<dialog id="paired-machines-dialog" aria-labelledby="paired-machines-title"><header class="machines-dialog-heading">${cloudBrand()}<button id="paired-machines-close" type="button" aria-label="Close paired machines">×</button></header><h2 id="paired-machines-title">Paired machines</h2><p class="machine-register-hint">Paired with this browser. Removing a machine here leaves its other devices connected.</p><div id="paired-machines-list"></div><p id="paired-machines-error" role="alert" hidden></p><button id="paired-machines-add" type="button">Pair a machine</button></dialog>`;
+  return `<dialog id="paired-machines-dialog" aria-labelledby="paired-machines-title"><header class="machines-dialog-heading">${cloudBrand()}<button id="paired-machines-close" type="button" aria-label="Close paired machines">×</button></header><h2 id="paired-machines-title">Paired machines</h2><p class="machine-register-hint" data-testid="machine-register-hint">Paired with this browser. Removing a machine here leaves its other devices connected.</p><div id="paired-machines-list"></div><p id="paired-machines-error" role="alert" hidden></p><button id="paired-machines-add" type="button">Pair a machine</button></dialog>`;
 }
 
 /** Keyed register: status ticks preserve focused controls and removal confirmation. */

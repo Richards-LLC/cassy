@@ -25,12 +25,13 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
     // Ctrl+K lands in the list search; the appearance lives behind the list's Appearance & commands button.
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     // The row in effect says so (F20): System, with a check and "Current".
-    // scheme.ts marks the row in effect with aria-current and the description "Current" together.
-    const current = commandPalette(page).getByRole("button", { name: /^Appearance · \S+\s*Current/ });
-    await expect(current).toHaveCount(1);
+    // scheme.ts marks only the row in effect with aria-current.
+    const current = appearanceRow(page, "system");
+    await expect(current).toHaveAttribute("aria-current", "true");
+    for (const scheme of ["light", "dark"]) await expect(appearanceRow(page, scheme)).not.toHaveAttribute("aria-current", "true");
     await expect(current).toHaveAttribute("data-palette-scheme", "system");
-    await expect(current.getByText("✓", { exact: true })).toBeVisible();
-    await expect(current.getByText(/^Current/)).toBeVisible();
+    await expect(current.getByTestId("palette-check")).toBeVisible();
+    await expect(current.getByTestId("palette-command-hint")).toBeVisible();
     // cas-865c: every Appearance row fits the palette at 1280×720.
     for (const scheme of ["system", "light", "dark"]) await expect(appearanceRow(page, scheme)).toBeInViewport({ ratio: 1 });
     await page.getByRole("button", { name: /^Appearance · Dark/ }).click();

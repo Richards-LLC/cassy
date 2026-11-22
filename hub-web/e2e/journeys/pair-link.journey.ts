@@ -4,15 +4,16 @@ import { ATLAS, STUDIO } from "./world";
 import { SCOPES } from "./hub-double";
 import type { Locator, Page } from "@playwright/test";
 
+// A link opens the confirmation form.
 // A link opens the confirmation form, titled "Pair a machine".
 const pairDialog = (page: Page) => page.getByRole("dialog", { name: "Pair a machine", exact: true });
-const technicalSummary = (dialog: Locator) => dialog.getByText("Technical details", { exact: true });
-// The <details> disclosure (role group) that holds the Technical details summary.
-const technicalDetails = (page: Page, dialog: Locator) => dialog.getByRole("group").filter({ has: page.getByText("Technical details", { exact: true }) });
-// One permission line in a machine's Fleet permissions region, found by its permission name.
-const OPERATE = "Manage workers and tasks";
-const MANAGE = "Stop and restart workers and sessions";
-const permission = (page: Page, fleet: Locator, name: string) => fleet.getByTestId("fleet-permission").filter({ has: page.getByText(name, { exact: true }) });
+// The Technical details disclosure, and its summary control.
+const technicalDetails = (dialog: Locator) => dialog.getByTestId("pair-technical");
+const technicalSummary = (dialog: Locator) => technicalDetails(dialog).getByText("Technical details", { exact: true });
+// A paired machine's section, by its fixture label.
+const pairedMachine = (machines: Locator, label: string) => machines.getByTestId("paired-machine").filter({ has: machines.page().getByRole("heading", { name: label, exact: true }) });
+// One permission line, by its data-permission kind: there is no attribute assertion for picking one of two.
+const permission = (page: Page, machine: Locator, kind: "operate" | "manage") => machine.getByTestId("fleet-permission").and(page.locator(`[data-permission="${kind}"]`));
 
 // A first link, for another machine, that the operator opened earlier in the same tab.
 const EARLIER_TOKEN = "Zq3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRa";
@@ -29,8 +30,7 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await journey.open();
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${MANAGE_TOKEN}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas%20%C2%B7%20Linux&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage`);
     await expect(dialog.getByRole("textbox", { name: "Machine's hub address", exact: true })).toBeVisible();
-    // The capability lead; a withheld-scopes lead after it starts "This link does not let it".
-    await expect(dialog.getByText(/^This browser will be able to:/)).toBeVisible();
+    await expect(dialog.getByTestId("pair-lead").first()).toBeVisible();
     // Native disclosure scrolling is tracked separately in cas-207a.
     // Desktop retains the raw checkbox; both layouts verify visible grants
     // and the exact requested scopes at exchange.
@@ -52,13 +52,13 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await activate(page, page.getByRole("button", { name: /^2 paired machines / }));
     const machines = page.getByRole("dialog", { name: "Paired machines", exact: true });
     await expect(machines).toBeVisible();
-    const atlas = machines.getByRole("region", { name: /^Fleet permissions on Atlas/ });
-    const studio = machines.getByRole("region", { name: /^Fleet permissions on Studio/ });
-    await expect(permission(page, atlas, MANAGE).getByTestId("fleet-permission-state")).toBeVisible();
-    await expect(permission(page, atlas, MANAGE).getByText(MANAGE, { exact: true })).toBeVisible();
+    const atlas = pairedMachine(machines, ATLAS.label);
+    const studio = pairedMachine(machines, STUDIO.label);
+    await expect(permission(page, atlas, "manage").getByTestId("fleet-permission-state")).toBeVisible();
+    await expect(permission(page, atlas, "manage").getByTestId("fleet-permission-name")).toBeVisible();
     // Studio was paired for control only: explain the missing permission
     // before its re-pair command, without a disabled fleet-action lookalike.
-    const manage = permission(page, studio, MANAGE);
+    const manage = permission(page, studio, "manage");
     // The command is reachable by keyboard and copies exactly.
     const copy = manage.getByRole("button", { name: "Copy command" });
     if (phone) await activate(page, copy);
@@ -70,11 +70,11 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     // A control pairing may allow managing workers itself, once: the first
     // press says what it allows, the second grants it.
     // The name matches both "Allow managing workers" and its "Confirm: allow managing workers on …" press.
-    const allow = permission(page, studio, OPERATE).getByRole("button", { name: "Allow managing workers" });
+    const allow = permission(page, studio, "operate").getByRole("button", { name: "Allow managing workers" });
     await activate(page, allow);
     await expect(allow).toBeVisible();
     await activate(page, allow);
-    await expect(permission(page, studio, OPERATE).getByTestId("fleet-permission-state")).toBeVisible();
+    await expect(permission(page, studio, "operate").getByTestId("fleet-permission-state")).toBeVisible();
   });
 });
 
@@ -104,11 +104,11 @@ for (const scheme of ["light", "dark"] as const) {
 
         await summary.tap();
 
-        await expect(technicalDetails(page, dialog)).toHaveAttribute("open", "");
+        await expect(technicalDetails(dialog)).toHaveAttribute("open", "");
         // Let the tap's click task and the rebuild it released both run: on the
         // page clock, timers and frames included, not a fixed pause (cas-c4b2).
         await page.clock.runFor(100);
-        await expect(technicalDetails(page, dialog)).toHaveAttribute("open", "");
+        await expect(technicalDetails(dialog)).toHaveAttribute("open", "");
         for (const scope of ["machine:read", "session:read", "pane:read"]) {
           await expect(dialog.getByRole("checkbox", { name: scope, exact: true })).toBeChecked();
         }

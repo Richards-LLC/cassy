@@ -62,6 +62,7 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   title.textContent = WRITE_ACCESS_TITLE;
   const lead = document.createElement("p");
   lead.className = "write-grant-lead";
+  lead.dataset.testid = "write-grant-lead";
   lead.textContent = "Lets the agents on one task write to a folder outside their worktree until the task closes.";
   panel.append(title);
   if (context.where) {

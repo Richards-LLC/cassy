@@ -267,13 +267,13 @@ export class InboxView {
     const selected = this.selected ? threads.find((thread) => thread.hubId === this.selected!.hubId && thread.session === this.selected!.session) : undefined;
     const withheld = snapshot ? unverifiedCount(snapshot) : 0;
     if (snapshot?.replay?.kind === "unavailable") section.append(el("p", { class: "operator-inbox-warning", role: "status" }, snapshot.replay.reason));
-    if (withheld > 0) section.append(el("p", { class: "operator-inbox-withheld", role: "status" }, withheldCopy(withheld)));
+    if (withheld > 0) section.append(el("p", { class: "operator-inbox-withheld", "data-testid": "operator-inbox-withheld", role: "status" }, withheldCopy(withheld)));
     if (!selected) section.append(this.presenceMarkup());
     if (selected) {
       section.append(this.threadMarkup(selected));
     } else if (threads.length === 0) {
       if (snapshot?.replay?.kind === "loading") {
-        section.append(el("p", { class: "operator-inbox-empty", role: "status" }, "Loading inbox history…"));
+        section.append(el("p", { class: "operator-inbox-empty", "data-testid": "operator-inbox-empty", role: "status" }, "Loading inbox history…"));
       } else if (snapshot?.replay?.kind !== "unavailable") {
         section.append(el("p", { class: "operator-inbox-empty" }, "No messages yet. Supervisor messages from enrolled machines appear here, including ones sent while this browser was away."));
       }
@@ -364,7 +364,7 @@ export class InboxView {
     } else {
       const observerStale = presence.observerCheckedAt === null || Date.now() - Date.parse(presence.observerCheckedAt) > 180_000;
       if (presence.observerStatus === "unavailable" || observerStale) {
-        section.append(el("p", { class: "operator-inbox-warning", role: "status" }, "Cassy Cloud's alert check is unavailable, so an alert may take longer than five minutes."));
+        section.append(el("p", { class: "operator-inbox-warning", "data-testid": "operator-inbox-warning", role: "status" }, "Cassy Cloud's alert check is unavailable, so an alert may take longer than five minutes."));
       }
       const machines = el("ul", { class: "machine-presence-rows", "aria-label": "Monitored machines" });
       for (const machine of presence.machines) {

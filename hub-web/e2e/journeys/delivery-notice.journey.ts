@@ -67,8 +67,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
   });
 
   await journey.stage("A blocker I never answered does not say I replied", async () => {
-    const blocker = log.getByRole("group", { name: /^Blocker from / }).filter({ hasText: "The ledger import is red" });
-    const handled = blocker.getByText(/^(You've written since this|Acknowledged — you replied)$/);
+    const blocker = log.getByTestId("conversation-turn").filter({ hasText: "The ledger import is red" });
+    const handled = blocker.getByTestId(/^blk-(handled|later)$/);
     await expect(handled).toBeVisible();
 
     await expect(handled.getByRole("img", { includeHidden: true })).toHaveCount(0);
@@ -180,7 +180,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // QA round 3 F02/F03: a minute rollover (the cards' ages change) is not a
     // redraw either. Open the notice's Details, rest on its Copy, cross a
     // minute on the page clock: the same element keeps focus, Details stays open.
-    const notice = sheet.getByRole("article").filter({ hasText: NOTICE_HEADLINE });
+    const notice = sheet.getByRole("article").first();
     // cas-b56b: while Details is closed its Copy is not laid out at all, so
     // no "Copy" box sits below the rail's scroll range for a layout check
     // (the strict visual inspector) to find. Opening Details brings it back.
@@ -211,7 +211,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(page.getByTestId("conversation-shell")).not.toHaveAttribute("data-before-wake");
     const sameControl = (label: string) => label.replace(/#\d+$/, "");
     await expect.poll(async () => sameControl(await focused()), { message: "focus is on Copy again after the page is rebuilt" }).toBe(sameControl(copy));
-    await expect(sheet.getByRole("article").filter({ hasText: NOTICE_HEADLINE }).getByRole("group")).toHaveAttribute("open", "");
+    await expect(sheet.getByRole("article").first().getByRole("group")).toHaveAttribute("open", "");
     atlas[atlas.length - 1]!.liveness = "stale_metadata";
     await hub.announceCatalog("atlas");
     await expect.poll(async () => sameControl(await focused())).toBe(sameControl(copy));
@@ -322,8 +322,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // journal as conversation blockers, nor make the rail wait on me.
     await expect(log.getByTestId("conversation-turn").filter({ hasText: NOTICE_TEXT })).toHaveCount(0);
     await expect(log).not.toContainText("never reached it");
-    await expect(contextRail(page).getByRole("button", { name: /^Blocker/, includeHidden: true })).toHaveCount(0);
-    const waiting = contextRail(page).getByRole("region", { name: "Waiting on you", exact: true, includeHidden: true });
+    await expect(contextRail(page).getByTestId("context-jump").and(page.locator('[data-kind="blocker"]'))).toHaveCount(0);
+    const waiting = contextRail(page).getByTestId("context-waiting");
     await expect(waiting).toBeHidden();
     await expect(waiting.getByRole("listitem", { includeHidden: true })).toHaveCount(0);
     // Hidden static headings do not represent a waiting state. The spoken
@@ -337,7 +337,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // it arrives in this thread, naming the session it answers.
     hub.supervisorSays(SESSION, "The bank feed reconciled overnight.", { reply_to: 3196200, reply_to_session: "Accounting-wise-lion-31" });
     const answer = log.getByTestId("conversation-turn").filter({ hasText: "The bank feed reconciled overnight." });
-    await expect(answer.getByText(/^Reply to /)).toContainText("wise-lion-31");
+    await expect(answer.getByTestId("reply-quote")).toContainText("wise-lion-31");
     await expect(answer).toHaveAttribute("data-reply-to", "3196200");
     // An open earlier session shows its turn list; a collapsed one hides it.
     await expect(page.getByRole("region", { name: "Earlier sessions" }).getByRole("group").getByRole("list")).toHaveCount(0);

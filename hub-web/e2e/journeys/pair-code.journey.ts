@@ -3,7 +3,6 @@ import type { Locator, Page } from "@playwright/test";
 import { test, expect, expectWholeFocusRing, holdPageClock } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 
-// The pairing dialog is named by its step's heading.
 const pairDialog = (page: Page) => page.getByRole("dialog", { name: /^(Pair a machine|Machine authorized)$/ });
 // The step's scroller: the invitation form, or the create/code section.
 const pairScroller = (dialog: Locator) => dialog.getByTestId("pair-flow").or(dialog.locator("#pair-form"));
@@ -31,7 +30,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
   await journey.stage("Ask for a pairing code", async () => {
     await activate(page, page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeVisible();
-    await expect(dialog.getByText("This browser will be able to:")).toBeVisible();
+    await expect(dialog.getByTestId("pair-lead").first()).toBeVisible();
     await expect(dialog.getByText("Technical details", { exact: true })).toBeVisible();
     // cas-d043 G11: the dialog is named by its heading.
     await expect(page.getByRole("dialog", { name: "Pair a machine", exact: true })).toBeVisible();

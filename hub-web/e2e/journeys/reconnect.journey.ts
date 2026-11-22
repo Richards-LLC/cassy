@@ -8,10 +8,11 @@ const conversationList = (page: Page) => page.getByRole("navigation", { name: "C
 const conversationRow = (page: Page) => conversationList(page).getByRole("button", { name: /^cas-src on / });
 // The header's connection chip is hidden while it has no words; attribute checks still read it.
 const connectionChip = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
-const messageStatus = (page: Page) => page.getByRole("status", { name: "Message status" });
+const messageStatus = (page: Page) => page.getByTestId("message-status");
 const conversationLog = (page: Page) => page.getByRole("log");
 // The held send's waiting line, and the supervisor's working line.
-const heldNotice = (page: Page) => conversationLog(page).getByRole("status").filter({ hasText: "Waiting for the connection" });
+const heldNotice = (page: Page) => conversationLog(page).getByTestId("conversation-held");
+const turn = (page: Page, text: string) => conversationLog(page).getByTestId("conversation-turn").filter({ hasText: text });
 const workingLine = (page: Page) => conversationLog(page).getByTestId("working");
 const attentionCount = (page: Page) => page.getByTestId("conversation-attention-count");
 
@@ -180,7 +181,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // sending signal; no working line beside it.
     await expect(workingLine(page)).toHaveCount(0);
     hub.deliverLatest(PELICAN);
-    await expect(conversationLog(page).getByRole("status").filter({ hasText: /^Delivered$/ })).toBeVisible();
+    await expect(turn(page, "Are you there?")).toHaveAttribute("data-state", "delivered");
+    await expect(turn(page, "Are you there?").getByTestId("conversation-delivered")).toBeVisible();
     // cas-3f40: a transport receipt proves handoff, not supervisor execution.
     await expect(workingLine(page)).toHaveCount(0);
     // A second flush would come from a timer: the page clock runs the next

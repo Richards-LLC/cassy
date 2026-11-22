@@ -192,12 +192,14 @@ for (const [index, variant] of variants.entries()) {
         await expect(diagram(frame)).toBeVisible();
         await expect(expand).toBeHidden();
         await expect(wrap).toBeHidden();
-        await expect(log.getByLabel("Diagram source — preview unavailable", { exact: true })).toHaveText("invalid diagram source");
+        const fallback = codeFrames(page).filter({ hasText: "invalid diagram source" }).getByTestId("markdown-code");
+        await expect(fallback).toHaveAttribute("data-rich-state", "fallback");
+        await expect(fallback).toHaveText("invalid diagram source");
         expect(richRequests.some((url) => url.includes("chunk-rich-diagram"))).toBe(true);
         // The reply guidance's own flowchart shows whole, with no action to reach its end.
         hub.supervisorSays(PELICAN, "```mermaid\nflowchart TD\n  A[Worker parks the task] --> B[Supervisor merges to the epic]\n  B --> C[Merge queue runs the suite]\n  C -->|green| D[main]\n  C -->|red| B\n```");
         const flow = codeFrames(page).filter({ hasText: "mermaid" }).filter({ has: page.getByText("Merge queue runs the suite") });
-        const flowchart = flow.getByRole("img", { name: "Mermaid diagram", exact: true });
+        const flowchart = diagram(flow).getByRole("img");
         await expect(flowchart).toBeVisible();
         // The SVG can be visible and still have no box for a moment on a fast runner.
         await expect.poll(async () => (await flowchart.boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeGreaterThan(288);

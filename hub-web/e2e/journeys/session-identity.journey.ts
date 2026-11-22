@@ -12,8 +12,8 @@ const connection = (page: Page) => page.getByRole("status", { name: "Connection"
 const composer = (page: Page) => page.getByRole("textbox", { name: "Your message", exact: true });
 const sendButton = (page: Page) => page.getByRole("button", { name: /^Send to the .+ supervisor$/ });
 const turn = (page: Page, text: string) => page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: text });
-// A held send says it waits for the connection.
-const heldLine = (page: Page) => page.getByRole("log").getByRole("status").filter({ hasText: "Waiting for the connection" });
+// A held send's waiting line, by its test id.
+const heldLine = (page: Page) => page.getByRole("log").getByTestId("conversation-held");
 const backButton = (page: Page) => page.getByRole("button", { name: "‹ Conversations", exact: true });
 const heading = (page: Page) => page.getByTestId("conversation-heading");
 const rawOutput = (page: Page) => heading(page).getByRole("button", { name: "Raw output", exact: true });
@@ -159,8 +159,9 @@ test("HUB-J14 upgrading a running session preserves a legacy draft", journeyPart
   await journey.stage("Missing birth is unknown, not evidence of a stopped session", async () => {
     await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
     await expect(composer(page)).toHaveValue("Words written before birth tracking");
-    // A stopped draft would be filed as a Saved messages notice.
-    await expect(page.getByRole("region", { name: "Saved messages" }).getByRole("article")).toHaveCount(0);
+    // No notice anywhere is a stopped draft: notices carry their identity in data-attention-id.
+    const noticeIds = await page.getByRole("article", { includeHidden: true }).evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.attentionId ?? ""));
+    expect(noticeIds.filter(id => id.includes(":stopped-draft:"))).toEqual([]);
     expect(hub.sends).toHaveLength(0);
   });
 });
@@ -183,8 +184,8 @@ test("HUB-J14 an old rejected send cannot settle the replacement's in-flight mes
   await journey.stage("New sends keep their own receipt state", async () => {
     await expect.poll(() => hub.sends.length).toBe(2);
     for (const text of ["New send A", "New send B"]) await expect(turn(page, text)).toHaveAttribute("data-state", "sending");
-    // Every unconfirmed send, alone or in a run, carries a "not confirmed" status.
-    await expect(page.getByRole("log").getByRole("status").filter({ hasText: /not confirmed/i })).toHaveCount(0);
+    // None of the three sends is unconfirmed.
+    for (const text of ["Old held words", "New send A", "New send B"]) await expect(turn(page, text)).not.toHaveAttribute("data-state", "unconfirmed");
   });
 });
 
@@ -296,8 +297,8 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
       await expect(row("thoughtful-chinchilla-84")).not.toHaveAccessibleName(/most recent/i);
       expect(await rects()).toEqual(before);
     });
-    // Only the Most recent row speaks its mark; the others' slots are aria-hidden.
-    const currentKey = await conversationList(page).getByRole("button", { name: /^gabber-studio on .*\bmost recent\b/ }).getAttribute("data-thread-key");
+    // The Most recent row is the one marked data-most-recent="true".
+    const currentKey = await rows.evaluateAll(nodes => nodes.find(node => (node as HTMLElement).dataset.mostRecent === "true")?.getAttribute("data-thread-key") ?? null);
     const next = machine.sessions.find(session => `atlas:${session.name}` !== currentKey)!;
     const nextRow = row(next.supervisor!);
     const previousRow = rows.filter({ hasText: machine.sessions.find(session => `atlas:${session.name}` === currentKey)!.supervisor! });
@@ -341,7 +342,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   const log = page.getByRole("log");
   const earlier = page.getByRole("region", { name: "Earlier sessions" });
   // Each earlier session is a disclosure; its summary leads with this label.
-  const earlierLabels = earlier.getByText(/^Earlier (session \S+|messages with no session recorded), /);
+  const earlierLabels = earlier.getByTestId("earlier-label");
   /** The list sits beside the thread on a desktop; a narrow layout goes back to it. */
   const backToList = async () => { const back = backButton(page); if (await back.isVisible()) await back.click(); };
   const rows = projectRows(page, "gabber-studio");
@@ -354,8 +355,8 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     // cas-ade2: rows sort by supervisor name; Most recent marks the newest where it stands.
     const names = rows.getByTestId("conversation-role");
     await expect(names).toContainText(["calm-puma-34", "noble-cheetah-84", "wild-shark-68"]);
-    await expect(row("calm-puma-34").getByText("Most recent", { exact: true })).toBeVisible();
-    await expect(row("noble-cheetah-84").getByText("Most recent", { exact: true })).toBeHidden();
+    await expect(row("calm-puma-34").getByTestId("conversation-session-mark")).toBeVisible();
+    await expect(row("noble-cheetah-84").getByTestId("conversation-session-mark")).toBeHidden();
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
     await expect(rows.getByTestId("conversation-when")).toHaveText(["2m", /^\d+h$/, "40m"]);
@@ -365,7 +366,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(rows.getByTestId("conversation-preview")).toHaveCount(0);
     await expect(row("calm-puma-34")).toHaveAccessibleName(/bright-robin-85/);
     await expect(row("noble-cheetah-84").getByLabel("1 unread")).toBeVisible();
-    await expect.poll(async () => ((await page.getByTestId("hub-footer-badges").getByText(/conversation/i).innerText()).match(/\d+/g) ?? []).map(Number)).toEqual([3]);
+    await expect.poll(async () => ((await page.getByTestId("hub-footer-badges").getByTestId("hub-footer-sessions").innerText()).match(/\d+/g) ?? []).map(Number)).toEqual([3]);
     // A useful incoming preview can grow the last row beyond the list's
     // available height. Keep it reachable in the list's own scroll region.
     const incoming = rows.last();
@@ -384,7 +385,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(empty).not.toContainText("Commander");
     await expect(empty).not.toContainText("→");
     await expect(empty.getByRole("button")).toHaveCount(0);
-    await expect(page.getByTestId("conversation-thread").getByRole("log")).not.toContainText("Mixdown preview rendered");
+    await expect(page.getByTestId("conversation-thread").getByRole("log", { includeHidden: true })).not.toContainText("Mixdown preview rendered");
     await expect(page.getByRole("region", { name: /^Waiting on you: question from / })).toBeHidden();
     // The older session's thread is a collapsed, labelled section, with dates.
     await expect(earlierLabels).toHaveText([/^Earlier session noble-cheetah-84, Yesterday/, /^Earlier messages with no session recorded, Yesterday/]);
@@ -392,8 +393,9 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   });
 
   await journey.stage("Read an earlier session's messages", async () => {
-    const nobleLabel = earlier.getByText(/^Earlier session noble-cheetah-84, /);
-    const noble = earlier.getByRole("group").filter({ has: page.getByText(/^Earlier session noble-cheetah-84, /) });
+    const noble = earlier.getByRole("group").filter({ has: page.getByTestId("earlier-label").filter({ hasText: "noble-cheetah-84" }) });
+    await expect(noble).toHaveAttribute("data-session", "gabber-studio-noble-cheetah-84");
+    const nobleLabel = noble.getByTestId("earlier-label");
     await nobleLabel.click();
     await expect(noble.getByRole("listitem")).toHaveCount(2);
     await expect(noble.getByRole("listitem").nth(1)).toContainText("Mixdown preview rendered: 3 stems.");
@@ -603,8 +605,8 @@ test("HUB-J14 a project group ends before the next project's conversation (cas-6
     const group = list.getByRole("group", { name: "gabber-studio · 2 conversations on Atlas", exact: true });
     await expect(groupRows("gabber-studio")).toHaveCount(2);
     await expect(list.getByRole("group", { name: "pulse-card · 1 conversation on Atlas", exact: true }).getByRole("button", { name: /^pulse-card on / })).toHaveCount(1);
-    // Only the Most recent row speaks its mark; the others' slots are aria-hidden.
-    await expect(group.getByRole("button", { name: /^gabber-studio on .*\bmost recent\b/ }).getByText("Most recent", { exact: true })).toBeVisible();
+    // Only the Most recent row shows its mark; the others' slots are hidden.
+    await expect(group.getByTestId("conversation-session-mark").filter({ visible: true })).toHaveCount(1);
     await groupRows("gabber-studio").first().focus();
     await page.keyboard.press("Tab");
     await expect(groupRows("gabber-studio").last()).toBeFocused();

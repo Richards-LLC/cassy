@@ -153,6 +153,7 @@ function appendWithSubject(document: Document, line: HTMLElement, text: string, 
 function confirmation(document: Document, context: FleetOpsViewContext, rowKey: string, action: FleetAction): HTMLElement {
   const box = document.createElement("div");
   box.className = "fleet-ops-confirm";
+  box.dataset.testid = "fleet-ops-confirm";
   box.setAttribute("role", "group");
   box.setAttribute("aria-label", action.question ?? action.label);
   const question = document.createElement("p");
@@ -427,10 +428,10 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   }
   const groups = [...byScope.values()];
   if (groups.length) {
-    const disclosure = document.createElement("details"); disclosure.className = "fleet-permissions";
+    const disclosure = document.createElement("details"); disclosure.className = "fleet-permissions"; disclosure.dataset.testid = "fleet-permissions";
     disclosure.open = permissionDisclosure.get(context.state) ?? false;
     disclosure.ontoggle = () => permissionDisclosure.set(context.state, disclosure.open);
-    const summary = document.createElement("summary");
+    const summary = document.createElement("summary"); summary.dataset.testid = "fleet-permissions-summary";
     summary.textContent = !addGate.allowed && !focusGate.allowed && (!context.writeAccess || !grantGate.allowed) ? "View only · Permissions" : "Limited access · Permissions";
     const explanation = document.createElement("p");
     explanation.textContent = headerInstruction(groups);

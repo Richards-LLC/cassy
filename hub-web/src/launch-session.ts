@@ -294,7 +294,7 @@ export function launchSheetMarkup(): string {
   <div class="launch-flow">
     <header class="launch-head"><h2 id="launch-title">New session</h2><button type="button" class="launch-close" data-launch-action="close" aria-label="Close new session">×</button></header>
     <label class="launch-machine" data-launch-machine-field>Machine<select name="launch-machine"></select></label>
-    <section class="launch-view" data-launch-view="form" aria-labelledby="launch-title">
+    <section class="launch-view" data-testid="launch-view" data-launch-view="form" aria-labelledby="launch-title">
       <fieldset class="launch-project">
         <legend>Project</legend>
         <div class="launch-tabs" role="tablist" aria-label="How to find the project">
@@ -318,7 +318,7 @@ export function launchSheetMarkup(): string {
       <p class="launch-invalid" role="alert" hidden></p>
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
     </section>
-    <section class="launch-view launch-grant" data-launch-view="grant" hidden>
+    <section class="launch-view launch-grant" data-testid="launch-view" data-launch-view="grant" hidden>
       <p class="launch-lead" data-testid="launch-lead"></p>
       <p class="launch-grant-error" role="alert" hidden></p>
       <p class="launch-grant-invite">Starting sessions is a separate permission this browser asks for once per machine. Run this on the machine, then open the link it prints in this browser.</p>
@@ -326,12 +326,12 @@ export function launchSheetMarkup(): string {
       <p class="field-hint launch-grant-note">The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.</p>
       <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button><button type="button" class="primary" data-launch-action="allow">Allow starting sessions</button></div>
     </section>
-    <section class="launch-view launch-starting" data-launch-view="starting" hidden>
+    <section class="launch-view launch-starting" data-testid="launch-view" data-launch-view="starting" hidden>
       <div role="status" class="launch-progress"><p class="launch-progress-title"></p><p class="launch-progress-step"></p></div>
       <p class="field-hint">You can close this. The session keeps starting on the machine and appears in your conversations.</p>
       <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button></div>
     </section>
-    <section class="launch-view launch-error" data-launch-view="error" hidden>
+    <section class="launch-view launch-error" data-testid="launch-view" data-launch-view="error" hidden>
       <div role="alert"><h3 class="launch-error-title"></h3><p class="launch-error-advice"></p><span class="launch-login launch-error-command" hidden><code></code><button type="button" data-launch-action="copy">Copy</button></span></div>
       <details class="launch-error-detail" hidden><summary>The machine's message</summary><pre></pre></details>
       <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button><button type="button" class="primary" data-launch-action="back">Back</button></div>

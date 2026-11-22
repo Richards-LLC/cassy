@@ -59,7 +59,7 @@ function capabilityLead(scopes: readonly Scope[], adminMachine?: string): string
   // :has on the box, so no re-render moves the operator's place).
   const summary = scopeSummary(scopes.filter((scope) => scope !== HUB_ADMIN_SCOPE)).map(escapeHtml).join(" · ");
   const admin = adminMachine === undefined ? "" : `<span class="pair-summary-admin" data-testid="pair-summary-admin"> · ${escapeHtml(hubAdminConsentLabel(adminMachine))}</span>`;
-  return `<p class="pair-lead">This browser will be able to: <strong class="pair-summary">${summary}${admin}</strong></p>`;
+  return `<p class="pair-lead" data-testid="pair-lead">This browser will be able to: <strong class="pair-summary">${summary}${admin}</strong></p>`;
 }
 
 /** The admin consent in plain words, naming the machine (cas-d043 G08); the scope id stays in Technical details. */
@@ -77,7 +77,7 @@ function exactScopes(scopes: readonly Scope[]): string {
 
 /** The exact origin and scopes, for whoever wants to check them; collapsed by default. */
 function technicalDetails(step: PairingStep, draft: PairingDraft, rows: string, extra = ""): string {
-  return `<details class="pair-technical" data-step="${step}"${draft.technicalOpen === step ? " open" : ""}><summary>Technical details</summary><dl class="pair-details">${rows}</dl>${extra}</details>`;
+  return `<details class="pair-technical" data-testid="pair-technical" data-step="${step}"${draft.technicalOpen === step ? " open" : ""}><summary>Technical details</summary><dl class="pair-details">${rows}</dl>${extra}</details>`;
 }
 
 type InvitationField = "url" | "label" | "operator" | "device";
@@ -220,7 +220,7 @@ function withheldLead(grantedScopes: readonly Scope[] | undefined, machineLabel:
   const ask = missing.includes("message-send")
     ? `To send messages from this browser, ask whoever runs ${machine} for a link that can, then open it here.`
     : `For more, ask whoever runs ${machine} for a link that allows it, then open it here.`;
-  return `<div class="pair-withheld"><p class="pair-lead">This link does not let it: <strong class="pair-summary">${scopeSummary(missing).map(escapeHtml).join(" · ")}</strong></p><p class="scope-hint pair-withheld-ask">${escapeHtml(ask)}</p></div>`;
+  return `<div class="pair-withheld"><p class="pair-lead" data-testid="pair-lead">This link does not let it: <strong class="pair-summary">${scopeSummary(missing).map(escapeHtml).join(" · ")}</strong></p><p class="scope-hint pair-withheld-ask">${escapeHtml(ask)}</p></div>`;
 }
 
 /**

@@ -53,7 +53,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         // cas-68d0 F01: the name is announced once: by the group at 1280, by
         // the phone sheet's dialog at 390, never also by an inner group.
         await expect(page.getByRole("group", { name: "Write access outside the worktree" })).toHaveCount(width === 390 ? 0 : 1);
-        await expect(panel.getByText("Lets the agents on one task write to a folder outside their worktree until the task closes.", { exact: true })).toBeVisible();
+        await expect(panel.getByTestId("write-grant-lead")).toBeVisible();
         if (width === 390) {
           await expect(panel.getByText(/^cas-src on /)).toBeVisible();
           await expect(page.getByRole("dialog", { name: "Write access outside the worktree" }).getByRole("button", { name: "Close write access", exact: true })).toBeVisible();
@@ -188,10 +188,8 @@ test.describe("write access without factory:manage cas_ab04", () => {
       await journey.open();
       await conversationRow(page).click();
       await expect(statusView(page).getByRole("button", { name: "Write access…" })).toHaveCount(0);
-      // The Permissions disclosure is a <details> (role group) opened from its summary.
-      const summary = page.getByText(/^(View only|Limited access) · Permissions$/);
-      const permissions = statusView(page).getByRole("group").filter({ has: summary });
-      await permissions.getByText(/^(View only|Limited access) · Permissions$/).focus(); await page.keyboard.press("Enter");
+      const permissions = statusView(page).getByTestId("fleet-permissions");
+      await permissions.getByTestId("fleet-permissions-summary").focus(); await page.keyboard.press("Enter");
       await expect(permissions).toBeVisible();
       expect(hub.writeGrants).toHaveLength(0);
       await permissions.getByRole("link", { name: "Open Paired machines" }).click();

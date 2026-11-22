@@ -9,7 +9,7 @@ const conversationList = (page: Page) => page.getByRole("navigation", { name: "C
 // A row is named "<project> on <machine>, …"; the row's own controls are not.
 const conversationRow = (page: Page) => conversationList(page).getByRole("button", { name: /^cas-src on / });
 const connectionHeader = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
-const messageStatus = (page: Page) => page.getByRole("status", { name: "Message status", exact: true });
+const messageStatus = (page: Page) => page.getByTestId("message-status");
 const outageBanner = (page: Page) => page.getByTestId("terminal-disconnected-banner");
 // The banner's sentence is its own live region.
 const outageWords = (page: Page) => page.getByRole("status", { name: "Outage", exact: true });
@@ -20,15 +20,16 @@ const pairedMachinesToggle = (page: Page) => page.getByRole("complementary", { n
 const pairDialog = (page: Page) => page.getByRole("dialog", { name: /^(?:Pair a machine|Machine authorized)$/ });
 const toast = (page: Page) => page.getByRole("status", { name: "Notice", exact: true });
 const turns = (page: Page) => page.getByRole("log").getByTestId("conversation-turn");
-// A sent bubble's delivery line is a status; its words name the send's state.
-const deliveryStatus = (page: Page, words: RegExp) => page.getByRole("log").getByRole("status").filter({ hasText: words });
-const DELIVERED = /^Delivered$/;
-const HELD = /^Waiting for the connection — /;
-const SENDING = /^(?:Sending…|Waiting for the connection — .*|Waiting for .+ to confirm…)$/;
-const notSentStatus = (page: Page) => page.getByRole("log").getByRole("status").filter({ has: page.getByText("Not sent", { exact: true }) });
-// An Attention card is an article headed by its notice.
-const attentionCard = (page: Page, headline: string) => page.getByTestId("attention-panel")
-  .getByRole("article", { includeHidden: true }).filter({ has: page.getByText(headline, { exact: true }) });
+const sentTurn = (page: Page, text: string) => turns(page).filter({ hasText: text });
+// A held send's waiting line, and any still-sending send's line (held or not).
+const heldLine = (page: Page) => page.getByRole("log").getByTestId("conversation-held");
+const sendingLines = (page: Page) => page.getByRole("log").getByTestId("conversation-delivery").or(heldLine(page));
+async function expectDelivered(page: Page, text: string): Promise<void> {
+  await expect(sentTurn(page, text)).toHaveAttribute("data-state", "delivered");
+  await expect(sentTurn(page, text).getByTestId("conversation-delivered")).toBeVisible();
+}
+// An Attention notice carries its stable machine:kind identity (cas-a5c6).
+const attentionCard = (scope: Page | Locator, id: string) => scope.locator(`[data-attention-id="${id}"]`);
 const opening = (page: Page) => page.getByRole("status", { name: "Opening conversation", exact: true });
 
 // Every independent page must remain free of unhandled app errors too.
@@ -62,7 +63,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     expect((await accepted).text).toBe("After the route change");
     expect(hub.machineSocketOpens.get("atlas")).toBeGreaterThan(1);
     hub.deliverLatest(PELICAN);
-    await expect(deliveryStatus(page, DELIVERED)).toBeVisible();
+    await expectDelivered(page, "After the route change");
     expect(sentTimes(hub, "After the route change")).toBe(1);
   });
 });
@@ -88,7 +89,7 @@ async function connected(page: Page, multiplex = true, machines = [ATLAS]) {
   await page.goto("./");
   await chooseConversation(page);
   const header = connectionHeader(page);
-  const held = deliveryStatus(page, HELD);
+  const held = heldLine(page);
   await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
   await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
   return { hub, clock, header, held };
@@ -131,7 +132,7 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
     // messages went out, and stays clear once they are Delivered.
     await expect(messageStatus(page)).toBeHidden();
     hub.deliverLatest(PELICAN);
-    await expect(deliveryStatus(page, DELIVERED)).toBeVisible();
+    await expectDelivered(page, "Second before the refusal");
     await expect(messageStatus(page)).toBeHidden();
   });
 });
@@ -205,7 +206,7 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
     await expect(messageStatus(page)).toBeHidden();
     expect(hub.sends.map(m => m.text)).toEqual(["While unsteady", "While Tailscale is off"]);
     hub.deliverLatest(PELICAN);
-    await expect(deliveryStatus(page, DELIVERED)).toBeVisible();
+    await expectDelivered(page, "While Tailscale is off");
     expect(sentTimes(hub, "While unsteady")).toBe(1);
     expect(sentTimes(hub, "While Tailscale is off")).toBe(1);
   });
@@ -405,15 +406,18 @@ test("HUB-J12 network switch: a reheld send expires at its original two-minute d
     await clock.advance(112_999);
     await expect(held).toHaveCount(1);
     const log = page.getByRole("log");
-    await expect(log.getByText("Not sent", { exact: true })).toHaveCount(0);
+    const expired = sentTurn(page, "While the daemon stays down");
+    await expect(expired).not.toHaveAttribute("data-state", "error");
     await clock.advance(1);
-    await expect(log.getByText("Not sent", { exact: true })).toBeVisible();
-    await expect(notSentStatus(page).getByTestId("conversation-refused-next")).toBeVisible();
+    await expect(expired).toHaveAttribute("data-state", "error");
+    await expect(expired.getByRole("status")).toBeVisible();
+    await expect(expired.getByTestId("conversation-refused-next")).toBeVisible();
     // With no queued send left, a healthy session attach can now settle even
     // while its daemon still refuses sends. Retry wording follows that state.
     await clock.advance(8_000);
     await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
-    await expect(notSentStatus(page).getByTestId("conversation-refused-next")).toBeVisible();
+    await expect(expired).toHaveAttribute("data-state", "error");
+    await expect(expired.getByTestId("conversation-refused-next")).toBeVisible();
     await expect(held).toHaveCount(0);
 
     expect(hub.sends).toHaveLength(0);
@@ -516,7 +520,7 @@ test("HUB-J12 network switch: a revoked pairing settles waiting sends and is nam
     const log = page.getByRole("log");
     // On the wire, with no receipt yet.
     await accepted(page, hub, "On the wire before the revoke");
-    await expect(deliveryStatus(page, SENDING)).toHaveCount(1);
+    await expect(sendingLines(page)).toHaveCount(1);
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
     await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
@@ -526,23 +530,25 @@ test("HUB-J12 network switch: a revoked pairing settles waiting sends and is nam
     await clock.advance(1_000);
     await expect(header).toBeVisible();
     // Nothing keeps saying it is sending (journey F35).
-    await expect(deliveryStatus(page, SENDING)).toHaveCount(0);
+    await expect(sendingLines(page)).toHaveCount(0);
     await expect(held).toHaveCount(0);
-    const refused = log.getByTestId("conversation-turn").filter({ has: page.getByText("Not sent", { exact: true }) });
+    // The held send is the refused one; the one on the wire is only not confirmed.
+    const refused = sentTurn(page, "Held before the revoke");
     await expect(refused).toHaveCount(1);
+    await expect(refused).toHaveAttribute("data-state", "error");
     await expect(refused).toContainText("Held before the revoke");
     await expect(refused.getByTestId("conversation-refused-reason")).toBeVisible();
     await expect(refused.getByRole("button", { name: "Retry sending" })).toBeVisible();
-    await expect(log.getByTestId("conversation-turn").filter({ has: page.getByText("Not confirmed", { exact: true }) })).toContainText("On the wire before the revoke");
+    await expect(sentTurn(page, "On the wire before the revoke")).toHaveAttribute("data-state", "unconfirmed");
     await expect(messageStatus(page)).toBeVisible();
     // The rail card is headed as the header and banner word it (journey F8).
-    await expect(attentionCard(page, "Machine needs pairing")).toBeVisible();
+    await expect(attentionCard(page, "atlas:auth_loss")).toBeVisible();
     // Negative window: the held send never goes by itself, and the refusal
     // stands through later heartbeats (cas-05c0 QA).
     await clock.advance(10_000);
     expect(sentTimes(hub, "Held before the revoke")).toBe(0);
 
-    await expect(attentionCard(page, "Machine needs pairing")).toBeVisible();
+    await expect(attentionCard(page, "atlas:auth_loss")).toBeVisible();
     await expect(header).toHaveAttribute("data-phase", "failed");
   });
 });
@@ -550,7 +556,7 @@ test("HUB-J12 network switch: a revoked pairing settles waiting sends and is nam
 test("HUB-J12 network switch: a machine drop is told by the banner alone, and control comes back with the machine (cas-7b31)", journeyPart, async ({ page, journey }) => {
   await journey.stage("The whole machine drops, then returns", async () => {
     const { hub, clock, header } = await connected(page);
-    const transport = attentionCard(page, "Lost connection to Atlas · Linux");
+    const transport = attentionCard(page.getByTestId("attention-panel"), "atlas:hub_disconnected");
     const leaseTakes: string[] = [];
     page.on("request", request => { if (request.method() === "POST" && request.url().endsWith("/lease")) leaseTakes.push(request.url()); });
     await hub.down("atlas", { sockets: "close" });
@@ -626,7 +632,7 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     // cas-71f4: the supervisor has it once it is delivered; until then the
     // bubble's "Sending…" is the one signal.
     hub.deliverLatest(PELICAN);
-    await expect(deliveryStatus(page, DELIVERED)).toBeVisible();
+    await expectDelivered(page, "Before the pairing is revoked");
     const working = page.getByRole("log").getByTestId("working");
     // A receipt alone never claims supervisor execution, before or after revocation.
     await expect(working).toHaveCount(0);
@@ -842,14 +848,18 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
   const studioRow = list.getByRole("button", { name: /^gabber-studio on / });
   const footer = footerMeta(page);
   const expectFooter = async (count: string) => {
-    await expect(footer.getByText(/conversation/i)).toHaveText(count);
+    await expect(footer.getByTestId("hub-footer-sessions")).toHaveText(count);
     await expect(footer.getByTitle("Web client release and build")).toHaveText(/^Web \S/);
   };
   // The list's empty state is shown only when no row is (it is hidden, not
   // removed, while rows exist).
   const empty = page.getByTestId("conversation-empty").filter({ visible: true });
-  // A down machine's row reads "Last known", not a draft, unreachable or interrupted line.
-  const outageNote = (conversation: Locator) => conversation.getByTestId("conversation-preview").filter({ hasText: /^Last known$/ });
+  // A down machine's row note carries no draft, unreachable or interrupted modifier.
+  const outageNote = (conversation: Locator) => conversation.getByTestId("conversation-preview");
+  const expectOutageNote = async (conversation: Locator) => {
+    await expect(outageNote(conversation)).toBeVisible();
+    await expect(outageNote(conversation)).toHaveClass("conversation-preview");
+  };
   const outages = [
     ["The machine stays down past its catalog's freshness: the network is gone for both machines, so every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
     ["The machine stays down past its catalog's freshness: only Atlas, its hub answering 503 auth_store_unavailable, so only its conversation is last known", ["atlas"], { sockets: "close", http: "auth_store_unavailable" }, "2 conversations · 1 last known"],
@@ -863,10 +873,10 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       await expect(header).toHaveAttribute("data-phase", "backoff");
       // A down machine's row carries its outage note (last known), not a
       // draft, unreachable or interrupted line.
-      await expect(outageNote(row)).toBeVisible();
+      await expectOutageNote(row);
       await expect(row).not.toContainText(/retry|Reconnecting|message pending/i);
       if (down.length === 1) await expect(outageNote(studioRow)).toHaveCount(0);
-      else await expect(outageNote(studioRow)).toBeVisible();
+      else await expectOutageNote(studioRow);
       await expect(empty).toHaveCount(0);
       await expectFooter(count);
     });
@@ -1026,7 +1036,7 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await page.reload();
     await chooseConversation(page);
     await expect(header).toHaveAttribute("data-phase", "live", { timeout: 30_000 });
-    const notice = attentionCard(page, "Starting sessions needs allowing again").filter({ visible: true });
+    const notice = attentionCard(page.getByTestId("attention-panel"), "atlas:launch_dropped").filter({ visible: true });
     await expect(notice).toBeVisible();
     await expect(page.getByTestId("attention-panel")).toBeVisible();
     // cas-865c: New session keeps its name; without the permission it opens the grant view.
@@ -1041,9 +1051,10 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
   await journey.stage("Allowing it again settles the notice", async () => {
     const sheet = page.getByRole("dialog", { name: "New session" });
     await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).click();
-    await expect(sheet.getByRole("region", { name: "New session", exact: true })).toBeVisible();
+    const shownView = sheet.getByTestId("launch-view").filter({ visible: true });
+    await expect(shownView).toHaveAttribute("data-launch-view", "form");
     await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(attentionCard(page, "Starting sessions needs allowing again")).toHaveCount(0);
+    await expect(attentionCard(page, "atlas:launch_dropped")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     // Allowed: the remembered state is gone, so a reload does not bring the lead back.
     expect(await page.evaluate(() => localStorage.getItem("cas-commander-launch-dropped:v1"))).toBeNull();
@@ -1067,7 +1078,7 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
       expect((await next).text).toBe(text);
     }
     await clock.advance(15_000); // every receipt deadline passes
-    const notice = log.getByRole("status").filter({ hasText: /not confirmed/i });
+    const notice = log.getByTestId("conversation-unconfirmed");
     await expect(notice).toHaveCount(1);
     await expect(notice).toContainText(new RegExp("(?=[\\s\\S]*cas\\-src)(?=[\\s\\S]*3)"));
     await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
@@ -1111,7 +1122,7 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
     // thing disagree, on screen or to a screen reader.
     await expect(chip).toBeVisible();
     await expect(chip).toContainText("3 dismissed");
-    await expect(notice.getByText(/not confirmed$/i)).toContainText("2");
+    await expect(notice.getByTestId("conversation-unconfirmed-count")).toContainText("2");
     const counts = await page.evaluate(() => {
       const said = [document.body.innerText, ...[...document.querySelectorAll("[aria-label]")].map((node) => node.getAttribute("aria-label") ?? "")].join("\n");
       return [...said.matchAll(/(\d+) (?:messages?|dismissed)[^\n]*?not (?:sent or not )?confirmed/g)].map((match) => `${match[0].includes("dismissed") ? "dismissed" : "thread"}:${match[1]}`);
@@ -1211,7 +1222,7 @@ test("HUB-J12 explain a machine connection that cannot retry (cas-99d7)", journe
     await expect(banner).toContainText(String(recovery));
     await expect(header).toBeVisible();
     await expect(header).toHaveAttribute("data-phase", "failed");
-    await expect(attentionCard(page, "Lost connection to Atlas · Linux")).toHaveCount(1);
+    await expect(attentionCard(page, "atlas:hub_disconnected")).toHaveCount(1);
     // No automatic reconnect is claimed on any visible surface: the list
     // footer beside the conversation names the machine as the row and the
     // header do (cas-f698).

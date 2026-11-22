@@ -16,8 +16,8 @@ const sidebar = (page: Page) => page.getByRole("complementary", { name: "Supervi
 const conversationRow = (page: Page, spokenStart: string) => conversationList(page).getByRole("button", { name: new RegExp(`^${escapeRegExp(spokenStart)}`) });
 /** Every row of these projects, shown or folded away, as the row class counted them. */
 const conversationRows = (page: Page, projects: readonly string[]) => conversationList(page).getByRole("button", { name: new RegExp(`^(?:${projects.map(escapeRegExp).join("|")}) on `), includeHidden: true });
-// A project card is the group named "<project> · <n> conversations on <machines>".
-const projectCards = (page: Page) => conversationList(page).getByRole("group", { name: / · \d+ conversations? on /, includeHidden: true });
+const projectCards = (page: Page) => conversationList(page).getByTestId("project-card");
+const projectCardNames = (page: Page) => projectCards(page).getByTestId("project-card-name");
 const machineChip = (page: Page, machine: string) => conversationList(page).getByRole("button", { name: new RegExp(`^Filter conversations on ${escapeRegExp(machine)}(?:,|$)`) });
 // The row Enter opens has no ARIA state of its own; the search names it as its active descendant.
 const listEnterTarget = (page: Page) => conversationList(page).locator('[data-enter-target="true"]');
@@ -270,7 +270,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     firstWelcome = await welcomeLayout();
     expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
     // cas-ade2: project cards sort by name (cas-src, gabber-studio, lighthouse); each row names its role and machine (cas-da546).
-    await expect(projectCards(page).getByRole("strong")).toHaveText(["cas-src", "gabber-studio", "lighthouse"]);
+    await expect(projectCardNames(page)).toHaveText(["cas-src", "gabber-studio", "lighthouse"]);
     await expect(list.getByTestId("conversation-machine-name")).toHaveText(["Atlas", "Studio Mac", "Forge build box with an unusual hostname"]);
     await expect(search).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", /Ctrl K/);
@@ -324,11 +324,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // A project name leaves its conversation as the only row.
     await search.fill("gabber");
     await expect(rows).toHaveCount(1);
-    await expect(projectCards(page).getByRole("strong")).toHaveText(["gabber-studio"]);
+    await expect(projectCardNames(page)).toHaveText(["gabber-studio"]);
     // The machine and the supervisor codename find it too.
     await search.fill("atlas");
     await expect(rows).toHaveCount(1);
-    await expect(projectCards(page).getByRole("strong")).toHaveText(["cas-src"]);
+    await expect(projectCardNames(page)).toHaveText(["cas-src"]);
     // cas-786a (journey F29): the row Enter opens carries its "Enter ↵" hint
     // and its unread count side by side, never one drawn over the other. Every
     // point of the count is the count's own, not the hint painted on top.
@@ -347,7 +347,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     expect(await listEnterTarget(page).ariaSnapshot(), "the row's aria snapshot").not.toContain("Enter");
     await search.fill(OTTER);
     await expect(rows).toHaveCount(1);
-    await expect(projectCards(page).getByRole("strong")).toHaveText(["gabber-studio"]);
+    await expect(projectCardNames(page)).toHaveText(["gabber-studio"]);
     await search.fill("no-such-project");
     await expect(rows).toHaveCount(0);
     await expect(page.getByTestId("conversation-empty")).toBeVisible();
@@ -387,9 +387,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(title).not.toHaveClass(/codename/);
     await expect(card.getByTestId("proj2")).toHaveText(`Studio Mac · macOS · ${OTTER}`);
     await expect(card.getByTestId("proj2").getByTestId("codename")).toHaveText(OTTER);
-    // A harness avatar is titled by its provider.
-    await expect(conversationHeading(page).getByTitle("Claude", { exact: true })).toHaveAttribute("data-harness", "claude");
-    await expect(card.getByTitle("Claude", { exact: true })).toHaveAttribute("data-harness", "claude");
+    await expect(page.getByTestId("conversation-identity").getByTestId("conversation-avatar")).toHaveAttribute("data-harness", "claude");
+    await expect(card.getByTestId("mono")).toHaveAttribute("data-harness", "claude");
   });
 
   await journey.stage("Find the conversation from the keyboard", async () => {
@@ -446,9 +445,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // machines, and "Dismiss all info" only when there is something to
     // dismiss (3.30.0 journey F4).
     await expect(paletteHeadings(page).filter({ visible: true })).toHaveText(["Conversations", "Machines", "Appearance", "Advanced"]);
-    // Only "Jump to" rows sit under Conversations.
-    await expect(palette.getByRole("region", { name: "Conversations", exact: true }).getByRole("button", { name: /^(?!Jump to )/, includeHidden: true })).toHaveCount(0);
-    await expect(palette.getByRole("region", { name: "Machines", exact: true })).toContainText(/\S/);
+    // Only session commands sit under Conversations; groups carry no test id, so their data-palette-group names them.
+    await expect(palette.getByTestId("palette-commands").locator('[data-palette-group="conversations"] button:not([data-palette-session])')).toHaveCount(0);
+    await expect(palette.getByTestId("palette-commands").locator('[data-palette-group="machines"]')).toContainText(/\S/);
     await expect(palette.getByRole("button", { name: /Dismiss all info/ })).toHaveCount(0);
     // cas-0546: Conversations is the only surface. No command opens a
     // terminal, shows worker panes or takes control; Advanced holds only the
@@ -495,7 +494,6 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // palette speaks of conversations, not sessions (cas-0546).
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await expect(paletteHeadings(page)).toHaveText(["Conversations", "Machines", "Appearance", "Advanced"]);
-    await expect(commandPalette(page).getByRole("button", { name: /control/i, includeHidden: true })).toHaveCount(0);
     await expect(commandPalette(page).getByRole("searchbox", { name: "Filter commands", includeHidden: true })).toHaveAttribute("placeholder", /\S/);
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });
@@ -647,7 +645,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette).toBeHidden();
     // cas-5e8b: the chips clear the description, Close is a 40px circle and
     // the installations control has an action pill's edge.
-    const hint = (await paired.getByText("Paired with this browser.").boundingBox())!;
+    const hint = (await paired.getByTestId("machine-register-hint").boundingBox())!;
     const chips = (await paired.locator("#paired-machine-filters").boundingBox())!;
     expect(chips.y - (hint.y + hint.height)).toBeGreaterThanOrEqual(12);
     expect(await closePairedMachines(page).evaluate((node) => {

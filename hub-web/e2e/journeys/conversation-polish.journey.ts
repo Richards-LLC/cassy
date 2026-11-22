@@ -180,6 +180,8 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
     await expect(statusView(page)).toBeVisible();
     await expect(statusAgents(page)).toHaveCount(1);
     expect(await statusView(page).evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    // The ask needs the session's socket, which can open after the rail draws.
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     hub.supervisorSays(PELICAN, "Choose a route with a readable question.\n\n" + "More detail about this decision. ".repeat(60), { kind: "ask", options: [] });
     await expect(pinnedExpand(page)).toBeVisible();
     // cas-053c (cas-d043): hovering the bar keeps its amber fill in both

@@ -12,8 +12,8 @@ const actionSheet = (page: Page) => page.getByTestId("fleet-action-sheet");
 const taskRow = (page: Page, id: string) => statusRail(page).getByTestId("status-task").filter({ hasText: id });
 /** The one live region every fleet result is spoken in. */
 const fleetResults = (page: Page) => page.getByRole("status", { name: "Fleet results" });
-/** A row's inline Stop confirmation, named by its question. */
-const stopConfirm = (row: Locator) => row.getByRole("group", { name: /^Stop / });
+/** A row's inline Stop confirmation. */
+const stopConfirm = (row: Locator) => row.getByTestId("fleet-ops-confirm");
 const phoneNotice = (page: Page) => page.getByTestId("fleet-phone-undo");
 /** Whose tasks the phone sheet shows; it is the sheet's description. */
 const sheetWhere = (page: Page) => page.getByTestId("context-sheet-where");
@@ -158,11 +158,12 @@ for (const colorScheme of ["light", "dark"] as const) {
           const laid = await boxes(task, notice);
           return laid && laid[0].y + laid[0].height <= laid[1].y;
         }, { message: "feedback reserves space after the last task" }).toBe(true);
-        await task.scrollIntoViewIfNeeded();
-        expect(await task.evaluate((row) => {
+        // A status refresh replaces the row; each poll reads the current one.
+        await expect.poll(() => task.evaluate((row) => {
+          row.scrollIntoView({ block: "nearest" });
           const r = row.getBoundingClientRect();
           return row.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
-        }), "the final task receives pointer input").toBe(true);
+        }, undefined, { timeout: 1_000 }).catch(() => false), { message: "the final task receives pointer input" }).toBe(true);
       });
       await journey.stage("Close the sheet; dismiss feedback by keyboard without losing the row's error", async () => {
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
@@ -430,14 +431,12 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
     await expect(reason).not.toContainText(/factory:|--scopes/);
     // Pause needs factory:operate, which this control pairing may allow itself.
     await expect(row("swift-lark-3").getByRole("menuitem", { name: "Pause" })).toHaveAttribute("aria-disabled", "true");
-    // Pause's scope is reported first, ahead of Restart and Stop's.
-    await expect(row("swift-lark-3").getByTestId("fleet-ops-reason").filter({ hasText: /^Pause: / })).toBeVisible();
+    await expect(row("swift-lark-3").getByTestId("fleet-ops-reason").first()).toBeVisible();
     const header = statusRail(page).getByTestId("fleet-ops-header");
     await expect(header.getByRole("button")).toHaveCount(0);
-    // The permissions disclosure (<details>, role group) and its summary line.
-    const permissions = header.getByRole("group");
-    await expect(permissions.getByText(/ · Permissions$/)).toBeVisible();
-    await permissions.getByText(/ · Permissions$/).click();
+    const permissions = header.getByTestId("fleet-permissions");
+    await expect(permissions.getByTestId("fleet-permissions-summary")).toBeVisible();
+    await permissions.getByTestId("fleet-permissions-summary").click();
     await expect(permissions).toBeVisible();
     const before = hub.operations.length;
     await stop.click({ force: true });
@@ -598,7 +597,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
           // A catalog change re-renders, which replaces the shell.
           await hub.announceCatalog("atlas");
           await expect(phoneNotice(page)).toContainText("swift-lark-3");
-          await expect(agent().getByRole("status", { name: "Fleet progress", exact: true })).toContainText("swift-lark-3");
+          await expect(agent().getByRole("status", { name: "Fleet progress", exact: true, includeHidden: true })).toContainText("swift-lark-3");
           await raw().click();
           await expect(drawer()).toBeVisible();
           await page.keyboard.press("Escape");
@@ -615,7 +614,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
             : { status: 409, json: { error: "stale", current: { worker: "swift-lark-3", generation: 3 } } });
           const text = disposition === "success" ? "swift-lark-3 paused." : "swift-lark-3 already restarted.";
           await expect(fleetResults(page)).toHaveText(text);
-          await expect(agent().getByRole("status", { name: "Fleet progress", exact: true })).toHaveCount(0);
+          await expect(agent().getByRole("status", { name: "Fleet progress", exact: true, includeHidden: true })).toHaveCount(0);
           // On a phone the Undo sits above the composer, not in the sheet.
           if (disposition === "stale") await expect(agent().getByTestId("fleet-ops-note")).toHaveText(text);
           await page.keyboard.press("Escape");

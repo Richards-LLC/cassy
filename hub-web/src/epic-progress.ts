@@ -71,7 +71,8 @@ function taskGroup(document: Document, epic: ProjectEpic, label: "In progress" |
   const rows = epic.rows.filter(row => row.group === label);
   if (!rows.length) return undefined;
   const group = element(document, "section", "live-epic-group");
-  group.append(element(document, "h4", "live-epic-group-label", `${label} · ${rows.length}`), taskList(document, rows, multiMachine));
+  const heading = element(document, "h4", "live-epic-group-label", `${label} · ${rows.length}`); heading.dataset.testid = "live-epic-group-label";
+  group.append(heading, taskList(document, rows, multiMachine));
   return group;
 }
 
@@ -120,7 +121,8 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
     // Closed tasks are not part of the status snapshot: Merged lists the
     // merged deliveries it has and points at the full board for the rest.
     const merged = element(document, "details", "live-epic-group live-epic-merged");
-    merged.append(element(document, "summary", "live-epic-group-label", `Merged · ${mergedCount}`));
+    const summary = element(document, "summary", "live-epic-group-label", `Merged · ${mergedCount}`); summary.dataset.testid = "live-epic-group-label";
+    merged.append(summary);
     if (mergedRows.length) merged.append(taskList(document, mergedRows, options.multiMachine));
     const note = element(document, "p", "live-epic-merged-note");
     if (mergedRows.length >= mergedCount) note.hidden = true;
@@ -146,7 +148,7 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
 /** Live epics for the selected project. Absent when there are none. */
 export function liveEpicsSection(document: Document, options: LiveEpicsOptions): HTMLElement | undefined {
   if (!options.live.length && !options.pending.length && !options.failed.length && !options.quiet) return undefined;
-  const section = element(document, "section", "live-epics");
+  const section = element(document, "section", "live-epics"); section.dataset.testid = "live-epics";
   section.setAttribute("aria-labelledby", "live-epics-heading");
   const heading = element(document, "h3", "status-section-label", `Live epics · ${options.live.length}`); heading.id = "live-epics-heading";
   section.append(heading);
@@ -182,7 +184,7 @@ export function liveEpicsSection(document: Document, options: LiveEpicsOptions):
   }
   if (options.quiet) {
     const text = `${options.quiet} quiet open ${options.quiet === 1 ? "epic" : "epics"} in Explorer`;
-    const footer = element(document, "p", "live-epics-footer");
+    const footer = element(document, "p", "live-epics-footer"); footer.dataset.testid = "live-epics-footer";
     if (options.explorerHref) {
       const link = element(document, "a", undefined, text); link.href = options.explorerHref; link.target = "cassy-explorer"; link.rel = "noopener noreferrer";
       footer.append(link);

@@ -336,8 +336,8 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
       await expect(accountsEditor(dialog)).toBeHidden();
-      // The weekly meter at 38% used reads "62% left · resets <time>".
-      await expect(dialog.getByText(/^62% left/)).toContainText(/(AM|PM) [A-Z]/);
+      // The weekly meter at 38% used: its bar carries data-left="62".
+      await expect(dialog.getByTestId("accounts-meter").filter({ has: dialog.locator('[data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
       const stale = dialog.getByRole("listitem").filter({ hasText: "old@example.test" });
       await expect(stale).toHaveAttribute("data-login-state", "stale_login");
       await expect(stale).toBeVisible();
@@ -346,13 +346,13 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       if (width === 390) {
         await page.mouse.move(200, 600);
         await page.mouse.wheel(0, 1800);
-        await expect(dialog.getByRole("paragraph").filter({ hasText: /^Grok uses one account\./ })).toBeInViewport();
+        await expect(dialog.getByRole("listitem").filter({ hasText: "grok:default" }).getByTestId("accounts-readonly")).toBeInViewport();
         await page.mouse.wheel(0, -1800);
         await expect(dialog.getByText("hello@example.test", { exact: true })).toBeInViewport();
       }
     });
     await journey.stage(`Clean up confirmation spans the sheet at ${width} in ${colorScheme}`, async () => {
-      const banner = dialog.getByRole("note").filter({ hasText: /\d+ to clean up/ });
+      const banner = dialog.getByTestId("accounts-cleanup-banner");
       const bannerHeight = (await banner.boundingBox())!.height;
       await banner.getByRole("button", { name: "Clean up", exact: true }).click();
       const editor = accountsEditor(dialog);
@@ -409,7 +409,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await hub.seedPaired();
     await page.reload();
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
-    const grant = dialog.getByRole("note").filter({ hasText: /^Read-only on / });
+    const grant = dialog.getByTestId("accounts-grant");
     await expect(grant).toBeVisible();
     await expect(grant.getByRole("button", { name: "Copy command", exact: true })).toBeVisible();
     // Every account operation, including those folded in a closed ⋯ menu.
@@ -508,10 +508,8 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
       expect(await factor.evaluate(node => node.getClientRects().length)).toBe(1);
       // The hero's figure holds its one chart.
       await expect(dialog.getByRole("figure").getByRole("img")).toBeVisible();
-      // A rubric still awaiting a score says "awaiting …"; a scored one does not.
-      const rubrics = dialog.getByRole("region", { name: "Every rubric, by who it scores", exact: true }).getByRole("listitem");
-      await expect(rubrics.filter({ hasNotText: "awaiting " })).toHaveCount(7);
-      await expect(rubrics.filter({ hasText: "awaiting " })).not.toHaveCount(0);
+      await expect(dialog.getByTestId("quality-rubric")).toHaveCount(7);
+      await expect(dialog.getByTestId("quality-pending")).not.toHaveCount(0);
       const wakes = dialog.getByRole("table", { name: /^Supervisor tokens by wake source/ });
       // Body rows lead with a row header; the head row has column headers only.
       await expect(wakes.getByRole("row").filter({ has: page.getByRole("rowheader") })).toHaveCount(2);

@@ -19,7 +19,7 @@ test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true
 const conversationList = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" });
 /** A list row is named "<project> on <machine>, …"; the row's own controls are not. */
 const conversationRow = (page: Page, project: string) => conversationList(page).getByRole("button", { name: new RegExp(`^${project} on `) });
-const conversationRows = (page: Page) => conversationList(page).getByRole("button", { name: /^[^,]+ on [^,]+, / });
+const conversationRows = (page: Page) => conversationList(page).getByRole("button", { name: /^\S+ on [^,]+, / });
 const sidebar = (page: Page) => page.getByRole("complementary", { name: "Supervisor conversations" });
 const heading = (page: Page) => page.getByTestId("conversation-heading");
 const thread = (page: Page) => page.getByTestId("conversation-thread");

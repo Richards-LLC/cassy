@@ -299,7 +299,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const badge = standby + (version?.update ? `<span class="supervisor-version update-available" data-testid="supervisor-version" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "");
   // Two sessions of one project on one machine read apart by their codename.
   // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
-  const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
+  const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark" data-testid="conversation-session-mark">Most recent</span></span>` : "";
   const name = row.supervisor.trim();
   const hasName = name && name.toLowerCase() !== "supervisor";
   const supervisorLabel = row.showSupervisorName && hasName ? name : "Supervisor";

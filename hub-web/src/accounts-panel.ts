@@ -183,7 +183,7 @@ export class AccountsSheet {
     const observed = catalog.accounts.map(row => row.usage_observed_at).filter((at): at is string => Boolean(at)).sort().at(-1);
     const summary = `${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${observed ? ` · usage as of ${escapeHtml(accountTime(observed))}` : ""}`;
     const why = manage ? "" : "Needs manage access on this machine";
-    const banner = cleanup.length ? `<div class="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates of another account.</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : "";
+    const banner = cleanup.length ? `<div class="accounts-cleanup-banner" data-testid="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates of another account.</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : "";
     const groups = PROVIDERS.map(([provider, label]) => {
       const accounts = catalog.accounts.filter(row => row.provider === provider && !needsCleanup(row)).sort((a, b) => headroom(b) - headroom(a));
       return accounts.length ? `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${label} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts)).join("")}</ul></section>` : "";
@@ -195,7 +195,7 @@ export class AccountsSheet {
   /** DESIGN.md: read-only pairings see the actions and exactly how to unlock them. */
   private grantCallout(machine: AccountsMachine): string {
     const command = scopeGrantCommand(this.doc.defaultView?.location.origin ?? "", machine.scopes, FACTORY_MANAGE_SCOPE);
-    return `<div class="accounts-grant" role="note"><p><strong>Read-only on ${escapeHtml(machine.label)}.</strong> Removing, disabling, renaming and choosing the default need manage access. Run this on ${escapeHtml(machine.label)}, then open the link it prints here:</p><div class="accounts-login"><code>${escapeHtml(command)}</code><button type="button" data-grant-command="${escapeHtml(command)}">Copy command</button></div></div>`;
+    return `<div class="accounts-grant" data-testid="accounts-grant" role="note"><p><strong>Read-only on ${escapeHtml(machine.label)}.</strong> Removing, disabling, renaming and choosing the default need manage access. Run this on ${escapeHtml(machine.label)}, then open the link it prints here:</p><div class="accounts-login"><code>${escapeHtml(command)}</code><button type="button" data-grant-command="${escapeHtml(command)}">Copy command</button></div></div>`;
   }
 
   private card(machine: AccountsMachine, account: AccountRow, manage: boolean, accounts: readonly AccountRow[]): string {
@@ -207,13 +207,13 @@ export class AccountsSheet {
     const where = `${account.location ? `Lives in <code>${escapeHtml(account.location)}</code> on ` : "On "}${escapeHtml(machine.label)} · used by ${HARNESS_NAME[account.provider]}`;
     const meters = accountMeters(account.windows);
     const usage = meters.length
-      ? `<div class="accounts-usage">${meters.map(meter => `<div class="accounts-meter"><span class="accounts-meter-name">${escapeHtml(meter.name)}</span><span class="accounts-bar" aria-hidden="true"><span data-left="${meter.left ?? 0}"${meter.left !== null && meter.left < 10 ? ' class="crit"' : meter.left !== null && meter.left < 25 ? ' class="low"' : ""}></span></span><span class="accounts-meter-text">${meter.left === null ? "usage unknown" : `${meter.left}% left`}${meter.reset ? ` <span class="accounts-reset">· resets ${escapeHtml(meter.reset)}</span>` : ""}</span></div>`).join("")}</div>`
+      ? `<div class="accounts-usage">${meters.map(meter => `<div class="accounts-meter" data-testid="accounts-meter"><span class="accounts-meter-name">${escapeHtml(meter.name)}</span><span class="accounts-bar" aria-hidden="true"><span data-left="${meter.left ?? 0}"${meter.left !== null && meter.left < 10 ? ' class="crit"' : meter.left !== null && meter.left < 25 ? ' class="low"' : ""}></span></span><span class="accounts-meter-text">${meter.left === null ? "usage unknown" : `${meter.left}% left`}${meter.reset ? ` <span class="accounts-reset">· resets ${escapeHtml(meter.reset)}</span>` : ""}</span></div>`).join("")}</div>`
       : `<p class="accounts-observed">Usage unknown${grok ? "" : account.login_state === "logged_in" ? " · not read yet on this machine" : " · log in to read it"}</p>`;
     const removable = account.capabilities.remove === null;
     const cleanup = account.duplicate_of ? `<p class="accounts-cleanup-why" data-duplicate-of>Duplicate of ${duplicateName(account.duplicate_of, accounts, machine.label)}${account.login_state === "stale_login" ? " with a stale login" : ""}.</p>` : account.login_state === "stale_login" ? `<p class="accounts-cleanup-why">Stale login: log in again${removable ? ", or remove it" : ""}.</p>` : "";
     const login = account.login_state !== "logged_in" && !grok ? `<div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy login command</button></div>` : "";
-    const reasons = grok ? '<p class="accounts-readonly">Grok uses one account. Named account management and login status are unavailable.</p>'
-      : [...new Set([account.capabilities.remove, account.capabilities.rename].filter(Boolean))].map(reason => `<p class="accounts-readonly">${escapeHtml(reason!)}</p>`).join("");
+    const reasons = grok ? '<p class="accounts-readonly" data-testid="accounts-readonly">Grok uses one account. Named account management and login status are unavailable.</p>'
+      : [...new Set([account.capabilities.remove, account.capabilities.rename].filter(Boolean))].map(reason => `<p class="accounts-readonly" data-testid="accounts-readonly">${escapeHtml(reason!)}</p>`).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];

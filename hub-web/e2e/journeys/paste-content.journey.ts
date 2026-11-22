@@ -13,7 +13,7 @@ import type { Page } from "@playwright/test";
 
 // A row is named "<project> on <machine>, …"; the row's own controls are not.
 const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
-const messageStatus = (page: Page) => page.getByRole("status", { name: "Message status" });
+const messageStatus = (page: Page) => page.getByTestId("message-status");
 const uploadStrip = (page: Page) => page.getByTestId("composer-uploads");
 const uploadError = (page: Page) => page.getByTestId("upload-error");
 // A sent or received file's card is a link in the conversation log.
@@ -235,7 +235,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
             expect((await next).text).toContain("art-slow-photo/slow-photo.png");
             hub.deliverLatest(PELICAN);
             await expect(uploadStrip(page)).toBeHidden();
-            await expect(page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: "slow-photo.png" }).getByRole("status").filter({ hasText: "Delivered" })).toHaveText("Delivered");
+            await expect(page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: "slow-photo.png" }).getByTestId("conversation-delivered")).toHaveText("Delivered");
             expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
           } finally {
             releaseSaving();

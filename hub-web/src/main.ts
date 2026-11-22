@@ -4737,7 +4737,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
           </section>
           <section class="palette-group" data-palette-group="appearance" aria-labelledby="palette-group-appearance">
             <h3 id="palette-group-appearance" class="palette-group-heading" data-testid="palette-group-heading">Appearance</h3>
-            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span><span class="palette-check" aria-hidden="true" hidden>✓</span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
+            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span><span class="palette-check" data-testid="palette-check" aria-hidden="true" hidden>✓</span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small data-testid="palette-command-hint">${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
           </section>
           <details class="palette-group palette-advanced" data-palette-group="advanced">
             <summary class="palette-group-heading" data-testid="palette-group-heading">Advanced</summary>

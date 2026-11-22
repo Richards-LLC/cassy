@@ -391,7 +391,7 @@ function relativeAgo(at: number, now: number): string {
 /** Name the question an answer belongs to; unavailable history stays explicit. */
 export function earlierReplyQuote(document: Document, session: string, question?: string): HTMLElement {
   const quote = document.createElement("div");
-  quote.className = "reply-quote";
+  quote.className = "reply-quote"; quote.dataset.testid = "reply-quote";
   const firstLine = question ? plainTextMarkdown(question.split(/\r?\n/, 1)[0] ?? "").trim() : "";
   quote.textContent = firstLine
     ? `Reply to “${firstLine}” · ${sessionCodename(session)}`
@@ -413,7 +413,7 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
   details.dataset.session = entry.session;
   details.open = open;
   const summary = document.createElement("summary");
-  const label = document.createElement("span"); label.className = "earlier-label"; label.textContent = earlierSessionLabel(entry, now);
+  const label = document.createElement("span"); label.className = "earlier-label"; label.dataset.testid = "earlier-label"; label.textContent = earlierSessionLabel(entry, now);
   const count = document.createElement("span"); count.className = "earlier-count";
   count.textContent = `${entry.events.length} message${entry.events.length === 1 ? "" : "s"}`;
   summary.append(label, count);
@@ -1691,6 +1691,7 @@ export class ConversationView {
     if (send.state === "sending") {
       const state = document.createElement("span");
       state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");
+      state.dataset.testid = send.held ? "conversation-held" : "conversation-delivery";
       // Held while the machine is unreachable (cas-0978): not on the wire yet,
       // and it can auto-send once within the disclosed two-minute wait.
       state.textContent = send.held ? "Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry."
@@ -1709,6 +1710,7 @@ export class ConversationView {
       // handoff. Only the daemon's transport evidence earns Delivered/the tick.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-delivered"; state.setAttribute("role", "status");
+      state.dataset.testid = "conversation-delivered";
       const delivered = send.state === "delivered";
       if (delivered) {
         const tick = document.createElement("template"); tick.innerHTML = TICK;
@@ -1727,8 +1729,9 @@ export class ConversationView {
       if (run.last) {
         const state = document.createElement("span");
         state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
+        state.dataset.testid = "conversation-unconfirmed";
         const glyph = document.createElement("template"); glyph.innerHTML = WARN;
-        const label = document.createElement("b"); label.textContent = `${run.count} messages not confirmed`;
+        const label = document.createElement("b"); label.textContent = `${run.count} messages not confirmed`; label.dataset.testid = "conversation-unconfirmed-count";
         const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
         const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.dataset.testid = "conversation-refused-reason";
         reason.textContent = `Cassy couldn't confirm delivery to ${this.supervisorPhrase()}.`;
@@ -1753,6 +1756,7 @@ export class ConversationView {
       bubble.dataset.settled = "true";
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed conversation-settled"; state.setAttribute("role", "status");
+      state.dataset.testid = "conversation-unconfirmed";
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.dataset.testid = "conversation-refused-reason";
@@ -1775,6 +1779,7 @@ export class ConversationView {
       // that a retry may reach the supervisor twice.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
+      state.dataset.testid = "conversation-unconfirmed";
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
@@ -1944,7 +1949,7 @@ export class ConversationView {
       // line that appeared and vanished on every reply shifted the thread).
       if (!reply.device_persisted && reply.device_store_failed) {
         const receipt = document.createElement("small");
-        receipt.className = "reply-storage-receipt";
+        receipt.className = "reply-storage-receipt"; receipt.dataset.testid = "reply-storage-receipt";
         receipt.textContent = "Not kept on this device yet";
         bubble.append(receipt);
       }
@@ -2050,7 +2055,7 @@ function timeElement(document: Document, time: string, clockAhead: boolean | und
   const element = document.createElement("time"); element.textContent = time; element.setAttribute("aria-hidden", "true");
   if (clockAhead) {
     element.title = CLOCK_AHEAD_TITLE;
-    const hint = document.createElement("span"); hint.className = "clock-ahead"; hint.textContent = ` · ${CLOCK_AHEAD}`;
+    const hint = document.createElement("span"); hint.className = "clock-ahead"; hint.dataset.testid = "clock-ahead"; hint.textContent = ` · ${CLOCK_AHEAD}`;
     element.append(hint);
   }
   return element;

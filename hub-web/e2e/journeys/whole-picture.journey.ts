@@ -172,7 +172,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("work-live-shine");
         await read.focus(); await page.keyboard.press("Enter");
         await expect(read).toBeFocused();
-        const detail = block.getByTestId("work-detail").filter({ hasText: "Read targets" });
+        // Its button is renamed below when the metadata changes; the event id is not.
+        const detail = workRows(block).and(block.locator('[data-event-id="typed-read"]')).getByTestId("work-detail");
         await expect(detail.getByRole("listitem")).toHaveText(["src/a.ts", "src/b.ts", "src/c.ts"]);
         await expect(detail.getByTestId("work-record")).toHaveText(exact);
         await expect(detail.locator("script")).toHaveCount(0);

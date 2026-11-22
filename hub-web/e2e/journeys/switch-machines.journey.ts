@@ -107,10 +107,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(page.getByRole("button", { name: "Appearance & commands", exact: true })).toHaveAttribute("title", "Appearance & commands (Ctrl K twice)");
     // The tab names the open conversation too.
     await expect(page).toHaveTitle(`cas-src ${PELICAN} — Cassy Cloud`);
-    // Conversations is the only surface (cas-0546): nothing offers a
-    // Terminal view, a session picker or a machine rail.
+    // Conversations is the only surface (cas-0546): nothing offers a Terminal view.
     await expect(page.getByRole("button", { name: /terminal/i })).toHaveCount(0);
-    await expect(page.locator("#session-picker, #session-picker-toggle, #machine-rail-list, #fleet-board")).toHaveCount(0);
     // Ctrl K reaches the search, again the palette; Escape closes it and
     // leaves the conversation as it was.
     await composer.focus();

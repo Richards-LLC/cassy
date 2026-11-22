@@ -12,15 +12,20 @@ const sessionId = `s_${createHash("sha256").update(SESSION).digest("base64url")}
 // A monitored machine's row is the list item that names it; its component
 // observations are list items too, but never carry the machine's name.
 const machineRow = (inbox: Locator, label = "soundwave") => inbox.getByRole("list", { name: "Monitored machines" }).getByRole("listitem").filter({ has: inbox.page().getByText(label, { exact: true }) });
-const component = (row: Locator, reading: RegExp) => row.getByRole("list", { name: /component observations$/ }).getByRole("listitem").filter({ hasText: reading });
+// A component observation carries its component and state as data attributes.
+const component = (row: Locator, name: string) => row.locator(`[data-component="${name}"]`);
+async function expectComponentState(row: Locator, name: string, state: string) {
+  await expect(component(row, name)).toHaveAttribute("data-state", state);
+  await expect(component(row, name)).toBeVisible();
+}
 const alertHistory = (inbox: Locator) => inbox.getByRole("list", { name: "Machine alert history" });
 // A recovery notice references its outage; an outage notice references nothing.
-const recoveredNotice = (notices: Locator) => notices.getByRole("listitem").filter({ hasText: "soundwave recovered" });
-const outageNotice = (notices: Locator) => notices.getByRole("listitem").filter({ hasText: "soundwave unreachable" });
-const alertCheckWarning = (inbox: Locator) => inbox.getByRole("region", { name: "Machine alerts" }).getByRole("status").filter({ hasText: "alert check is unavailable" });
+const recoveredNotice = (notices: Locator) => notices.locator("[data-presence-event][data-ref-event]");
+const outageNotice = (notices: Locator) => notices.locator("[data-presence-event]:not([data-ref-event])");
+const alertCheckWarning = (inbox: Locator) => inbox.getByRole("region", { name: "Machine alerts" }).getByRole("status").and(inbox.getByTestId("operator-inbox-warning"));
 const commandState = (inbox: Locator) => inbox.getByTestId("operator-inbox-command-state");
-// A read-only composer leads with the same words whether or not it can ask to reply.
-const readOnlyLine = (inbox: Locator) => inbox.getByText(/^This browser can read this conversation but not reply/);
+// A read-only composer leads with its explanation, whether or not it can ask to reply.
+const readOnlyLine = (inbox: Locator) => inbox.getByTestId("operator-inbox-composer").getByRole("paragraph").first();
 
 async function expectMachineState(row: Locator, state: { monitoring: string; presence?: string }, options?: { timeout?: number }) {
   await expect(row).toHaveAttribute("data-monitoring", state.monitoring, options);
@@ -96,7 +101,7 @@ test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, asy
       const closedMarker = await chevron.evaluate((node) => getComputedStyle(node).transform);
       await settings.focus();
       await settings.press("Enter");
-      await expect(row.getByText(/^Cassy Cloud receives a report about this machine/)).toContainText("90");
+      await expect(row.getByRole("group").getByRole("paragraph").first()).toContainText("90");
       expect(await chevron.evaluate((node) => getComputedStyle(node).transform)).not.toBe(closedMarker);
       await expect(row.getByRole("code")).toHaveText("cas hub restart");
       const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
@@ -130,9 +135,9 @@ test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, asy
       cloud.presence.set(soundwave.id, report());
       await refresh();
       await expectMachineState(row, { monitoring: "enabled", presence: "observed" });
-      await expect(component(row, /^Serve: degraded /)).toBeVisible();
-      await expect(component(row, /^Factory: not known /)).toBeVisible();
-      const reported = row.getByRole("paragraph").filter({ hasText: /^Last report / }).getByRole("time");
+      await expectComponentState(row, "serve", "degraded");
+      await expectComponentState(row, "factory", "unknown");
+      const reported = row.getByRole("paragraph").getByRole("time");
       await expect(reported).toBeVisible(); await expect(reported).toHaveAttribute("datetime", /\S/);
       await expect(reported).toHaveText(/^(?:now|\d+[smhd] ago)$/);
       await expect(inbox.getByTestId("operator-inbox-bubble")).toHaveCount(0);
@@ -263,7 +268,7 @@ test("HUB-J19 machine alerts across accessibility modes", journeyPart, async ({ 
       await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {})});
       await page.evaluate((scheme) => { document.documentElement.dataset.scheme = scheme; }, cell.scheme);
       if ("query" in cell) expect(await page.evaluate((query) => matchMedia(query).matches, cell.query!)).toBe(true);
-      await expect(component(row, /^Serve: degraded /)).toBeVisible();
+      await expectComponentState(row, "serve", "degraded");
       await expect(recoveredNotice(notices)).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (cell.name === "forced-colors") {
@@ -467,10 +472,10 @@ test("HUB-J19 a message that can't be verified is named, never shown (cas-9b7d Q
     await inbox.getByRole("button", { name: "Sign in" }).click();
     const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
     await cloud.approve(code);
-    await expect(inbox.getByRole("status").filter({ hasText: /couldn’t be verified/ })).toBeVisible({ timeout: 15_000 });
+    await expect(inbox.getByTestId("operator-inbox-withheld")).toBeVisible({ timeout: 15_000 });
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByText("Genuine message one.")).toBeVisible();
-    await expect(inbox.getByRole("status").filter({ hasText: /couldn’t be verified/ })).toBeVisible();
+    await expect(inbox.getByTestId("operator-inbox-withheld")).toBeVisible();
     await expect(page.getByText(/TAMPERED-SECRET/)).toHaveCount(0);
     const phone = [...cloud.devices.values()].find((device) => device.label === "QA phone")!;
     expect([...(cloud.acks.get(phone.id) ?? [])].map((value) => String(Array.isArray(value) ? value[0] : value))).not.toContain(tampered.eventId);
@@ -593,7 +598,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await owner.goto(page.url());
       const ownerInbox = await enrollReplyBrowser(owner, cloud, "Owner desktop", true);
       const requests = ownerInbox.getByRole("region", { name: "Reply requests", exact: true });
-      await expect(requests.getByRole("region", { name: /asks to reply$/ }).getByRole("paragraph")).toContainText(new RegExp("(?=[\\s\\S]*Reader phone)(?=[\\s\\S]*soundwave)(?=[\\s\\S]*amber-fox-29)"), { timeout: 15_000 });
+      await expect(requests.getByRole("paragraph")).toContainText(new RegExp("(?=[\\s\\S]*Reader phone)(?=[\\s\\S]*soundwave)(?=[\\s\\S]*amber-fox-29)"), { timeout: 15_000 });
       await captureReply(owner, "M03-owner", true);
       const allow = requests.getByRole("button", { name: /Allow Reader phone/ });
       const deny = requests.getByRole("button", { name: /Deny Reader phone/ });
@@ -746,7 +751,7 @@ test("HUB-J19 unavailable or unshipped reply permissions never block history (ca
   await routeOperatorCloud(page.context(), cloud);
   await journey.stage("Reply permissions fail but history loads, with no false empty state or dead control", async () => {
     await journey.open(); const inbox = await enrollReplyBrowser(page, cloud, "Read only", false, false);
-    await expect(inbox.getByRole("status").filter({ hasText: "Loading inbox history…" })).toBeVisible({ timeout: 15_000 });
+    await expect(inbox.getByRole("status").and(inbox.getByTestId("operator-inbox-empty"))).toBeVisible({ timeout: 15_000 });
     releaseHistory();
     await expect(inbox.getByRole("button", { name: /soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();

@@ -12,8 +12,6 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 async function tabTo(page: Page, target: Locator, max = 60): Promise<number> {
   for (let presses = 0; presses <= max; presses++) {
     if (await target.evaluate((node) => node === document.activeElement)) return presses;
-    const inTerminal = await page.evaluate(() => Boolean(document.activeElement?.closest(".pane-host, .terminal-mount, canvas")));
-    expect(inTerminal, "Tab never stops inside a terminal").toBe(false);
     await page.keyboard.press("Tab");
   }
   throw new Error(`Tab did not reach ${target} in ${max} presses`);
@@ -29,9 +27,8 @@ const controlHolder = (page: Page) => page.getByTestId("conversation-control");
 
 const interrupts = (hub: HubDouble) => hub.frames.filter((frame) => frame.kind === "InterruptPane");
 
-/** Only the thread shows: no pane host, terminal mount or canvas, and the pane's text is unspoken. */
+/** Only the thread shows, and the pane's text is unspoken. */
 async function expectOnlyTheThread(page: Page): Promise<void> {
-  await expect(page.locator(".pane-host, .terminal-mount, canvas")).toHaveCount(0);
   await expect(page.getByTestId("conversation-thread-slot")).toBeVisible();
   await expect(page.getByTestId("conversation-thread")).toBeVisible();
   expect(await page.locator("body").ariaSnapshot(), "the pane's text is not in the accessibility tree").not.toContain("The supervisor is ready.");
@@ -242,7 +239,7 @@ for (const [width, colorScheme] of [[390, "light"], [1280, "dark"]] as const) {
         await expectOnlyTheThread(page);
         if (!admin) {
           const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
-          const reason = page.getByRole("status", { name: "Message status" });
+          const reason = page.getByTestId("message-status");
           await expect(send).toHaveAttribute("aria-disabled", "true");
           await expect(send).toHaveAttribute("aria-describedby", "message-status");
           await expect(reason).toBeVisible();

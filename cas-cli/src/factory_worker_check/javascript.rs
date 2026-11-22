@@ -1435,9 +1435,15 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
         let mut runners = local_runners(&current);
-        // A Playwright spec imports its runner; a plain test file beside a
-        // Playwright config belongs to the unit runner.
-        if runners.len() > 1 {
+        // Beside a unit runner, a Playwright config that lists the file owns
+        // it, though it imports `test` from a local fixture (GH #2294); a
+        // plain test file there belongs to the unit runner.
+        if runners.len() > 1 && runners.contains("playwright") {
+            let spec = repo.join(path);
+            if runner_configs(&current, "playwright").iter()
+                .any(|config| playwright_config_selects(repo, &current, config, &spec)) {
+                return Some("playwright");
+            }
             runners.remove("playwright");
         }
         match runners.len() {

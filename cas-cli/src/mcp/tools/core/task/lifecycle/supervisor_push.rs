@@ -824,6 +824,11 @@ pub fn resolve_worker_supervisor(
     agent_store: &dyn AgentStore,
     factory_session: Option<&str>,
 ) -> Option<OwningSupervisor> {
+    // Non-factory lifecycle callers retain their legacy unscoped lookup.
+    // Worker message/reminder entry points require a named session themselves.
+    if factory_session.is_none() {
+        return resolve_owning_supervisor(agent_store, None);
+    }
     resolve_worker_supervisor_from_agents(&agent_store.list(None).ok()?, factory_session).ok()
 }
 

@@ -814,11 +814,13 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
 
 
 def lane_base(root, recorded_ref, inferred):
-    """Resolve the recorded attribution base without changing the impact range.
+    """Attribute against the newest target commit already contained in HEAD.
 
-    A record that is missing or not an ancestor of HEAD falls back to the
-    inferred base; the returned source names which one was used.
+    The plan resolves the live target merge-base. A recorded ancestor is
+    only a fallback when that target cannot be resolved.
     """
+    if inferred:
+        return inferred, "live target merge-base"
     if not recorded_ref:
         return inferred, "inferred: no record requested"
     found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{recorded_ref}^{{commit}}"], cwd=root, capture_output=True, text=True)

@@ -2023,12 +2023,26 @@ async fn blocked_supplemental_work_resumes_without_invalidating_proof_gh2247() {
     call(&f.worker, serde_json::json!({"action":"update", "id":id, "status":"blocked"})).await;
     assert_eq!(f.task(id).status, TaskStatus::Blocked);
 
-    // Follow the existing generic worker recovery sequence after approval.
-    call(&f.worker, serde_json::json!({"action":"update", "id":id, "status":"open"})).await;
+    // An operational resume must not reopen or change the reviewed scope.
+    for update in [
+        serde_json::json!({"action":"update", "id":id, "status":"open"}),
+        serde_json::json!({"action":"update", "id":id, "status":"blocked", "title":"New scope"}),
+    ] {
+        let error = f.worker.task(Parameters(serde_json::from_value(update).unwrap())).await.unwrap_err();
+        assert!(error.message.contains("[G-29]"), "{error:?}");
+        assert_eq!(f.task(id).status, TaskStatus::Blocked);
+    }
+    // After the supervisor approves supplemental work, start resumes it
+    // directly; findings stay in notes rather than replacing the proof.
+    call(&f.supervisor, serde_json::json!({
+        "action":"notes", "id":id, "note_type":"decision",
+        "notes":"Supplemental read-only fixture approved within the existing scope",
+    })).await;
     call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
     let resumed = f.task(id);
     assert_eq!(resumed.status, TaskStatus::InProgress);
     assert_eq!(resumed.external_ref, before.external_ref);
+    assert_eq!(resumed.title, before.title);
     assert_eq!(serde_json::to_value(resumed.deliverables).unwrap(),
         serde_json::to_value(before.deliverables).unwrap());
     assert_eq!(serde_json::to_value(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()).unwrap(),

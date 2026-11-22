@@ -4198,8 +4198,6 @@ async fn revalidated_landed_task_closes_without_delivery_and_frees_queue_gh1695(
     git(&checkout, &["commit", "-q", "-m", "fix(cas-1695a): landed fix"]);
     let landed = git(&checkout, &["rev-parse", "HEAD"]);
     git(&checkout, &["push", "-q", "origin", &lane]);
-    git(repo, &["merge", "-q", "--ff-only", &lane]);
-    git(repo, &["push", "-q", "origin", "main"]);
     let mut task = assigned(id, TaskType::Bug, "main");
     task.status = TaskStatus::Closed;
     task.closed_at = Some(chrono::Utc::now());
@@ -4223,11 +4221,17 @@ async fn revalidated_landed_task_closes_without_delivery_and_frees_queue_gh1695(
     let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
     assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
     queue_control(&f, Some(vec![&next.id])).await;
-
-    let closed = call(&f.worker, serde_json::json!({
+    let close = serde_json::json!({
         "action":"close", "id":id, "no_delivery":true,
         "reason":"Revalidated: the landed fix passes on the current tree",
-    })).await;
+    });
+
+    // Until the retained tip is on the target, it is still a delivery.
+    let refused = call(&f.worker, close.clone()).await;
+    assert!(refused.contains("G-47"), "{refused}");
+    git(repo, &["merge", "-q", "--ff-only", &lane]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let closed = call(&f.worker, close).await;
     assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some(), "{closed}");
     let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
         "action":"start", "id":next.id,

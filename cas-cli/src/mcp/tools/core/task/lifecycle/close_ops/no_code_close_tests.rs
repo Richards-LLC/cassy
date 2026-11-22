@@ -4219,6 +4219,8 @@ async fn transferred_redo_on_fresh_branch_closes_after_merge_gh1437() {
     git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
     let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
     assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+    // The incident's path: A's tip is not inherited, so start keeps A's source.
+    assert_eq!(f.task(id).deliverables.factory_branch_start.unwrap().branch, old_lane, "{started}");
     std::fs::write(checkout.join("fix.rs"), "pub fn redone() {}\n").unwrap();
     git(&checkout, &["add", "fix.rs"]);
     git(&checkout, &["commit", "-q", "-m", &format!("fix({id}): redo")]);
@@ -4228,6 +4230,8 @@ async fn transferred_redo_on_fresh_branch_closes_after_merge_gh1437() {
         "action":"close", "id":id, "reason":"Redone on a fresh branch",
     })).await;
     assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{started}\n---\n{parked}");
+    assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(), Some(redo.as_str()), "{parked}");
+    assert!(f.task(id).deliverables.declined_factory_anchors().contains(&declined));
 
     git(repo, &["merge", "-q", "--no-ff", "-m", "Merge B's redo", &lane]);
     git(repo, &["push", "-q", "origin", "main"]);

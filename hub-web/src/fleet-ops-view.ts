@@ -95,6 +95,7 @@ function reasonLine(document: Document, gate: FleetControlGate, id: string, name
   if (gate.allowed) return undefined;
   const line = document.createElement("small");
   line.className = "fleet-ops-reason";
+  line.dataset.testid = "fleet-ops-reason";
   line.id = id;
   line.append(`${names ? `${names}: ` : ""}${gate.state}. ${gate.reason}`);
   // cas-97d58 F06: one remedy for both permissions. Paired machines shows
@@ -112,6 +113,7 @@ function noteLine(document: Document, context: FleetOpsViewContext, rowKey: stri
     const line = document.createElement("p");
     line.className = "fleet-ops-progress";
     line.setAttribute("role", "status");
+    line.setAttribute("aria-label", "Fleet progress");
     line.tabIndex = -1;
     line.dataset.fleetFocus = `${rowKey}:progress`;
     line.textContent = pending.progress;
@@ -121,6 +123,7 @@ function noteLine(document: Document, context: FleetOpsViewContext, rowKey: stri
   if (!note) return undefined;
   const line = document.createElement("p");
   line.className = `fleet-ops-note fleet-ops-note--${note.tone}`;
+  line.dataset.testid = "fleet-ops-note";
   line.tabIndex = -1;
   line.dataset.fleetFocus = `${rowKey}:note`;
   appendWithSubject(document, line, note.text, rowKey.slice(rowKey.indexOf(":") + 1));
@@ -217,7 +220,7 @@ function picker(document: Document, context: FleetOpsViewContext, rowKey: string
   const title = document.createElement("h2"); title.textContent = label;
   panel.append(title);
   if (subject) {
-    const current = document.createElement("p"); current.className = "fleet-picker-context"; current.textContent = subject;
+    const current = document.createElement("p"); current.className = "fleet-picker-context"; current.dataset.testid = "fleet-picker-context"; current.textContent = subject;
     panel.append(current);
   }
   const search = document.createElement("input");
@@ -317,6 +320,7 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
     if (asked !== undefined && context.state.preview?.rowKey !== rowKey) {
       const line = document.createElement("p");
       line.className = "fleet-ops-asked";
+      line.dataset.testid = "fleet-ops-asked";
       line.textContent = `Asked ${context.relative(asked)}`;
       wrap.append(line);
     }
@@ -395,6 +399,7 @@ const permissionDisclosure = new WeakMap<FleetOpsState, boolean>();
 export function headerControls(document: Document, context: FleetOpsViewContext, panel: FleetHeaderPanel | undefined): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "fleet-ops-header";
+  wrap.dataset.testid = "fleet-ops-header";
   const add = button(document, "Add worker…", "fleet-ops-add", "header:add", () => context.on.toggleHeader("add"));
   add.setAttribute("aria-expanded", String(panel === "add"));
   const addGate = fleetControlGate(context.scopes, "add-workers", context.origin);
@@ -473,6 +478,7 @@ export function undoBar(document: Document, context: FleetOpsViewContext): HTMLE
   if (!offer || (context.phone && context.state.phoneNoticeDismissed(offer))) return undefined;
   const bar = document.createElement("div");
   bar.className = "fleet-ops-undo";
+  bar.dataset.testid = "fleet-ops-undo";
   const text = document.createElement("span"); text.textContent = offer.label;
   const undo = button(document, "Undo", "fleet-ops-undo-action", "undo", () => context.on.undo());
   // Shell focus restoration uses the control's id after replacing its nodes.
@@ -494,6 +500,7 @@ export function resultBar(document: Document, context: FleetOpsViewContext): HTM
   if (!result) return undefined;
   const bar = document.createElement("div");
   bar.className = "fleet-ops-result";
+  bar.dataset.testid = "fleet-ops-result";
   bar.tabIndex = -1;
   bar.dataset.fleetFocus = "result";
   const text = document.createElement("span"); text.textContent = result.label;

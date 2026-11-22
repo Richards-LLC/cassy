@@ -559,6 +559,7 @@ export class ConversationView {
     const { supervisor } = this.options;
     this.element = document.createElement("div");
     this.element.className = "conversation-reading thread";
+    this.element.dataset.testid = "conversation-thread";
     // The keyed reading anchor owns compensation, including spacer changes.
     this.element.style.overflowAnchor = "none";
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
@@ -621,7 +622,7 @@ export class ConversationView {
     retryHistory.className = "conversation-load-earlier"; retryHistory.textContent = "Retry history";
     retryHistory.onclick = () => this.options.retryHistory?.();
     this.historyFailure.append(this.historyFailureDetail, retryHistory);
-    this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
+    this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.dataset.testid = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
     this.jump.onclick = () => { this.following = true; this.focusMoved = undefined; this.update(); this.pin(); };
@@ -1141,7 +1142,7 @@ export class ConversationView {
       ? document.activeElement.className : undefined;
     this.pinned.dataset.signature = signature;
     this.pinned.dataset.collapsed = "true";
-    const bar = document.createElement("div"); bar.className = "pinned-bar";
+    const bar = document.createElement("div"); bar.className = "pinned-bar"; bar.dataset.testid = "pinned-bar";
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "pinned-expand";
     const label = document.createElement("span"); label.className = "pinned-bar-label"; label.textContent = "Waiting on you:";
     const text = document.createElement("span"); text.className = "pinned-bar-text"; appendEmojiText(document, text, askLine(ask.message));
@@ -1362,14 +1363,14 @@ export class ConversationView {
     // codename is the only name there is, and it keeps the title.
     const name = document.createElement("b"); name.textContent = project || supervisor; name.title = project || supervisor;
     if (!project) name.className = "codename";
-    const where = document.createElement("span"); where.className = "proj2";
+    const where = document.createElement("span"); where.className = "proj2"; where.dataset.testid = "proj2";
     where.title = [machine, project ? supervisor : undefined].filter(Boolean).join(" · ");
     // cas-766c: as in the header, the machine name holds its place; its OS
     // word goes first, then the codename yields (fitMachineLine).
     const host = document.createElement("span"); host.className = "proj2-machine"; host.innerHTML = hostMarkup(machine ?? "");
     if (machine) where.append(host);
     if (project) {
-      const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
+      const secondary = document.createElement("span"); secondary.className = "codename"; secondary.dataset.testid = "codename"; secondary.textContent = supervisor;
       const separator = document.createElement("span"); separator.className = "proj2-sep"; separator.textContent = " · ";
       where.append(...(machine ? [separator] : []), secondary);
     }
@@ -1382,7 +1383,7 @@ export class ConversationView {
     if (activityText) {
       // One quiet line: when the session last did anything (cas-010f).
       const foot = document.createElement("p"); foot.className = "empty-foot";
-      const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live);
+      const live = document.createElement("span"); live.className = "empty-activity"; live.dataset.testid = "empty-activity"; live.textContent = activityText; foot.append(live);
       children.push(foot);
     }
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
@@ -1448,9 +1449,9 @@ export class ConversationView {
     }
     node.dataset.signature = signature;
     switch (item.type) {
-      case "day": node.className = "day"; node.textContent = item.label; return;
+      case "day": node.className = "day"; node.dataset.testid = "day"; node.textContent = item.label; return;
       case "session": node.className = "session-divider"; node.textContent = item.label; return;
-      case "history-end": node.className = "history-end"; node.textContent = item.label; return;
+      case "history-end": node.className = "history-end"; node.dataset.testid = "history-end"; node.textContent = item.label; return;
       case "working": this.renderWorking(node); return;
       case "coalesce": this.renderCoalesce(node, item); return;
       case "group": this.renderGroup(node, item); return;
@@ -1481,8 +1482,9 @@ export class ConversationView {
     node.className = "turn working-turn";
     const phase = this.phase;
     const line = document.createElement("div"); line.className = phase?.unavailable ? "phase-line" : phase ? "working phase-line" : "working"; line.setAttribute("role", "status");
+    if (line.classList.contains("working")) line.dataset.testid = "working";
     if (phase) { line.dataset.active = String(phase.active); line.dataset.state = phase.state; }
-    const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
+    const dots = document.createElement("span"); dots.className = "dots"; dots.dataset.testid = "dots"; dots.setAttribute("aria-hidden", "true");
     dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
     line.append(dots, document.createTextNode(phase?.label ?? "working"));
     if (phase?.elapsed !== undefined) {
@@ -1490,7 +1492,7 @@ export class ConversationView {
       line.append(document.createTextNode(" · "), clock);
     }
     if (phase?.step) {
-      const step = document.createElement("span"); step.className = "phase-step"; step.textContent = phase.step;
+      const step = document.createElement("span"); step.className = "phase-step"; step.dataset.testid = "phase-step"; step.textContent = phase.step;
       line.append(document.createTextNode(" · "), step);
     }
     if (phase?.lastActivityAt) line.append(document.createTextNode(" · Last activity "), document.createElement("time"));
@@ -1527,6 +1529,7 @@ export class ConversationView {
     const spokenStatus = this.spokenSpeakerOf(item.session);
     speaker(node, `${spokenStatus.name}, status`, item.time, item.clockAhead, spokenStatus.description);
     const line = document.createElement("div"); line.className = "coalesce";
+    line.dataset.testid = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
     line.dataset.expanded = String(expanded);
@@ -1594,6 +1597,7 @@ export class ConversationView {
           if (kept && kept.dataset.attachmentSignature === sheet.dataset.attachmentSignature) sheet.replaceWith(kept);
         });
         bubble.classList.add("conversation-turn");
+        bubble.dataset.testid = "conversation-turn";
         bubble.dataset.key = turn.key;
         bubble.dataset.signature = signature;
         // Receipt-only changes rebuild the bubble, while media keeps its DOM,
@@ -1726,9 +1730,9 @@ export class ConversationView {
         const glyph = document.createElement("template"); glyph.innerHTML = WARN;
         const label = document.createElement("b"); label.textContent = `${run.count} messages not confirmed`;
         const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
-        const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+        const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.dataset.testid = "conversation-refused-reason";
         reason.textContent = `Cassy couldn't confirm delivery to ${this.supervisorPhrase()}.`;
-        const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Review them to retry.";
+        const next = document.createElement("span"); next.className = "conversation-refused-next"; next.dataset.testid = "conversation-refused-next"; next.textContent = " Review them to retry.";
         reason.append(next);
         state.append(glyph.content.firstElementChild!, label, separator, reason);
         const actions = document.createElement("div"); actions.className = "conversation-actions";
@@ -1751,7 +1755,7 @@ export class ConversationView {
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed conversation-settled"; state.setAttribute("role", "status");
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.dataset.testid = "conversation-refused-reason";
       reason.textContent = "The supervisor has replied since; send it again only if it missed this.";
       state.append(label, separator, reason);
       bubble.append(state);
@@ -1774,10 +1778,10 @@ export class ConversationView {
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.dataset.testid = "conversation-refused-reason";
       // cas-71f4 (journey F20): the project's supervisor, never the codename.
       reason.textContent = `Cassy couldn't confirm delivery to ${this.supervisorPhrase()}.`;
-      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.dataset.testid = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
@@ -1808,7 +1812,7 @@ export class ConversationView {
       state.className = "conversation-delivery conversation-refused conversation-replaced"; state.setAttribute("role", "status");
       const label = document.createElement("b"); label.textContent = "Not sent";
       const separator = document.createElement("span"); separator.textContent = " · ";
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = "replaced by your edit";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.dataset.testid = "conversation-refused-reason"; reason.textContent = "replaced by your edit";
       state.append(label, separator, reason);
       bubble.append(state);
     } else if (send.state === "error") {
@@ -1830,8 +1834,8 @@ export class ConversationView {
       // cas-1730: another device holds control and this one cannot take it
       // over, so the next step is to wait for its release, as the composer says.
       const holder = plain.action === "take-control" && !resolved ? this.options.controlHolder?.() : undefined;
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
-      const next = document.createElement("span"); next.className = "conversation-refused-next";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.dataset.testid = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.dataset.testid = "conversation-refused-next";
       const sessionBack = plain.action === "await-session" && this.options.sessionLive?.() === true;
       next.textContent = resolved || sessionBack ? " Retry to send it." : holder ? ` ${holder} is in control. Take control when it's released, then retry.` : ` ${plain.next}`;
       reason.append(next);
@@ -2067,7 +2071,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
   const nodes: HTMLElement[] = [];
   for (const block of messageBlocks(reply.message)) {
     if (block.type === "text") { nodes.push(...renderMarkdown(document, block.text)); continue; }
-    const table = document.createElement("div"); table.className = "evi";
+    const table = document.createElement("div"); table.className = "evi"; table.dataset.testid = "evi";
     const actions = document.createElement("div"); actions.className = "evi-actions";
     const status = document.createElement("span"); status.className = "evi-status"; status.setAttribute("role", "status"); status.setAttribute("aria-atomic", "true");
     let copyStatusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2096,7 +2100,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
         appendInline(document, cell, text);
         cell.dataset.align = alignments[index]!;
         if (evidenceColumns[index]) cell.classList.add("evi-number");
-        const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
+        const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) { cell.classList.add(tone); cell.dataset.testid = tone; }
         line.append(cell);
       }
       return line;

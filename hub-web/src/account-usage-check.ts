@@ -32,7 +32,7 @@ export class AccountUsageChecks {
       return `<p>${name} ${amount === null || amount === undefined || !Number.isFinite(amount) || amount < 0 || amount > 100 ? "usage unknown" : `${Math.round(amount)}% used`}${window?.resets_at ? ` · resets ${escapeHtml(accountTime(window.resets_at))}` : " · reset time unknown"}</p>`;
     }).join("") : "";
     const detail = result ? `${windows}<p>Checked at ${escapeHtml(accountTime(result.checked_at))}</p><p>Usage as of ${result.observed_at ? escapeHtml(accountTime(result.observed_at)) : "unknown"} · ${escapeHtml(result.source)}</p>${result.reason ? `<p>${escapeHtml(result.reason)}</p>` : ""}` : "";
-    return `<div class="account-usage-check" data-usage-machine="${escapeHtml(machine)}" data-usage-account="${escapeHtml(account)}"><button type="button" data-check-usage${state.pending ? " disabled" : ""} aria-label="Check usage for ${escapeHtml(account)}">${state.pending ? "Checking usage…" : "Check usage"}</button><div class="account-usage-result" role="status" aria-live="polite">${detail}${state.error ? `<p>${escapeHtml(state.error)}</p>` : ""}</div></div>`;
+    return `<div class="account-usage-check" data-usage-machine="${escapeHtml(machine)}" data-usage-account="${escapeHtml(account)}"><button type="button" data-check-usage${state.pending ? " disabled" : ""} aria-label="Check usage for ${escapeHtml(account)}">${state.pending ? "Checking usage…" : "Check usage"}</button><div class="account-usage-result" role="status" aria-label="Usage for ${escapeHtml(account)}" aria-live="polite">${detail}${state.error ? `<p>${escapeHtml(state.error)}</p>` : ""}</div></div>`;
   }
   handle(event: Event): boolean {
     const button = (event.target as Element).closest("[data-check-usage]");

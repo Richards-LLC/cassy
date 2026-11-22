@@ -319,7 +319,7 @@ export function launchSheetMarkup(): string {
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
     </section>
     <section class="launch-view launch-grant" data-launch-view="grant" hidden>
-      <p class="launch-lead"></p>
+      <p class="launch-lead" data-testid="launch-lead"></p>
       <p class="launch-grant-error" role="alert" hidden></p>
       <p class="launch-grant-invite">Starting sessions is a separate permission this browser asks for once per machine. Run this on the machine, then open the link it prints in this browser.</p>
       <div class="pair-code-actions launch-grant-command"><code></code><button type="button" data-launch-action="copy">Copy command</button></div>

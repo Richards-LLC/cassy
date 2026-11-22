@@ -55,8 +55,12 @@ function taskList(document: Document, rows: readonly ProjectEpic["rows"][number]
     item.append(element(document, "span", "live-epic-task-title", row.task.title?.trim() || "Untitled task"));
     const meta = element(document, "span", "live-epic-task-meta");
     meta.append(element(document, "span", "live-epic-task-worker", row.worker ?? "Unassigned"));
-    if (multiMachine) meta.append(element(document, "span", "live-epic-task-machine", row.machine));
-    meta.append(element(document, "span", `live-epic-chip live-epic-chip--${row.state.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, row.state));
+    if (multiMachine) {
+      const machine = element(document, "span", "live-epic-task-machine", row.machine); machine.dataset.testid = "live-epic-task-machine";
+      meta.append(machine);
+    }
+    const chip = element(document, "span", `live-epic-chip live-epic-chip--${row.state.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, row.state); chip.dataset.testid = "live-epic-chip";
+    meta.append(chip);
     item.append(meta);
     list.append(item);
   }
@@ -105,7 +109,7 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
     line.append(dots);
   }
   toggle.append(line);
-  const panel = element(document, "div", "live-epic-tasks"); panel.id = panelId; panel.hidden = !open;
+  const panel = element(document, "div", "live-epic-tasks"); panel.id = panelId; panel.dataset.testid = "live-epic-tasks"; panel.hidden = !open;
   for (const label of ["In progress", "Open"] as const) {
     const group = taskGroup(document, epic, label, options.multiMachine);
     if (group) panel.append(group);

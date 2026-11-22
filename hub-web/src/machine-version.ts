@@ -46,7 +46,7 @@ export function machineVersionMarkup(runtime: string | undefined, latest?: strin
     : stale ? `Hub ${escapeHtml(runtime)} · installed ${escapeHtml(installed!.replace(/^v/, ""))}` : `Cassy ${escapeHtml(runtime)}`;
   const restart = stale ? ` <span class="machine-version-update" title="This machine's hub is still the process started before ${escapeHtml(installed!.replace(/^v/, ""))} was installed. Run cas hub restart there to load it.">Run cas hub restart</span>` : "";
   const update = isNewerRelease(stale ? installed : runtime, latest);
-  return `<span class="machine-version"><span class="machine-version-installed${known ? "" : " unknown"}">${label}</span>${restart}${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
+  return `<span class="machine-version" data-testid="machine-version"><span class="machine-version-installed${known ? "" : " unknown"}">${label}</span>${restart}${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
 }
 
 /** cas-da546: a machine's version is shown only when it is out of step: its

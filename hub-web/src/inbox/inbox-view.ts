@@ -57,7 +57,7 @@ export function withheldCopy(count: number): string {
 
 /** QA F01: the reply's trust state is a state line, not metadata. */
 function commandStateMarkup(state: CommandState, machine?: string): HTMLElement {
-  return el("span", { class: "operator-inbox-command-state", "data-state": state }, commandStatusLabel(state, machine));
+  return el("span", { class: "operator-inbox-command-state", "data-testid": "operator-inbox-command-state", "data-state": state }, commandStatusLabel(state, machine));
 }
 
 export { browserLabel } from "../browser-label";
@@ -191,7 +191,7 @@ export class InboxView {
       if (requests) body.append(requests);
     }
     body.append(this.stateMarkup(state));
-    if (this.status) body.append(el("p", { class: "operator-inbox-status", role: this.statusError ? "alert" : "status" }, this.status));
+    if (this.status) body.append(el("p", { class: "operator-inbox-status", "data-testid": "operator-inbox-status", role: this.statusError ? "alert" : "status" }, this.status));
     if (state.kind !== "ready") this.replyDrafts.clear();
     this.dialog.replaceChildren(body);
     for (const details of this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details")) details.open = expanded.has(details.id);
@@ -219,9 +219,9 @@ export class InboxView {
     const section = el("form", { class: "operator-inbox-signin" });
     if (state.kind === "revoked" || state.kind === "unavailable") section.append(el("p", { class: "operator-inbox-warning" }, state.reason));
     section.append(
-      el("p", { class: "operator-inbox-lead" }, "Read your supervisors’ messages here even when their machines are off, and leave a reply for when they’re back."),
+      el("p", { class: "operator-inbox-lead", "data-testid": "operator-inbox-lead" }, "Read your supervisors’ messages here even when their machines are off, and leave a reply for when they’re back."),
       // cas-97d58 F21: one brand, and plainly who can read the messages.
-      el("p", { class: "operator-inbox-disclosure" }, "Your Cassy Cloud account approves this browser. Cassy Cloud keeps messages for 90 days, encrypted when stored and sent. It holds the keys, so Cassy Cloud can read them as well as you: this isn’t end-to-end encryption."),
+      el("p", { class: "operator-inbox-disclosure", "data-testid": "operator-inbox-disclosure" }, "Your Cassy Cloud account approves this browser. Cassy Cloud keeps messages for 90 days, encrypted when stored and sent. It holds the keys, so Cassy Cloud can read them as well as you: this isn’t end-to-end encryption."),
     );
     const label = el("label", {}, "Name this browser");
     const input = el("input", { id: "operator-inbox-label", type: "text", maxlength: "80", value: this.deps.defaultLabel });
@@ -241,7 +241,7 @@ export class InboxView {
 
   private approvalMarkup(state: Extract<InboxState, { kind: "awaiting_approval" }>): HTMLElement {
     const section = el("div", { class: "operator-inbox-approval" });
-    section.append(el("p", { class: "operator-inbox-lead" }, "Approve this browser from your Cassy Cloud account. Check that the code matches."));
+    section.append(el("p", { class: "operator-inbox-lead", "data-testid": "operator-inbox-lead" }, "Approve this browser from your Cassy Cloud account. Check that the code matches."));
     section.append(el("div", { class: "pair-code operator-inbox-code", "aria-label": "Sign-in code" }, state.userCode));
     const link = el("a", { href: state.approvalUrl, target: "_blank", rel: "noopener noreferrer", class: "button primary", id: "operator-inbox-approve-link" }, "Approve on Cassy Cloud");
     section.append(link);
@@ -322,16 +322,16 @@ export class InboxView {
     const author = (name: string): HTMLElement[] => {
       const first = name !== previousAuthor;
       previousAuthor = name;
-      return first ? [el("span", { class: "operator-inbox-author" }, name)] : [];
+      return first ? [el("span", { class: "operator-inbox-author", "data-testid": "operator-inbox-author" }, name)] : [];
     };
     for (const turn of thread.turns) {
       const item = el("li", { class: `operator-inbox-turn operator-inbox-${turn.kind}` });
       if (turn.kind === "reply") {
-        const bubble = el("div", { class: "operator-inbox-bubble" });
+        const bubble = el("div", { class: "operator-inbox-bubble", "data-testid": "operator-inbox-bubble" });
         bubble.append(...renderMarkdown(document, turn.message));
         item.append(...author("Supervisor"), bubble);
       } else {
-        item.append(...author("You"), el("p", { class: "operator-inbox-bubble" }, turn.text));
+        item.append(...author("You"), el("p", { class: "operator-inbox-bubble", "data-testid": "operator-inbox-bubble" }, turn.text));
         if (turn.kind === "command") {
           const command = commands.get(turn.commandId);
           item.append(commandStateMarkup(command?.state ?? "pending_machine", thread.machineLabel));
@@ -345,7 +345,7 @@ export class InboxView {
       if (command.hubId !== thread.hubId || command.sessionName !== thread.session) continue;
       if (thread.turns.some((turn) => turn.kind === "command" && turn.commandId === command.commandId)) continue;
       const item = el("li", { class: "operator-inbox-turn operator-inbox-command" });
-      item.append(...author("You"), el("p", { class: "operator-inbox-bubble" }, command.body), commandStateMarkup(command.state, thread.machineLabel));
+      item.append(...author("You"), el("p", { class: "operator-inbox-bubble", "data-testid": "operator-inbox-bubble" }, command.body), commandStateMarkup(command.state, thread.machineLabel));
       log.append(item);
     }
     section.append(log);
@@ -392,7 +392,7 @@ export class InboxView {
           if (this.controller.canManageMonitoring()) {
             const consent = el("details", { id: `presence-consent-${machine.machineId}` });
             const summary = el("summary", { id: `presence-details-${machine.machineId}`, "aria-label": `Monitoring settings for ${label}` });
-            summary.append(el("span", { class: "machine-presence-chevron", "aria-hidden": "true" }), document.createTextNode("Monitoring settings"));
+            summary.append(el("span", { class: "machine-presence-chevron", "data-testid": "machine-presence-chevron", "aria-hidden": "true" }), document.createTextNode("Monitoring settings"));
             consent.append(summary);
             consent.append(el("p", {}, "Cassy Cloud receives a report about this machine's Hub, Serve and Factory about once a minute. If reports stop, an alert appears in this inbox within about five minutes while Cassy Cloud's alert check is working. It keeps only the latest status and keeps notices for 90 days; Cassy Cloud can read them. No email or phone push is sent."));
             if (machine.monitoring === "disabled") {
@@ -468,7 +468,7 @@ export class InboxView {
   }
 
   private composerMarkup(thread: Thread): HTMLElement {
-    const form = el("form", { class: "operator-inbox-composer" });
+    const form = el("form", { class: "operator-inbox-composer", "data-testid": "operator-inbox-composer" });
     const machine = this.snapshot?.machines.find((entry) => entry.hubId === thread.hubId && entry.status === "active");
     const granted = this.controller.commandScopes().some(
       (scope) =>

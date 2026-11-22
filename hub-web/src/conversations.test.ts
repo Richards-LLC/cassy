@@ -593,7 +593,7 @@ describe('conversation evidence', () => {
     expect(pendingSessionLabel(dormant, false)).toBeUndefined();
     // A row whose machine is down says Last known, not its last turn (cas-da546).
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Last known', machine_online: false, attention: 0, preview: 'An older turn.', selected: false };
-    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview">Last known</span>');
+    expect(conversationRowMarkup(row)).toContain('<span data-testid="conversation-preview" class="conversation-preview">Last known</span>');
   });
   it('marks a parked draft in another conversation, under any connection problem (cas-97d58 F19)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: 'Gate run 3 of 3 is going.', selected: false, draft: 'Please keep the release notes short' };
@@ -603,7 +603,7 @@ describe('conversation evidence', () => {
     // The open conversation shows its draft in the composer, not the row.
     expect(conversationRowMarkup({ ...row, selected: true })).not.toContain('conversation-preview');
     // A connection problem still leads, so the row agrees with the header.
-    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
+    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span data-testid="conversation-preview" class="conversation-preview interrupted">Reconnecting</span>');
     expect(conversationRowMarkup({ ...row, draft: '   ' })).not.toContain('conversation-preview');
   });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {
@@ -619,7 +619,7 @@ describe('conversation evidence', () => {
     const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
     expect(shell).toContain('class="conversation-shell thread-open machine-accent-0"');
     expect(shell).toContain('id="compose-fab" class="compose-fab"');
-    expect(conversationShellMarkup({ selected: false, loaded: true, paired: true })).toContain('class="conversation-shell">');
+    expect(conversationShellMarkup({ selected: false, loaded: true, paired: true })).toContain('class="conversation-shell" data-testid="conversation-shell">');
   });
   it('offers one primary Pair a machine on first run: the welcome, with the header chip primary only where the welcome is hidden (D3)', () => {
     const shell = document.createElement('div');

@@ -68,7 +68,7 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
     // Handled, it quiets to the supervisor's colour (journey F12): only what
     // still waits keeps the attention treatment.
     object.dataset.answered = "true";
-    const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.state = answer.state;
+    const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.testid = "sent"; sent.dataset.state = answer.state;
     sent.append(tick(document), document.createTextNode(sentMessageLabel(answer.text)));
     sent.setAttribute("aria-label", `You replied: ${sentMessageLabel(answer.text)}`);
     foot.append(sent);

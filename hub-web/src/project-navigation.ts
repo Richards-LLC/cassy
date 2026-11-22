@@ -172,7 +172,7 @@ export class ProjectNavigation {
         const node = document.createElement("section"); node.className = "conversation-group project-card"; node.setAttribute("role", "group");
         // The spoken group name and visual header share the same facts. Keep
         // the complete machine names in the spoken heading when chips wrap.
-        const heading = document.createElement("p"); heading.className = "conversation-group-head sr-only"; heading.setAttribute("aria-hidden", "true");
+        const heading = document.createElement("p"); heading.className = "conversation-group-head sr-only"; heading.dataset.testid = "conversation-group-head"; heading.setAttribute("aria-hidden", "true");
         const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "project-card-toggle";
         const header = document.createElement("div"); header.className = "project-card-head";
         const chips = document.createElement("div"); chips.className = "project-machine-chips";

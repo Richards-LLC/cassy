@@ -1,0 +1,3 @@
+title: Evidence file counts cannot inflate synced task notes or silently truncate peer restoration
+tasks: [cas-591f]
+journeys: [FACTORY-CLOSE, FACTORY-MERGE]

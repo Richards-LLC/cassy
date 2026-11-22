@@ -4081,7 +4081,7 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
-        let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
+        let start_guidance = format!("{}{}\n\n{}", self.close_requirements(&task), start_guidance(&task), qa_impact::predicted(self, &task));
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -102,5 +102,82 @@ out.mkdir(parents=True)
     const [code] = await once(refused, 'exit');
     assert.equal(code, 2);
     assert.match(refused.output, message);
+  }
+});
+
+// GH #2291: use the canonical config and real Playwright startup, with one
+// HTTP-only selected test. Only npm and memory capacity are fixture boundaries.
+test('named journeys execute ready snapshots and report refused admission before tests start', async (t) => {
+  const repo = await mkdtemp(join(tmpdir(), 'cas-named-startup-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const hub = join(repo, 'hub-web');
+  for (const dir of ['scripts', 'hub-web/src', 'hub-web/e2e/journeys', 'tools']) {
+    await mkdir(join(repo, dir), { recursive: true });
+  }
+  for (const path of ['scripts/journey_dist.py', 'hub-web/playwright.config.ts', 'hub-web/playwright.base.ts',
+    'hub-web/e2e/checkout-ports.mjs', 'hub-web/e2e/journeys/clock.ts', 'hub-web/e2e/journeys/serve-dist.mjs']) {
+    await copyFile(new URL(`../../../${path}`, import.meta.url), join(repo, path));
+  }
+  const installed = new URL('../../node_modules', import.meta.url).pathname;
+  await symlink(installed, join(hub, 'node_modules'), 'dir');
+  await writeFile(join(repo, '.gitignore'), '/target/\n/hub-web/node_modules\n');
+  await writeFile(join(hub, 'package.json'), '{"type":"module"}');
+  await writeFile(join(hub, 'src/app.txt'), 'source-bound named journey');
+  await writeFile(join(repo, 'tools/npm'), `#!/usr/bin/env python3
+import sys
+from pathlib import Path
+out = Path(sys.argv[sys.argv.index('--outDir') + 1])
+out.mkdir(parents=True)
+(out / 'index.html').write_text(Path('src/app.txt').read_text())
+`, { mode: 0o755 });
+  await writeFile(join(repo, 'scripts/worker-memory.py'), `import os,sys
+if os.environ.get('FIXTURE_REFUSE_MEMORY') == '1':
+    print('worker memory admission: fixture capacity refused', flush=True)
+    sys.exit(75)
+command = sys.argv[sys.argv.index('--') + 1:]
+os.execvp(command[0], command)
+`);
+  const executed = join(repo, 'target/executed');
+  await writeFile(join(hub, 'e2e/journeys/startup.journey.ts'), `
+    import { test, expect } from '@playwright/test';
+    import { writeFileSync } from 'node:fs';
+    test('named startup selected', async ({ request }) => {
+      const response = await request.get('./');
+      expect(await response.text()).toBe('source-bound named journey');
+      writeFileSync(${JSON.stringify(executed)}, 'executed');
+    });
+  `);
+  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.name', 'fixture'); git('config', 'user.email', 'fixture@example.test');
+  git('add', '.'); git('commit', '-qm', 'named startup fixture');
+  const reservation = createServer();
+  reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  for (const refused of [false, true]) {
+    await rm(join(repo, 'target'), { recursive: true, force: true });
+    const report = join(repo, 'target/report.json');
+    const env = { ...process.env, CI: '1', PATH: `${join(repo, 'tools')}:${process.env.PATH}`,
+      HUB_JOURNEY_PORT: String(port), FIXTURE_REFUSE_MEMORY: refused ? '1' : '0',
+      PLAYWRIGHT_JSON_OUTPUT_NAME: report, JOURNEY_OUTPUT: join(repo, 'target/results') };
+    delete env.JOURNEY_BUILD_MANIFEST;
+    const child = spawn(process.execPath, [join(hub, 'node_modules/@playwright/test/cli.js'),
+      'test', '--project=journeys', '--grep', 'named startup selected', '--workers=1', '--reporter=json'],
+    { cwd: hub, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
+    let output = '';
+    child.stdout.on('data', bytes => { output += bytes; });
+    child.stderr.on('data', bytes => { output += bytes; });
+    const [code] = await once(child, 'exit');
+    assert.equal(code, refused ? 75 : 0, output);
+    if (refused) {
+      const outcome = output.split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } })
+        .find(row => row.status === 'NOT_STARTED');
+      assert.equal(outcome?.reason, 'memory_admission');
+      await assert.rejects(readFile(executed), { code: 'ENOENT' });
+    } else {
+      assert.equal(JSON.parse(await readFile(report, 'utf8')).stats.expected, 1);
+      assert.equal(await readFile(executed, 'utf8'), 'executed');
+    }
   }
 });

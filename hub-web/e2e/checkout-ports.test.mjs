@@ -52,7 +52,9 @@ test('project selection starts only the servers consumed by the selected tests',
   ]) {
     await writeFile(selected, '');
     const child = spawn(process.execPath, [playwrightCli, 'test', '--config', config, ...args], {
-      cwd: hubRoot, env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
+      // These server doubles do not consume a snapshot; keep config loading
+      // on journey-eval's prebuilt path rather than building the real checkout.
+      cwd: hubRoot, env: { ...process.env, CI: '1', JOURNEY_BUILD_MANIFEST: join(root, 'unused-manifest.json') }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '';
     child.stdout.on('data', bytes => { output += bytes; });

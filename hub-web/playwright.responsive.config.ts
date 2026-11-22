@@ -1,5 +1,5 @@
 import { defineConfig } from "@playwright/test";
-import base, { journeyWebServer } from "./playwright.config";
+import base, { journeyWebServer, prepareJourneySnapshot } from "./playwright.base";
 
 // Run one variant at a time so each owns its journey receipts. This fixture
 // regression lane retains the original desktop tests and adds native phone goals.
@@ -8,6 +8,7 @@ const scheme = process.env.JOURNEY_SCHEME ?? "light";
 if (layout !== "phone" && layout !== "desktop") throw new Error("JOURNEY_LAYOUT must be phone or desktop");
 if (scheme !== "light" && scheme !== "dark") throw new Error("JOURNEY_SCHEME must be light or dark");
 const journey = base.projects!.find(project => project.name === "journeys")!;
+prepareJourneySnapshot();
 
 export default defineConfig({
   ...base,

@@ -3127,13 +3127,25 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
             tokio::time::pause();
             tokio::time::advance(std::time::Duration::from_secs(56)).await;
-            let error = dispatch.await.unwrap().unwrap_err();
+            // The retained close now returns a normal structured disposition,
+            // rather than the old timeout error (cas-23c1).
+            let answer = dispatch.await.unwrap().unwrap();
             tokio::time::resume();
+            assert_eq!(answer.is_error, Some(false));
+            let data = answer.structured_content.as_ref().unwrap();
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
+            assert_eq!(data["task_id"], first.id);
+            let continuation = data["continuation_id"].as_str().unwrap();
+            uuid::Uuid::parse_str(continuation).unwrap();
             let _ = resume_tx.send(());
             done_rx.await.unwrap();
-            assert_eq!(error.data.as_ref().unwrap()["mutation_outcome"], "COMMITTED", "{error}");
+            // Queue assertions below must observe the retained handler and its
+            // durable outcome writer, not just its early response.
+            closer.tool_work.wait_idle().await;
+            let outcome = format!("CLOSE_OUTCOME: continuation={continuation}");
+            assert_eq!(f.task(&first.id).notes.matches(&outcome).count(), 1);
 
-            error.message.to_string()
+            format!("{answer:?}")
         };
         assert_eq!(f.task(&first.id).status,
             if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");

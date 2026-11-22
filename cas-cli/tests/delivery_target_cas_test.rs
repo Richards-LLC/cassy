@@ -523,13 +523,16 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     std::fs::write(worker_path.join("delivered.txt"), "observed merge\n").unwrap();
     run_git(&["add", "delivered.txt"], &worker_path);
     run_git(&["commit", "-m", "observed delivery"], &worker_path);
+    run_git(&["push", "origin", "factory/cas8d38-worker"], &worker_path);
 
     let task_store = open_task_store(&cas_root).unwrap();
     let mut task = Task::new("cas-cas8d38-observed".to_string(), "Observed merge correction".to_string());
     task.task_type = TaskType::Task;
-    task.status = TaskStatus::InProgress;
+    task.status = TaskStatus::AwaitingMerge;
     task.depth = TaskDepth::Light;
     task.assignee = Some("cas8d38-worker".to_string());
+    task.deliverables.factory_branch_anchor = Some(git_stdout(&worker_path, &["rev-parse", "HEAD"]));
+    task.deliverables.parked_branch = Some("factory/cas8d38-worker".into());
     task.risk = vec![cas::types::TaskRisk::Platform];
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/cas8d38-observed".to_string(),

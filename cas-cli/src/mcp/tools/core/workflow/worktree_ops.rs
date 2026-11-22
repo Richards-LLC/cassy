@@ -2338,9 +2338,26 @@ impl CasCore {
             return Ok(None);
         };
         let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let check_pushed = |selected: Option<String>, anchor: &str| {
+            let anchor = git.resolve_commit(anchor).unwrap_or_else(|| anchor.to_string());
+            if task.task_type != cas_types::TaskType::Epic
+                && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+            {
+                let branch = selected.as_deref().unwrap_or(source);
+                let pushed = requested_merge_source_tip(repo, branch, true)
+                    .map_err(|error| format!("Cannot verify pushed delivery {branch}: {error}"))?;
+                if pushed.as_deref() != Some(anchor.as_str()) {
+                    return Err(format!(
+                        "PARKED DELIVERY NOT PUSHED: {branch} must be pushed at parked anchor {anchor}; live origin is {}. No merge was attempted.",
+                        pushed.as_deref().unwrap_or("missing"),
+                    ));
+                }
+            }
+            Ok(selected)
+        };
         let original = parked_merge_source(&git, source, &task.id, anchor);
         if original.is_ok() || task.status != cas_types::TaskStatus::AwaitingMerge {
-            return original;
+            return original.and_then(|selected| check_pushed(selected, anchor));
         }
         let Some(tip) = git.resolve_commit(source) else {
             return original;
@@ -2360,6 +2377,7 @@ impl CasCore {
         if !unchanged {
             return original;
         }
+        check_pushed(None, &tip)?;
         self.advance_awaiting_merge_anchor(task_store, task, repo, parent_branch, Some(&tip))
             .map_err(|error| format!("Cannot advance parked delivery anchor: {error}"))?;
         let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload parked delivery anchor: {error}"))?;
@@ -5944,12 +5962,7 @@ impl CasCore {
             }
 
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
-                .or(dirty_pushed_anchor)
-                .or_else(|| scoped_task.as_deref()
-                    .filter(|task| transactional_delivery.is_none()
-                        && task.task_type != cas_types::TaskType::Epic
-                        && task.delivery_mode == cas_types::DeliveryMode::PushBranch)
-                    .and(parked_source_tip.as_deref()));
+                .or(dirty_pushed_anchor);
             // GH #2151: a local_merge delivery integrates its exact local
             // anchor; only a pushed delivery owes origin source-ref proof.
             let source_proof = if scoped_task.as_deref()

@@ -29,9 +29,10 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &artifact.id)
             .map_err(|error| format!("Verifier artifact {} unavailable: {error:#}", artifact.id))?;
         artifacts.push(serde_json::json!({
-            "artifact_id":record.id, "path":path, "sha256":record.sha256,
+            "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
         }));
     }
+    artifacts.extend(materialize_parent_plan_artifacts(&core.cas_root, task)?);
     let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
         .and_then(|candidate| candidate.inherited_supervisor_call);
     let supervisor_calls = core.open_verification_store().map_err(|e| e.to_string())?
@@ -953,6 +954,8 @@ mod tests {
                 handle.join().unwrap();
                 let prepared = received.try_recv().ok();
                 if mode == "good" {
+                    assert!(prepared.as_ref().is_some_and(|result| result.is_ok()),
+                        "parent={parent_scope} attempt={attempt}: {prepared:?}");
                     assert_eq!(prepared.unwrap().unwrap(), bytes, "parent={parent_scope} attempt {attempt}");
                     assert!(cas_store::SqliteArtifactStore::open(&core.cas_root).unwrap().get(&record.id).unwrap().is_some());
                     let input = std::fs::read_to_string(core.cas_root.join("prompt.txt")).unwrap();
@@ -964,6 +967,17 @@ mod tests {
                     assert_eq!(Path::new(reference["path"].as_str().unwrap()), expected);
                     if parent_scope { assert_eq!(reference["task_id"], parent.id); }
                     std::fs::remove_file(&expected).unwrap();
+                    if parent_scope && attempt == 1 {
+                        let before = context_digest(&core.cas_root, &task).unwrap();
+                        let mut sequence = record.clone();
+                        sequence.id = "art-peer-sequence".into();
+                        sequence.cloud_artifact_id = Some("cloud-peer-sequence".into());
+                        core.open_task_store().unwrap().append_trusted_note(&parent.id, &format!(
+                            "Sequence art-peer-sequence\nARTIFACT_PROOF: {}", serde_json::to_string(&sequence).unwrap(),
+                        )).unwrap();
+                        assert_ne!(context_digest(&core.cas_root, &task).unwrap(), before,
+                            "new referenced parent proof invalidates the candidate context");
+                    }
                 } else if mode == "unreferenced" {
                     assert!(prepared.is_some());
                     assert!(!expected.exists());

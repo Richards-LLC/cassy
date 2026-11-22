@@ -12,7 +12,6 @@ async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     for handling in ["unread", "polled", "acknowledged"] {
         let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
-        daemon.teams = None;
         let cas = daemon.app.cas_dir().to_path_buf();
         let name = daemon.app.supervisor_name().to_string();
         let session = daemon.session_name.clone();
@@ -56,7 +55,15 @@ async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19
         let control = super::delivery::enqueue_commander_message(&cas, &session, &name,
             "COMMANDER-CONTROL-4F19", None, false, None,
             &crate::ui::factory::protocol::MessageAttribution { request_id:Some(format!("control-{handling}")), ..attribution }).unwrap().id();
-        let typed = typed_once(&root, &mut daemon, "COMMANDER-CONTROL-4F19").await;
+        let typed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+                if typed.contains("COMMANDER-CONTROL-4F19") && typed.ends_with('\r')
+                    && !daemon.app.mux.has_pending_injects() { break typed; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the unobserved control reaches the real consumer");
         assert_eq!(typed.contains("COMMANDER-CLAIM-4F19"), handling == "unread", "{handling}: {typed:?}");
         let report = queue.message_delivery_report(id).unwrap().unwrap();
         if handling != "unread" {

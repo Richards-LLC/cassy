@@ -512,7 +512,7 @@ fn evidence_summary(report: &EvidenceReport) -> String {
         report.manifest.files.len(), report.skipped.len(), report.unpublished.len(), report.excluded.len());
     // One shared sample budget, including errors and excluded directories.
     for item in report.unpublished.iter().chain(&report.skipped).chain(&report.excluded)
-        .chain(report.manifest.files.iter().map(|file| &file.name)).take(EVIDENCE_SAMPLE)
+        .chain(report.manifest.files.iter().filter(|_| report.unpublished.is_empty()).map(|file| &file.name)).take(EVIDENCE_SAMPLE)
     {
         summary.push_str("\n- ");
         summary.push_str(&short_evidence_text(item, 256));
@@ -908,7 +908,16 @@ pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task)
                 let loaded = (|| -> anyhow::Result<EvidenceSync> {
                     anyhow::ensure!(reference.path == EVIDENCE_REPORT, "invalid evidence report path");
                     let path = if let Some(id) = &reference.artifact_id {
-                        fetch_task(cas_root, &task.id, id)?.1
+                        // Use the same authenticated task snapshot as the
+                        // manifest, rather than re-reading a stale local row.
+                        let artifact = from_notes(&task.notes, id, &task.id)?
+                            .ok_or_else(|| anyhow::anyhow!("no synced artifact record {id}"))?;
+                        let store = SqliteArtifactStore::open(cas_root)?;
+                        let config = crate::config::Config::load(cas_root)?;
+                        let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+                        let roots = PublishRoots::new(cas_root, &base, &task.id);
+                        fetch(&store, super::cloud_client(cas_root).as_ref(), &roots, artifact,
+                            &format!("{id}-{EVIDENCE_REPORT}"))?
                     } else {
                         anyhow::ensure!(!sync.strict, "strict evidence report is not published");
                         evidence_dir(cas_root, task)?.join(&reference.path)

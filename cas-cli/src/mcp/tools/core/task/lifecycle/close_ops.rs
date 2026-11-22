@@ -10146,6 +10146,20 @@ impl CasCore {
                         }
                         // The advanced anchor keeps this machine's fresh receipts.
                         keep_fresh_test_receipts(task_store.as_ref(), &task.id, portable);
+                        // A fully checked same-tip retry confirms the existing
+                        // durable park without writing another anchor or cycle.
+                        // Do not borrow a changed or unreadable task snapshot.
+                        if let Some(parked) = current.as_ref()
+                            && anchor.as_deref().zip(parked.deliverables.factory_branch_anchor.as_deref())
+                                .is_some_and(|(tip, recorded)| tip == recorded)
+                        {
+                            crate::mcp::tools::service::mutation_receipt::task_disposition_committed(
+                                &task.id,
+                                &format!("task `{}` parked awaiting_merge on {} at {}", task.id,
+                                    parked.deliverables.parked_branch.as_deref().unwrap_or("recorded delivery branch"),
+                                    anchor.as_deref().expect("checked unchanged park anchor")),
+                            );
+                        }
                     }
 
                     if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {

@@ -176,8 +176,16 @@ pub(super) fn park_refusals(
         };
         let missing = stability::missing(&passing, &tests);
         if !missing.is_empty() {
+            // GH #2288: name why an earlier five-pass proof did not carry.
+            let voided = stability::invalidated(&passing, &missing).into_iter().map(|(tested, inputs)| {
+                let tested = &tested[..tested.len().min(12)];
+                match inputs {
+                    Some(inputs) => format!(" Proof at {tested} does not carry: {short} changes its inputs {}.", inputs.join(", ")),
+                    None => format!(" Proof at {tested} does not carry: not an ancestor of {short}."),
+                }
+            }).collect::<String>();
             refusals.push(crate::gates::tag("G-61", format!(
-                "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}. Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner: {}. Then retry park.",
+                "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}.{voided} Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner: {}. Then retry park.",
                 task.id, missing.iter().map(|test| format!("{}::{}", test.path, test.name)).collect::<Vec<_>>().join(", "),
                 stability::rerun_commands(cas_root, proof_repo, &missing).join("; "),
             )));

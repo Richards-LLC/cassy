@@ -120,6 +120,19 @@ pub(crate) fn missing(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Ide
     tests.iter().filter(|test| !covered.contains(*test)).cloned().collect()
 }
 
+/// GH #2288: earlier five-pass proofs for these tests that this tip could not
+/// carry, each with the changed proof inputs that voided it (`None`: its head
+/// is not an ancestor, or the range is unreadable).
+pub(crate) fn invalidated(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<(String, Option<Vec<String>>)> {
+    let mut refused = passing.voided().iter()
+        .filter(|(_, test, _)| test.stability.as_ref()
+            .is_some_and(|proof| valid(proof) && proof.tests.iter().any(|test| tests.contains(test))))
+        .map(|(head, _, inputs)| (head.clone(), inputs.clone())).collect::<Vec<_>>();
+    refused.sort();
+    refused.dedup();
+    refused
+}
+
 /// Snapshot only evidence the normal park consumer accepts at this tip.
 /// Admission still invalidates it before launching a possibly failing child.
 pub(super) fn prior(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Proof> {

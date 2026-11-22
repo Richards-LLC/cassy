@@ -5,6 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub const OUTBOX_TTL_SECS: i64 = 15 * 60;
 const SEND_LEASE_SECS: i64 = 120;
 const BUILD_ROUTE_SEND_ATTEMPTS: u32 = 3;
+/// GH #1731 §4: an accepted send still undelivered this long alerts its sender.
+const DELIVERY_ALERT_SECS: i64 = 120;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerSendError {
@@ -378,6 +380,48 @@ fn tick_at(root: &Path, _session: &str, now: i64) -> anyhow::Result<()> {
     };
     for id in due {
         let _ = attempt(root, id, now)?;
+    }
+    alert_undelivered(root, &conn, now)
+}
+
+/// GH #1731 §4: Cloud's "queued" receipt reads as sent, so a peer that has
+/// not claimed the message leaves its sender waiting unawares. Each accepted
+/// ordinary send gets one Cloud status read once it is due; any outcome but
+/// delivery alerts the sender. `notice_sent` records that the read settled.
+fn alert_undelivered(root: &Path, conn: &Connection, now: i64) -> anyhow::Result<()> {
+    let held = {
+        let mut stmt = conn.prepare("SELECT id,cloud_id,sender_agent_id,sender_name,sender_session,recipient,created_at FROM peer_message_outbox WHERE state='sent' AND notice_sent=0 AND cloud_id IS NOT NULL AND created_at<=?1 AND created_at>?2 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key') LIKE 'peer:%' ORDER BY id LIMIT 2")?;
+        stmt.query_map(params![now - DELIVERY_ALERT_SECS, now - OUTBOX_TTL_SECS], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?, r.get::<_, String>(5)?, r.get::<_, i64>(6)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let Some(mailbox) = held.first().and_then(|_| http_mailbox(root)) else { return Ok(()) };
+    for (id, cloud_id, sender, name, session, recipient, created_at) in held {
+        let status = match mailbox.status(&cloud_id) {
+            Ok(status) => status.status,
+            Err(error) => {
+                tracing::warn!(outbox_id = id, %error, "peer delivery status unavailable; rechecking next tick");
+                continue;
+            }
+        };
+        if status != "delivered" {
+            let (target, session) = match crate::store::open_agent_store(root)?.get(&sender) {
+                Ok(agent) if matches!(agent.status, AgentStatus::Active | AgentStatus::Idle) => (agent.name, agent.factory_session),
+                _ => (name, session),
+            };
+            let body = format!(
+                "Peer message {cloud_id} to {recipient} is still {status} in Cassy Cloud {}s after it was sent; the peer has not received it. Check message_status id={cloud_id}, or reach the peer another way if it is urgent.",
+                now - created_at,
+            );
+            crate::store::open_prompt_queue_store(root)?.enqueue_idempotent(
+                "delivery-watchdog", &target, &body, session.as_deref(),
+                Some(&format!("Peer message {cloud_id} still {status}")), None,
+                &format!("peer-delivery-delayed:{cloud_id}"), Some(&QueueOrigin::Daemon),
+            )?;
+        }
+        conn.execute("UPDATE peer_message_outbox SET notice_sent=1 WHERE id=?1", [id])?;
     }
     Ok(())
 }

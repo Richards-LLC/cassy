@@ -1995,10 +1995,19 @@ impl SqlitePromptQueueStore {
                         let holding = Self::holding_detail_on_conn(tx, prompt.id)?;
                         // cas-acb6e (GH #2231): a hold recorded late explains
                         // only the time after it began, not the whole delay.
-                        let started = envelope.occurrence.min(prompt.created_at);
+                        // GH #1731 §2: a row queued long after its occurrence
+                        // was late before the queue held it; that is a known
+                        // cause, and the queue's own wait starts at enqueue.
+                        let enqueue_lag_secs = (prompt.created_at - envelope.occurrence).num_seconds().max(0);
+                        let enqueued_late = enqueue_lag_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS;
+                        let started = if enqueued_late {
+                            prompt.created_at
+                        } else {
+                            envelope.occurrence.min(prompt.created_at)
+                        };
                         let unrecorded_secs = Self::holding_since_on_conn(tx, prompt.id)?
                             .map_or(0, |since| (since - started).num_seconds().max(0));
-                        let cause = holding.as_deref().map(|detail| {
+                        let held = holding.as_deref().map(|detail| {
                             let text = detail.split_whitespace().collect::<Vec<_>>().join(" ");
                             let mut bounded = text.chars().take(160).collect::<String>();
                             if text.chars().count() > 160 { bounded.push('…'); }
@@ -2007,7 +2016,17 @@ impl SqlitePromptQueueStore {
                             } else {
                                 format!("held: {bounded}")
                             }
-                        }).unwrap_or_else(|| "cause unrecorded".into());
+                        });
+                        let queued_wait_secs = (now - prompt.created_at).num_seconds().max(0);
+                        let cause = match (enqueued_late, held) {
+                            (false, held) => held.unwrap_or_else(|| "cause unrecorded".into()),
+                            (true, Some(held)) => format!("queued {}m after it happened; {held}", enqueue_lag_secs / 60),
+                            (true, None) if queued_wait_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS => format!(
+                                "queued {}m after it happened; then cause unrecorded for {}m",
+                                enqueue_lag_secs / 60, queued_wait_secs / 60,
+                            ),
+                            (true, None) => format!("queued {}m after it happened", enqueue_lag_secs / 60),
+                        };
                         let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
                         summary.push_str(&format!(" [delayed {}m; {cause}]", age_secs / 60));
                     }

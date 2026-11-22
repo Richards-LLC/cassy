@@ -429,7 +429,7 @@ pub fn revalidate_event_for_delivery_with_context(
                 return None;
             }
 
-            let active_task = unfiltered_data
+            let mut active_task = unfiltered_data
                 .agents
                 .iter()
                 .find(|agent| agent.name == *worker)
@@ -447,6 +447,22 @@ pub fn revalidate_event_for_delivery_with_context(
                             pending_qa: None,
                         })
                 });
+            // GH #1731 §3: the worker's lease moved to a later assignment
+            // after detection. The idle premise was about the earlier task and
+            // cannot describe the new one; only a merge alert for a task that
+            // is still parked stays, and it stays about that task.
+            if let (Some(enqueued), Some(live)) = (enqueued_active_task.as_ref(), active_task.as_ref())
+                && live.task_id != enqueued.task_id
+            {
+                let still_parked = is_merge_required_idle(enqueued)
+                    && unfiltered_data.in_progress_tasks.iter().any(|task| {
+                        task.id == enqueued.task_id && task.status == TaskStatus::AwaitingMerge
+                    });
+                if !still_parked {
+                    return None;
+                }
+                active_task = Some(enqueued.clone());
+            }
 
             let supervisor_already_contacted = idle_since
                 .and_then(|idle_since| {

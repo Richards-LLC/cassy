@@ -8636,9 +8636,14 @@ impl FactoryDaemon {
                 // alongside so message_status stays truthful about *why* a
                 // row is still pending.
                 let pane_known = self.app.mux.get(&pane_target).is_some();
+                // GH #1731 §1: between recycle shutdown and relaunch the name
+                // is off the roster and has no pane, but its successor is
+                // coming. The shutdown gate already keeps this mail; so must
+                // a failed inject.
                 let target_is_current =
                     self.app.worker_names().contains(&pane_target.to_string())
-                        || pane_target == self.app.supervisor_name();
+                        || pane_target == self.app.supervisor_name()
+                        || self.pending_worker_replacements().contains(&pane_target);
                 match super::delivery::classify_queued_delivery(
                     false,
                     pane_known,

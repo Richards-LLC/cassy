@@ -2388,7 +2388,7 @@ async fn retarget_empty_branch_rebind_then_start_gh1673() {
 #[tokio::test]
 async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
     let mut env = TestEnvGuard::temp_home();
-    for obstruction in ["clean", "dirty", "foreign"] {
+    for obstruction in ["open", "clean", "dirty", "foreign"] {
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
         let fork = git(repo, &["rev-parse", "main"]);
@@ -2408,6 +2408,11 @@ async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
         task.status = TaskStatus::Open;
         f.put(&task);
         call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        if obstruction == "open" {
+            call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "status":"open"})).await;
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+            assert!(f.task(id).deliverables.factory_branch_start.is_some());
+        }
         if obstruction == "dirty" {
             std::fs::write(checkout.join("local.txt"), "unsaved work\n").unwrap();
         } else if obstruction == "foreign" {
@@ -2433,11 +2438,15 @@ async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
         assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
             serde_json::to_value(&before.deliverables).unwrap());
         let recovery = &error.data.as_ref().unwrap()["recovery"];
+        if let Some(start) = recovery.get("start") {
+            call(&f.worker, start.clone()).await;
+            assert_eq!(f.task(id).status, TaskStatus::InProgress);
+        }
         call(&f.supervisor, recovery["target_update"].clone()).await;
         let replacement = recovery["branch"].as_str().unwrap();
         git(&checkout, &["checkout", "-q", "-b", replacement, recovery["base"].as_str().unwrap()]);
         let rebound = f.supervisor.task(Parameters(serde_json::from_value(recovery["rebind"].clone()).unwrap())).await;
-        if obstruction != "clean" {
+        if matches!(obstruction, "dirty" | "foreign") {
             assert!(rebound.is_err(), "{obstruction}: {rebound:?}");
             assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
             if obstruction == "dirty" {

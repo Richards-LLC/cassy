@@ -167,7 +167,7 @@ if out="$("$gate" "$nodist" 2>&1)" && [[ "$out" == *"not applicable"* ]]; then o
 # --- server isolation (cas-00ad) ---------------------------------------------
 # A journey run must never attach to another checkout's server: no reuse, no
 # fixed shared default ports, and each checkout's pair stays in 20000–32767.
-config="$repo/hub-web/playwright.config.ts"
+config="$repo/hub-web/playwright.base.ts"
 if grep -q 'reuseExistingServer: false' "$config" && ! grep -q 'reuseExistingServer: !\|reuseExistingServer: true' "$config"; then
     ok "playwright config never reuses a running server"
 else bad "playwright config may reuse another checkout's server"; fi

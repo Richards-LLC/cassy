@@ -2671,9 +2671,9 @@ impl CasCore {
                     && !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
                     && task.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
                 .map(|task| task.id).collect::<Vec<_>>();
-            active.extend(agents.list_active_leases()
+            active.extend(crate::worker_task_queue::unfinished_worker_leases(task_store.as_ref(), agents.as_ref(), worker)
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
-                .into_iter().filter(|lease| lease.agent_id == worker.id && lease.task_id != req.id)
+                .into_iter().filter(|lease| lease.task_id != req.id)
                 .map(|lease| lease.task_id));
             active.sort();
             active.dedup();

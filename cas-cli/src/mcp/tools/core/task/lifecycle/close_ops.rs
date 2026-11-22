@@ -10366,8 +10366,40 @@ impl CasCore {
                     ..
                 }))
         );
+        // GH #2226/#2244: the prescribed historical override must not loop
+        // merely because a completed reviewer failed before giving a verdict.
+        // Only the exact recorded delivery already on its target can recover;
+        // pending/rejected reviews and unintegrated work retain their authority.
+        let historical_error_recovery = (verification_enabled
+            && matches!(skip_reason, VerificationSkipReason::SupervisorBypass)
+            && close_disposition.requires_delivery_gates()
+            && task.task_type != TaskType::Epic)
+        .then(|| {
+            let actor = self.resolve_live_supervisor_authority().ok()?;
+            let receipt = resolve_task_commit_receipt_sha(&close_project_root, req.commit_receipt.as_deref()?).ok()?;
+            let anchor = resolve_task_commit_receipt_sha(&close_project_root, task.deliverables.factory_branch_anchor.as_deref()?).ok()?;
+            if receipt != anchor || !commit_is_merged_into_parent(&close_project_root, &receipt, &resolved_parent_branch) {
+                return None;
+            }
+            let prior = self.open_verification_store().ok()?.get_latest_for_task(&task.id).ok()??;
+            if prior.status != VerificationStatus::Error { return None; }
+            match cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).ok()? {
+                None if prior.dispatch_id.is_none() => {}
+                Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved
+                    && prior.dispatch_id.as_deref() == Some(dispatch.id.as_str()) => {}
+                _ => return None,
+            }
+            Some((actor.id, receipt, prior))
+        }).flatten();
+        if let Some((actor, receipt, prior)) = &historical_error_recovery {
+            close_notes.record(&mut task, &format!(
+                "Historical integrated-delivery recovery: supervisor {actor} audited {receipt} on {resolved_parent_branch} after Error {} (dispatch {}). Original Error retained; no pre-merge approval created. Reason: {}",
+                prior.id, prior.dispatch_id.as_deref().unwrap_or("legacy"), req.reason.as_deref().unwrap_or_default(),
+            ));
+        }
         // Legacy errors also retain their authority when no typed dispatch exists.
-        let skip_verification = published_delivery.is_some() || skip_reason.is_skip() && exact_dispatch_allows_skip
+        let skip_verification = published_delivery.is_some() || historical_error_recovery.is_some()
+            || skip_reason.is_skip() && exact_dispatch_allows_skip
             && self.open_verification_store().is_ok_and(|store| {
                 store.get_latest_for_task(&req.id).is_ok_and(|latest| latest.is_none_or(|row| {
                     row.dispatch_id.is_some()

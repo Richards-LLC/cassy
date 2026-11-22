@@ -679,6 +679,20 @@ async fn task_read_byte_budget_and_lossless_pages() {
             "{action} pages must reproduce full output byte for byte"
         );
     }
+    // GH #2281: list must not silently discard a show/notes byte cursor and
+    // replay the first hundred tasks as though it were the next page.
+    for index in 0..101 {
+        store.add(&Task::new(format!("cas-list-{index:03}"), "List fixture".into())).unwrap();
+    }
+    let list = |offset: Option<usize>| Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
+        serde_json::json!({"action": "list", "limit": 100, "offset": offset})
+    ).unwrap());
+    let first = extract_text(service.task(list(None)).await.unwrap());
+    assert_eq!(first.lines().filter(|line| line.starts_with("- [cas-")).count(), 100);
+    for offset in [0, 100] {
+        let error = service.task(list(Some(offset))).await.expect_err("list offset is unsupported");
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
     let workspace = cas::test_paths::workspace_root();
     if workspace.join("Cargo.toml").is_file() {
         let path = workspace.join("target/task-read-replay.json");

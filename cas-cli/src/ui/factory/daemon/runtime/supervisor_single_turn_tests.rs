@@ -73,6 +73,7 @@ async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19
                 tokio::task::yield_now().await;
             }
         }).await.expect("the unobserved control reaches the real consumer");
+        assert!(daemon.queue_jobs.drain_for_shutdown(&cas, Duration::from_secs(5)));
         let report = queue.message_delivery_report(id).unwrap().unwrap();
         assert_eq!(typed.contains("COMMANDER-CLAIM-4F19"), handling == "unread", "{handling}: {typed:?}; {report:?}");
         if handling != "unread" {

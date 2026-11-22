@@ -1438,34 +1438,71 @@ mod tests {
         assert!(comments.iter().all(|(url, body)| url == &transport.issue_url && body.contains(launch)));
     }
 
-    /// An open task already tracking the refusal takes the evidence; no issue.
+    /// Component reports deduplicate only against tasks owned by that component.
     #[tokio::test]
     async fn refusal_tracked_by_an_open_task_adds_evidence_to_that_task() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        let temp = tempfile::tempdir().unwrap();
-        let service = report_service(temp.path());
-        let store = service.inner.open_task_store().unwrap();
-        let mut task = crate::types::Task::new(
-            store.generate_id().unwrap(),
-            "Verifier launch refuses a live supervisor".to_string(),
-        );
-        task.description = "Refusal: [G-104] merge held on verification dispatch vdispatch-1; automatic verifier startup is scheduled".to_string();
-        store.add(&task).unwrap();
-        let transport = recording_transport();
-        let request = serde_json::from_value(serde_json::json!({
-            "action": "report_cas_bug",
-            "title": "Merge stays held after the verifier is scheduled",
-            "description": "worktree_merge holds forever.",
-            "actual": "merge held on verification dispatch vdispatch-77aa; automatic verifier startup is scheduled\n\n[G-104]",
-        }))
-        .unwrap();
-        service
-            .report_cas_bug_with_transport(request, &transport)
-            .await
-            .unwrap();
-        assert!(transport.reports_seen.borrow().is_empty());
-        assert!(transport.comments_seen.borrow().is_empty());
-        assert!(store.get(&task.id).unwrap().notes.contains("+1"));
+        for (project_repo, source, origin, target, dedup) in [
+            (Some("example/product"), false, "product", None, false),
+            (Some("example/component"), false, "component", None, true),
+            (None, true, "component", None, true),
+            (None, true, "foreign", None, false),
+            (Some("example/product"), false, "foreign", Some("remote:github.com/example/component"), true),
+            (Some("example/component"), false, "component", Some("remote:github.com/example/product"), false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join(".cas");
+            std::fs::create_dir(&root).unwrap();
+            let project = if source || project_repo == Some("example/component") { "component" } else { "product" };
+            let tracker = project_repo.map(|repo| format!("[issues]\nrepo='{repo}'\n")).unwrap_or_default();
+            std::fs::write(root.join("config.toml"), format!(
+                "[project]\ncanonical_id='{project}'\n{tracker}[issues.components]\ncassy='example/component'\n"
+            )).unwrap();
+            if source {
+                std::fs::create_dir(temp.path().join("cas-cli")).unwrap();
+                std::fs::write(temp.path().join("cas-cli/Cargo.toml"), "name = \"cas\"\n").unwrap();
+            }
+            let service = report_service(&root);
+            let store = service.inner.open_task_store().unwrap();
+            let refusal = "Refusal: [G-104] merge held on verification dispatch vdispatch-1; automatic verifier startup is scheduled";
+            let mut task = crate::types::Task::new("cas-candidate".into(), "Fix the reported failure".into());
+            task.notes = refusal.into();
+            task.origin_project = Some(origin.into());
+            task.deliverables.work_target = target.map(|selector| cas_types::WorkTarget {
+                repo_selector: selector.into(), target_branch: "main".into(),
+            });
+            store.add(&task).unwrap();
+            // An unrelated earlier match must not hide a genuine component task.
+            let mut decoy = crate::types::Task::new("cas-product".into(), "Product work".into());
+            decoy.notes = refusal.into();
+            decoy.origin_project = Some("foreign-product".into());
+            decoy.priority = cas_types::Priority(0);
+            decoy.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "remote:github.com/example/product".into(), target_branch: "main".into(),
+            });
+            store.add(&decoy).unwrap();
+            let mut transport = recording_transport();
+            transport.issue_url = "https://github.com/example/component/issues/1".into();
+            let actual = "merge held on verification dispatch vdispatch-77aa; automatic verifier startup is scheduled\n\n[G-104]";
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "report_cas_bug", "title": "Merge stays held after the verifier is scheduled",
+                "description": "A product task encounters a Cassy close refusal.", "actual": actual,
+            })).unwrap();
+            let result = service.report_cas_bug_with_transport(request, &transport).await.unwrap();
+            assert_eq!(result.is_error, Some(false));
+            assert_eq!(transport.reports_seen.borrow().len(), usize::from(!dedup), "{project_repo:?}/{source}/{origin}/{target:?}");
+            assert!(transport.comments_seen.borrow().is_empty());
+            assert_eq!(store.get(&decoy.id).unwrap().notes, decoy.notes);
+            let updated = store.get(&task.id).unwrap();
+            if dedup {
+                assert_eq!(updated.notes.matches(actual).count(), 1); // exact caller payload
+                assert!(transport.repos_seen.borrow().is_empty());
+            } else {
+                assert_eq!(updated.notes, task.notes);
+                assert_eq!(&*transport.repos_seen.borrow(), &["example/component", "example/component"]);
+                assert!(transport.reports_seen.borrow()[0].1.contains(actual)); // exact caller payload
+            }
+        }
     }
 
     #[tokio::test]

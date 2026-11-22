@@ -563,6 +563,7 @@ impl CasService {
         transport: &T,
         repo: &str,
         fingerprint: &RefusalFingerprint,
+        eligible: impl Fn(&crate::types::Task) -> bool,
     ) -> Result<Option<OpenMatch>, String> {
         let issues = transport.open_issues(repo)?;
         if let Some((url, _)) = issues.into_iter().find(|(_, text)| fingerprint.matches(text)) {
@@ -572,7 +573,7 @@ impl CasService {
             .inner
             .open_task_store()
             .map_err(|error| format!("task store unavailable: {}", error.message))?;
-        Ok(crate::issue_intake::open_task_match(store.as_ref(), fingerprint)
+        Ok(crate::issue_intake::open_task_match(store.as_ref(), fingerprint, eligible)
             .map_err(|error| format!("could not list open tasks: {error}"))?
             .map(|task| OpenMatch::Task(task.id)))
     }
@@ -627,7 +628,7 @@ impl CasService {
             }
             None => Err("no project issue tracker configured".to_string()),
         };
-        let found = match tracker.and_then(|repo| self.find_open_match(&transport, &repo, fingerprint)) {
+        let found = match tracker.and_then(|repo| self.find_open_match(&transport, &repo, fingerprint, |_| true)) {
             Ok(found) => found,
             Err(error) => {
                 tracing::warn!(%error, "cas-5edc: open issues not consulted; matching open tasks only");
@@ -635,7 +636,7 @@ impl CasService {
                     .inner
                     .open_task_store()
                     .map_err(|error| format!("task store unavailable: {}", error.message))?;
-                crate::issue_intake::open_task_match(store.as_ref(), fingerprint)
+                crate::issue_intake::open_task_match(store.as_ref(), fingerprint, |_| true)
                     .map_err(|error| format!("could not list open tasks: {error}"))?
                     .map(|task| OpenMatch::Task(task.id))
             }
@@ -744,7 +745,24 @@ impl CasService {
             Err(warning) => ("unassigned".to_string(), Some(warning)),
         };
         let filing_result = resolve_issue_repo(&self.inner.cas_root).and_then(|repo| {
-            self.find_open_match(transport, &repo, &fingerprint)?
+            let scope = crate::mcp::tools::core::task::ProjectScope::current(&self.inner.cas_root);
+            let local_component = crate::quality_ledger::is_cassy_source(&self.inner.cas_root)
+                || self.inner.load_config().issue_repo_registry().project
+                    .is_some_and(|project| project.eq_ignore_ascii_case(&repo));
+            let component_remote = format!("remote:github.com/{repo}");
+            self.find_open_match(transport, &repo, &fingerprint, |task| {
+                // Refusal text in product work is evidence of impact, not component ownership.
+                if let Some(target) = &task.deliverables.work_target {
+                    let selector = crate::mcp::tools::core::task::repo_context::canonical_selector(&target.repo_selector);
+                    if selector.starts_with("remote:") {
+                        return selector.eq_ignore_ascii_case(&component_remote);
+                    }
+                    if scope.project_id().is_none_or(|id| selector != format!("project:{id}")) {
+                        return false;
+                    }
+                }
+                local_component && scope.shows(task)
+            })?
             .map_or_else(
                 || file_bug_report(transport, &repo, &title, &body).map(Filing::Filed),
                 |found| self.add_evidence(transport, found, &title, &body),
@@ -1448,7 +1466,10 @@ mod tests {
             (None, true, "component", None, true),
             (None, true, "foreign", None, false),
             (Some("example/product"), false, "foreign", Some("remote:github.com/example/component"), true),
+            (Some("example/product"), false, "foreign", Some("remote:git@github.com:Example/Component.git"), true),
             (Some("example/component"), false, "component", Some("remote:github.com/example/product"), false),
+            (Some("example/component"), false, "component", Some("project:component"), true),
+            (Some("example/component"), false, "component", Some("project:product"), false),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().join(".cas");

@@ -1113,6 +1113,13 @@ For example, `issues.repo = "example/downstream"` alone still files Cassy bugs
 in `Richards-LLC/cassy`, agreeing with `cas config get issues.components.cassy`.
 The checkout's inferred origin is never a Cassy filing target.
 
+Matching an open task also requires component ownership. A matching GitHub
+remote work target qualifies; otherwise the task must belong to the current
+project and that project must be Cassy's source or explicitly use the selected
+component tracker. A different explicit work target is excluded. A product
+task containing the refusal cannot suppress the component report. Matching
+component issues or tasks still receive the new evidence instead of duplicates.
+
 Legacy opt-out: a raw, explicitly blank or whitespace-only
 `[issues.components] cassy` value in config.toml permits a nonblank stored
 `issues.repo` fallback. If the project override is also blank or absent, the

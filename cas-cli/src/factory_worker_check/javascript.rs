@@ -1378,20 +1378,41 @@ fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
 /// The runner a G-61 refusal names for a changed test file: its runner
 /// import, else the nearest directory with runner evidence. Conflicting or
 /// absent evidence leaves the runner unknown.
+/// Modules the file's code imports or requires. Text inside strings, such as
+/// a fixture that writes a Playwright spec, is not an import (cas-83d8).
+fn imported_modules(path: &str, source: &str) -> BTreeSet<String> {
+    fn collect(node: Node<'_>, source: &str, modules: &mut BTreeSet<String>) {
+        let specifier = match node.kind() {
+            "import_statement" => node.child_by_field_name("source"),
+            "call_expression" if node.child_by_field_name("function")
+                .is_some_and(|function| function.kind() == "import" || text(function, source) == "require") =>
+                node.child_by_field_name("arguments").and_then(|arguments| arguments.named_child(0)),
+            _ => None,
+        };
+        if let Some(specifier) = specifier.filter(|specifier| specifier.kind() == "string") {
+            modules.insert(text(specifier, source).trim_matches(['\'', '"']).to_string());
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, source, modules);
+        }
+    }
+    let mut modules = BTreeSet::new();
+    if let Ok(tree) = source_tree(path, source) {
+        collect(tree.root_node(), source, &mut modules);
+    }
+    modules
+}
+
 pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     let source = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
-    if source.contains("@playwright/test") {
-        return Some("playwright");
-    }
-    if source.contains("'vitest'") || source.contains("\"vitest\"") {
-        return Some("vitest");
-    }
-    if source.contains("@jest/globals") {
-        return Some("jest");
-    }
+    let modules = imported_modules(path, &source);
     // GH #2055: a node:test file beside a Jest config is Node's own runner.
-    if source.contains("'node:test'") || source.contains("\"node:test\"") {
-        return Some("node --test");
+    for (module, runner) in [("@playwright/test", "playwright"), ("vitest", "vitest"),
+        ("@jest/globals", "jest"), ("node:test", "node --test")] {
+        if modules.contains(module) {
+            return Some(runner);
+        }
     }
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
@@ -2504,6 +2525,22 @@ process.exit(ok ? 0 : 1);
         assert_eq!(invocation(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|invocation| invocation.runner), Some("node"));
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
+
+        // cas-83d8: a node:test file whose fixture writes and launches a
+        // Playwright spec (serve-dist.test.mjs) is still Node's; a real spec
+        // beside it stays Playwright.
+        std::fs::create_dir_all(repo.path().join("e2e")).unwrap();
+        std::fs::write(repo.path().join("e2e/playwright.config.ts"), "export default {};\n").unwrap();
+        std::fs::write(repo.path().join("e2e/serve.test.mjs"), concat!(
+            "import { spawn } from 'node:child_process';\nimport test from 'node:test';\n",
+            "test('journey', async () => {\n  const spec = `\n    import { test, expect } from '@playwright/test';\n  `;\n",
+            "  spawn(process.execPath, ['node_modules/@playwright/test/cli.js', 'test', '--project=journeys', spec]);\n});\n",
+        )).unwrap();
+        std::fs::write(repo.path().join("e2e/a.spec.ts"), "import { test } from '@playwright/test';\ntest('a', () => {});\n").unwrap();
+        let commands = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(),
+            &[id("e2e/serve.test.mjs", "journey"), id("e2e/a.spec.ts", "a")]);
+        assert_eq!(commands, ["node --test e2e/serve.test.mjs", "playwright e2e/a.spec.ts"]
+            .map(|argv| format!("`cas factory worker-check --cas-root /cas -- {argv}`")));
 
         let commands = super::super::stability::rerun_commands(
             Path::new("/cas"),

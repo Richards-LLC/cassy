@@ -7,6 +7,9 @@ mod shell_effects;
 pub(super) struct ShellReadContext {
     pub command: String,
     pub directories: Vec<Option<std::path::PathBuf>>,
+    /// Literal values the command binds to its variables (GH #2171), so a
+    /// `$VAR` operand is judged at its value rather than as a relative path.
+    pub values: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Not a valid file name, so no real directory entry has this spelling.
@@ -4782,7 +4785,7 @@ fn is_shell_variable_name(name: &str) -> bool {
 /// The bounded Cartesian product prevents a crafted command from making the
 /// hook allocate without limit; retaining the original word on overflow keeps
 /// the containment check fail-closed.
-fn expand_factory_shell_word(
+pub(super) fn expand_factory_shell_word(
     word: &str,
     values: &std::collections::HashMap<String, Vec<String>>,
 ) -> Vec<String> {

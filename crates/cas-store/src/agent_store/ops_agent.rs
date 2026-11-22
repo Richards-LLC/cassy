@@ -128,30 +128,11 @@ fn reconcile_restarted_factory_supervisor(
     Ok(())
 }
 
-/// Whether `value` reads as a task id: a letter first, a `-`, then more
-/// letters, digits, `.`, `_` or `-` (for example `cas-73b8` or `cas-73b8.1`).
-/// Mirrors the pattern the worker git hooks accept; registration's
-/// namespace check and the isolation guard share this one grammar.
-pub fn is_task_id_like(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_alphabetic()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && value
-            .split_once('-')
-            .is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_alphanumeric()))
-}
-
 /// cas-ea31 (N1): factory names own `factory/<name>` and
 /// `factory/<name>-<task-ref>`. A name that extends another factory name with
-/// a task-ref-shaped part (`kevin-cas-12`) would let the shorter name's task
-/// grammar claim the longer one's branches, so registration refuses it.
-/// Extensions that never parse as task refs (`kevin-2`, `kevin-owner`) cannot
-/// collide and are allowed; the grammar is the isolation guard's own.
+/// a letter-led part would let the shorter name's task grammar claim the
+/// longer one's branches, so registration keeps the namespaces prefix-free.
+/// Digit-led extensions (`kevin-2`) never parse as task refs and are allowed.
 /// Only workers commit on `factory/` branches, so supervisors and primaries
 /// (`kevin-supervisor` beside worker `kevin`) cannot collide and are not checked.
 fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: &str) -> Result<()> {
@@ -163,7 +144,7 @@ fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: 
         longer
             .strip_prefix(shorter)
             .and_then(|rest| rest.strip_prefix('-'))
-            .is_some_and(is_task_id_like)
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphabetic()))
     };
     let mut statement = conn.prepare(
         "SELECT name FROM agents WHERE id != ?1 AND role = 'worker'",
@@ -175,7 +156,7 @@ fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: 
             return Err(StoreError::Other(format!(
                 "WORKER_NAME_OVERLAPS: '{name}' would share the branch namespace factory/{}-… \
                  with registered agent '{other}'. Choose a name that does not extend another \
-                 factory name with a task-id-shaped suffix.",
+                 factory name with a hyphen and a letter.",
                 if name.len() < other.len() { name } else { other },
             )));
         }

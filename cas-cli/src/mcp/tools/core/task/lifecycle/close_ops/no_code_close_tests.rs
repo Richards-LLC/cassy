@@ -540,6 +540,41 @@ async fn integrated_squash_receipt_survives_large_source_history_gh1454() {
     assert_eq!(f.task(id).status, TaskStatus::Closed, "{response}");
 }
 
+/// GH #1775: a release batch squashes this delivery with another task's.
+/// A train-hosted worker's close accepts that batch receipt as integrated
+/// evidence, so the park that follows must not refuse it as a branch anchor.
+#[tokio::test]
+async fn hosted_release_batch_receipt_parks_with_one_rule_gh1775() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-7555";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("train_owner".into(), "remote-owner".into());
+    agents.update(&agent).unwrap();
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-7555): own delivery"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let anchor = git(&checkout, &["rev-parse", "HEAD"]);
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--squash", &lane]);
+    std::fs::write(repo.join("batch.rs"), "pub fn sibling() {}\n").unwrap();
+    git(repo, &["add", "batch.rs"]);
+    git(repo, &["commit", "-qm", "release batch: cas-7555 and cas-9e1f"]);
+    let receipt = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Delivered in the release batch",
+        "commit_receipt": receipt,
+    })).await;
+    assert!(!response.contains("[G-60]"), "{response}");
+    let task = f.task(id);
+    assert_eq!(task.status, TaskStatus::AwaitingMerge, "{response}");
+    assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
+}
+
 #[tokio::test]
 async fn explicit_staging_scope_fix_survives_epic_child_close_gh1452() {
     let mut env = TestEnvGuard::temp_home();

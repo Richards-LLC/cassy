@@ -9926,8 +9926,17 @@ impl CasCore {
                         delivery.record_park(measured_branch.as_deref(), anchor.as_deref(), task.assignee.as_deref());
                         delivery.factory_branch_anchor
                     };
+                    // GH #1775: a receipt the merge gate accepted as integrated,
+                    // task-attributed evidence (a release-batch squash) is not a
+                    // branch anchor; judge it by that same validator here.
+                    let receipt_is_integrated_evidence = req.commit_receipt.as_deref()
+                        .zip(commit_receipt_window.as_ref())
+                        .is_some_and(|(receipt, window)| validate_task_commit_receipt(
+                            &close_project_root, receipt, &resolved_parent_branch, window,
+                        ).is_ok());
                     if tip_is_pushed && let (Some(branch), Some(tip)) = (measured_branch.as_deref(), anchor.as_deref()) {
-                        for boundary in req.commit_receipt.as_deref().into_iter()
+                        for boundary in req.commit_receipt.as_deref()
+                            .filter(|_| !receipt_is_integrated_evidence).into_iter()
                             .chain(park_anchor.as_deref())
                         {
                             if !git_commit_is_ancestor(&close_project_root, boundary, tip)

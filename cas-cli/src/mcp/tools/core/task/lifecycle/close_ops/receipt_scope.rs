@@ -1053,6 +1053,42 @@ mod tests {
             "test(=auth) selects one test, not the class");
         record("cas", "test(auth)");
         assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
+
+        // cas-8a5c (cas-b36f): a class registered only in an integration
+        // harness gets that harness's command, which --lib cannot run.
+        let git_repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(git_repo.path())
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        for (path, body) in [
+            ("Cargo.toml", "[workspace]\nmembers = [\"cas-cli\"]\n"),
+            ("cas-cli/Cargo.toml", "[package]\nname = \"cas\"\nautotests = false\n[[test]]\nname = \"integration_factory\"\npath = \"tests/integration/factory.rs\"\n"),
+            ("cas-cli/src/lib.rs", "pub fn f() {}\n"),
+            ("cas-cli/tests/integration/factory.rs", "#[path = \"../factory_mcp_ops_test.rs\"]\nmod factory_mcp_ops_test;\n"),
+            ("cas-cli/tests/factory_mcp_ops_test.rs", "#[test]\nfn test_assignment_allows() {}\n"),
+        ] {
+            std::fs::create_dir_all(git_repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(git_repo.path().join(path), body).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        std::fs::write(git_repo.path().join("cas-cli/src/lib.rs"), "pub fn f() { let _ = 1; }\n").unwrap();
+        git(&["commit", "-qam", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let changed = vec!["cas-cli/src/lib.rs".to_string()];
+        crate::factory_worker_check::record_passing_test_for_tests(&root, git_repo.path(), &head, "cas", "test(worker)");
+        crate::store::open_task_store(&root).unwrap().patch_execution_state(
+            &task.id, &serde_json::json!({"class_audit": "test(factory_mcp_ops_test::test_assignment_) | test(factory_mcp_ops_test::)"}),
+        ).unwrap();
+        let refusals = park_refusals(&root, git_repo.path(), &task, &changed, &head, "main", None);
+        let class = refusals.iter().find(|refusal| refusal.contains("CLASS_AUDIT_REQUIRED")).expect("class refusal");
+        assert!(class.contains("-p cas --test integration_factory -E"), "{class}");
+        assert!(!class.contains("--lib"), "{class}");
     }
 
     #[test]

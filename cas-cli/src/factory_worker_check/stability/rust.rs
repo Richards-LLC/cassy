@@ -278,6 +278,13 @@ pub(crate) fn net_changed(repo: &Path, base: &str, head: &str) -> Result<Vec<Tes
     changed(repo, base, head, &paths)
 }
 
+/// The Cargo targets (package, harness; `None` is the library) whose tests a
+/// class filter selects in the crates `paths` touch at `head` (cas-8a5c).
+pub(crate) fn class_targets(repo: &Path, head: &str, paths: &[String], class: &str) -> Result<BTreeSet<(String, Option<String>)>> {
+    Ok(inventory(repo, head, paths)?.0.into_iter().filter(|test| filter_matches(class, &test.identity.name))
+        .map(|test| (test.package, test.harness)).collect())
+}
+
 pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
     filter.split('|').any(|union| union.split('&').all(|intersection| {
         let value = intersection.trim().trim_start_matches("test(").trim_end_matches(')');

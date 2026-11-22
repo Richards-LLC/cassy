@@ -1639,6 +1639,9 @@ impl CasService {
                         format!("Failed to queue external message: {error}"),
                     )
                 })?;
+            crate::mcp::tools::service::mutation_receipt::message_ref_committed(
+                &format!("external-inbox notification {notification_id}"),
+            );
 
             return Ok(Self::success(format!(
                 "External message queued\n\nID: {}\nInbox: {}\nFrom: {} ({})\nMessage: {}",

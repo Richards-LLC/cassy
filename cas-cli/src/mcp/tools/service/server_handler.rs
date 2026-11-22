@@ -1032,14 +1032,17 @@ impl CasService {
         tokio::spawn(async move {
             let _work = work;
             let joined = handle.await;
-            if let Some(live) = &live { let _ = live.finished.set(()); }
+            let errored = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true));
+            // A panic or cancellation is not a clean refusal: it may follow a write.
+            let refused = matches!(&joined, Ok(Err(_))) || matches!(&joined, Ok(Ok(result)) if result.is_error == Some(true));
+            if let Some(live) = &live { let _ = live.finished.set(refused); }
             let summary = late_close_summary(&joined);
-            // A finished send that never reached its enqueue wrote nothing.
-            let outcome = if receipt.commit.get().is_some() { "COMMITTED" }
-                else if send { "NOT_COMMITTED" } else { "UNKNOWN" };
+            let outcome = if send { finished_send_outcome(receipt.commit.get().is_some(), refused) }
+                else if receipt.commit.get().is_some() { "COMMITTED" } else { "UNKNOWN" };
             let notification_id = receipt.commit.get().and_then(|commit| commit.notification_id);
+            let committed = receipt.commit.get().map(|commit| commit.description.clone());
             let recorded_id = continuation_id.clone();
-            let result_status = if matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true)) { "ok" } else { "error" };
+            let result_status = if errored { "error" } else { "ok" };
             let recorded = tokio::task::spawn_blocking(move || {
                 let agents = service.inner.open_agent_store().map_err(|error| error.message.to_string())?;
                 let id = service.inner.agent_id.get().and_then(Option::as_deref)
@@ -1061,7 +1064,7 @@ impl CasService {
                     "continuation_id": continuation_id, "action": receipt.action(),
                     "session_id": session_id, "agent_id": recipient.id,
                     "mutation_outcome": outcome, "result_status": result_status,
-                    "notification_id": notification_id,
+                    "notification_id": notification_id, "committed": committed,
                 });
                 if send {
                     crate::supervisor_notices::enqueue_keyed(
@@ -1329,7 +1332,20 @@ fn send_outcome_key(continuation_id: &str) -> String {
 /// A send that outlived its response, until its outcome notice is durable.
 struct LiveSend {
     receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
-    finished: std::sync::OnceLock<()>,
+    /// Set when the handler finishes: whether it returned a refusal.
+    finished: std::sync::OnceLock<bool>,
+}
+
+/// cas-cd0f review: NOT_COMMITTED needs positive evidence. Every message write
+/// records its commit before any later fallible step, so only a send that
+/// returned a refusal without one wrote nothing. A success, panic or
+/// cancellation without one is UNKNOWN, never "safe to send again".
+fn finished_send_outcome(committed: bool, refused: bool) -> &'static str {
+    match (committed, refused) {
+        (true, _) => "COMMITTED",
+        (false, true) => "NOT_COMMITTED",
+        (false, false) => "UNKNOWN",
+    }
 }
 
 fn live_sends() -> std::sync::MutexGuard<'static, HashMap<String, std::sync::Arc<LiveSend>>> {
@@ -1347,12 +1363,14 @@ pub(crate) fn send_continuation_status(
     continuation_id: &str,
 ) -> Result<rmcp::model::CallToolResult, String> {
     let live = live_sends().get(continuation_id).cloned();
-    let (outcome, notification_id) = if let Some(live) = live {
-        match live.receipt.commit.get() {
-            Some(commit) => ("COMMITTED", commit.notification_id),
-            None if live.finished.get().is_some() => ("NOT_COMMITTED", None),
-            None => ("IN_PROGRESS", None),
-        }
+    let (outcome, notification_id, committed) = if let Some(live) = live {
+        let commit = live.receipt.commit.get();
+        let outcome = match live.finished.get() {
+            Some(&refused) => finished_send_outcome(commit.is_some(), refused),
+            None if commit.is_some() => "COMMITTED",
+            None => "IN_PROGRESS",
+        };
+        (outcome, commit.and_then(|commit| commit.notification_id), commit.map(|commit| commit.description.clone()))
     } else {
         let notice = crate::store::open_supervisor_queue_store(cas_root)
             .and_then(|store| Ok(store.get_by_transition_key(&send_outcome_key(continuation_id))?))
@@ -1368,17 +1386,18 @@ pub(crate) fn send_continuation_status(
                     _ => "UNKNOWN",
                 },
                 context["notification_id"].as_i64(),
+                context["committed"].as_str().map(str::to_string),
             ),
-            None => ("UNKNOWN", None),
+            None => ("UNKNOWN", None, None),
         }
     };
-    let guidance = match outcome {
-        "COMMITTED" => format!(
-            "the send committed as notification_id {}; do not resend; query message_status notification_id={} for delivery",
-            notification_id.unwrap_or_default(), notification_id.unwrap_or_default()),
-        "NOT_COMMITTED" => "the send ended without writing a message; it is safe to send it once more".into(),
-        "IN_PROGRESS" => "the send is still running; query again; do not resend".into(),
-        _ => "this server holds no record of the send (it may have restarted mid-send); check the recipient's inbox before resending".into(),
+    let guidance = match (outcome, notification_id) {
+        ("COMMITTED", Some(id)) => format!(
+            "the send committed as notification_id {id}; do not resend; query message_status notification_id={id} for delivery"),
+        ("COMMITTED", None) => committed.clone().unwrap_or_else(|| "the send committed; do not resend".into()),
+        ("NOT_COMMITTED", _) => "the send failed without writing a message; it is safe to send it once more".into(),
+        ("IN_PROGRESS", _) => "the send is still running; query again; do not resend".into(),
+        _ => "no write was confirmed (the send may have finished without a receipt, or this server restarted mid-send); check the recipient's inbox before resending".into(),
     };
     let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
         format!("Send {continuation_id}: {outcome}: {guidance}."),
@@ -1387,6 +1406,7 @@ pub(crate) fn send_continuation_status(
         "continuation_id": continuation_id,
         "mutation_outcome": outcome,
         "notification_id": notification_id,
+        "committed": committed,
     }));
     Ok(answer)
 }

@@ -3519,20 +3519,48 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
 }
 
 #[tokio::test]
-async fn cas_619c_worktree_merge_warns_for_an_unparked_in_progress_task() {
+async fn cas_619c_worktree_merge_requires_a_pushed_parked_delivery() {
     let mut env = test_env();
+    for case in ["legacy_rebase", "recorded_rebase", "pushed_active", "parked_unpushed", "parked"] {
     let fixture = rebound_merge_fixture(&mut env).await;
-    let task = open_task_store(&fixture.cas_root).unwrap().get("cas-e429").unwrap();
-    assert_eq!(task.status, TaskStatus::InProgress);
-    assert!(task.deliverables.parked_branch.is_none());
+    let tasks = open_task_store(&fixture.cas_root).unwrap();
+    let mut task = tasks.get("cas-e429").unwrap();
+    if matches!(case, "legacy_rebase" | "recorded_rebase" | "parked_unpushed") {
+        let base = git_stdout(&fixture.repo.root, &["merge-base", &fixture.branch, "epic/rebound"]);
+        run_git(&["switch", "-c", "rebased-target", "epic/rebound"], &fixture.repo.root);
+        std::fs::write(fixture.repo.root.join("sibling.txt"), "new rebase base\n").unwrap();
+        run_git(&["add", "sibling.txt"], &fixture.repo.root);
+        run_git(&["commit", "-m", "new rebase base"], &fixture.repo.root);
+        run_git(&["rebase", "--onto", "rebased-target", &base], &fixture.worker);
+        assert_ne!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip);
+    }
+    if case == "legacy_rebase" { task.deliverables.factory_branch_start = None; }
+    let source = git_stdout(&fixture.worker, &["rev-parse", "HEAD"]);
+    task.status = if case.starts_with("parked") { TaskStatus::AwaitingMerge } else { TaskStatus::InProgress };
+    task.deliverables.factory_branch_anchor = case.starts_with("parked").then(|| source.clone());
+    task.deliverables.parked_branch = case.starts_with("parked").then(|| fixture.branch.clone());
+    tasks.update(&task).unwrap();
+    let target = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+    let remote = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+    let pushed_source = git_stdout(fixture.origin.path(), &["rev-parse", &format!("refs/heads/{}", fixture.branch)]);
     let mut request = coord_req("worktree_merge");
     request.id = Some(fixture.branch.clone());
-    request.task_id = Some(task.id);
+    request.task_id = Some(task.id.clone());
     request.cleanup = Some(false);
-    let response = fixture.service.factory(Parameters(request)).await.unwrap();
-    let text = get_text(&response);
-    assert!(text.contains("UNPARKED TASK") && text.contains("cas-e429"),
-        "an explicit merge must disclose the worker's unfinished lifecycle state: {text}");
+    let response = fixture.service.factory(Parameters(request)).await;
+    if case == "parked" {
+        run_git(&["merge-base", "--is-ancestor", &source, "epic/rebound"], &fixture.repo.root);
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+            git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), "{response:?}");
+    } else {
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), target, "{case}: {response:?}");
+        assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote, "{case}");
+        assert!(response.as_ref().map_or(true, |result| result.is_error.unwrap_or(false)), "{case}: {response:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().status, task.status, "{case}");
+    }
+    assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), source, "{case}");
+    assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", &format!("refs/heads/{}", fixture.branch)]), pushed_source, "{case}");
+    }
 }
 
 #[tokio::test]

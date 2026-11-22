@@ -2433,47 +2433,66 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
     }
 }
 
-/// cas-dae4 (GH #1579): the retired worker's lane holds only a handoff commit
-/// and the replacement is spawned at the base. Start used to direct a
-/// supervisor rebind that refuses until the replacement has delivered, so the
-/// replacement stalled. It binds its own lane instead and keeps the old one.
+/// cas-dae4 (GH #1579): a replacement spawned at the base after its
+/// predecessor retired must reach a bound lane without a supervisor override.
+/// An untouched predecessor lane (the handoff lives in the artifacts dir) binds
+/// at start. A predecessor lane with commits is kept (cas-57df never discards a
+/// pending delivery); the replacement starts, delivers, and the supervisor's
+/// rebind then succeeds instead of refusing for want of a delivery.
 #[tokio::test]
-async fn replacement_starts_on_its_own_lane_when_the_old_lane_has_no_delivery_cas_dae4() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main");
-    let repo = f.dir.path();
-    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
-    let agents = open_agent_store(&f.cas_dir()).unwrap();
-    let mut agent = agents.get("nocode-worker-session").unwrap();
-    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
-    agents.update(&agent).unwrap();
-    let id = "cas-1579";
-    let base = git(repo, &["rev-parse", "main"]);
-    git(repo, &["checkout", "-q", "-b", "factory/old-worker", "main"]);
-    std::fs::write(repo.join("HANDOFF.md"), "context checkpoint\n").unwrap();
-    git(repo, &["add", "HANDOFF.md"]);
-    git(repo, &["commit", "-q", "-m", "chore(cas-1579): handoff"]);
-    let handoff = git(repo, &["rev-parse", "HEAD"]);
-    git(repo, &["push", "-q", "origin", "factory/old-worker"]);
-    git(repo, &["checkout", "-q", "main"]);
-    let replacement = format!("{LANE}-{id}");
-    git(&worker_path, &["checkout", "-q", "-b", &replacement, "main"]);
-    let mut task = assigned(id, TaskType::Bug, "main");
-    task.status = TaskStatus::Open;
-    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-        work_target: task.deliverables.work_target.clone().unwrap(),
-        assignee: "old-worker".into(),
-        branch: "factory/old-worker".into(),
-        base_sha: base,
-    });
-    f.put(&task);
-    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
-    let task = f.task(id);
-    assert_eq!(task.status, TaskStatus::InProgress, "{started}");
-    assert_eq!(task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()),
-        Some(replacement.as_str()), "{started}");
-    assert!(!started.contains("rebind_branch"), "no supervisor round trip: {started}");
-    assert_eq!(git(repo, &["rev-parse", "factory/old-worker"]), handoff, "the old lane is preserved");
+async fn replacement_reaches_a_bound_lane_without_override_cas_dae4() {
+    for predecessor in ["untouched", "committed"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let id = "cas-1579";
+        let base = git(repo, &["rev-parse", "main"]);
+        git(repo, &["branch", "factory/old-worker", "main"]);
+        if predecessor == "committed" {
+            git(repo, &["checkout", "-q", "factory/old-worker"]);
+            std::fs::write(repo.join("HANDOFF.md"), "context checkpoint\n").unwrap();
+            git(repo, &["add", "HANDOFF.md"]);
+            git(repo, &["commit", "-q", "-m", "chore(cas-1579): handoff"]);
+            git(repo, &["checkout", "-q", "main"]);
+        }
+        let old_tip = git(repo, &["rev-parse", "factory/old-worker"]);
+        git(repo, &["push", "-q", "origin", "factory/old-worker"]);
+        let replacement = format!("{LANE}-{id}");
+        git(&worker_path, &["checkout", "-q", "-b", &replacement, "main"]);
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: "old-worker".into(),
+            branch: "factory/old-worker".into(),
+            base_sha: base,
+        });
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{predecessor}: {started}");
+        let bound = |f: &Fixture| f.task(id).deliverables.factory_branch_start.map(|start| start.branch);
+        if predecessor == "untouched" {
+            assert_eq!(bound(&f).as_deref(), Some(replacement.as_str()), "{started}");
+        } else {
+            assert_eq!(bound(&f).as_deref(), Some("factory/old-worker"), "{started}");
+            std::fs::write(worker_path.join("fix.rs"), "pub fn fix() {}\n").unwrap();
+            git(&worker_path, &["add", "fix.rs"]);
+            git(&worker_path, &["commit", "-q", "-m", "fix(cas-1579): replacement delivery"]);
+            git(&worker_path, &["push", "-q", "origin", &replacement]);
+            let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"rebind_branch", "id":id, "branch":replacement,
+                "reason":"Bind the replacement after its first delivery",
+            })).unwrap())).await;
+            assert!(rebound.is_ok(), "{rebound:?}");
+            assert_eq!(bound(&f).as_deref(), Some(replacement.as_str()));
+        }
+        assert_eq!(git(repo, &["rev-parse", "factory/old-worker"]), old_tip, "{predecessor}: the old lane is kept");
+    }
 }
 
 /// Start, rather than commit subject conventions, establishes the new task's

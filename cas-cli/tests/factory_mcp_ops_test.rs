@@ -7880,9 +7880,9 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
 async fn test_gc_retains_file_written_after_dirty_probe_cas_75ae() {
     const CHILD: &str = "REVIEW_GC_RACE_CHILD_75AE";
     if std::env::var_os(CHILD).is_none() {
-        let home_dir = TempDir::new().unwrap();
-        // cas-253d: host retention refuses symlinked ancestors such as macOS /tmp.
-        let home = home_dir.path().canonicalize().unwrap();
+        // Host retention refuses symlinked ancestors.
+        let home_dir = cas::test_paths::physical_tempdir();
+        let home = home_dir.path().to_path_buf();
         let bin = home.join("bin");
         std::fs::create_dir(&bin).unwrap();
         let inherited_path = std::env::var_os("PATH").unwrap();

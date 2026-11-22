@@ -323,9 +323,12 @@ impl ReleaseNoticePhase {
 }
 
 /// One waking release action for the train's owning supervisor, sent once
-/// per `occurrence` (the train revision or version it is about). GH #2310: an
-/// owner that is no supervisor of this machine is a peer elsewhere, which sends
-/// its own copy; a local supervisor that is not the owner gets none.
+/// per `occurrence` (the train revision or version it is about). GH #2310: a
+/// train-gated notice (cut ready, CI red) for an owner that is no supervisor of
+/// this machine belongs to a peer elsewhere, which sends its own copy; a local
+/// supervisor that is not the owner gets none. The post-publish notices take
+/// their owner from the release receipt, which may name `operator`, so they
+/// keep the fallback chain.
 pub(crate) fn release_action(
     root: &Path,
     train: &cas_types::Task,
@@ -335,9 +338,11 @@ pub(crate) fn release_action(
 ) -> Result<(), crate::error::CasError> {
     let agents = open_agent_store(root)?.list(None)?;
     let owner = train.epic_verification_owner.as_deref();
-    if owner.is_some_and(|owner| !agents.iter().any(|a| {
-        a.role == AgentRole::Supervisor && (a.id == owner || a.name == owner)
-    })) {
+    if matches!(phase, ReleaseNoticePhase::CutReady | ReleaseNoticePhase::RustRed)
+        && owner.is_some_and(|owner| !agents.iter().any(|a| {
+            a.role == AgentRole::Supervisor && (a.id == owner || a.name == owner)
+        }))
+    {
         return Ok(());
     }
     let recipient = resolve(&agents, owner, None);

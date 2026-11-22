@@ -179,7 +179,7 @@ fn write_queue(path: &Path, queue: &Queue) -> Result<()> {
 fn held_by_prior_owner(root: &Path, actor: &cas_types::Agent, queue: &Queue, generation: &str) -> bool {
     let continues = crate::cloud::peer_mailbox::owns_recipient(root, actor, &queue.supervisor)
         && (queue.owner_generation.is_empty() || queue.owner_generation == generation);
-    !continues
+    !continues && crate::cloud::peer_mailbox::supervisor_is_live(root, &queue.supervisor)
 }
 
 /// Checked before preparing a candidate and again under the normal target

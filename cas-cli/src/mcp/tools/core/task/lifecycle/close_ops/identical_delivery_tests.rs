@@ -202,17 +202,22 @@ fn epic_row(repo: &Path, task: &Task) -> EpicChildBranchStatus {
 /// same-tree merge of duplicate docs work. Neither shape loses its ancestors.
 #[test]
 fn integrated_exact_and_same_tree_anchors_keep_ancestor_content_gh2222_gh2236() {
-    for same_tree in [false, true] {
+    for (same_tree, reverted, foreign) in [(false, false, false), (true, false, false), (true, true, false), (true, false, true)] {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
         let base = commit(repo, "obsolete.rs", "old();\n", "seed obsolete source");
         git(repo, &["checkout", "-qb", "factory/worker"]);
         git(repo, &["rm", "obsolete.rs"]);
-        let content = commit(repo, "docs/guide.md", "delivered guide\n", "docs: replace obsolete source");
+        let content = commit(repo, "docs/guide.md", "delivered guide\n",
+            if foreign { "docs(cas-other): replace obsolete source" } else { "docs: replace obsolete source" });
+        let content = if reverted {
+            git(repo, &["revert", "--no-edit", &content]);
+            git(repo, &["rev-parse", "HEAD"])
+        } else { content };
         if same_tree {
             git(repo, &["checkout", "-qb", "remote-tip", &base]);
-            git(repo, &["cherry-pick", &content]);
+            git(repo, &["cherry-pick", &format!("{base}..{content}")]);
             git(repo, &["commit", "--amend", "-qm", "docs: duplicate remote guide"]);
             git(repo, &["checkout", "-q", "factory/worker"]);
             git(repo, &["merge", "--no-ff", "remote-tip", "-m", "Merge remote branch tip (same tree)"]);
@@ -246,6 +251,13 @@ fn integrated_exact_and_same_tree_anchors_keep_ancestor_content_gh2222_gh2236() 
                 stranded_branch_override: None },
             "main", repo, TaskCommitAttribution { receipt: None, window: Some(&window) },
         );
+        if reverted || foreign {
+            let rejected = outcome();
+            assert!(matches!(&rejected, MergeStateGateOutcome::Reject(message)
+                if crate::gates::codes_in(message).contains(&"G-56")),
+                "reverted={reverted}, foreign={foreign}: {rejected:?}");
+            continue;
+        }
         for advanced in [false, true] {
             if advanced {
                 commit(repo, "unrelated.md", "target moves\n", "unrelated target advance");

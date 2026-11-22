@@ -72,9 +72,13 @@ pub(crate) fn guard_operator_config(
     Ok(())
 }
 
-// gate[H-41 cli]: Operator-only CLI context check
 fn require_operator() -> anyhow::Result<()> {
-    if let Some(refusal) = operator_context_refusal(&InvocationContext::from_process()) {
+    require_operator_context(&InvocationContext::from_process())
+}
+
+// gate[H-41 cli]: Operator-only CLI context check
+pub(crate) fn require_operator_context(context: &InvocationContext) -> anyhow::Result<()> {
+    if let Some(refusal) = operator_context_refusal(context) {
         anyhow::bail!(crate::gates::tag("H-41", refusal));
     }
     Ok(())

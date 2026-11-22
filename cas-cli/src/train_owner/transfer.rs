@@ -39,10 +39,12 @@ fn authenticate(root: &Path, repo: &Path, actor: &Agent, snapshot: Snapshot, exp
     Ok((refreshed, identity))
 }
 
-fn resolve_successor(root: &Path, caller: &Agent, id: &str) -> Result<Identity, String> {
+pub(super) fn resolve_successor(root: &Path, caller: Option<&Agent>, id: &str) -> Result<Identity, String> {
+    let machine = caller.and_then(|actor| actor.machine_id.clone())
+        .unwrap_or_else(Agent::get_or_generate_machine_id);
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     if let Ok(agent) = agents.get(id) {
-        if agent.machine_id == caller.machine_id && agent.role == AgentRole::Supervisor && agent.is_alive() {
+        if agent.machine_id.as_deref() == Some(machine.as_str()) && agent.role == AgentRole::Supervisor && agent.is_alive() {
             return super::identity(&agent, id);
         }
         // A locally registered id must not fall through to an unrelated cloud
@@ -55,7 +57,7 @@ fn resolve_successor(root: &Path, caller: &Agent, id: &str) -> Result<Identity, 
     let rows = crate::cloud::CloudCoordinator::new(config).map_err(|e| e.to_string())?
         .with_timeout(Duration::from_secs(15)).with_canonical_id(Some(project.clone()))
         .list_agent_infos().map_err(|e| e.to_string())?;
-    registered_remote_identity(&rows, &project, &caller.id, id)
+    registered_remote_identity(&rows, &project, caller.map_or("", |actor| actor.id.as_str()), id)
 }
 
 fn registered_remote_identity(rows: &[crate::cloud::AgentInfo], project: &str, caller: &str, id: &str) -> Result<Identity, String> {
@@ -135,7 +137,7 @@ impl CasCore {
         // check. B may have accepted remotely and crashed before projection.
         let result = match request.operation {
             Action::Prepare => {
-                let successor = resolve_successor(&self.cas_root, &actor, request.successor.as_deref().unwrap())?;
+                let successor = resolve_successor(&self.cas_root, Some(&actor), request.successor.as_deref().unwrap())?;
                 snapshot.prepare(&repo, &identity, &successor, &request.transfer_id)?
             }
             Action::Quiesce | Action::Abort => {

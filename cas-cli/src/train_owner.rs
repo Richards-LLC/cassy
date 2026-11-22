@@ -8,6 +8,7 @@ use crate::worktree::git::train_authority::{Identity, Phase, Snapshot};
 pub(crate) const ENROLLED: &str = "train-owner-enrolled-v1";
 
 pub(crate) mod transfer;
+pub(crate) mod recovery;
 pub(crate) mod provider;
 
 /// Called after authenticating the accepted successor (or by sync after

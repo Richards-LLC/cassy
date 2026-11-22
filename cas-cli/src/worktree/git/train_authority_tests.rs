@@ -626,6 +626,133 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, accepted.tip);
 }
 
+#[test]
+fn train_transfer_operator_recovery_requires_h41_and_exact_scope_cas_6456() {
+    use crate::config::operator_policy::InvocationContext;
+    use crate::train_owner::recovery::{Action, Request};
+    use cas_mcp::types::{TrainOwnerTransferAction as TransferAction, TrainOwnerTransferRequest};
+    // Exercise the actual CLI grammar; there is no operator identity/override argument.
+    for operation in ["force", "adopt-target"] {
+        let mut args = vec!["cas", "factory", "train", "owner-transfer", "cas-6456", operation,
+            "--expected-authority", "authority", "--expected-generation", "generation",
+            "--request-id", "request", "--reason", "reason", "--sha", "target",
+            "--evidence", "evidence", "--stopped-or-fenced", "all prior publishers"];
+        if operation == "force" { args.extend(["--transfer-id", "transfer", "--successor", "owner-b"]); }
+        assert!(<crate::cli::Cli as clap::Parser>::try_parse_from(args.clone()).is_ok());
+        args.extend(["--supervisor-override"]);
+        assert!(<crate::cli::Cli as clap::Parser>::try_parse_from(args).is_err());
+    }
+    let fixture = Fixture::new();
+    let root = crate::store::init_cas_dir(&fixture.left).unwrap();
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='fixture'\n").unwrap();
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    let tasks = core.open_task_store().unwrap();
+    let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+    let mut train = crate::types::Task::new("cas-6456".into(), "train".into());
+    train.task_type = crate::types::TaskType::Epic;
+    train.branch = Some(first.record.target.clone());
+    train.labels = vec!["release-train".into(), crate::train_owner::ENROLLED.into()];
+    train.epic_verification_owner = Some(fixture.actor.owner.clone());
+    tasks.add(&train).unwrap();
+    let agents = core.open_agent_store().unwrap();
+    let mut successor = Fixture::service_actor();
+    successor.id = "owner-b".into(); successor.name = "owner-b".into();
+    successor.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
+    agents.register(&successor).unwrap(); agents.update(&successor).unwrap();
+    let mut request = Request { action: Action::Force { successor: successor.id.clone(), transfer_id: "operator-transfer".into() },
+        expected_authority: first.tip.clone(), expected_generation: first.record.generation.clone(),
+        expected_target: first.record.target_sha.clone(), request_id: uuid::Uuid::new_v4().to_string(),
+        reason: "recover stopped publisher".into(), evidence: "credential revocation receipt".into(),
+        stopped_or_fenced: "all prior hosts stopped and automation credentials revoked".into() };
+    let operator = InvocationContext { stdin_is_terminal: true, stdout_is_terminal: true,
+        ancestors: vec!["-bash".into()], ..Default::default() };
+    let mut forbidden = Vec::new();
+    for kind in 0..4 {
+        let mut context = operator.clone();
+        match kind {
+            0 => { context.env_names.insert("CAS_AGENT_ROLE".into()); },
+            1 => context.ancestors.insert(0, "codex exec".into()),
+            2 => context.stdin_is_terminal = false,
+            _ => context.cgroup = "0::/cas-worker-test.scope".into(),
+        }
+        forbidden.push(context);
+    }
+    let checks = Settled::default();
+    for context in &forbidden {
+        let error = core.train_owner_recover_checked(&train.id, &request, context, &checks).unwrap_err();
+        assert!(crate::gates::codes_in(&error).contains(&"H-41"), "{error}");
+        assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, first.tip);
+        assert_eq!(checks.reads.get(), 0);
+    }
+    // The typed MCP surface cannot express operator-only recovery or provenance.
+    for operation in ["force", "adopt_target"] {
+        let value = serde_json::json!({"operation": operation, "expected_authority": first.tip,
+            "expected_generation": first.record.generation, "transfer_id": "operator-transfer",
+            "request_id": request.request_id, "reason": request.reason, "operator_claim": {"operator": "forged"}});
+        assert!(serde_json::from_value::<TrainOwnerTransferRequest>(value).is_err());
+    }
+    checks.pending.set(true);
+    assert!(core.train_owner_recover_checked(&train.id, &request, &operator, &checks).is_err());
+    assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, first.tip);
+    checks.pending.set(false);
+    let evidence = std::mem::take(&mut request.evidence);
+    assert!(core.train_owner_recover_checked(&train.id, &request, &operator, &checks).is_err());
+    request.evidence = evidence;
+    let before = checks.reads.get();
+    let receipt = core.train_owner_recover_checked(&train.id, &request, &operator, &checks).unwrap();
+    assert!(checks.reads.get() >= before + 2);
+    let forced = Snapshot::read(&fixture.left, &train.id).unwrap();
+    assert_eq!(forced.record.phase, Phase::Quiesced);
+    assert_eq!(forced.record.identity, fixture.actor);
+    assert_eq!(receipt["operator_claim_trust"], "unauthenticated");
+    assert!(forced.record.operator_claim.as_ref().unwrap().get("unauthenticated_operator_claim").is_some());
+    assert_eq!(forced.record.audit.as_ref().unwrap()["request_id"], request.request_id);
+    assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some(fixture.actor.owner.as_str()));
+    // A raw push makes force hold. Only adoption of its exact SHA clears divergence,
+    // invalidating old generation/acceptance proof and leaving publication held.
+    let raw = fixture.candidate(&fixture.right, "operator-raw-writer");
+    command(&fixture.right, &["push", "origin", &format!("{raw}:refs/heads/{}", first.record.target)], None).unwrap();
+    request.expected_authority = forced.tip.clone();
+    request.expected_target = raw.clone();
+    assert!(core.train_owner_recover_checked(&train.id, &request, &operator, &checks).is_err());
+    request.action = Action::AdoptTarget;
+    for context in &forbidden {
+        let error = core.train_owner_recover_checked(&train.id, &request, context, &checks).unwrap_err();
+        assert!(crate::gates::codes_in(&error).contains(&"H-41"), "{error}");
+    }
+    request.expected_target = first.record.target_sha.clone();
+    assert!(core.train_owner_recover_checked(&train.id, &request, &operator, &checks).is_err());
+    request.expected_target = raw.clone();
+    checks.pending.set(true);
+    assert!(core.train_owner_recover_checked(&train.id, &request, &operator, &checks).is_err());
+    assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, forced.tip);
+    checks.pending.set(false);
+    core.train_owner_recover_checked(&train.id, &request, &operator, &checks).unwrap();
+    let adopted = Snapshot::read(&fixture.left, &train.id).unwrap();
+    assert_eq!(adopted.record.target_sha, raw);
+    assert_eq!(adopted.record.phase, Phase::RecoveryHeld);
+    assert_ne!(adopted.record.generation, first.record.generation);
+    assert!(adopted.record.quiescence.is_none());
+    assert!(adopted.record.transfer.is_none());
+    assert!(adopted.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &raw).is_err());
+    let stale_accept = TrainOwnerTransferRequest { operation: TransferAction::Accept,
+        expected_authority: forced.tip.clone(), expected_generation: first.record.generation.clone(),
+        transfer_id: "operator-transfer".into(), request_id: uuid::Uuid::new_v4().to_string(),
+        reason: "accept recovery".into(), successor: None };
+    core.set_agent_id_for_testing(successor.id.clone());
+    assert!(core.train_owner_transfer_checked(&train, &stale_accept, &checks).is_err());
+    request.action = Action::Force { successor: successor.id.clone(), transfer_id: "recovery-after-adoption".into() };
+    request.expected_authority = adopted.tip.clone();
+    request.expected_generation = adopted.record.generation.clone();
+    core.train_owner_recover_checked(&train.id, &request, &operator, &checks).unwrap();
+    let quiesced = Snapshot::read(&fixture.left, &train.id).unwrap();
+    let accept = TrainOwnerTransferRequest { expected_authority: quiesced.tip,
+        expected_generation: adopted.record.generation, transfer_id: "recovery-after-adoption".into(), ..stale_accept };
+    core.train_owner_transfer_checked(&tasks.get(&train.id).unwrap(), &accept, &checks).unwrap();
+    assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some(successor.id.as_str()));
+    assert_eq!(fixture.target(), raw);
+}
+
 #[derive(Default)]
 struct Settled {
     reads: std::cell::Cell<usize>,

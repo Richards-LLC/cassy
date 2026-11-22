@@ -738,7 +738,7 @@ pub struct KillAllArgs {
 
 /// `cas factory train` actions (cas-dcc9).
 #[derive(clap::ValueEnum, Debug, Clone, PartialEq, Eq)]
-pub enum OwnerTransferAction { Prepare, Quiesce, Accept, Abort }
+pub enum OwnerTransferAction { Prepare, Quiesce, Accept, Abort, Force, AdoptTarget }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum TrainCommand {
@@ -751,15 +751,24 @@ pub enum TrainCommand {
         expected_authority: String,
         #[arg(long)]
         expected_generation: String,
-        #[arg(long)]
-        transfer_id: String,
+        #[arg(long, required_if_eq_any = [("operation", "prepare"), ("operation", "quiesce"),
+            ("operation", "accept"), ("operation", "abort"), ("operation", "force")])]
+        transfer_id: Option<String>,
         #[arg(long)]
         request_id: String,
         #[arg(long)]
         reason: String,
-        /// Canonical registered supervisor id; required only for prepare.
-        #[arg(long)]
+        /// Canonical registered supervisor id; required for prepare or force.
+        #[arg(long, required_if_eq_any = [("operation", "prepare"), ("operation", "force")])]
         successor: Option<String>,
+        /// Exact observed remote SHA; --sha is an alias for adopt-target.
+        #[arg(long, alias = "sha", required_if_eq_any = [("operation", "force"), ("operation", "adopt-target")])]
+        expected_target: Option<String>,
+        #[arg(long, required_if_eq_any = [("operation", "force"), ("operation", "adopt-target")])]
+        evidence: Option<String>,
+        /// Attest which prior hosts, credentials and automation were stopped or fenced.
+        #[arg(long, required_if_eq_any = [("operation", "force"), ("operation", "adopt-target")])]
+        stopped_or_fenced: Option<String>,
     },
     /// Merge this train's parked deliveries in order; the daemon resumes
     /// automatically after candidate verification or pending CI.
@@ -1370,16 +1379,36 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 Ok(())
             }
             FactoryCommands::Train { command: TrainCommand::OwnerTransfer { train, operation, expected_authority,
-                expected_generation, transfer_id, request_id, reason, successor } } => {
+                expected_generation, transfer_id, request_id, reason, successor, expected_target, evidence, stopped_or_fenced } } => {
                 use cas_mcp::types::{TrainOwnerTransferAction as Action, TrainOwnerTransferRequest};
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train owner-transfer requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::for_cli(root.to_path_buf());
+                if matches!(operation, OwnerTransferAction::Force | OwnerTransferAction::AdoptTarget) {
+                    use crate::train_owner::recovery::{Action as Recovery, Request};
+                    let required = |value: &Option<String>| value.clone().ok_or_else(|| anyhow::anyhow!("operator recovery requires exact scope and fencing evidence"));
+                    let request = Request {
+                        action: if *operation == OwnerTransferAction::Force {
+                            Recovery::Force { successor: required(successor)?, transfer_id: required(transfer_id)? }
+                        } else { Recovery::AdoptTarget },
+                        expected_authority: expected_authority.clone(), expected_generation: expected_generation.clone(),
+                        expected_target: required(expected_target)?, request_id: request_id.clone(), reason: reason.clone(),
+                        evidence: required(evidence)?, stopped_or_fenced: required(stopped_or_fenced)?,
+                    };
+                    let receipt = core.train_owner_recover(train, &request).map_err(anyhow::Error::msg)?;
+                    println!("{receipt}");
+                    return Ok(());
+                }
+                if expected_target.is_some() || evidence.is_some() || stopped_or_fenced.is_some() {
+                    anyhow::bail!("operator recovery fields require force or adopt-target");
+                }
                 let request = TrainOwnerTransferRequest {
                     operation: match operation { OwnerTransferAction::Prepare => Action::Prepare,
                         OwnerTransferAction::Quiesce => Action::Quiesce, OwnerTransferAction::Accept => Action::Accept,
-                        OwnerTransferAction::Abort => Action::Abort },
+                        OwnerTransferAction::Abort => Action::Abort,
+                        OwnerTransferAction::Force | OwnerTransferAction::AdoptTarget => unreachable!() },
                     expected_authority: expected_authority.clone(), expected_generation: expected_generation.clone(),
-                    transfer_id: transfer_id.clone(), request_id: request_id.clone(), reason: reason.clone(), successor: successor.clone(),
+                    transfer_id: transfer_id.clone().ok_or_else(|| anyhow::anyhow!("transfer id required"))?,
+                    request_id: request_id.clone(), reason: reason.clone(), successor: successor.clone(),
                 };
                 let receipt = core.train_owner_transfer(train, &request).map_err(anyhow::Error::msg)?;
                 println!("{receipt}");

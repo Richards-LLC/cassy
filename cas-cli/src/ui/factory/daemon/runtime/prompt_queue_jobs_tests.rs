@@ -1239,16 +1239,25 @@ fn an_untaken_claim_is_released_after_its_ttl() {
 /// turn; the carried leader delivers the whole batch once.
 #[test]
 fn a_carried_batch_keeps_its_passenger_out_of_a_fresh_selection() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_root, cas_dir) = project();
     let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
     let [lead, passenger] = ["First field report", "Second field report"]
         .map(|text| queue.queued_prompt(enqueue(&cas_dir, "worker-a", text)).unwrap().unwrap());
+    // Use the real selection/batching producer, with the debounce already due.
+    rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+        [(chrono::Utc::now() - chrono::Duration::seconds(301)).to_rfc3339()],
+    ).unwrap();
+    let mut initial = super::super::queue_and_events::run_queue_select(&request(&cas_dir), 1).unwrap();
+    assert_eq!(initial.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
+    let facts = initial.facts.remove(&lead.id).unwrap();
+    assert_eq!(facts.message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
     let writer = TestWriter::start(true);
     let mut jobs = jobs_on(&writer);
     for row in [&lead, &passenger] {
         assert!(!jobs.claim_resolved(&cas_dir, "s", row.id, "worker-a", "worker-a"));
     }
-    let facts = super::super::queue_and_events::RowFacts { message_batch: vec![passenger.clone()], ..Default::default() };
     jobs.carry_claimed_row(lead.clone(), facts);
     let fresh = passenger.clone();
     jobs.submit_select(request(&cas_dir), move |_, _| Ok(QueueSelection { rows: vec![fresh], ..Default::default() }));

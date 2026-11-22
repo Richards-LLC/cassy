@@ -819,6 +819,8 @@ def lane_base(root, recorded_ref, inferred):
     The plan resolves the live target merge-base. A recorded ancestor is
     only a fallback when that target cannot be resolved.
     """
+    if inferred:
+        return inferred, "live target merge-base"
     if not recorded_ref:
         return inferred, "inferred: no record requested"
     found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{recorded_ref}^{{commit}}"], cwd=root, capture_output=True, text=True)

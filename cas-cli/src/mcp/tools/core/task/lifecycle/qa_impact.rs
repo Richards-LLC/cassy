@@ -84,17 +84,14 @@ pub(crate) fn render(impact: &Value) -> String {
     out
 }
 
+pub(crate) fn predicted_value(core: &CasCore, task: &Task) -> Result<Value> {
+    let repo = super::super::repo_context::resolve_task_metadata_repo(&core.cas_root, task)
+        .map_err(|error| anyhow!(error))?;
+    Ok(serde_json::to_value(crate::qa_impact::predicted(&repo, &core.load_config().qa(), task)?)?)
+}
+
 pub(crate) fn predicted(core: &CasCore, task: &Task) -> String {
-    let result = (|| -> Result<Value> {
-        let repo = if let Some(target) = task.deliverables.work_target.as_ref() {
-            super::super::repo_context::resolve_repo_context(&core.cas_root, target)
-                .map_err(|e| anyhow!(e))?
-                .repo_root
-        } else {
-            close_ops::resolve_close_gate_repo_root(&core.cas_root).map_err(|e| anyhow!(e))?
-        };
-        Ok(serde_json::to_value(crate::qa_impact::predicted(&repo, &core.load_config().qa(), task)?)?)
-    })();
+    let result = predicted_value(core, task);
     match result {
         Ok(report) => format!(
             "Predicted QA impact (paths named in title, description, design and proof targets; not a delivery diff):\n{}",
@@ -294,6 +291,20 @@ mod checkout_tests {
             "action":"show", "id":task.id, "full":true,
         })).unwrap())).await.unwrap();
         assert_eq!(answer.structured_content.unwrap()["qa_impact"]["registry"]["present"], false);
+        // Even a registered worker cannot substitute a different repository.
+        let foreign = tempfile::tempdir().unwrap();
+        git(foreign.path(), &["init", "-qb", "main"]);
+        registry(foreign.path(), "PRIMARY-J");
+        let agents = crate::store::open_agent_store(&dir.path().join(".cas")).unwrap();
+        let mut agent = agents.get("reader-session").unwrap();
+        agent.metadata.insert("clone_path".into(), foreign.path().display().to_string());
+        agents.update(&agent).unwrap();
+        let answer = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"show", "id":task.id, "full":true,
+        })).unwrap())).await.unwrap();
+        let data = answer.structured_content.unwrap();
+        assert!(data["qa_impact"].is_null());
+        assert!(data["qa_impact_error"].is_string());
     }
 
     #[tokio::test]

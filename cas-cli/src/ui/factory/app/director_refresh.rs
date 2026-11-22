@@ -229,11 +229,11 @@ pub(crate) struct DeliveryRequest {
     /// cas-fcd5b: the same idle workers, kept for the recycle read after
     /// `idle_workers` moves to its liveness job.
     recycle_candidates: Vec<String>,
-    factory_session: Option<String>,
     /// Delivery evidence for revalidating a `SupervisorStalled` event.
     stall: Option<StallEvidenceRequest>,
-    /// The session whose metadata a `SupervisorStalled` event is revalidated
-    /// against (cas-3b16: read here, not on the loop).
+    /// The factory session: a `SupervisorStalled` event is revalidated against
+    /// its metadata (cas-3b16: read here, not on the loop), and the recycle read
+    /// scopes its spawn-queue lookup to it.
     session: Option<String>,
     merge_events: Vec<DirectorEvent>,
     merge_probes: super::merge_alert::ProbeCache,
@@ -435,7 +435,7 @@ impl DeliveryRequest {
             recycling_workers: (!self.recycle_candidates.is_empty())
                 .then(|| crate::store::open_spawn_queue_store(&self.cas_dir).ok()).flatten()
                 .map(|spawns| self.recycle_candidates.iter()
-                    .filter(|worker| spawns.has_pending_spawn(worker, self.factory_session.as_deref()).unwrap_or(false))
+                    .filter(|worker| spawns.has_pending_spawn(worker, self.session.as_deref()).unwrap_or(false))
                     .cloned().collect())
                 .unwrap_or_default(),
             data,
@@ -773,7 +773,7 @@ impl FactoryApp {
             .then(|| self.stall_evidence_request())
             .flatten();
         let qa_needed = events.iter().any(|event| matches!(event, DirectorEvent::QaWalkAttention { .. }));
-        let session = (stall.is_some() || qa_needed).then(|| self.factory_session.clone()).flatten();
+        let session = self.factory_session.clone();
         DeliveryRequest {
             qa_needed,
             blocked_tasks: events.iter().filter_map(|event| match event {
@@ -785,7 +785,6 @@ impl FactoryApp {
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             project_id: self.project_scope(),
             recycle_candidates: idle_workers.clone(),
-            factory_session: self.factory_session.clone(),
             idle_workers,
             stall,
             session,

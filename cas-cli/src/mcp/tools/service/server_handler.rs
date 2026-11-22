@@ -721,7 +721,7 @@ impl CasService {
                     return Ok(answer);
                 }
                 if tool_name == "task" && receipt.action() == "close" {
-                    self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
+                    return self.close_continuation_answer(handle, receipt, start, budget);
                 } else if !matches!(
                     (tool_name, receipt.action()),
                     ("factory", "worktree_merge")
@@ -790,11 +790,11 @@ impl CasService {
                 let task_close = tool_name == "task"
                     && receipt.action() == "close"
                     && receipt.task_id().is_some();
-                let close_unfinished = task_close && receipt.terminal.get().is_none();
+                if task_close {
+                    return self.close_continuation_answer(handle, receipt, start, budget);
+                }
                 if let Some(id) = &continuation_id {
                     self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
-                } else if task_close {
-                    self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
                 } else if commit.is_some()
                     && matches!(
                         (tool_name, receipt.action()),
@@ -835,14 +835,6 @@ impl CasService {
                 } else if let Some(id) = &continuation_id {
                     format!("{} (registration keeps running; its final outcome will appear in your inbox with continuation_id={id}; do not retry)",
                         if commit.is_some() { "COMMITTED" } else { "IN_PROGRESS" })
-                } else if close_unfinished && commit.is_some() {
-                    format!(
-                        "IN_PROGRESS (the close has not committed: only intermediate writes have, so the task's status is unchanged so far; the close keeps running in the background and records its final outcome as a {LATE_CLOSE_NOTE_MARKER} task note — re-query with task action=show before retrying)"
-                    )
-                } else if close_unfinished {
-                    format!(
-                        "IN_PROGRESS (nothing has committed yet, so the task's status is unchanged so far; the close keeps running in the background and records its final outcome as a {LATE_CLOSE_NOTE_MARKER} task note — re-query with task action=show before retrying)"
-                    )
                 } else {
                     self.mutation_timeout_outcome(tool_name, arguments, commit)
                 };
@@ -864,7 +856,7 @@ impl CasService {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                     message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}{pagination_hint}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if (continuation_id.is_some() && commit.is_none()) || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if read_recovery.is_some() { "NOT_APPLICABLE" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if continuation_id.is_some() && commit.is_none() { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if read_recovery.is_some() { "NOT_APPLICABLE" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
                         "code": read_recovery.as_ref().map(|_| "task_read_paginate"),
                         "recovery": read_recovery,
                         "continuation_id": continuation_id,
@@ -1200,13 +1192,44 @@ impl CasService {
         })
     }
 
+    /// A retained close is ordinary progress, even when its phases exceed the
+    /// response budget. The journal exists before its identity is returned.
+    fn close_continuation_answer(
+        &self,
+        handle: tokio::task::JoinHandle<ToolResult>,
+        receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
+        start: std::time::Instant,
+        budget: std::time::Duration,
+    ) -> ToolResult {
+        let outcome = if receipt.terminal.get().is_some() { "COMMITTED" } else { "IN_PROGRESS" };
+        let description = receipt.outcome.get().map(|value| format!("{value}. ")).unwrap_or_default();
+        let (continuation_id, _) = self.record_late_close_outcome(handle, receipt.clone(), start, budget)?;
+        let task_id = receipt.task_id().expect("close continuation task id");
+        let timings = receipt.timings();
+        let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
+            "{outcome}: {description}Close work continues in the background. Continuation: {continuation_id}. \
+             Read `task action=show id={task_id}` for its {LATE_CLOSE_NOTE_MARKER} outcome. Do not retry.\n\
+             Timing (inclusive, + running): {timings}",
+        ))]);
+        answer.structured_content = Some(serde_json::json!({
+            "mutation_outcome": outcome, "continuation_id": continuation_id, "task_id": task_id,
+            "action": receipt.action(), "recovery": {
+                "kind": "close_outcome", "tool": "task",
+                "arguments": {"action": "notes", "id": task_id, "offset": 0, "limit": 1600},
+            },
+            "elapsed_ms": start.elapsed().as_millis() as u64, "budget_ms": budget.as_millis() as u64,
+            "timings": timings,
+        }));
+        Ok(answer)
+    }
+
     fn record_late_close_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
         receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
         start: std::time::Instant,
         budget: std::time::Duration,
-    ) -> Result<tokio::task::JoinHandle<()>, rmcp::ErrorData> {
+    ) -> Result<(String, tokio::task::JoinHandle<()>), rmcp::ErrorData> {
         let task_id = receipt.task_id().ok_or_else(|| Self::error(
             rmcp::model::ErrorCode::INTERNAL_ERROR, "Close continuation has no task id",
         ))?.to_string();
@@ -1215,9 +1238,10 @@ impl CasService {
         let continuation = super::close_continuation::LateClose::begin(self, &task_id)
             .map_err(|error| Self::error(rmcp::model::ErrorCode::INTERNAL_ERROR,
                 format!("Close may still be running, but its continuation journal could not be saved: {error}. Re-query task state before retrying.")))?;
+        let id = continuation.id().to_owned();
         let disposition = if receipt.terminal.get().is_some() { "COMMITTED" } else { "IN_PROGRESS" };
         let service = self.clone();
-        Ok(tokio::spawn(async move {
+        Ok((id, tokio::spawn(async move {
             let joined = handle.await;
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
@@ -1268,7 +1292,7 @@ impl CasService {
                     warn!(error = %error, "MCP late close outcome recorder ended abnormally")
                 }
             }
-        }))
+        })))
     }
 
     fn mutation_timeout_outcome(
@@ -2159,37 +2183,84 @@ mod tests {
         }
     }
 
-    /// cas-24d8: a close that committed only an intermediate write (a gate
-    /// note, a parked anchor) before the deadline has not closed anything.
-    /// It must not be reported as COMMITTED.
+    /// Whole-close response budget spans preflight, evidence sync and follow-up.
+    /// A retained execution has a durable identity, not a transport failure.
     #[tokio::test]
     async fn close_deadline_after_an_intermediate_write_reports_in_progress_cas_24d8() {
         use crate::mcp::server::CasCore;
-        use crate::mcp::tools::service::CasService;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let service = CasService::new(
-            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            CasCore::with_daemon(temp.path().join(".cas"), None, None),
             #[cfg(feature = "mcp-proxy")]
             None,
         );
-        let arguments = serde_json::json!({"action":"close", "id":"cas-park"});
-        let close = async {
-            super::super::mutation_receipt::task_committed("cas-park");
-            std::future::pending().await
-        };
-        let error = service
-            .call_with_deadline(
-                "task",
-                arguments.as_object(),
-                std::time::Duration::from_millis(20),
-                close,
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
-
+        std::fs::create_dir_all(&service.inner.cas_root).unwrap();
         let tasks = service.inner.open_task_store().unwrap();
+        for (id, intermediate, committed) in [
+            ("cas-preflight", false, false),
+            ("cas-evidence", true, false),
+            ("cas-followup", true, true),
+        ] {
+            tasks.add(&crate::types::Task::new(id.into(), "slow close".into())).unwrap();
+            let arguments = serde_json::json!({"action":"close", "id":id});
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let started = calls.clone();
+            let store = tasks.clone();
+            let (release, held) = tokio::sync::oneshot::channel();
+            let outcome = serde_json::json!({"task_id":id, "status":"awaiting_merge"}).to_string();
+            let supplied_outcome = outcome.clone();
+            let refusal = serde_json::json!({"code":"MERGE_REQUIRED", "task_id":id}).to_string();
+            let supplied_refusal = refusal.clone();
+            let answer = service.call_with_deadline(
+                "task", arguments.as_object(), std::time::Duration::from_millis(20), async move {
+                    started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _phase = mutation_receipt::phase(if intermediate { "close_gates" } else { "preflight" });
+                    if intermediate { mutation_receipt::task_committed(id); }
+                    if committed {
+                        let mut task = store.get(id).unwrap();
+                        task.status = crate::types::TaskStatus::AwaitingMerge;
+                        store.update(&task).unwrap();
+                        mutation_receipt::task_disposition_committed(id, &supplied_outcome);
+                    }
+                    held.await.unwrap();
+                    if !committed {
+                        let mut task = store.get(id).unwrap();
+                        task.status = crate::types::TaskStatus::AwaitingMerge;
+                        store.update(&task).unwrap();
+                        mutation_receipt::task_disposition_committed(id, &supplied_outcome);
+                    }
+                    // Older parks returned this error even after committing.
+                    Ok(CasCore::tool_error(supplied_refusal))
+                },
+            ).await.expect("retained close must return a normal tool result");
+            assert_eq!(answer.is_error, Some(false));
+            let data = answer.structured_content.unwrap();
+            assert_eq!(data["mutation_outcome"], if committed { "COMMITTED" } else { "IN_PROGRESS" });
+            assert_eq!(data["task_id"], id);
+            let continuation = data["continuation_id"].as_str().unwrap();
+            uuid::Uuid::parse_str(continuation).unwrap();
+            let journal = service.inner.cas_root.join("close-continuations").join(format!("{continuation}.json"));
+            let pending: serde_json::Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(pending["id"], continuation);
+            assert_eq!(pending["task_id"], id);
+            assert!(pending["note"].is_null());
+            assert_eq!(tasks.get(id).unwrap().status, if committed {
+                crate::types::TaskStatus::AwaitingMerge
+            } else { crate::types::TaskStatus::Open });
+            release.send(()).unwrap();
+            service.tool_work.wait_idle().await;
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, crate::types::TaskStatus::AwaitingMerge);
+            assert_eq!(task.notes.matches(&format!("CLOSE_OUTCOME: continuation={continuation}")).count(), 1);
+            // Exact caller payloads identify the original committed disposition.
+            assert!(task.notes.contains(&outcome), "{}", task.notes);
+            assert!(!task.notes.contains(&refusal), "{}", task.notes);
+            assert!(!journal.exists());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
         for (id, status, disposition) in [
             ("cas-closed", crate::types::TaskStatus::Closed, "closed"),
             ("cas-parked", crate::types::TaskStatus::AwaitingMerge, "parked awaiting_merge"),
@@ -2216,9 +2287,11 @@ mod tests {
             ).await.expect("a durable disposition answers before held follow-up");
             let elapsed = started.elapsed();
             tokio::time::resume();
-            let text = format!("{answer:?}");
             assert_eq!(answer.is_error, Some(false));
-            assert!(text.contains(disposition), "{text}");
+            let data = answer.structured_content.unwrap();
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
+            assert_eq!(data["task_id"], id);
+            uuid::Uuid::parse_str(data["continuation_id"].as_str().unwrap()).unwrap();
 
             assert!(elapsed < std::time::Duration::from_secs(1), "committed close waited {elapsed:?}");
             assert_eq!(tasks.get(id).unwrap().status, status);
@@ -2295,9 +2368,10 @@ mod tests {
             let service = CasService::new(CasCore::with_daemon(root.into(), None, None),
                 #[cfg(feature = "mcp-proxy")] None);
             let args = serde_json::json!({"action":"close", "id":"cas-crash"});
-            let error = service.call_with_deadline("task", args.as_object(),
-                std::time::Duration::from_millis(20), std::future::pending()).await.unwrap_err();
-            assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+            let answer = service.call_with_deadline("task", args.as_object(),
+                std::time::Duration::from_millis(20), std::future::pending()).await.unwrap();
+            assert_eq!(answer.is_error, Some(false));
+            assert_eq!(answer.structured_content.unwrap()["mutation_outcome"], "IN_PROGRESS");
             std::process::exit(0);
         }
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -2313,7 +2387,7 @@ mod tests {
         let receipt = super::super::mutation_receipt::Receipt::new("task", "close", Some("cas-lost"));
         let handler = tokio::spawn(std::future::pending());
         let abort_handler = handler.abort_handle();
-        let watcher = service.record_late_close_outcome(
+        let (_, watcher) = service.record_late_close_outcome(
             handler, receipt, std::time::Instant::now(), std::time::Duration::from_secs(55),
         ).unwrap();
         super::super::close_continuation::recover(&root);
@@ -2334,7 +2408,7 @@ mod tests {
         let receipt = super::super::mutation_receipt::Receipt::new("task", "close", Some("cas-panic"));
         let handler = tokio::spawn(async { panic!("injected handler loss") });
         service.record_late_close_outcome(handler, receipt, std::time::Instant::now(),
-            std::time::Duration::from_secs(55)).unwrap().await.unwrap();
+            std::time::Duration::from_secs(55)).unwrap().1.await.unwrap();
         assert_eq!(tasks.get("cas-panic").unwrap().notes.matches("CLOSE_OUTCOME:").count(), 1);
 
         tasks.add(&crate::types::Task::new("cas-crash".into(), "backend exit".into())).unwrap();
@@ -2366,7 +2440,7 @@ mod tests {
         let store = tasks.clone();
         let (release, held) = tokio::sync::oneshot::channel();
         tokio::time::pause();
-        let error = service.call_with_deadline_and_grace("task", args.as_object(),
+        let answer = service.call_with_deadline_and_grace("task", args.as_object(),
             std::time::Duration::from_millis(10), std::time::Duration::ZERO, async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 let mut task = store.get("cas-committed-deadline").unwrap();
@@ -2375,9 +2449,10 @@ mod tests {
                 super::super::mutation_receipt::task_disposition_committed(&task.id, "closed");
                 held.await.unwrap();
                 Ok(rmcp::model::CallToolResult::success(vec![]))
-            }).await.unwrap_err();
+            }).await.unwrap();
         tokio::time::resume();
-        assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
+        assert_eq!(answer.is_error, Some(false));
+        assert_eq!(answer.structured_content.unwrap()["mutation_outcome"], "COMMITTED");
         release.send(()).unwrap();
         service.tool_work.wait_idle().await;
         let committed = tasks.get("cas-committed-deadline").unwrap();
@@ -2429,7 +2504,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             Ok(CasCore::tool_error(park_reply(refusals)))
         };
-        let error = service
+        let answer = service
             .call_with_deadline(
                 "task",
                 arguments.as_object(),
@@ -2437,9 +2512,10 @@ mod tests {
                 close,
             )
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+        assert_eq!(answer.is_error, Some(false));
+        assert_eq!(answer.structured_content.unwrap()["mutation_outcome"], "IN_PROGRESS");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let notes = loop {
@@ -2503,7 +2579,7 @@ mod tests {
             service.record_late_close_outcome(
                 handle, receipt, std::time::Instant::now() - std::time::Duration::from_millis(142_500),
                 std::time::Duration::from_secs(55),
-            ).unwrap().await.unwrap();
+            ).unwrap().1.await.unwrap();
             let task = tasks.get(id).unwrap();
             assert_eq!(task.status, crate::types::TaskStatus::AwaitingMerge);
             // These are exact caller payloads, not assertions on human wording.

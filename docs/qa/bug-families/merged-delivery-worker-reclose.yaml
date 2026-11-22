@@ -1,0 +1,9 @@
+title: Merged delivery receipts owe no worker re-close
+statement: >-
+  An approved delivery PR merge records its immutable receipt once and sends a
+  quiet informational receipt to the owning worker. No worker close action is
+  requested. Missing or pending approval and delayed finalization remain routed
+  to the delivery-owning supervisor, without waking an unrelated watcher.
+tasks: [cas-602b]
+journeys: []
+invariants: []

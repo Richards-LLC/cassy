@@ -13,7 +13,7 @@ use super::stability::{Identity, Proof};
 mod importers;
 mod web_attribution;
 
-pub(crate) use importers::playwright_importers;
+pub(crate) use importers::related_tests;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
@@ -1524,12 +1524,13 @@ fn execute_tests(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        // GH #2146: a helper runs through the specs importing it.
+        // GH #2146, #2200: a helper runs through the tests importing it.
         let importers = match widened {
-            Some((super::widened::Scope::Related(helper), _, _)) if runner == "playwright" => {
-                let specs = playwright_importers(repo, helper);
-                if specs.is_empty() { bail!(crate::gates::tag("G-61", format!("no Playwright spec imports {helper}"))); }
-                eprintln!("Running {helper} through its importing specs: {}", specs.join(" "));
+            Some((super::widened::Scope::Related(helper), _, _)) if matches!(runner, "playwright" | "node") => {
+                let Some((_, specs)) = related_tests(repo, helper).filter(|(owner, _)| *owner == runner) else {
+                    bail!(crate::gates::tag("G-61", format!("no {runner} test imports {helper}")));
+                };
+                eprintln!("Running {helper} through its importing tests: {}", specs.join(" "));
                 specs
             }
             _ => Vec::new(),
@@ -1619,6 +1620,7 @@ fn execute_tests(
                 if runner == "playwright" && !importers.is_empty() {
                     command.args(importers.iter().map(|spec| regex::escape(&repo.join(spec).to_string_lossy())));
                 } else if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
+                else if !importers.is_empty() { command.args(importers.iter().map(|test| repo.join(test))); }
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
@@ -2038,8 +2040,11 @@ fn validate_report_with_inherited(
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
     let path = Path::new(path);
+    // A runner may report the resolved path: macOS `/var` is `/private/var`.
+    let canonical = repo.canonicalize().ok();
     let path = if path.is_absolute() {
         path.strip_prefix(repo)
+            .or_else(|error| canonical.as_deref().map_or(Err(error), |repo| path.strip_prefix(repo)))
             .context("reported test is outside the repository")?
     } else {
         path
@@ -2421,9 +2426,9 @@ mod tests {
         let (tests, scopes) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &[helper.into()], None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [Scope::Related(helper.into())]);
-        assert_eq!(playwright_importers(repo.path(), helper), ["e2e/journeys/pair-link.journey.ts"]);
-        assert_eq!(playwright_importers(repo.path(), "e2e/journeys/world.ts"),
-            ["e2e/journeys/pair-link.journey.ts", "e2e/journeys/read-history.journey.ts"]);
+        assert_eq!(related_tests(repo.path(), helper), Some(("playwright", vec!["e2e/journeys/pair-link.journey.ts".into()])));
+        assert_eq!(related_tests(repo.path(), "e2e/journeys/world.ts"),
+            Some(("playwright", vec!["e2e/journeys/pair-link.journey.ts".into(), "e2e/journeys/read-history.journey.ts".into()])));
         let command = widened::commands(Path::new("/cas"), repo.path(), &[helper.into()], &scopes);
         assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
         assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new() }));
@@ -2432,7 +2437,62 @@ mod tests {
         let scopes = [widened::scope(repo.path(), runtime)];
         assert_eq!(widened::commands(Path::new("/cas"), repo.path(), &[runtime.into()], &scopes),
             [format!("cas factory worker-check --cas-root /cas -- vitest related --run {runtime}")]);
-        assert!(playwright_importers(repo.path(), "src/shared.ts").is_empty());
+        assert!(related_tests(repo.path(), "src/shared.ts").is_none());
+    }
+
+    /// GH #2200: a workflow change and the `node:test` CI guard that reads it
+    /// through a helper. G-61 prescribed `playwright <workflow>.yml`, which
+    /// the capped runner refuses. The helper now runs through the guard tests
+    /// importing it; the receipt that run records is the one park reads, and a
+    /// failing guard records none.
+    #[test]
+    fn node_guard_helper_proof_runs_its_importing_tests_gh2200() {
+        use super::super::widened::{self, Scope};
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let write = |path: &str, text: &str| {
+            std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.path().join(path), text).unwrap();
+        };
+        let (workflow, helper) = (".github/workflows/playwright.yml", "tests/ci/workflow.mjs");
+        git(&["init", "--quiet"]);
+        write("package.json", "{}");
+        write("playwright.config.js", "module.exports = {};");
+        write(workflow, "retries: 0\n");
+        write(helper, "import { readFileSync } from 'node:fs';\nconst workflow = new URL('../../.github/workflows/playwright.yml', import.meta.url);\nexport const retries = () => /retries: 0/.test(readFileSync(workflow, 'utf8'));\n");
+        write("tests/ci/workflow.test.mjs", "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { retries } from './workflow.mjs';\ntest('workflow never retries', () => assert.ok(retries()));\n");
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        write(workflow, "name: e2e\nretries: 0\n");
+        write(helper, &format!("// Guards {workflow}.\n{}", std::fs::read_to_string(repo.path().join(helper)).unwrap()));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = [workflow.to_string(), helper.to_string()];
+        let (tests, scopes) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [Scope::Related(helper.into())]);
+        let prescribed = widened::commands(Path::new("/cas"), repo.path(), &paths, &scopes);
+        assert_eq!(prescribed, [format!("cas factory worker-check --cas-root /cas -- node --test {helper}")]);
+        let args: Vec<String> = ["node", "--test", helper].map(String::from).into();
+        let invocation = invocation(&args).expect("the prescribed command is a capped runner");
+        let cas_root = tempfile::tempdir().unwrap();
+        let passing = |head: &str| widened::missing(&super::super::PassingTests::new(cas_root.path(), repo.path(), head), &scopes);
+        assert_eq!(passing(&head), scopes);
+        execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &[], Some((&scopes[0], helper, "uncertain")), &[]).unwrap();
+        assert!(passing(&head).is_empty());
+        // A guard that fails records no proof for its new tip.
+        write(workflow, "retries: 2\n");
+        git(&["commit", "--quiet", "-am", "retry"]);
+        let failed = git(&["rev-parse", "HEAD"]);
+        assert!(execute_tests(cas_root.path(), repo.path(), &failed, "node", None, &[], Some((&scopes[0], helper, "uncertain")), &[]).is_err());
+        assert_eq!(passing(&failed), scopes);
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid

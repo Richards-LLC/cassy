@@ -2124,7 +2124,7 @@ impl CasCore {
                 let reason = "Approve divergent unparked target migration while preserving the old lane";
                 let target_update = serde_json::json!({
                     "action":"update", "id":task.id, "proof_scope_fix":true,
-                    "target_repo":target.repo_selector, "target_branch":target.target_branch, "reason":reason,
+                    "target_branch":target.target_branch, "reason":reason,
                 });
                 let rebind = serde_json::json!({
                     "action":"rebind_branch", "id":task.id, "branch":branch, "reason":reason,
@@ -2133,8 +2133,8 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(crate::gates::tag("G-151", format!(
-                        "WORK TARGET MIGRATION REQUIRED: task {} has a recorded start outside {base}. No task fields were changed. Preserve its old branch and any dirty or foreign work; do not reset it. A live supervisor runs `{prefix}task action=update id={} proof_scope_fix=true target_repo={} target_branch={} reason=\"<approval>\"`. Create a clean replacement branch `{branch}` from `{base}`, then the supervisor runs `{prefix}task action=rebind_branch id={} branch={branch} reason=\"<approval>\"` before the worker starts again. Rebind refuses dirty work or an old lane with unpreserved delivery.",
-                        task.id, task.id, target.repo_selector, target.target_branch, task.id,
+                        "WORK TARGET MIGRATION REQUIRED: task {} has a recorded start outside {base}. No task fields were changed. Preserve its old branch and any dirty or foreign work; do not reset it. A live supervisor runs `{prefix}task action=update id={} proof_scope_fix=true target_branch={} reason=\"<approval>\"`. Create a clean replacement branch `{branch}` from `{base}`, then the supervisor runs `{prefix}task action=rebind_branch id={} branch={branch} reason=\"<approval>\"` before the worker starts again. Rebind refuses dirty work or an old lane with unpreserved delivery.",
+                        task.id, task.id, target.target_branch, task.id,
                     ))),
                     data: Some(serde_json::json!({
                         "rule_id":"unparked_target_base_migration",

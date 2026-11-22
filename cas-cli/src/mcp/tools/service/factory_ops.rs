@@ -2777,7 +2777,7 @@ impl CasService {
         provisioner_build: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         self.factory_spawn_workers_in_with_name_source(ctx, req, provisioner_build,
-            &mut || crate::orchestration::names::generate_unique(1).remove(0)).await
+            &mut crate::orchestration::names::generate).await
     }
 
     // gate-audit[force_build_guard]: bypass G-135 Admits a spawn despite measured builder-capacity refusal.
@@ -13892,7 +13892,14 @@ mod spawn_lifecycle_tests {
             "action":"spawn_workers","count":1,"cli":"grok","isolate":true,"worker_names":name
         })).unwrap();
         let ctx = crate::ops::fleet::FleetContext::operator("collision-fixture");
-        let mut candidates = [local, remote, fresh].into_iter();
+        // cas-dc08 (N1): generated names also skip any that would share a
+        // registered worker's or a factory branch's namespace; a branch of
+        // the same name's own known task does not block it.
+        crate::store::open_agent_store(&root).unwrap().register(&cas_types::Agent::new_with_role(
+            "swift-id".into(), "swift".into(), cas_types::AgentRole::Worker)).unwrap();
+        git(&["update-ref", "refs/remotes/origin/factory/taken-owner-x", "HEAD"]);
+        git(&["update-ref", &format!("refs/remotes/origin/factory/{fresh}-cas-spawn-epic"), "HEAD"]);
+        let mut candidates = [local, remote, "occupied-local-7", "swift-falcon-7", "taken", fresh].into_iter();
         service.factory_spawn_workers_in_with_name_source(&ctx, request(None), None,
             &mut || candidates.next().expect("bounded fixture candidates").to_owned()).await.expect("spawn is admitted");
         let queue = crate::store::open_spawn_queue_store(&root).unwrap();
@@ -13907,6 +13914,9 @@ mod spawn_lifecycle_tests {
         let explicit = service.factory_spawn_workers_in_with_name_source(&ctx, request(Some(local)), None,
             &mut || panic!("an explicit name must not be regenerated")).await.expect_err("explicit collisions refuse before enqueue");
         assert!(explicit.message.contains(&format!("factory/{local}")), "{explicit}");
+        let overlap = service.factory_spawn_workers_in_with_name_source(&ctx, request(Some("swift-hawk-3")), None,
+            &mut || panic!("an explicit name must not be regenerated")).await.expect_err("explicit overlaps refuse before enqueue");
+        assert!(overlap.message.contains("WORKER_NAME_OVERLAPS"), "{overlap}");
         assert_eq!(queue.peek(10).unwrap().len(), 1, "explicit refusal creates no second queue row");
     }
 

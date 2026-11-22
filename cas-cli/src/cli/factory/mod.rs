@@ -1786,15 +1786,18 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     };
     let is_minions = theme_variant == crate::ui::theme::ThemeVariant::Minions;
 
+    // cas-dc08 (N1): generated worker names skip any that would share a
+    // registered worker's or a factory branch's namespace.
+    let names = crate::factory_isolation::WorkerNameRegistry::load(&preflight.cas_root, &project_root).ok();
+    let reject = |name: &str| names.as_ref().is_some_and(|names| names.overlap(name).is_some());
     let (supervisor_name, mut worker_names) = if is_minions {
         use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
         let sup = generate_minion_supervisor();
-        let workers = generate_minion_unique(args.workers as usize);
+        let workers = generate_minion_unique(args.workers as usize, &reject);
         (sup, workers)
     } else {
-        let all_names = generate_unique(args.workers as usize + 1);
-        let sup = all_names[0].clone();
-        let workers: Vec<String> = all_names[1..].to_vec();
+        let sup = crate::orchestration::names::generate();
+        let workers = generate_unique(args.workers as usize, &reject);
         (sup, workers)
     };
 

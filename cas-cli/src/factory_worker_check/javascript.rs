@@ -2378,7 +2378,9 @@ mod tests {
     /// assertions run through pair-link.journey.ts. The gate widened it to the
     /// whole package. It now runs through the Playwright specs importing it,
     /// directly or through other helpers; a helper no spec imports, or one a
-    /// unit test also imports, keeps its previous proof.
+    /// unit test also imports, keeps its previous proof. hub-double.ts imports
+    /// Playwright only for types, and a Vitest test imports it: its helpers
+    /// keep their Vitest route (cas-87b5).
     #[test]
     fn playwright_helper_runs_through_its_importing_specs_gh2146() {
         use super::super::widened::{self, Scope};
@@ -2402,7 +2404,10 @@ mod tests {
             ("e2e/journeys/pair-link.journey.ts", "import { test } from \"./journey\";\nimport { goals } from \"./responsive-goals.js\";\nimport { shared } from \"../../src/shared\";\ntest(\"pairs\", goals);"),
             ("e2e/journeys/read-history.journey.ts", "import { test } from \"./journey\";\ntest(\"reads\", () => {});"),
             ("src/shared.ts", "export const shared = 1;"),
-            ("src/shared.test.ts", "import { test } from 'vitest';\nimport { shared } from './shared';\ntest('shared', () => {});"),
+            ("src/shared.test.ts", "import { test } from 'vitest';\nimport { shared } from './shared';\nimport { unused } from '../e2e/journeys/orphan';\ntest('shared', () => {});"),
+            ("e2e/journeys/hub-double.ts", "import type { Page } from \"@playwright/test\";\nimport { runtime } from \"./hub-double-runtime\";\nexport const double = (page: Page) => runtime;"),
+            ("e2e/journeys/hub-double-runtime.ts", "export const runtime = 1;"),
+            ("preview/browser-page.test.ts", "import { double } from \"../e2e/journeys/hub-double\";\nit(\"serves\", () => double);"),
         ];
         for (path, body) in files {
             std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
@@ -2423,6 +2428,7 @@ mod tests {
         assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
         assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new() }));
         assert_eq!(widened::scope(repo.path(), "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
+        assert_eq!(widened::scope(repo.path(), "e2e/journeys/hub-double-runtime.ts"), Scope::Package(String::new()));
         assert!(playwright_importers(repo.path(), "src/shared.ts").is_empty());
     }
 

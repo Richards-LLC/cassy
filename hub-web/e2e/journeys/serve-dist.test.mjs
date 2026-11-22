@@ -162,7 +162,7 @@ os.execvp(command[0], command)
       PLAYWRIGHT_JSON_OUTPUT_NAME: report, JOURNEY_OUTPUT: join(repo, 'target/results') };
     delete env.JOURNEY_BUILD_MANIFEST;
     const child = spawn(process.execPath, [join(hub, 'node_modules/@playwright/test/cli.js'),
-      'test', '--project=journeys', '--grep', '^named startup selected$', '--workers=1', '--reporter=json'],
+      'test', '--project=journeys', '--grep', 'named startup selected', '--workers=1', '--reporter=json'],
     { cwd: hub, env, stdio: ['ignore', 'pipe', 'pipe'] });
     t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
     let output = '';

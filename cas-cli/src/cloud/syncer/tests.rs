@@ -441,6 +441,88 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
     }
 }
 
+/// GH #2318: a parked local delivery outranks the cloud's older Open row, so
+/// the pull skips applying it. The rejected push must still be rebased on the
+/// cloud revision by that one pull, or the park never reaches the cloud.
+#[tokio::test]
+async fn one_pull_rebases_a_rejected_park_that_outranks_the_remote_open_row_gh_2318() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use std::sync::Mutex;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (project, team) = ("park-rebase-project", "park-rebase-team");
+    let mut open = Task::new("cas-park-rebase".into(), "request_changes left this Open".into());
+    open.origin_project = Some(project.into());
+    open.updated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    let mut parked = open.clone();
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.updated_at = chrono::Utc::now() - chrono::Duration::hours(1);
+
+    let server = MockServer::start().await;
+    let remote = Arc::new(Mutex::new((serde_json::to_value(&open).unwrap(), 8i64)));
+    let writing = Arc::clone(&remote);
+    Mock::given(method("POST")).and(path(format!("/api/teams/{team}/sync/push")))
+        .respond_with(move |request: &wiremock::Request| {
+            let mut task = decode_push_body(request)["tasks"][0].clone();
+            let mut state = writing.lock().unwrap();
+            let id = task["id"].as_str().unwrap().to_string();
+            let detail = if crate::cloud::wire_revision(&task) == Some(state.1) {
+                state.1 += 1;
+                task.as_object_mut().unwrap().remove("revision");
+                state.0 = task;
+                serde_json::json!({"inserted":0,"updated":1,"skipped":0,
+                    "accepted": {id.clone(): {"revision": state.1.to_string()}}})
+            } else {
+                serde_json::json!({"inserted":0,"updated":0,"skipped":1,
+                    "rejected":[{"id":id,"reason":"revision_conflict","current_revision":state.1.to_string()}]})
+            };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{"tasks":detail}}))
+        }).mount(&server).await;
+    let reading = Arc::clone(&remote);
+    Mock::given(method("GET")).and(path(format!("/api/teams/{team}/sync/pull")))
+        .respond_with(move |_: &wiremock::Request| {
+            let state = reading.lock().unwrap();
+            let mut task = state.0.clone();
+            task["revision"] = serde_json::json!(state.1.to_string());
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks":[task],"task_dependencies":[],"team_id":team,
+                "pulled_at":"2026-11-22T23:00:00Z","status":"ok"
+            }))
+        }).mount(&server).await;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    tasks.add(&parked).unwrap();
+    let queue = Arc::new(SyncQueue::open(&root).unwrap());
+    queue.init().unwrap();
+    // The builder last saw revision 4; the owner's request_changes made it 8.
+    queue.record_revision(EntityType::Task, &parked.id, 4).unwrap();
+    queue.enqueue_for_team(EntityType::Task, &parked.id, SyncOperation::Upsert,
+        Some(&serde_json::to_string(&parked).unwrap()), team).unwrap();
+    let syncer = CloudSyncer::new_for_project(Arc::clone(&queue), CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), project.into(), &root);
+
+    assert_eq!(syncer.push_team(team).unwrap().pushed_tasks, 0);
+    let pulled = syncer.pull_team(team, project,
+        &*crate::store::open_store_local(&root).unwrap(), &*tasks,
+        &*crate::store::open_rule_store_local(&root).unwrap(),
+        &*crate::store::open_skill_store_local(&root).unwrap()).unwrap();
+    assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
+    assert_eq!(tasks.get(&parked.id).unwrap().status, TaskStatus::AwaitingMerge);
+    assert_eq!(queue.revision(EntityType::Task, &parked.id).unwrap(), Some(8));
+
+    assert_eq!(syncer.push_team(team).unwrap().pushed_tasks, 1);
+    assert!(queue.pending_for_team(team, 10, 5).unwrap().is_empty());
+    let state = remote.lock().unwrap();
+    assert_eq!(state.0["status"], "awaiting_merge");
+    assert_eq!(state.1, 9);
+}
+
 #[tokio::test]
 async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_is_skipped() {
     use crate::cloud::{CloudConfig, EntityType, SyncOperation};

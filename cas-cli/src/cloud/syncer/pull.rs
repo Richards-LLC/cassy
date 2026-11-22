@@ -1610,6 +1610,38 @@ fn rejects_delivery_regression(local: &Task, remote: &Task) -> bool {
     regresses && !has_explicit_remote_reopen(local, remote)
 }
 
+/// A receiver's later bookkeeping clock cannot hide a completed peer park
+/// for the exact execution already recorded here. This imports no approval
+/// or publication authority; merge admission still checks the pushed tip.
+fn receipted_park_projection(local: &Task, remote: &Task) -> Option<Task> {
+    if !matches!(local.status, TaskStatus::InProgress | TaskStatus::Blocked)
+        || remote.status != TaskStatus::AwaitingMerge || remote.updated_at > local.updated_at
+        || local.deliverables.delivery_cycle != remote.deliverables.delivery_cycle
+        || local.assignee != remote.assignee
+        || local.deliverables.work_target != remote.deliverables.work_target
+        || local.deliverables.factory_branch_start != remote.deliverables.factory_branch_start
+        || has_explicit_remote_reopen(remote, local)
+    { return None; }
+    let start = local.deliverables.factory_branch_start.as_ref()?;
+    let anchor = remote.deliverables.factory_branch_anchor.as_deref()?;
+    if anchor.len() != 40 || !anchor.bytes().all(|b| b.is_ascii_hexdigit())
+        || local.assignee.as_deref() != Some(start.assignee.as_str())
+        || local.deliverables.work_target.as_ref() != Some(&start.work_target)
+        || remote.deliverables.parked_branch.as_deref() != Some(start.branch.as_str())
+        || local.deliverables.factory_branch_anchor.as_deref().is_some_and(|tip| tip != anchor)
+        || local.deliverables.declined_factory_anchors().iter().any(|tip| tip.eq_ignore_ascii_case(anchor))
+        || !remote.notes.split("\n\n").filter_map(lifecycle_audit_note).any(|(_, event)|
+            event.starts_with(audit::PARKED) && event.contains(audit::PARKED_STATE))
+    { return None; }
+    let mut projected = local.clone();
+    projected.status = remote.status;
+    projected.pending_verification = remote.pending_verification;
+    projected.pending_worktree_merge = remote.pending_worktree_merge;
+    projected.deliverables = remote.deliverables.clone();
+    projected.notes = merge_task_notes(&local.notes, &remote.notes);
+    Some(projected)
+}
+
 /// A later receiver note is not a new delivery. Import only the completion
 /// of its exact approved, merged cycle; body LWW and explicit rework remain
 /// independent. The caller still applies this through the store's atomic
@@ -1998,6 +2030,14 @@ impl CloudSyncer {
                 (None, None) => false,
                 _ => true,
             };
+            if incoming_is_owner && !origins_differ
+                && strategy != Some(ConflictResolution::LocalWins)
+                && let Some(mut projected) = receipted_park_projection(&local, &task)
+            {
+                append_sync_status_provenance(&mut projected, &local, sync_id, source);
+                return self.apply_task_from_sync(store, &projected, &local,
+                    "merged", "receipted_park");
+            }
             if incoming_is_owner && !origins_differ
                 && strategy != Some(ConflictResolution::LocalWins)
                 && let Some(mut projected) = receipted_terminal_projection(&local, &task)

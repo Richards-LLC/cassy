@@ -120,6 +120,9 @@ pub fn resolve(request: &BrandRequest) -> anyhow::Result<Brand> {
         workspace.path("default-tokens.json").into(),
         "--audience".into(),
         request.audience.as_str().into(),
+        // GH #2152: the roles the report close gate requires, from its one list.
+        "--required-roles".into(),
+        super::report_quality::BRAND_TOKENS.join(",").into(),
     ];
     if let Some(tokens) = &request.tokens {
         args.extend(["--tokens".into(), tokens.clone().into()]);

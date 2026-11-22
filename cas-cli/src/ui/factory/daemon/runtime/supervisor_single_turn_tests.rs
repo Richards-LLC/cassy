@@ -40,7 +40,7 @@ async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19
                 tokio::task::yield_now().await;
             }
             assert!(!daemon.app.mux.has_pending_injects());
-            while !daemon.queue_jobs.claim_resolved(&cas, &session, id, &name, &name) {
+            while !daemon.queue_jobs.claim_ready(id, &name) {
                 daemon.queue_jobs.apply_completions();
                 tokio::task::yield_now().await;
             }

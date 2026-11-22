@@ -2082,31 +2082,14 @@ impl QueueJobs {
         target: &str,
     ) -> ClaimStep {
         let key = (row, recipient.to_string());
-        if !self.claims.contains_key(&key) {
-            self.submit_claim(cas_dir, session, row, recipient, target);
-            if matches!(self.exec, Exec::Inline(_)) {
-                self.apply_completions();
-            }
-        }
-        if !matches!(self.claims.get(&key), Some(ClaimState::Ready(..))) {
+        if !self.claim_resolved(cas_dir, session, row, recipient, target) {
             return ClaimStep::Waiting;
         }
         let Some(ClaimState::Ready(outcome, _)) = self.claims.remove(&key) else {
             return ClaimStep::Waiting;
         };
         match outcome {
-            ClaimOutcome::Claimed(token) => {
-                // A named inbox poll may have taken over this reservation
-                // while its job result waited for the next control pass.
-                // Re-read on the store lane; never inject from that old result.
-                self.submit_claim_recheck(cas_dir, session, row, recipient, target, token);
-                if matches!(self.exec, Exec::Inline(_)) {
-                    self.apply_completions();
-                    return self.claim_for_inject(cas_dir, session, row, recipient, target);
-                }
-                ClaimStep::Waiting
-            },
-            ClaimOutcome::Rechecked(token) => ClaimStep::Claimed(token),
+            ClaimOutcome::Claimed(token) | ClaimOutcome::Rechecked(token) => ClaimStep::Claimed(token),
             ClaimOutcome::HandedOff => ClaimStep::HandedOff,
             ClaimOutcome::NotClaimed | ClaimOutcome::Stale => ClaimStep::NotClaimed,
             ClaimOutcome::Failed(error) => {
@@ -2123,8 +2106,8 @@ impl QueueJobs {
     }
 
     /// Make sure a claim job for `(row, recipient)` is out or back, and say
-    /// whether it is back. A broadcast checks every member this way before
-    /// injecting any (cas-786a6).
+    /// whether its recipient recheck is back. Batches and broadcasts resolve
+    /// every member this way before consuming any token (cas-786a6).
     pub(crate) fn claim_resolved(
         &mut self,
         cas_dir: &Path,
@@ -2136,6 +2119,16 @@ impl QueueJobs {
         let key = (row, recipient.to_string());
         if !self.claims.contains_key(&key) {
             self.submit_claim(cas_dir, session, row, recipient, target);
+            if matches!(self.exec, Exec::Inline(_)) {
+                self.apply_completions();
+            }
+        }
+        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(token), _)) = self.claims.get(&key) {
+            // A named inbox poll may have taken over this reservation
+            // while its job result waited for the next control pass.
+            // Re-read on the store lane before this token can be consumed.
+            let token = *token;
+            self.submit_claim_recheck(cas_dir, session, row, recipient, target, token);
             if matches!(self.exec, Exec::Inline(_)) {
                 self.apply_completions();
             }
@@ -2268,6 +2261,12 @@ impl QueueJobs {
     #[cfg(test)]
     pub(crate) fn has_claim(&self, row: i64, recipient: &str) -> bool {
         self.claims.contains_key(&(row, recipient.to_string()))
+    }
+
+    /// Observe the prepared result without advancing its recipient recheck.
+    #[cfg(test)]
+    pub(crate) fn claim_ready(&self, row: i64, recipient: &str) -> bool {
+        matches!(self.claims.get(&(row, recipient.to_string())), Some(ClaimState::Ready(..)))
     }
 
     /// Rows claim jobs re-targeted since the last call.

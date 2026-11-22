@@ -1,0 +1,3 @@
+### Fixed — Factory messaging
+
+- **Timed-out sends can be reconciled without resending** — A `coordination action=message` that is still writing when the response deadline passes now answers `IN_PROGRESS` with a `send-…` continuation id instead of a bare `UNKNOWN` with no identifier. The send keeps running rather than being cancelled mid-write. `coordination action=message_status id=<continuation id>` reports whether it is still running, committed (with its notification id), or ended without writing, and its final outcome also arrives in the sender's inbox, so the sender never has to guess and resend.

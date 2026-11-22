@@ -1,0 +1,12 @@
+title: Worker locked out of, or sharing, its own factory branch namespace
+statement: >-
+  A worker owns factory/<name> and factory/<name>-<task-id> and nothing else.
+  The tool guard and the installed commit and push hooks decide ownership
+  from the branch name with one shared rule, so a worker on its own per-task
+  branch is never refused. Registration keeps worker namespaces exclusive: a
+  worker name that extends another worker's name across a hyphen is refused,
+  so no branch has two owners. Supervisors are exempt, and names without a
+  hyphen boundary (eager-panda-2, eager-panda-27) both register.
+tasks: [cas-ea31]
+journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+invariants: []

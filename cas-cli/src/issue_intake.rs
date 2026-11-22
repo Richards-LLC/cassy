@@ -83,13 +83,15 @@ impl RefusalFingerprint {
     }
 }
 
-/// The first open task whose title, description or notes name this refusal.
+/// The first eligible open task whose title, description or notes name this refusal.
 pub(crate) fn open_task_match(
     store: &dyn cas_store::TaskStore,
     fingerprint: &RefusalFingerprint,
+    eligible: impl Fn(&crate::types::Task) -> bool,
 ) -> anyhow::Result<Option<crate::types::Task>> {
     Ok(store.list(None)?.into_iter().find(|task| {
         !task.is_terminal()
+            && eligible(task)
             && fingerprint.matches(&format!("{}\n{}\n{}", task.title, task.description, task.notes))
     }))
 }

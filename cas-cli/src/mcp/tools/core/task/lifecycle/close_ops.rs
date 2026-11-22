@@ -10146,6 +10146,20 @@ impl CasCore {
                         }
                         // The advanced anchor keeps this machine's fresh receipts.
                         keep_fresh_test_receipts(task_store.as_ref(), &task.id, portable);
+                        // A fully checked same-tip retry confirms the existing
+                        // durable park without writing another anchor or cycle.
+                        // Do not borrow a changed or unreadable task snapshot.
+                        if let Some(parked) = current.as_ref()
+                            && anchor.as_deref().zip(parked.deliverables.factory_branch_anchor.as_deref())
+                                .is_some_and(|(tip, recorded)| tip == recorded)
+                        {
+                            crate::mcp::tools::service::mutation_receipt::task_disposition_committed(
+                                &task.id,
+                                &format!("task `{}` parked awaiting_merge on {} at {}", task.id,
+                                    parked.deliverables.parked_branch.as_deref().unwrap_or("recorded delivery branch"),
+                                    anchor.as_deref().expect("checked unchanged park anchor")),
+                            );
+                        }
                     }
 
                     if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {
@@ -30472,6 +30486,59 @@ mod merge_state_gate_tests {
             "{}",
             stored.notes
         );
+    }
+
+    /// GH #2097: checked evidence-only retries at the same durable tip must
+    /// report COMMITTED while their remaining close work is still held.
+    #[tokio::test]
+    async fn same_tip_repark_wait_answers_committed_cas_b780() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::AwaitingMerge, AnchorChoice::Pushed);
+        git(fixture.dir.path(), &["reset", "-q", "--hard", &fixture.pushed]);
+        let mut task = fixture.store.get(&fixture.task_id).unwrap();
+        task.notes = "Additional review evidence at the unchanged delivery tip".into();
+        fixture.store.update(&task).unwrap();
+        let cycle = task.deliverables.delivery_cycle;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        lifecycle_race_hook::before_queue_handoff(&task.id, move || {
+            let _ = entered_tx.send(());
+            let _ = resume_rx.recv();
+        });
+        let service = fixture.service.clone();
+        let sender = service.clone();
+        let arguments = serde_json::json!({"action":"close", "id":task.id, "reason":"Review evidence updated"});
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let dispatch = tokio::spawn(async move {
+            service.call_with_deadline("task", arguments.as_object(),
+                std::time::Duration::from_secs(55), async move {
+                    let result = sender.task(Parameters(request)).await;
+                    let _ = done_tx.send(());
+                    result
+                }).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+            .await.expect("checked re-park must reach the follow-up barrier").unwrap();
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(56)).await;
+        let answer = dispatch.await.unwrap().unwrap();
+        tokio::time::resume();
+        let _ = resume_tx.send(());
+        done_rx.await.unwrap();
+        fixture.service.tool_work.wait_idle().await;
+
+        assert_eq!(answer.is_error, Some(false));
+        let data = answer.structured_content.unwrap();
+        assert_eq!(data["mutation_outcome"], "COMMITTED");
+        assert_eq!(data["task_id"], task.id);
+        let continuation = data["continuation_id"].as_str().unwrap();
+        let parked = fixture.store.get(&task.id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(fixture.pushed.as_str()));
+        assert_eq!(parked.deliverables.delivery_cycle, cycle);
+        let marker = format!("CLOSE_OUTCOME: continuation={continuation}");
+        assert_eq!(parked.notes.matches(&marker).count(), 1);
+        assert!(!parked.notes.contains("code=continuation_lost"));
     }
 
     /// cas-e571 (the cas-0fc56 incident): a build routed here from another

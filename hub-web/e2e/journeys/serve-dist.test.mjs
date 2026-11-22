@@ -114,7 +114,7 @@ test('named journeys execute ready snapshots and report refused admission before
   for (const dir of ['scripts', 'hub-web/src', 'hub-web/e2e/journeys', 'tools']) {
     await mkdir(join(repo, dir), { recursive: true });
   }
-  for (const path of ['scripts/journey_dist.py', 'hub-web/playwright.config.ts',
+  for (const path of ['scripts/journey_dist.py', 'hub-web/playwright.config.ts', 'hub-web/playwright.base.ts',
     'hub-web/e2e/checkout-ports.mjs', 'hub-web/e2e/journeys/clock.ts', 'hub-web/e2e/journeys/serve-dist.mjs']) {
     await copyFile(new URL(`../../../${path}`, import.meta.url), join(repo, path));
   }

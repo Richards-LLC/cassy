@@ -626,6 +626,7 @@ impl SqliteAgentStore {
 }
 
 mod ops_agent;
+pub use ops_agent::is_task_id_like;
 pub(crate) use ops_agent::register_agent_with_conn;
 pub mod continuity;
 mod ops_coordination;

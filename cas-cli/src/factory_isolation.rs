@@ -56,22 +56,7 @@ pub fn retire_branch_binding(deliverables: &mut cas_types::TaskDeliverables) -> 
     branch
 }
 
-/// Whether `value` reads as a task id: a letter first, a `-`, then more
-/// letters, digits, `.`, `_` or `-` (for example `cas-73b8` or `cas-73b8.1`).
-/// Mirrors the pattern the worker git hooks accept.
-pub fn is_task_id_like(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_alphabetic()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && value
-            .split_once('-')
-            .is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_alphanumeric()))
-}
+pub use cas_store::is_task_id_like;
 
 /// The task id of `branch` when it is `worker_name`'s own per-task branch
 /// (`factory/<worker>-<task-id>`), else `None`.

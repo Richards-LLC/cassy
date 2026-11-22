@@ -1748,7 +1748,7 @@ fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
 }
 
 /// cas-ea31 (N1): a factory name must not extend another registered factory
-/// name with a letter-led part. `ab` would otherwise own `factory/ab-cd-12`'s
+/// name with a task-ref-shaped part. `ab` would otherwise own `factory/ab-cd-12`'s
 /// branches by syntax, in Rust and in the Git hooks alike.
 #[test]
 fn factory_names_cannot_share_a_branch_namespace_cas_ea31() {
@@ -1760,6 +1760,9 @@ fn factory_names_cannot_share_a_branch_namespace_cas_ea31() {
     assert!(overlap.to_string().contains("WORKER_NAME_OVERLAPS"), "{overlap}");
     store.register(&worker("ab-id", "ab")).expect("re-registering the same name");
     store.register(&worker("ab2-id", "ab-2")).expect("a digit-led extension never parses as a task");
+    store.register(&worker("abowner-id", "ab-owner")).expect("'owner' never parses as a task ref");
+    let task_shaped = store.register(&worker("abcas-id", "ab-cas-1234")).expect_err("ab-cas-1234 reads as ab's task branch");
+    assert!(task_shaped.to_string().contains("WORKER_NAME_OVERLAPS"), "{task_shaped}");
     let supervisor = Agent::new_with_role("absup-id".into(), "ab-supervisor".into(), AgentRole::Supervisor);
     store.register(&supervisor).expect("a supervisor owns no factory branches, so it cannot collide");
     let mut renamed = worker("other-id", "other");

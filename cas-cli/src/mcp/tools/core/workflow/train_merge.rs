@@ -173,6 +173,15 @@ fn write_queue(path: &Path, queue: &Queue) -> Result<()> {
     Ok(())
 }
 
+/// GH #2316: the queue's recorded supervisor holds it only while that session
+/// is live. The caller is already the current train owner, so an ended prior
+/// owner's generation is adopted rather than held forever.
+fn held_by_prior_owner(root: &Path, actor: &cas_types::Agent, queue: &Queue, generation: &str) -> bool {
+    let continues = crate::cloud::peer_mailbox::owns_recipient(root, actor, &queue.supervisor)
+        && (queue.owner_generation.is_empty() || queue.owner_generation == generation);
+    !continues
+}
+
 /// Checked before preparing a candidate and again under the normal target
 /// lock. The queue creates its reservation under that same lock, so a single
 /// merge already in flight cannot slip between reservation and publication.
@@ -209,8 +218,7 @@ pub(crate) fn admit(
         let actor = core.resolve_live_supervisor_authority()
             .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-113", format!("train owner authority unavailable: {error:?}"))))?;
         let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
-        ensure!(crate::cloud::peer_mailbox::owns_recipient(root, &actor, &queue.supervisor)
-            && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
+        ensure!(!held_by_prior_owner(root, &actor, &queue, &generation),
             crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
         ensure!(
             permit == Some(queue.id.as_str())
@@ -344,8 +352,7 @@ impl CasCore {
         let path = path(&self.cas_root, &repo, &target)?;
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
-            ensure!(crate::cloud::peer_mailbox::owns_recipient(&self.cas_root, &actor, &queue.supervisor)
-                && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
+            ensure!(!held_by_prior_owner(&self.cas_root, &actor, &queue, &generation),
                 crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
             if queue.reclaim_advancement() { save(&path, &mut queue)?; }
             queue.supervisor = actor.id.clone();
@@ -983,6 +990,41 @@ mod tests {
         assert!(held.is_err() || held.unwrap().is_error == Some(true));
         let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap()).unwrap().unwrap();
         assert_eq!(queue.supervisor, "supervisor");
+    }
+
+    /// GH #2316: a train handed to a new live owner is held only by a live
+    /// prior owner. Once that session ends, the current owner adopts the queue.
+    #[tokio::test]
+    async fn ended_prior_owner_queue_is_adopted_by_current_train_owner_gh_2316() {
+        let fixture = Fixture::new();
+        fixture.start().await;
+        let agents = fixture.core.open_agent_store().unwrap();
+        let mut successor = Agent::new("supervisor-2".into(), "supervisor-2".into());
+        successor.role = AgentRole::Supervisor;
+        successor.factory_session = Some("queue-session".into());
+        agents.register(&successor).unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut epic = tasks.get("cas-train").unwrap();
+        epic.epic_verification_owner = Some("supervisor-2".into());
+        tasks.update(&epic).unwrap();
+        let takeover = || {
+            let core = CasCore::with_daemon(fixture.root.clone(), None, None);
+            core.set_agent_id_for_testing("supervisor-2".into());
+            core.train_merge("cas-train", Some(&fixture.ids), false, None)
+        };
+        let queue = || read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap()).unwrap().unwrap();
+
+        let held = takeover().unwrap_err().to_string();
+        assert!(held.contains("[G-113]"), "{held}");
+        assert_eq!(queue().supervisor, "supervisor");
+
+        let mut prior = agents.get("supervisor").unwrap();
+        prior.status = cas_types::AgentStatus::Shutdown;
+        agents.update(&prior).unwrap();
+        takeover().unwrap();
+        let adopted = queue();
+        assert_eq!(adopted.supervisor, "supervisor-2");
+        assert_eq!(adopted.entries.len(), fixture.ids.len());
     }
 
     #[tokio::test]

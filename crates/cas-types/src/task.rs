@@ -1936,6 +1936,16 @@ mod tests {
         let refused = merge_task_execution_state_patch(&state,
             &serde_json::json!({"close_refusal": refusal})).unwrap();
         assert_eq!(refused["close_refusal"]["code"], "phase_outcome_gate");
+        // GH #2278: a stored merge hold carries its stamped supervisor and full anchor.
+        let merge_hold = serde_json::json!({"owner": "Ben", "reason": "GitHub review",
+            "until": "2026-11-22T14:00:00Z", "supervisor": "lead", "anchor": "a".repeat(40)});
+        assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"merge_hold": merge_hold})).is_ok());
+        for (field, value) in [("anchor", serde_json::json!("abc")), ("supervisor", serde_json::json!(" ")),
+            ("owner", serde_json::json!("")), ("extra", serde_json::json!(1))] {
+            let mut hold = merge_hold.clone();
+            hold[field] = value;
+            assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"merge_hold": hold})).is_err(), "{field}");
+        }
         assert_eq!(merge_task_execution_state_patch(&refused,
             &serde_json::json!({"close_refusal": null})).unwrap(), state);
         for (field, invalid) in [

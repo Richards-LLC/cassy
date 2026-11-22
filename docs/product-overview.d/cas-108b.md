@@ -1,3 +1,5 @@
+## Core Concepts
+
 ### Slow task response recovery
 
 When a committed task operation answers before its follow-up finishes, the MCP response identifies the action and task and includes a bounded notes request. Start responses confirm assignment acceptance and direct callers to START CONTEXT and close checks once follow-up finishes. Close responses continue to describe close follow-up.

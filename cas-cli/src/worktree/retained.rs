@@ -393,6 +393,68 @@ mod tests {
     }
 
     #[test]
+    fn cas_5fc4_retained_push_distance_is_not_global_uniqueness() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let root = repo.join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        env.set("CAS_ROOT", &root);
+        commit_git(repo, &["init", "-qb", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        commit_git(repo, &["add", ".gitignore"]);
+        commit_git(repo, &["commit", "-qm", "seed"]);
+        crate::store::open_agent_store(&root).unwrap().init().unwrap();
+        crate::store::open_task_store(&root).unwrap().init().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        commit_git(remote.path(), &["init", "-q", "--bare"]);
+        commit_git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        commit_git(repo, &["push", "-q", "origin", "main"]);
+        let worker = root.join("worker");
+        let branch = "factory/retired";
+        commit_git(repo, &["worktree", "add", "-qb", branch, worker.to_str().unwrap()]);
+        commit_git(&worker, &["push", "-q", "origin", branch]);
+        commit_git(&worker, &["commit", "--allow-empty", "-qm", "local before merge"]);
+        commit_git(repo, &["checkout", "-qb", "train"]);
+        for n in 0..34 {
+            commit_git(repo, &["commit", "--allow-empty", "-qm", &format!("train {n}")]);
+        }
+        commit_git(repo, &["push", "-q", "origin", "train"]);
+        commit_git(&worker, &["merge", "--no-ff", "-qm", "merge train", "train"]);
+        commit_git(&worker, &["commit", "--allow-empty", "-qm", "local after merge"]);
+        assert_eq!(commit_git(&worker, &["rev-list", "--count", "origin/factory/retired..HEAD"]), "37");
+        assert_eq!(commit_git(&worker, &["rev-list", "--count", "HEAD", "--not", "--remotes"]), "3");
+        let scan_now = || scan_until(&root, Instant::now() + Duration::from_secs(20));
+        let report = scan_now();
+        assert!(!report.is_partial(), "{report:?}");
+        assert_eq!(report.entries.len(), 1);
+        let summary = report.entries[0].summary();
+        // These are machine field names, not a prose contract.
+        let field = |key: &str| summary.split_whitespace().find_map(|part| part.strip_prefix(key));
+        assert_eq!(field("ahead_of_own_remote="), Some("37"));
+        assert_eq!(field("on_no_remote="), Some("3"));
+
+        // Publishing on a different remote branch must not hide the push owed here.
+        commit_git(&worker, &["push", "-q", "origin", "HEAD:refs/heads/published-elsewhere"]);
+        let shared = scan_now();
+        assert!(!shared.is_partial(), "{shared:?}");
+        assert_eq!(shared.entries.len(), 1);
+        assert_eq!(shared.entries[0].unpushed, Some(0));
+        assert!(shared.entries[0].summary().split_whitespace().any(|part| part == "ahead_of_own_remote=37"));
+
+        commit_git(repo, &["push", "-q", "origin", ":published-elsewhere", ":factory/retired"]);
+        let missing = scan_now();
+        assert!(!missing.is_partial(), "{missing:?}");
+        assert_eq!(missing.entries.len(), 1);
+        assert!(missing.entries[0].summary().split_whitespace().any(|part| part == "ahead_of_own_remote=missing"));
+        assert_eq!(missing.entries[0].unpushed, Some(3));
+        commit_git(&worker, &["push", "-q", "origin", branch]);
+        let published = scan_now();
+        assert!(!published.is_partial(), "{published:?}");
+        assert!(published.entries.is_empty());
+    }
+
+    #[test]
     fn local_only_primary_is_not_retained_but_worker_work_is_cas_6a12() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         for remote in [None, Some("upstream")] {

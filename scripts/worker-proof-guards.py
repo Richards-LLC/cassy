@@ -56,7 +56,7 @@ def main():
                                      'CAS_GATE_AUDIT_SELECT_ROOT': str(repo),
                                      'CAS_GATE_AUDIT_SELECT_OUT': str(answer)})
         tests = int(guard_count.read_text().strip())
-        if False:  # cas-19792 red run: selection disabled
+        if not answer.is_file() or answer.read_text().strip() != '0':
             print('guards: delivery touches an audited gate site; adding gates::registry_tests', flush=True)
             verified(args.verified_script, args.cargo,
                      ['nextest', 'run', '-p', 'cas', '--lib', '-E', REGISTRY_FILTER], guard_count)

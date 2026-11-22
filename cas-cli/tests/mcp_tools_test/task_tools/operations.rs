@@ -6016,6 +6016,9 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
     std::fs::write(managed.join("delivery.txt"), "unsaved takeover edit").unwrap();
     let cleanup = guard("git checkout -- .");
     assert_eq!(cleanup.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("allow"), "{cleanup}");
+    // The allowance never reaches outside the registered worktree.
+    let shared = guard(&format!("git -C '{}' checkout -- .", root.display()));
+    assert_eq!(shared.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{shared}");
     branch_transfer_git(&managed, &["checkout", "--", "."]);
     // The named recovery must work in one supervisor call without asking
     // the worker to run a checkout that the guard itself refuses.

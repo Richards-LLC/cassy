@@ -5174,6 +5174,15 @@ Default show retains Type and Demo for builtin gates, and names full-only sectio
 
 ## Durable task artifacts
 
+Park publication stores its complete per-file manifest, skipped uploads and
+excluded trees in `evidence-sync-report.json` under the task artifacts directory.
+Synced task notes contain counts, at most twenty sampled paths and the report
+path, under sixteen KiB per summary. Large manifests use a verified artifact
+reference; reviewers fetch the complete manifest before restoring its files.
+Small and legacy inline `EVIDENCE_SYNC` notes retain their existing semantics.
+Automatic scans prune `node_modules`, `.git`, `vendor` and `.venv` trees and
+ignore generated evidence reports. Explicit close citations remain required.
+
 `factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).
 New task evidence lives in `<base>/<project-key>/<task-id>/`; assignment briefs
 print the exact path. The key combines the project folder label with a SHA256

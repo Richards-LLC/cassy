@@ -539,6 +539,47 @@ fn task_context(task: &Task) -> serde_json::Value {
     })
 }
 
+/// A parent relation grants context, not access to an arbitrary artifact ID.
+/// Resolve only cited proof in that parent's own project/task authority.
+fn referenced_parent_artifacts(root: &Path, task: &Task) -> Result<Vec<cas_store::PublishedArtifact>, String> {
+    let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
+    let Some(parent) = tasks.get_parent_epic(&task.id).map_err(|error| error.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let scope = crate::mcp::tools::core::task::ProjectScope::current(root);
+    if !scope.shows(task) || !scope.shows(&parent) {
+        return Err(format!("Parent plan {} is outside this project's task scope", parent.id));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for text in [&parent.description, &parent.design, &parent.acceptance_criteria, &parent.notes] {
+        for line in text.lines().filter(|line| {
+            !line.starts_with("ARTIFACT_PROOF:")
+                && !line.split_once("] ").is_some_and(|(_, body)| body.starts_with("Published artifact "))
+        }) {
+            for id in line.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+                if id.starts_with("art-") && id.len() > 4 { ids.insert(id.to_string()); }
+            }
+        }
+    }
+    ids.into_iter().map(|id| {
+        let artifact = crate::artifacts::proof::lookup_metadata(root, Some(&parent.id), &id)
+            .map_err(|error| format!("Parent plan {} artifact {id} unavailable: {error:#}", parent.id))?;
+        crate::artifacts::proof::validate(&artifact, &parent.id)
+            .map_err(|error| format!("Parent plan {} artifact {id} unavailable: {error:#}", parent.id))?;
+        Ok(artifact)
+    }).collect()
+}
+
+fn materialize_parent_plan_artifacts(root: &Path, task: &Task) -> Result<Vec<serde_json::Value>, String> {
+    referenced_parent_artifacts(root, task)?.into_iter().map(|artifact| {
+        let (record, path) = crate::artifacts::proof::fetch_task(root, &artifact.task_id, &artifact.id)
+            .map_err(|error| format!("Parent plan {} artifact {} unavailable: {error:#}", artifact.task_id, artifact.id))?;
+        Ok(serde_json::json!({
+            "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
+        }))
+    }).collect()
+}
+
 fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), String> {
     hash.update(serde_json::to_vec(&task_context(task)).map_err(|error| error.to_string())?);
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
@@ -571,6 +612,8 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(b"cas-premerge-candidate-v2-regenerated\0");
     hash_plan_context(root, task, &mut hash)?;
+    hash.update(serde_json::to_vec(&referenced_parent_artifacts(root, task)?)
+        .map_err(|error| error.to_string())?);
     if let Some(train) = crate::cloud::peer_mailbox::train_parks::owner_train(root,task)? {
         hash.update(crate::factory_session_scope::train_owner_generation(&train)?.as_bytes());
     }
@@ -1305,6 +1348,7 @@ impl CasCore {
         // A peer machine's committed evidence lands where the verifier reads,
         // before the digest so a restored LEDGER.md is part of this candidate.
         crate::artifacts::proof::materialize_peer_evidence(&self.cas_root, task).map_err(fail)?;
+        materialize_parent_plan_artifacts(&self.cas_root, task).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))

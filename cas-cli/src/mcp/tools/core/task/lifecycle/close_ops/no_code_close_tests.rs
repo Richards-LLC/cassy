@@ -540,6 +540,56 @@ async fn integrated_squash_receipt_survives_large_source_history_gh1454() {
     assert_eq!(f.task(id).status, TaskStatus::Closed, "{response}");
 }
 
+/// GH #1442: task A parks and lands as a squash; the worker then commits task
+/// B on top of A, with A's tip as B's start base. A's merged receipt still
+/// closes A, whether B shares A's lane or A's merged lane was deleted.
+#[tokio::test]
+async fn merged_receipt_closes_after_next_task_commits_gh1442() {
+    let mut env = TestEnvGuard::temp_home();
+    for shared_lane in [true, false] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let id = "cas-a0a0";
+        let (checkout, lane) = issue_delivery(&f, id, "main");
+        std::fs::write(checkout.join("a.rs"), "pub fn a() {}\n").unwrap();
+        git(&checkout, &["add", "a.rs"]);
+        git(&checkout, &["commit", "-qm", "fix(cas-a0a0): delivery A"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        let a_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        let parked = call(&f.worker, serde_json::json!({"action":"close", "id":id, "reason":"Delivery A ready"})).await;
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+        git(repo, &["merge", "-q", "--squash", &lane]);
+        git(repo, &["commit", "-qm", "fix(cas-a0a0): delivery A (#1)"]);
+        let receipt = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let b_lane = if shared_lane { lane.clone() } else { format!("{LANE}-cas-b0b0") };
+        if !shared_lane {
+            git(&checkout, &["checkout", "-q", "-b", &b_lane]);
+        }
+        let mut b = assigned("cas-b0b0", TaskType::Bug, "main");
+        b.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: b.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(), branch: b_lane.clone(), base_sha: a_tip,
+        });
+        f.put(&b);
+        std::fs::write(checkout.join("b.rs"), "pub fn b() {}\n").unwrap();
+        git(&checkout, &["add", "b.rs"]);
+        git(&checkout, &["commit", "-qm", "fix(cas-b0b0): delivery B"]);
+        git(&checkout, &["push", "-q", "origin", &b_lane]);
+        let caller = if shared_lane { &f.worker } else {
+            git(repo, &["branch", "-D", &lane]);
+            git(repo, &["push", "-q", "origin", "--delete", &lane]);
+            &f.supervisor
+        };
+        let response = call(caller, serde_json::json!({
+            "action":"close", "id":id, "reason":"Delivery A merged",
+            "commit_receipt": receipt, "supervisor_override": !shared_lane,
+        })).await;
+        assert_eq!(f.task(id).status, TaskStatus::Closed, "shared_lane={shared_lane}: {response}");
+        assert_eq!(f.task("cas-b0b0").status, TaskStatus::InProgress);
+    }
+}
+
 #[tokio::test]
 async fn explicit_staging_scope_fix_survives_epic_child_close_gh1452() {
     let mut env = TestEnvGuard::temp_home();

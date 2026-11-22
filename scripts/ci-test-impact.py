@@ -442,8 +442,11 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     selection = dict(selection, configuration=proof_configuration(root, selection.get("configuration")))
     started = time.monotonic()
     env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
-    status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), "nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"], cwd=root, env=env).returncode
+    invocation = ["nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"]
+    status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), *invocation], cwd=root, env=env).returncode
     receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)
+    receipt["invocation"] = invocation
+    write(destination, receipt)
     # Attribution may clear the status only when every unsuccessful test is
     # named: the summary's run-minus-passed count must match the parsed set.
     counts = re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:\s+(\d+) passed", strip_ansi(log.read_text()))
@@ -580,7 +583,10 @@ def web_results(root, report):
         for suite in suites:
             names = ancestry + (suite["title"],) if ancestry or suite.get("column", 0) else ancestry
             for spec in suite.get("specs", []):
-                path = str((report_root / spec["file"]).resolve().relative_to(root.resolve()))
+                # Playwright writes spec paths with Node's lexical path.relative
+                # from an unresolved rootDir to the real file. Join them lexically
+                # too; resolving `..` through a symlink (macOS /var) doubles /private.
+                path = str(Path(os.path.normpath(report_root / spec["file"])).resolve().relative_to(root))
                 for test in spec["tests"]:
                     attempts = test["results"]
                     if test.get("expectedStatus") != "passed" or len(attempts) != 1 or attempts[0].get("retry", 0):
@@ -643,7 +649,7 @@ def replay_web(checkout, failures, settings, destination, phase, run):
 
 
 # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
-def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base", web=None):
+def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base", web=None, invocation=None):
     """Reuse exact-base failures, replay misses, and fail closed on incomplete work."""
     started = time.monotonic()
     # Twenty minutes for lookup/preparation/build/test, within the existing
@@ -710,6 +716,24 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
         print(f"Lane impact: {result['error']}", file=sys.stderr)
     elif pending:
         try:
+            if not web:
+                # cas-c53a1: replay the original archive/build, filter and shard
+                # BEFORE the base build replaces dependencies in root/target.
+                # Cargo can otherwise reuse those newer base artifacts when
+                # rebuilding head, turning a deterministic regression green.
+                if (not isinstance(invocation, list) or invocation[:2] != ["nextest", "run"]
+                        or not all(isinstance(arg, str) for arg in invocation)):
+                    raise RuntimeError("missing original Rust invocation; attribution requires a fresh lane receipt")
+                head_log = Path(destination).with_suffix(".head.log")
+                head_log.write_text("")
+                cargo = os.environ.get("CARGO", "cargo")
+                status = timed_command([cargo, *invocation], "head_test_seconds", head_log, dict(os.environ), cwd=root)
+                head_text = strip_ansi(head_log.read_text())
+                at_head = {failure_key(f) for f in parse_failures(head_text)}
+                if not sum(map(int, re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:", head_text))):
+                    raise RuntimeError("head rerun completed without executed tests")
+                if status and not at_head:
+                    raise RuntimeError(f"head rerun failed without a test result: {status}")
             preparation = time.monotonic()
             try:
                 subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=remaining())
@@ -755,19 +779,11 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
             if passed_at_base:
                 # cas-ae6ae: one failure here and one pass at base is not causal
                 # proof, and a log cannot show a repeat (nextest prints every
-                # FAIL twice; CI runs without retries). Rerun them once at this
-                # delivery's head in the same pass: "caused" fails again there.
+                # FAIL twice; CI runs without retries). The original Rust
+                # invocation was replayed before the base build; web replays
+                # are independent of that shared Cargo target.
                 if web:
                     at_head = replay_web(root, passed_at_base, web, destination, "head", timed_command)
-                else:
-                    head_expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in passed_at_base)
-                    head_log = Path(destination).with_suffix(".head.log")
-                    head_log.write_text("")
-                    status = timed_command([cargo, "nextest", "run", *build, "-E", head_expression, "--no-fail-fast", "--no-tests=pass"],
-                                           "head_test_seconds", head_log, env, cwd=root)
-                    at_head = {failure_key(f) for f in parse_failures(strip_ansi(head_log.read_text()))}
-                    if status and not at_head:
-                        raise RuntimeError(f"head rerun failed without a test result: {status}")
                 result["caused"] = [f for f in passed_at_base if failure_key(f) in at_head]
                 result["unattributed"] = [f for f in passed_at_base if failure_key(f) not in at_head]
             result["unresolved"] = []
@@ -868,7 +884,8 @@ def lane(root, args):
         if args.phase == "attribute":
             receipt = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())
             return lane_attribute(root, selection.get("attribution_base", selection.get("base", "")), receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"),
-                                  receipt.get("configuration"), selection.get("attribution_base_source", "no attribution base"))
+                                  receipt.get("configuration"), selection.get("attribution_base_source", "no attribution base"),
+                                  invocation=receipt.get("invocation"))
         source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
         receipt = out.with_name(f"{args.phase}-receipt.json")
         status, failed = 0, False

@@ -80,34 +80,49 @@ impl CasCore {
 
         let skill_store = self.open_skill_store()?;
 
-        // Try database first
-        let (skill, served_from_project_file) = match skill_store.get(&req.id) {
-            Ok(s) => (s, false),
-            Err(_) => {
-                // Try to find in .claude/skills/ by name
-                let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
-                match read_skill_from_file(project_root, &req.id) {
-                    Ok(Some(s)) => (s, true),
-                    Ok(None) => {
-                        let harness = catalog_harness();
-                        if let Some(file) = crate::builtins::builtin_skill_file(harness, &req.id) {
-                            return Ok(Self::success(render_builtin_skill(harness, &req.id, file)));
+        // GH #1702: the caller's own checkout comes first. This MCP process
+        // runs in its caller's cwd, so a worker worktree's edited SKILL.md is
+        // served over the database copy and the main checkout's file.
+        let caller_file = match caller_checkout(&self.cas_root) {
+            Some(checkout) => read_skill_from_file(&checkout, &req.id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Error reading skill: {e}")),
+                data: None,
+            })?,
+            None => None,
+        };
+
+        // Then the database, then the main checkout's file
+        let (skill, served_from_project_file) = match caller_file {
+            Some(s) => (s, true),
+            None => match skill_store.get(&req.id) {
+                Ok(s) => (s, false),
+                Err(_) => {
+                    // Try to find in .claude/skills/ by name
+                    let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+                    match read_skill_from_file(project_root, &req.id) {
+                        Ok(Some(s)) => (s, true),
+                        Ok(None) => {
+                            let harness = catalog_harness();
+                            if let Some(file) = crate::builtins::builtin_skill_file(harness, &req.id) {
+                                return Ok(Self::success(render_builtin_skill(harness, &req.id, file)));
+                            }
+                            return Err(McpError {
+                                code: ErrorCode::INVALID_PARAMS,
+                                message: Cow::from(self.unknown_skill_message(&req.id, skill_store.as_ref())),
+                                data: None,
+                            });
                         }
-                        return Err(McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(self.unknown_skill_message(&req.id, skill_store.as_ref())),
-                            data: None,
-                        });
-                    }
-                    Err(e) => {
-                        return Err(McpError {
-                            code: ErrorCode::INTERNAL_ERROR,
-                            message: Cow::from(format!("Error reading skill: {e}")),
-                            data: None,
-                        });
+                        Err(e) => {
+                            return Err(McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!("Error reading skill: {e}")),
+                                data: None,
+                            });
+                        }
                     }
                 }
-            }
+            },
         };
 
         let source = if served_from_project_file {
@@ -780,4 +795,54 @@ fn render_builtin_skill(
         }
     }
     output
+}
+
+/// The git checkout this MCP process serves, when it is not the project's
+/// main checkout: a worker's linked worktree.
+fn caller_checkout(cas_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let checkout = crate::worktree::GitOperations::detect_repo_root(&std::env::current_dir().ok()?).ok()?;
+    let main = cas_root.parent().unwrap_or(cas_root);
+    let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    (!same(&checkout, main)).then_some(checkout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GH #1702: a worker edited `.claude/skills/<name>/SKILL.md` in its
+    /// worktree, and `skill action=show` returned the main checkout's body.
+    #[tokio::test]
+    async fn skill_show_serves_the_callers_worktree_skill_gh_1702() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let git = |dir: &std::path::Path, args: &[&str]| assert!(std::process::Command::new("git").current_dir(dir)
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid"]).args(args)
+            .status().unwrap().success(), "{args:?}");
+        let skill = |root: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(root.join(".claude/skills/guide")).unwrap();
+            std::fs::write(root.join(".claude/skills/guide/SKILL.md"),
+                format!("---\nname: guide\ndescription: fixture\n---\n\n{body}\n")).unwrap();
+        };
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        skill(&main, "main checkout body");
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-qm", "skill"]);
+        let cas_root = crate::store::init_cas_dir(&main).unwrap();
+        let worktree = temp.path().join("worker");
+        git(&main, &["worktree", "add", "-q", "-b", "factory/worker", worktree.to_str().unwrap()]);
+        skill(&worktree, "worktree body");
+        let core = CasCore::with_daemon(cas_root, None, None);
+        let _cwd = env.enter_dir(&worktree);
+
+        let shown = core.cas_skill_show(Parameters(IdRequest { id: "guide".into() })).await.unwrap();
+        let text = serde_json::to_string(&shown).unwrap();
+        assert!(text.contains("worktree body"), "{text}");
+        assert!(!text.contains("main checkout body"), "{text}");
+    }
 }

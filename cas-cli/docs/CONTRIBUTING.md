@@ -2249,8 +2249,14 @@ blocking pool. Once publication or the checked Closed/AwaitingMerge disposition
 commits, the response adds no post-commit grace: it names that outcome while
 close follow-up, dispatch and notes finish in the background. A committed park
 is still awaiting merge. Gate/audit writes alone do not certify a close, and a
-close still evaluating gates reports `IN_PROGRESS` at its deadline. The final
-continuation outcome is recorded in task notes. Receipts and tracing include
+close still evaluating gates reports `IN_PROGRESS` at its deadline. Retained
+closes return a normal, non-error MCP result with structured `mutation_outcome`,
+`continuation_id`, `task_id`, `elapsed_ms`, `budget_ms` and `timings`. Only a
+checked Closed/AwaitingMerge disposition reports `COMMITTED`; intermediate
+writes remain `IN_PROGRESS`. Read `task action=show id=<task_id>` instead of
+retrying the close. The final `CLOSE_OUTCOME` task note carries the same
+continuation identity, including a late refusal or successful park.
+Receipts and tracing include
 inclusive merge-tree, push, close-gate, dispatch and note timings; `+` means a
 phase is still running and zero means no measured work in that phase yet.
 
@@ -5156,6 +5162,8 @@ starts a byte page of that same text; follow its `next=` cursor until `end`.
 The page header is separate from the body, and concatenated bodies reproduce
 the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
 boundaries. Note summary cursors address the full `task notes` response.
+`task list` does not support offset pagination: a supplied `offset`, including
+zero, returns `INVALID_PARAMS`. Omit it and use filters or a larger `limit`.
 For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
 context. Start's default still performs the same claim and epic lifecycle work.
 Complete start advisories, including worktree directory instructions, are saved

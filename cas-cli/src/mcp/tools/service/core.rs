@@ -705,6 +705,12 @@ impl CasService {
 
     pub(super) async fn task_list(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskListRequest;
+        if req.offset.is_some() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "offset is unsupported for task list; it is a byte cursor for show/get/notes. Omit offset and use filters or a larger limit to select tasks.",
+            ));
+        }
         let inner_req = TaskListRequest {
             limit: req.limit,
             scope: req.scope.unwrap_or_else(|| "all".to_string()),

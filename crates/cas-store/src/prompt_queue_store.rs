@@ -1993,11 +1993,20 @@ impl SqlitePromptQueueStore {
                     let age_secs = (now - envelope.occurrence.min(prompt.created_at)).num_seconds().max(0);
                     if age_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
                         let holding = Self::holding_detail_on_conn(tx, prompt.id)?;
+                        // cas-acb6e (GH #2231): a hold recorded late explains
+                        // only the time after it began, not the whole delay.
+                        let started = envelope.occurrence.min(prompt.created_at);
+                        let unrecorded_secs = Self::holding_since_on_conn(tx, prompt.id)?
+                            .map_or(0, |since| (since - started).num_seconds().max(0));
                         let cause = holding.as_deref().map(|detail| {
                             let text = detail.split_whitespace().collect::<Vec<_>>().join(" ");
                             let mut bounded = text.chars().take(160).collect::<String>();
                             if text.chars().count() > 160 { bounded.push('…'); }
-                            format!("held: {bounded}")
+                            if unrecorded_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
+                                format!("cause unrecorded for {}m, then held: {bounded}", unrecorded_secs / 60)
+                            } else {
+                                format!("held: {bounded}")
+                            }
                         }).unwrap_or_else(|| "cause unrecorded".into());
                         let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
                         summary.push_str(&format!(" [delayed {}m; {cause}]", age_secs / 60));
@@ -2505,6 +2514,11 @@ ALTER TABLE prompt_queue ADD COLUMN last_pending_detail TEXT;
 "#;
 const PROMPT_QUEUE_HOLDING_DETAIL_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN holding_detail TEXT;
+"#;
+/// cas-acb6e: when the row's first recorded hold began. A delay label cites
+/// the hold only for the time it covers; earlier waits stay unrecorded.
+const PROMPT_QUEUE_HOLDING_SINCE_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN holding_since TEXT;
 "#;
 const PROMPT_QUEUE_TRANSPORT_DELIVERED_AT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN transport_delivered_at TEXT;
@@ -4216,6 +4230,17 @@ impl SqlitePromptQueueStore {
         Ok(conn.query_row("SELECT holding_detail FROM prompt_queue WHERE id = ?", params![id], |row| row.get(0))?)
     }
 
+    fn holding_since_on_conn(conn: &Connection, id: i64) -> Result<Option<DateTime<Utc>>> {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('prompt_queue') WHERE name = 'holding_since')",
+            [], |row| row.get(0),
+        )?;
+        if !present { return Ok(None); }
+        let raw: Option<String> =
+            conn.query_row("SELECT holding_since FROM prompt_queue WHERE id = ?", params![id], |row| row.get(0))?;
+        Ok(raw.as_deref().and_then(Self::parse_datetime))
+    }
+
     fn prompt_from_row(row: &rusqlite::Row) -> rusqlite::Result<QueuedPrompt> {
         let processed_at_str: Option<String> = row.get(5)?;
         let processed_at = processed_at_str.and_then(|s| Self::parse_datetime(&s));
@@ -4630,6 +4655,7 @@ impl SqlitePromptQueueStore {
                 last_pending_reason = ?,
                 last_pending_detail = ?,
                 holding_detail = COALESCE(?, holding_detail),
+                holding_since = COALESCE(holding_since, ?),
                 broadcast_attempted = COALESCE(?, broadcast_attempted),
                 broadcast_succeeded = COALESCE(?, broadcast_succeeded),
                 broadcast_failed = COALESCE(?, broadcast_failed)
@@ -4644,6 +4670,7 @@ impl SqlitePromptQueueStore {
                 opts.reason.map(|r| r.as_str()),
                 opts.detail,
                 holding_detail,
+                holding_detail.map(|_| now.as_str()),
                 opts.broadcast_attempted.map(|n| n as i64),
                 opts.broadcast_succeeded.map(|n| n as i64),
                 opts.broadcast_failed.map(|n| n as i64),
@@ -6463,10 +6490,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "UPDATE prompt_queue
                  SET wake_gate_declines = COALESCE(wake_gate_declines, 0) + 1,
                      wake_attempt = 'nudge_not_attempted',
-                     wake_attempt_at = ?,
-                     wake_attempt_detail = ?,
-                     holding_detail = COALESCE(?, holding_detail)
-                 WHERE id = ? AND acked_at IS NULL AND processed_at IS NULL",
+                     wake_attempt_at = ?1,
+                     wake_attempt_detail = ?2,
+                     holding_detail = COALESCE(?3, holding_detail),
+                     holding_since = CASE WHEN ?3 IS NULL THEN holding_since
+                                          ELSE COALESCE(holding_since, ?1) END
+                 WHERE id = ?4 AND acked_at IS NULL AND processed_at IS NULL",
                 params![Utc::now().to_rfc3339(), detail, (!detail.trim().is_empty()).then_some(detail), prompt_id],
             )?;
             let declines: Option<i64> = conn
@@ -11459,11 +11488,17 @@ mod tests {
 
     #[test]
     fn delayed_current_lifecycle_digest_keeps_its_queue_age_for_visible_label() {
-        for (detail, busy) in [
-            (Some("recipient pane busy"), true),
-            (Some("directed supervisor message burst debounce"), false),
-            (Some("directed supervisor message pair rate limit"), false),
-            (None, false),
+        // cas-acb6e (GH #2231): the last case replays keen-viper-14, where a
+        // composer hold recorded seconds before delivery was shown as the
+        // cause of a 90-minute delay. A hold that began late must not read
+        // like one that held the row from the start.
+        let mut summaries = Vec::new();
+        for (detail, busy, late_hold) in [
+            (Some("recipient pane busy"), true, false),
+            (Some("directed supervisor message burst debounce"), false, false),
+            (Some("directed supervisor message pair rate limit"), false, false),
+            (None, false, false),
+            (Some("recipient pane busy"), true, true),
         ] {
             let (temp, store) = create_test_store();
             use crate::AgentStore;
@@ -11490,10 +11525,22 @@ mod tests {
             if let Some(detail) = detail {
                 if busy {
                     store.record_wake_gate_decline(id, detail).unwrap();
+                    // A recheck declines again; the hold keeps its first start.
+                    let since = || SqlitePromptQueueStore::holding_since_on_conn(&store.conn.lock().unwrap(), id).unwrap();
+                    let first = since();
+                    store.record_wake_gate_decline(id, detail).unwrap();
+                    assert!(first.is_some());
+                    assert_eq!(since(), first, "a repeated decline must not move the hold's start");
                 } else {
                     store.record_pending_reason(id, PendingReason::GatedNotReady, Some("pane not ready for injection")).unwrap();
                     assert_eq!(store.message_delivery_report(id).unwrap().unwrap().holding_detail.as_deref(), Some("pane not ready for injection"));
                     store.park_for_busy_recipient(id, Some(detail), Utc::now() + chrono::Duration::minutes(1)).unwrap();
+                }
+                if !late_hold {
+                    store.conn.lock().unwrap().execute(
+                        "UPDATE prompt_queue SET holding_since = ?1 WHERE id = ?2",
+                        params![queued_at.to_rfc3339(), id],
+                    ).unwrap();
                 }
             }
             let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
@@ -11506,6 +11553,7 @@ mod tests {
             if let Some(detail) = detail {
                 assert!(surfaced[0].summary.as_deref().unwrap().contains(detail));
             }
+            summaries.push(surfaced[0].summary.clone());
             // A separate read-only connection observes the committed receipt:
             // hook acknowledgement must not erase the earlier holding cause.
             let readonly = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
@@ -11515,6 +11563,7 @@ mod tests {
             let json = serde_json::to_value(report).unwrap();
             assert_eq!(json["holding_detail"], serde_json::json!(detail));
         }
+        assert_ne!(summaries[0], summaries[4], "a hold recorded 29 minutes late must be labelled differently");
     }
 
     #[test]

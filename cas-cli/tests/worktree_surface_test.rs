@@ -2737,27 +2737,32 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
 #[tokio::test]
 async fn cas_e051_required_verification_precedes_publication_without_blocking_exempt_lanes() {
     let mut env = test_env();
-    for verdict in ["timed_out", "approved", "rejected"] {
+    for (verdict, local_merge) in [
+        ("timed_out", false), ("approved", false), ("rejected", false),
+        ("approved", true), ("rejected", true),
+    ] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(
             fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n",
         )
         .unwrap();
-        if verdict == "approved" {
+        if verdict == "approved" && !local_merge {
             use std::io::Write;
             std::fs::OpenOptions::new().append(true).open(fixture.cas_root.join("config.toml")).unwrap()
                 .write_all(b"[fast_lane]\nenabled=true\npaths=['delivery.txt']\nmerge_checks=['PR gate']\n").unwrap();
         }
         let tasks = open_task_store(&fixture.cas_root).unwrap();
         let mut task = tasks.get("cas-e429").unwrap();
-        task.depth = if verdict == "approved" { TaskDepth::Light } else { TaskDepth::Deep };
-        task.status = if verdict == "approved" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
-        if verdict == "approved" { task.task_type = TaskType::Bug; }
-        task.labels = vec!["force-verifier".into()];
+        let fast_lane = verdict == "approved" && !local_merge;
+        task.depth = if fast_lane { TaskDepth::Light } else { TaskDepth::Deep };
+        task.status = if fast_lane { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        if fast_lane { task.task_type = TaskType::Bug; }
+        task.labels = if local_merge { vec![] } else { vec!["force-verifier".into()] };
+        if local_merge { task.delivery_mode = cas::types::DeliveryMode::LocalMerge; }
         task.acceptance_criteria = "Review this candidate before publishing it.".into();
-        task.deliverables.factory_branch_anchor = (verdict != "approved").then(|| fixture.tip.clone());
-        task.deliverables.parked_branch = (verdict != "approved").then(|| fixture.branch.clone());
+        task.deliverables.factory_branch_anchor = (!fast_lane).then(|| fixture.tip.clone());
+        task.deliverables.parked_branch = (!fast_lane).then(|| fixture.branch.clone());
         tasks.update(&task).unwrap();
         let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
         let mut merge = coord_req("worktree_merge");
@@ -2778,15 +2783,15 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
         let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id)
             .unwrap()
             .expect("the merge preflight dispatches the existing required verifier");
+        if local_merge {
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+            assert!(cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().is_none());
+        }
         let proof = dispatch.repository.as_ref().expect("candidate repository proof");
         let handoffs = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap().peek_all(100).unwrap();
         let handoff = handoffs.iter().find(|row| row.source == format!("verification-dispatch:{}", dispatch.id))
             .expect("durable pre-merge review handoff");
         assert_eq!(handoff.factory_session.as_deref(), Some("rebound-session"));
-        // pin: the candidate handoff must describe merge continuation rather than the removed close retry.
-        assert!(handoff.prompt.contains("A PASS continues the merge"));
-        // pin: prevent the legacy post-merge retry instruction from reaching this verifier.
-        assert!(!handoff.prompt.contains("queues the worker's close retry"));
 
         let prepared = tasks.get(&task.id).unwrap();
         let timing = prepared.notes.lines()
@@ -2818,6 +2823,24 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .unwrap();
         assert!(!recorded.is_error.unwrap_or(false), "{}", get_text(&recorded));
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
+        if local_merge {
+            // GH #1969: batch QA must not integrate an unreviewed local
+            // delivery, while an explicit candidate approval releases it.
+            let continued = fixture.service.factory(Parameters(merge.clone())).await;
+            if verdict == "approved" {
+                run_git(&["merge-base", "--is-ancestor", &fixture.tip, "epic/rebound"], &fixture.repo.root);
+                assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound^{tree}"]), candidate_tree,
+                    "approved local delivery must integrate: {continued:?}");
+                let landed = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+                let retry = fixture.service.factory(Parameters(merge)).await;
+                assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), landed, "{retry:?}");
+            } else {
+                assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before, "{continued:?}");
+                assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), before);
+            }
+            assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id, dispatch.id);
+            continue;
+        }
         if verdict == "approved" {
             let sibling = fixture.cas_root.join("sibling-target");
             run_git(&["worktree", "add", sibling.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);

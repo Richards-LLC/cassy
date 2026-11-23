@@ -468,7 +468,7 @@ impl CasCore {
         save(&path, &mut queue)?;
         // GH #2169: every queued delivery's review starts now, outside the publication lock.
         drop(target_lock);
-        start_queued_reviews(self, &queue, &*tasks, 0);
+        start_queued_reviews(self, &queue, &*tasks, 0, || true);
         let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
         Ok(if queue.ci_override.is_some() { crate::gates::override_tag("G-114", receipt) } else { receipt })
     }
@@ -612,10 +612,20 @@ thread_local! {
 /// later entry's reviewed files is re-reviewed by that preparation (G-104) when
 /// the entry reaches the head. A hold on its own dispatch is the expected
 /// answer here; any other refusal surfaces again when the entry is the head.
-fn start_queued_reviews(core: &CasCore, queue: &Queue, tasks: &dyn crate::store::TaskStore, from: usize) {
+///
+/// GH #2311: each preparation takes about a minute, so the daemon renews its
+/// advancement lease before every entry and stops once it is lost.
+fn start_queued_reviews(
+    core: &CasCore,
+    queue: &Queue,
+    tasks: &dyn crate::store::TaskStore,
+    from: usize,
+    mut leased: impl FnMut() -> bool,
+) {
     for entry in queue.entries.iter().skip(from) {
         #[cfg(test)]
         PREFETCH_PROBE.with_borrow_mut(|probe| if let Some(probe) = probe { probe() });
+        if !leased() { return; }
         let Ok(task) = tasks.get(&entry.task) else { continue };
         if task.status != TaskStatus::AwaitingMerge
             || task.deliverables.factory_branch_anchor.as_deref() != Some(&entry.sha)
@@ -697,10 +707,6 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             if !queue.active() {
                 break;
             }
-            start_queued_reviews(&core, &queue, &*tasks, queue.next + 1);
-            let Some(current) = driver.current()? else { break };
-            queue = current;
-            if !queue.active() { break; }
             if let Err(error) = crate::train_ci::guard(
                 &core,
                 &queue.train,
@@ -773,6 +779,13 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             });
             save(&path, &mut queue)?;
             break;
+        }
+        // GH #2311: the head has taken its step this pass, so reviews behind
+        // it start only now, while the lease lasts; they still run while the
+        // head waits for its own verdict or CI.
+        if queue.active() {
+            start_queued_reviews(&core, &queue, &*tasks, queue.next + 1,
+                || driver.current().ok().flatten().is_some_and(|current| current.active()));
         }
         if !queue.active() {
             let agents = core

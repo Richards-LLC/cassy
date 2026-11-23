@@ -67,9 +67,13 @@ pub(crate) fn with_pr_arm<T>(core: Option<&crate::mcp::CasCore>, repo: &Path, so
     let reserved = snapshot.reserve_external(repo, &actor, &id, &scope(repo, head, pr)?)?;
     let started = reserved.start_external_call(repo, Some(&actor), &id, ExternalAction::ArmPr, None)?;
     started.validate_external_call(repo, Some(&actor), &id, ExternalAction::ArmPr, None)?;
-    // Success and errors both leave the reservation pending until actual PR,
-    // release run and downstream publication outcomes have been reconciled.
-    effect()
+    let result = effect();
+    if result.is_ok() {
+        started.complete_external_call(repo, Some(&actor), &id, ExternalAction::ArmPr, None)?;
+    }
+    // An accepted call still owes actual PR/run outcomes. An error remains
+    // uncertain and cannot earn a no-publication receipt from an empty queue.
+    result
 }
 
 pub(crate) fn arm_pr(core: Option<&crate::mcp::CasCore>, repo: &Path, pr: u64, expected_head: Option<&str>) -> Result<(), String> {
@@ -85,7 +89,9 @@ pub(crate) fn arm_pr(core: Option<&crate::mcp::CasCore>, repo: &Path, pr: u64, e
 
 fn gh(repo: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new(crate::github_repo::gh_binary());
-    command.current_dir(repo).args(args);
+    let slug = crate::github_repo::origin_slug(repo, TIMEOUT)?
+        .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: canonical GitHub origin unavailable")?;
+    command.current_dir(repo).env("GH_HOST", "github.com").env("GH_REPO", slug).args(args);
     let output = crate::bounded_process::run_command(&mut command, crate::bounded_process::Deadline::after(TIMEOUT), TIMEOUT)
         .map_err(|error| format!("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING: {error:?}"))?;
     if !output.status.success() { return Err(format!("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING: {}", String::from_utf8_lossy(&output.stderr).trim())); }
@@ -166,7 +172,8 @@ pub(crate) fn create_release(repo: &Path, tag: &str, source: &str, slug: &str, r
         if scope.tag != tag || !scope.repository.eq_ignore_ascii_case(slug) { return Err("TRAIN_TRANSFER_CONFLICT: release tag or repository differs".into()); }
         let started = snapshot.start_external_call(repo, None, &id, ExternalAction::CreateRelease, Some(&proof))?;
         started.validate_external_call(repo, None, &id, ExternalAction::CreateRelease, Some(&proof))?;
-        return gh(repo, args).map(drop);
+        gh(repo, args)?;
+        return started.complete_external_call(repo, None, &id, ExternalAction::CreateRelease, Some(&proof)).map(drop);
     }
     gh(repo, args).map(drop)
 }
@@ -176,4 +183,28 @@ pub(crate) fn reconcile(repo: &Path, train: &str, id: &str, run: u64, attempt: u
     let checks = GitHubChecks::new(repo)?;
     let proof = checks.verify_publication_run(snapshot.external_operation(id)?, run, attempt)?;
     snapshot.settle_external(repo, id, &proof).map(drop)
+}
+
+pub(crate) fn disarm_pr(core: &crate::mcp::CasCore, repo: &Path, train: &str, id: &str) -> Result<(), String> {
+    use crate::worktree::git::train_authority::{ExternalAction, Phase};
+    let snapshot = Snapshot::read(repo, train)?;
+    let actor = core.resolve_live_supervisor_authority().map_err(|error| error.to_string())?;
+    if !crate::cloud::peer_mailbox::owns_recipient(&core.cas_root, &actor, &snapshot.record.identity.owner)
+        || super::identity(&actor, &snapshot.record.identity.owner)? != snapshot.record.identity
+        || snapshot.record.phase != Phase::Draining
+    { return Err("TRAIN_OWNER_DRAINING: disarm requires the recorded draining owner".into()); }
+    let operation = snapshot.external_operation(id)?;
+    if !operation.accepted.contains(&ExternalAction::ArmPr) || operation.started != [ExternalAction::ArmPr]
+        || !operation.claims.is_empty() || operation.tag_object.is_some()
+    { return Err("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING: request completion remains unknown or a release chain exists".into()); }
+    // This only removes an admission. Never re-arm an uncertain request.
+    gh(repo, &["pr", "merge", &operation.scope.pr.to_string(), "--disable-auto"])?;
+    reconcile_unpublished(repo, train, id)
+}
+
+pub(crate) fn reconcile_unpublished(repo: &Path, train: &str, id: &str) -> Result<(), String> {
+    let snapshot = Snapshot::read(repo, train)?;
+    let checks = GitHubChecks::new(repo)?;
+    let proof = checks.verify_unpublished(&snapshot, snapshot.external_operation(id)?)?;
+    snapshot.settle_unpublished_external(repo, id, &proof).map(drop)
 }

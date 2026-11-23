@@ -754,6 +754,11 @@ esac
         let lane = train.effective_epic_branch().unwrap().to_string();
         let remote = Command::new("git").args(["ls-remote", "--heads", "."]).arg(&lane).current_dir(bare.path()).output().unwrap();
         assert!(String::from_utf8_lossy(&remote.stdout).contains(&lane), "{lane} not on origin");
+        let authority = crate::worktree::git::train_authority::Snapshot::read(&root, &train.id).unwrap();
+        assert_eq!(authority.record.target, lane);
+        assert_eq!(Some(authority.record.identity.owner.as_str()), train.epic_verification_owner.as_deref());
+        assert_eq!(authority.record.target_sha, authority.observed_target(&root).unwrap());
+        assert!(train.labels.iter().any(|label| label == crate::train_owner::ENROLLED));
     }
 
     /// GH #1613: retirement acts only on a readable config with trains off.

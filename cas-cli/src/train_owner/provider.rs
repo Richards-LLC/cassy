@@ -86,9 +86,8 @@ impl GitHubChecks<Gh> {
     }
 }
 
-impl<P: Provider> TransferChecks for GitHubChecks<P> {
-    fn external_clear(&self, snapshot: &Snapshot) -> Result<Value, String> {
-        snapshot.require_external_settled()?;
+impl<P: Provider> GitHubChecks<P> {
+    fn observe_clear(&self, snapshot: &Snapshot) -> Result<Value, String> {
         let mut cursor = None::<String>;
         let mut seen = std::collections::BTreeSet::new();
         let mut observed = Vec::new();
@@ -135,6 +134,13 @@ impl<P: Provider> TransferChecks for GitHubChecks<P> {
         Ok(json!({"repository": self.slug, "prs": observed,
             "active_runs": 0, "run_scope": "repository", "observed_at": chrono::Utc::now()}))
     }
+}
+
+impl<P: Provider> TransferChecks for GitHubChecks<P> {
+    fn external_clear(&self, snapshot: &Snapshot) -> Result<Value, String> {
+        snapshot.require_external_settled()?;
+        self.observe_clear(snapshot)
+    }
 
     fn publishers_stopped(&self, snapshot: &Snapshot) -> Result<Value, String> {
         // Current runtimes publish an enrolled target only through
@@ -157,7 +163,7 @@ impl<P: Provider> TransferChecks for GitHubChecks<P> {
 
 #[path = "provider_run.rs"]
 mod run;
-pub(crate) use run::VerifiedRun;
+pub(crate) use run::{VerifiedRun, VerifiedUnpublished};
 
 #[cfg(test)]
 pub(crate) fn fixture_checks<P: Provider>(provider: P) -> GitHubChecks<P> {

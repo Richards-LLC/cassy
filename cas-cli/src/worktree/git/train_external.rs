@@ -52,6 +52,11 @@ pub(crate) struct ExternalOperation {
     /// A started call is never implicitly replayed. Its outcome may be unknown
     /// even when the launching process reported an error.
     pub started: Vec<ExternalAction>,
+    /// Written by the request process only after its provider call succeeds.
+    /// Absence includes crashes/timeouts and must never be inferred from an
+    /// empty queue: that process could still issue its admitted request later.
+    #[serde(default)]
+    pub accepted: Vec<ExternalAction>,
     pub tag_object: Option<String>,
     pub terminal: Option<serde_json::Value>,
 }
@@ -130,7 +135,7 @@ impl Snapshot {
         next.external_operations.push(ExternalOperation {
             id: id.into(), generation: next.generation.clone(), launch_identity: actor.clone(),
             expected_target: next.target_sha.clone(), scope: scope.clone(), claims: Vec::new(),
-            started: Vec::new(), tag_object: None, terminal: None,
+            started: Vec::new(), accepted: Vec::new(), tag_object: None, terminal: None,
         });
         next.operation = format!("reserve-external:{id}");
         live.append(repo, next)
@@ -237,6 +242,42 @@ impl Snapshot {
             ExternalAction::PublishTag => return Err(conflict()),
         }
         Ok(())
+    }
+
+    /// Completion may arrive after prepare or a same-owner restart. Preserve
+    /// the live phase/incarnation/successor; authenticate the original launch
+    /// or claimed run, rather than admitting another request.
+    pub(crate) fn complete_external_call(&self, repo: &Path, actor: Option<&Identity>, id: &str, action: ExternalAction,
+        proof: Option<&crate::train_owner::provider::VerifiedRun>) -> Result<Self, String> {
+        let live = Self::read(repo, &self.record.train)?;
+        let live = live.coherent(repo)?;
+        let operation = live.continuation(id)?;
+        if !operation.started.contains(&action) { return Err(conflict()); }
+        match action {
+            ExternalAction::ArmPr if actor == Some(&operation.launch_identity) => {},
+            ExternalAction::CreateRelease => live.require_claim(id, proof.ok_or_else(conflict)?)?,
+            _ => return Err(conflict()),
+        }
+        if operation.accepted.contains(&action) { return Ok(live); }
+        let mut next = live.record.clone();
+        next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap().accepted.push(action);
+        next.operation = format!("complete-external:{id}");
+        live.append(repo, next)
+    }
+
+    pub(crate) fn settle_unpublished_external(&self, repo: &Path, id: &str,
+        proof: &crate::train_owner::provider::VerifiedUnpublished) -> Result<Self, String> {
+        let live = self.coherent(repo)?;
+        let operation = live.continuation(id)?;
+        if live.record.phase != Phase::Draining || !proof.matches(operation)
+            || !operation.accepted.contains(&ExternalAction::ArmPr)
+            || operation.started != [ExternalAction::ArmPr]
+            || !operation.claims.is_empty() || operation.tag_object.is_some()
+        { return Err(pending()); }
+        let mut next = live.record.clone();
+        next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap().terminal = Some(proof.evidence().clone());
+        next.operation = format!("settle-unpublished-external:{id}");
+        live.append(repo, next)
     }
 
     /// The annotated tag and authority advance together, including while

@@ -850,6 +850,11 @@ fn train_authority_abort_reaccept_cas_6456() {
         let reserved = first.reserve_external(&fixture.left, &fixture.actor, &operation, &scope).unwrap();
         assert_eq!(reserved.record.protocol, 2);
         assert_eq!(reserved.reserve_external(&fixture.left, &fixture.actor, &operation, &scope).unwrap().tip, reserved.tip);
+        let unmerged_id = uuid::Uuid::new_v4().to_string();
+        let unmerged_scope = ExternalScope { pr: 18, tag: "v9.99.2".into(), ..scope.clone() };
+        let reserved = reserved.reserve_external(&fixture.left, &fixture.actor, &unmerged_id, &unmerged_scope).unwrap();
+        let reserved = reserved.start_external_call(&fixture.left, Some(&fixture.actor), &unmerged_id, ExternalAction::ArmPr, None).unwrap();
+        let reserved = reserved.start_external_call(&fixture.left, Some(&fixture.actor), &operation, ExternalAction::ArmPr, None).unwrap();
         let restarted = Snapshot::read(&fixture.right, "cas-6456").unwrap();
         assert_eq!(restarted.external_operation(&operation).unwrap().scope, scope);
         let successor = Identity { owner: "owner-b".into(), incarnation: "machine-b/session-b/process-b".into() };
@@ -876,8 +881,8 @@ fn train_authority_abort_reaccept_cas_6456() {
         use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
         struct Runs(Rc<RefCell<BTreeMap<String, Value>>>);
         impl crate::train_owner::provider::Provider for Runs {
-            fn prs(&self, _: &str, _: Option<&str>) -> Result<Value, String> { Err("not a PR listing".into()) }
-            fn runs(&self, _: &str) -> Result<Value, String> { Err("not a run listing".into()) }
+            fn prs(&self, branch: &str, _: Option<&str>) -> Result<Value, String> { self.publication(&format!("prs/{branch}")) }
+            fn runs(&self, status: &str) -> Result<Value, String> { self.publication(&format!("runs/{status}")) }
             fn publication(&self, path: &str) -> Result<Value, String> {
                 self.0.borrow().get(path).cloned().ok_or_else(|| "unknown provider request".into())
             }
@@ -895,10 +900,52 @@ fn train_authority_abort_reaccept_cas_6456() {
             ("actions/runs/44/attempts/1".into(), run),
             ("actions/runs/44/attempts/1/jobs?per_page=100&page=1".into(), jobs),
         ])));
+        let pr_listing = format!("prs/{}", draining.record.target);
+        let absent_release = format!("release/{}", unmerged_scope.tag);
+        model.borrow_mut().insert(pr_listing.clone(), json!({"data":{"repository":{"nameWithOwner":"test/fixture",
+            "pullRequests":{"nodes":[{"number":18,"headRefName":draining.record.target,"state":"OPEN",
+                "autoMergeRequest":null,"mergeQueueEntry":null}],"pageInfo":{"hasNextPage":false}}}}}));
+        model.borrow_mut().insert("pulls/18".into(), json!({"number":18,"merged":false,"merged_at":null,
+            "head":{"ref":draining.record.target,"sha":source,"repo":{"full_name":"test/fixture"}},
+            "base":{"repo":{"full_name":"test/fixture"}}}));
+        model.borrow_mut().insert(absent_release.clone(), json!({"data":{"repository":{"nameWithOwner":"test/fixture","release":null,"ref":null}}}));
+        for status in ["requested", "queued", "in_progress", "waiting", "pending"] {
+            model.borrow_mut().insert(format!("runs/{status}"), json!({"total_count":0,"workflow_runs":[]}));
+        }
         for workflow in &scope.workflows {
             model.borrow_mut().insert(format!("contents/{}?ref={source}", workflow.path), json!({"type":"file","sha":workflow.revision}));
         }
         let provider = crate::train_owner::provider::fixture_checks(Runs(model.clone()));
+        // The old request process is paused after validation. Even a complete
+        // empty provider observation cannot retire its reservation. A late
+        // successful response records completion without erasing DRAINING.
+        assert!(provider.verify_unpublished(&draining, draining.external_operation(&unmerged_id).unwrap()).is_err());
+        assert!(reserved.validate_external_call(&fixture.left, Some(&fixture.actor), &unmerged_id, ExternalAction::ArmPr, None).is_err());
+        assert!(reserved.complete_external_call(&fixture.left, Some(&successor), &unmerged_id, ExternalAction::ArmPr, None).is_err());
+        let completed = reserved.complete_external_call(&fixture.left, Some(&fixture.actor), &unmerged_id, ExternalAction::ArmPr, None).unwrap();
+        assert_eq!(completed.record.phase, Phase::Draining);
+        assert_eq!(completed.record.transfer.as_ref().unwrap().successor, successor);
+        let completed = Snapshot::read(&fixture.right, "cas-6456").unwrap();
+        assert_eq!(completed.external_operation(&unmerged_id).unwrap().accepted, [ExternalAction::ArmPr]);
+        assert!(provider.verify_unpublished(&completed, completed.external_operation(&operation).unwrap()).is_err());
+        for (endpoint, pointer, wrong) in [
+            (pr_listing.clone(), "/data/repository/pullRequests/nodes/0/autoMergeRequest", json!({"enabledAt":"now"})),
+            (pr_listing.clone(), "/data/repository/pullRequests/nodes/0/mergeQueueEntry", json!({"id":"queue"})),
+            ("runs/queued".into(), "/total_count", json!(1)),
+            ("pulls/18".into(), "/merged", json!(true)),
+            ("pulls/18".into(), "/head/repo/full_name", json!("foreign/repo")),
+            (absent_release.clone(), "/data/repository/ref", json!({"target":{"oid":source}})),
+        ] {
+            let original = model.borrow()[&endpoint].clone();
+            *model.borrow_mut().get_mut(&endpoint).unwrap().pointer_mut(pointer).unwrap() = wrong;
+            assert!(provider.verify_unpublished(&completed, completed.external_operation(&unmerged_id).unwrap()).is_err(), "{endpoint} {pointer}");
+            model.borrow_mut().insert(endpoint, original);
+        }
+        let no_publication = provider.verify_unpublished(&completed, completed.external_operation(&unmerged_id).unwrap()).unwrap();
+        let draining = completed.settle_unpublished_external(&fixture.right, &unmerged_id, &no_publication).unwrap();
+        assert!(draining.external_operation(&unmerged_id).unwrap().terminal.is_some());
+        assert!(draining.quiesce(&fixture.left, &fixture.actor, &checks).is_err());
+        assert!(draining.complete_external_call(&fixture.left, Some(&fixture.actor), &unmerged_id, ExternalAction::ArmPr, None).is_err());
         let operation_state = draining.external_operation(&operation).unwrap();
         assert!(provider.verify_publication_run(operation_state, 45, 1).is_err());
         for (endpoint, pointer, wrong) in [
@@ -955,6 +1002,17 @@ fn train_authority_abort_reaccept_cas_6456() {
         model.borrow_mut().insert(format!("release/{}", scope.tag), json!({"data":{"repository":{
             "nameWithOwner":"test/fixture","release":{"id":"release-id","tagName":scope.tag,"isDraft":false,"tagCommit":{"oid":source}},
             "ref":{"target":{"oid":object,"target":{"oid":source}}}}}}));
+        let endpoint = format!("release/{}", scope.tag);
+        let published = model.borrow()[&endpoint].clone();
+        model.borrow_mut().get_mut(&endpoint).unwrap()["data"]["repository"]["release"] = Value::Null;
+        for endpoint in ["actions/runs/44", "actions/runs/44/attempts/1"] {
+            model.borrow_mut().get_mut(endpoint).unwrap()["conclusion"] = json!("failure");
+        }
+        assert!(provider.verify_publication_run(releasing.external_operation(&operation).unwrap(), 44, 1).is_err());
+        model.borrow_mut().insert(endpoint, published);
+        for endpoint in ["actions/runs/44", "actions/runs/44/attempts/1"] {
+            model.borrow_mut().get_mut(endpoint).unwrap()["conclusion"] = json!("success");
+        }
         let terminal = provider.verify_publication_run(releasing.external_operation(&operation).unwrap(), 44, 1).unwrap();
         let settled = releasing.settle_external(&fixture.left, &operation, &terminal).unwrap();
         let quiesced = settled.quiesce(&fixture.right, &fixture.actor, &checks).unwrap();

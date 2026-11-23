@@ -1,7 +1,22 @@
 //! Only authenticated provider observations construct a continuation proof.
 //! Caller operation/run ids are lookup keys, never capabilities on their own.
 use super::*;
-use crate::worktree::git::train_authority::{ExternalOperation, RunClaim};
+use crate::worktree::git::train_authority::{ExternalAction, ExternalOperation, Phase, RunClaim};
+
+pub(crate) struct VerifiedUnpublished {
+    operation: ExternalOperation,
+    evidence: Value,
+}
+
+impl VerifiedUnpublished {
+    pub(crate) fn matches(&self, operation: &ExternalOperation) -> bool {
+        self.operation.id == operation.id && self.operation.generation == operation.generation
+            && self.operation.launch_identity == operation.launch_identity
+            && self.operation.expected_target == operation.expected_target && self.operation.scope == operation.scope
+            && self.operation.started == operation.started && self.operation.accepted == operation.accepted
+    }
+    pub(crate) fn evidence(&self) -> &Value { &self.evidence }
+}
 
 pub(crate) struct VerifiedRun {
     operation: ExternalOperation,
@@ -24,6 +39,39 @@ fn same_slug(value: &Value, expected: &str) -> bool {
 }
 
 impl<P: Provider> GitHubChecks<P> {
+    /// A completed arm can be disarmed without a landing run. A fresh empty
+    /// queue cannot settle an unfinished/uncertain call, which may still arm
+    /// after this observation. Never grant this proof for a claimed CI chain.
+    pub(crate) fn verify_unpublished(&self, snapshot: &Snapshot, operation: &ExternalOperation) -> Result<VerifiedUnpublished, String> {
+        let scope = &operation.scope;
+        if snapshot.record.phase != Phase::Draining || operation.generation != snapshot.record.generation
+            || !scope.repository.eq_ignore_ascii_case(&self.slug)
+            || operation.started != [ExternalAction::ArmPr] || !operation.claims.is_empty()
+            || operation.tag_object.is_some() || operation.terminal.is_some()
+        { return Err(pending("request completion is unknown or a release continuation exists")); }
+        let clear = self.observe_clear(snapshot)?;
+        let observed = clear["prs"].as_array().and_then(|prs| prs.iter().find(|pr| pr["number"].as_u64() == Some(scope.pr)))
+            .ok_or_else(|| pending("reserved PR queue observation missing"))?;
+        if !matches!(observed["state"].as_str(), Some("OPEN" | "CLOSED"))
+            || !observed["autoMergeRequest"].is_null() || !observed["mergeQueueEntry"].is_null()
+        { return Err(pending("reserved PR remains armed, queued or merged")); }
+        let pr = self.provider.publication(&format!("pulls/{}", scope.pr))?;
+        if pr["number"].as_u64() != Some(scope.pr) || pr["merged"].as_bool() != Some(false)
+            || !pr.get("merged_at").is_some_and(Value::is_null)
+            || pr["head"]["ref"].as_str() != Some(snapshot.record.target.as_str())
+            || !same_slug(&pr["head"]["repo"]["full_name"], &self.slug)
+            || !same_slug(&pr["base"]["repo"]["full_name"], &self.slug)
+        { return Err(pending("unmerged PR identity/outcome unavailable")); }
+        let publication = self.provider.release(&scope.tag)?;
+        let repository = &publication["data"]["repository"];
+        if !same_slug(&repository["nameWithOwner"], &self.slug)
+            || !repository.get("release").is_some_and(Value::is_null)
+            || !repository.get("ref").is_some_and(Value::is_null)
+        { return Err(pending("reserved tag or release exists or its outcome is unknown")); }
+        Ok(VerifiedUnpublished { operation: operation.clone(),
+            evidence: json!({"disposition":"disarmed_without_landing", "pr":pr,"clear":clear,"publication":publication}) })
+    }
+
     pub(crate) fn landing_pr(&self, sha: &str) -> Result<(u64, String, String), String> {
         let prs = self.provider.publication(&format!("commits/{sha}/pulls?per_page=100"))?;
         let rows = prs.as_array().ok_or_else(|| pending("landing PR association unavailable"))?;
@@ -119,6 +167,12 @@ impl<P: Provider> GitHubChecks<P> {
             { return Err(pending("release/tag observation incomplete")); }
             let tag = &repository["ref"];
             let release = &repository["release"];
+            // A cancelled/failed workflow cannot prove an admitted API child
+            // stopped before sending. Its uncertain CreateRelease must have
+            // an actual reconciled release, even when the run is terminal.
+            if operation.started.contains(&ExternalAction::CreateRelease) && release.is_null() {
+                return Err(pending("the admitted Release API outcome remains unknown"));
+            }
             if (!tag.is_null() && tag.pointer("/target/target/oid").and_then(Value::as_str) != Some(landing))
                 || (!tag.is_null() && operation.tag_object.is_none())
                 || (!release.is_null() && (release["tagName"] != scope.tag || release["isDraft"] != false

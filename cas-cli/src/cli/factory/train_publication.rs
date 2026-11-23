@@ -15,6 +15,8 @@ enum PublicationCommand {
     PublishTag(TagArgs),
     CreateRelease(ReleaseArgs),
     Reconcile(ReconcileArgs),
+    DisarmPr(OperationArgs),
+    ReconcileUnpublished(OperationArgs),
     IsEnrolled(BranchQuery),
     IsBoundTag(TagQuery),
 }
@@ -55,6 +57,11 @@ struct ReconcileArgs {
     #[arg(long)] attempt: u64,
 }
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
+struct OperationArgs {
+    #[arg(long)] train: String,
+    #[arg(long)] operation: String,
+}
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
 struct BranchQuery { #[arg(long)] branch: String }
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 struct TagQuery { #[arg(long)] tag: String }
@@ -76,6 +83,8 @@ pub(super) fn execute(args: &PublicationArgs, root: Option<&Path>) -> anyhow::Re
                 &command.iter().map(String::as_str).collect::<Vec<_>>())
         }
         PublicationCommand::Reconcile(args) => publication::reconcile(&repo, &args.train, &args.operation, args.run, args.attempt),
+        PublicationCommand::DisarmPr(args) => publication::disarm_pr(owner.as_ref().ok_or_else(|| anyhow::anyhow!("authenticated owner store required"))?, &repo, &args.train, &args.operation),
+        PublicationCommand::ReconcileUnpublished(args) => publication::reconcile_unpublished(&repo, &args.train, &args.operation),
         PublicationCommand::IsEnrolled(args) => {
             let enrolled = crate::worktree::git::train_authority::Snapshot::all(&repo).map_err(anyhow::Error::msg)?
                 .iter().any(|snapshot| snapshot.record.target == args.branch.trim_start_matches("refs/heads/"));

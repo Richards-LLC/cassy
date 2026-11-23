@@ -280,7 +280,7 @@ impl GitOperations {
             let published = &authority.record.target_sha;
             match self.resolve_commit(&refname) {
                 Some(local) if local != *published => return Err("TRAIN_OWNER_PUBLICATION_REQUIRED: publish or reconcile the enrolled base before preparing workers".into()),
-                None => self.create_branch_from(branch, published).map_err(|error| error.to_string())?,
+                None => { self.create_branch_from(branch, published).map_err(|error| error.to_string())?; }
                 _ => {}
             }
             Ok(Some(EpicBranchReadiness::ready(None)))

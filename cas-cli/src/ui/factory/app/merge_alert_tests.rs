@@ -1267,6 +1267,28 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     assert!(no_code.relay().is_empty(), "declared no-code work has no missing-CI decision");
 }
 
+/// cas-2421 (GH #2051): replay of gabber-studio tip 498b2dae at its alert
+/// time. Every test job had been skipped beside a green Vercel preview, so CI
+/// was unknown. The decision must name the query it read and what it saw.
+#[test]
+fn cas_2421_unknown_ci_decision_names_its_query_and_observed_checks() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    std::fs::write(f.app.cas_dir.join("ci.json"), r#"{"check_runs":[
+        {"id":3,"name":"Vercel Preview Comments","status":"completed","conclusion":"success","app":{"slug":"vercel"}},
+        {"id":2,"name":"Backend Test","status":"completed","conclusion":"skipped","app":{"slug":"github-actions"}},
+        {"id":1,"name":"Frontend Vitest","status":"completed","conclusion":"skipped","app":{"slug":"github-actions"}}]}"#).unwrap();
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    let prompts = f.relay();
+    assert_eq!(prompts.len(), 1);
+    let tip = prompts[0].merge_alert.as_ref().unwrap().factory_tip.clone();
+    for source in [format!("repos/acme/cas/commits/{tip}/check-runs"), "Backend Test".into(), "Frontend Vitest".into()] {
+        assert!(prompts[0].text.contains(&source), "{source} missing: {}", prompts[0].text);
+    }
+}
+
 /// cas-0c47 (GH #2273): a repo whose workflows run only on pull_request can
 /// never post CI for a factory push, so that unknown is not a decision. A push
 /// trigger that covers the branch keeps the bounded alert and its recovery.

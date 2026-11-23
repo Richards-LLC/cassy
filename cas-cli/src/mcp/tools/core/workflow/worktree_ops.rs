@@ -438,29 +438,53 @@ pub(crate) fn delivery_ci_pending(root: Option<&Path>, branch: &str, target: &st
 /// lookup errors and any unfinished check all defer it, even if another
 /// check is already red. Do not borrow an older code commit's green result.
 pub(crate) fn delivery_tip_ci_conclusion(sha: &str, cwd: &Path) -> &'static str {
-    delivery_tip_ci_answer(sha, cwd).unwrap_or("unknown")
+    delivery_tip_ci_reading(sha, cwd).0
 }
 
-fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Option<&'static str> {
+/// cas-2421 (GH #2051): the conclusion plus, for "unknown", the check-runs
+/// query it read and why that answer was not settled.
+pub(crate) fn delivery_tip_ci_reading(sha: &str, cwd: &Path) -> (&'static str, String) {
+    match delivery_tip_ci_answer(sha, cwd) {
+        Ok(conclusion) => (conclusion, String::new()),
+        Err(reason) => ("unknown", reason),
+    }
+}
+
+fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Result<&'static str, String> {
     let binary = crate::github_repo::gh_binary();
-    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT).ok()?;
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT)?;
+    let query = format!("repos/{}/commits/{sha}/check-runs", repo.canonical);
     let output = fetch_branch_ci(sha, cwd, &repo.canonical, &binary);
-    if !output.success { return None; }
-    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let runs = parsed.get("check_runs")?.as_array()?;
-    if runs.is_empty() { return None; }
+    let observed = |reason: String| format!("{query}: {reason}");
+    if !output.success {
+        return Err(observed(format!("lookup failed ({}): {}", output.status, first_stderr_line(&output.stderr))));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| observed(format!("invalid JSON: {error}")))?;
+    let runs = parsed.get("check_runs").and_then(serde_json::Value::as_array)
+        .ok_or_else(|| observed("response omitted check_runs".into()))?;
+    if runs.is_empty() { return Err(observed("no check runs for this commit".into())); }
     if runs.iter().any(|run| matches!(run.get("status").and_then(serde_json::Value::as_str),
         Some("queued" | "in_progress" | "requested" | "waiting" | "pending"))) {
-        return Some("pending");
+        return Ok("pending");
     }
     if runs.iter().any(|run| {
         run.get("status").and_then(serde_json::Value::as_str) != Some("completed")
             || run.get("conclusion").and_then(serde_json::Value::as_str).is_none()
-    }) { return None; }
+    }) { return Err(observed("a check run has no completed conclusion".into())); }
     match classify_branch_ci_response("", sha, output) {
-        BranchCiState::Green { .. } => Some("success"),
-        BranchCiState::Red { .. } => Some("failure"),
-        _ => None,
+        BranchCiState::Green { .. } => Ok("success"),
+        BranchCiState::Red { .. } => Ok("failure"),
+        BranchCiState::NoChecks { reason, .. }
+        | BranchCiState::Unknown { reason, .. }
+        | BranchCiState::MissingCommit { reason, .. }
+        | BranchCiState::UnvalidatedCode { reason, .. }
+        | BranchCiState::CodeValidationUnconfirmed { reason, .. } => Err(observed(reason)),
+        BranchCiState::GhFailure { status, stderr, .. } => Err(observed(format!("lookup failed ({status}): {stderr}"))),
+        // Every run completed: only cancelled runs or a classifier with no
+        // test jobs remain, which has stayed unknown rather than pending.
+        BranchCiState::Pending { .. } | BranchCiState::CodePending { .. } =>
+            Err(observed("completed runs hold no test verdict (cancelled or classifier only)".into())),
     }
 }
 

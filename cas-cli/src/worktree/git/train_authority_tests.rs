@@ -920,6 +920,7 @@ fn train_authority_abort_reaccept_cas_6456() {
         assert_eq!(claimed.record.transfer.as_ref().unwrap().successor, successor);
         assert_eq!(claimed.claim_external(&fixture.left, &operation, &proof).unwrap().tip, claimed.tip);
         assert!(claimed.settle_external(&fixture.left, &operation, &proof).is_err());
+        command(&fixture.right, &["fetch", "--no-tags", "origin", &source], None).unwrap();
         command(&fixture.right, &["tag", "-a", &scope.tag, "-m", "reserved release", &source], None).unwrap();
         let object = command(&fixture.right, &["rev-parse", &format!("refs/tags/{}", scope.tag)], None).unwrap();
         command(&fixture.origin, &["config", "receive.advertiseAtomic", "false"], None).unwrap();

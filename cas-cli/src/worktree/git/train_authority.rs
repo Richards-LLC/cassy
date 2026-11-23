@@ -176,15 +176,39 @@ fn fence_required(branch: &str, snapshot: Option<Snapshot>) -> Result<(), String
 
 /// Every write to an enrolled target goes through [`Snapshot::publish`].
 pub(crate) fn refuse_unfenced(repo: &Path, branch: &str) -> Result<(), String> {
-    fence_required(branch, fencing(repo, branch)?)
+    fence_required(branch, fencing(repo, branch)?)?;
+    refuse_local_train(repo, branch)
 }
 
 /// [`refuse_unfenced`] from the caller's just-fetched mirror ([`observed_fencing`]).
 pub(crate) fn refuse_observed_unfenced(repo: &Path, branch: &str) -> Result<(), String> {
-    fence_required(branch, observed_fencing(repo, branch)?)
+    fence_required(branch, observed_fencing(repo, branch)?)?;
+    refuse_local_train(repo, branch)
+}
+
+/// Before initial enrollment there is no remote authority ref to discover.
+/// The recorded task target still prevents generic creation/focus/manager
+/// paths from publishing that train as an ordinary epic.
+fn refuse_local_train(repo: &Path, branch: &str) -> Result<(), String> {
+    if !branch.starts_with("epic/") { return Ok(()); }
+    let Ok(root) = crate::store::find_cas_root_ignoring_env(repo) else { return Ok(()); };
+    let store = crate::store::open_task_store_local(&root).map_err(|error| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error}"))?;
+    let trains = store.list(None).map_err(|error| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error}"))?;
+    if trains.iter().any(|train| crate::mcp::tools::core::task::release_train::is_release_train(train)
+        && train.effective_epic_branch() == Some(branch))
+    {
+        return Err(crate::gates::tag("G-113", "TRAIN_OWNER_PUBLICATION_REQUIRED: recorded train targets require owner-aware publication"));
+    }
+    Ok(())
 }
 
 impl Snapshot {
+    pub(crate) fn all(repo: &Path) -> Result<Vec<Self>, String> {
+        let refs = command(repo, &["ls-remote", "--refs", "origin", "refs/cas/train-owner/*"], None)?;
+        refs.lines().filter_map(|line| line.split_once('\t').map(|(_, name)| name))
+            .map(|name| Self::read(repo, name.strip_prefix("refs/cas/train-owner/")
+                .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: invalid authority reference")?)).collect()
+    }
     pub(crate) fn audited(mut self, audit: serde_json::Value) -> Self {
         self.transition_audit = Some(audit);
         self

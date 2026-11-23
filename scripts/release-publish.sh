@@ -47,6 +47,13 @@ done
 tag="${tag:-v$version}"
 repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must name owner/repo}"
 gh_bin="${GH_BIN:-gh}"
+cas_bin="${CAS_BIN:-cas}"
+continuation=()
+[[ -z "${GITHUB_RUN_ID:-}" ]] || continuation+=(--run "$GITHUB_RUN_ID")
+[[ -z "${GITHUB_RUN_ATTEMPT:-}" ]] || continuation+=(--attempt "$GITHUB_RUN_ATTEMPT")
+if "$prerelease" && [[ "$tag" == dryrun-* ]]; then
+    continuation+=(--isolated-dry-run)
+fi
 
 shopt -s nullglob
 archives=("$assets"/*.tar.gz)
@@ -111,16 +118,15 @@ if [[ -n "$remote_tag" ]]; then
     fi
     printf 'tag %s already peels to %s\n' "$tag" "$sha"
 else
-    git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-        tag -a "$tag" -m "$tag" "$sha"
-    git push origin "refs/tags/$tag"
-    printf 'pushed annotated tag %s at %s\n' "$tag" "$sha"
+    printf 'preparing annotated tag %s at %s\n' "$tag" "$sha"
 fi
+"$cas_bin" factory train publication publish-tag --tag "$tag" --sha "$sha" "${continuation[@]}"
 
 # 4. The release.
-release_args=(release create "$tag" --repo "$repo" --verify-tag --title "CAS $tag" --notes-file "$notes")
+release_args=(factory train publication create-release --tag "$tag" --sha "$sha" --repo "$repo" \
+    --title "CAS $tag" --notes "$notes" "${continuation[@]}")
 if "$prerelease"; then
     release_args+=(--prerelease)
 fi
-"$gh_bin" "${release_args[@]}" "${archives[@]}"
+"$cas_bin" "${release_args[@]}" -- "${archives[@]}"
 printf 'published %s (%s) from %s\n' "$tag" "$([[ "$prerelease" == true ]] && echo prerelease || echo release)" "$sha"

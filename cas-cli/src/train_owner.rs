@@ -10,6 +10,7 @@ pub(crate) const ENROLLED: &str = "train-owner-enrolled-v1";
 pub(crate) mod transfer;
 pub(crate) mod recovery;
 pub(crate) mod provider;
+pub(crate) mod publication;
 
 /// Called after authenticating the accepted successor (or by sync after
 /// fetching the shared authority). Never infer an accepted owner from task

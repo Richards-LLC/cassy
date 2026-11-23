@@ -18,6 +18,8 @@ pub(super) struct PullRequest {
     pub url: String,
     pub repo: String,
     pub head: String,
+    pub source: String,
+    pub target: String,
 }
 
 #[track_caller]
@@ -66,6 +68,8 @@ fn checked_pr(
         url: expected_url,
         repo: slug.into(),
         head: head.into(),
+        source: source.into(),
+        target: target.into(),
     })
 }
 
@@ -191,7 +195,7 @@ pub(super) fn arm(core: &crate::mcp::CasCore, repo: &Path, pr: &PullRequest, tas
     if let Some(refusal) = core.peer_ask_merge_refusal(task_id, Some(pr.number), accepted_override_codes) {
         return Err(refusal);
     }
-    gh(
+    crate::train_owner::publication::with_pr_arm(Some(core), repo, &pr.source, &pr.target, pr.number, &pr.head, || gh(
         repo,
         &[
             "pr",
@@ -204,6 +208,6 @@ pub(super) fn arm(core: &crate::mcp::CasCore, repo: &Path, pr: &PullRequest, tas
             "--match-head-commit",
             &pr.head,
         ],
-    )
+    ))
     .map(|_| ())
 }

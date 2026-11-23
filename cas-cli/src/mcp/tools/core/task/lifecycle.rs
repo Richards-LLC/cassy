@@ -2364,6 +2364,13 @@ impl CasCore {
                             let push_state = if !push_enabled {
                                 "Push state: local-only (CAS_PUSH_EPIC_BRANCH is disabled); it will be published on first focus or spawn."
                                     .to_string()
+                            } else if created && super::release_train::is_release_train(&task) {
+                                let result = task_store.get(&id).map_err(|error| error.to_string()).and_then(|train|
+                                    super::release_train::publish_train_branch(&self.cas_root, &project_root, task_store.as_ref(), &train, &trunk));
+                                match result {
+                                    Ok(()) => format!("Push state: atomically enrolled {branch_name} on origin."),
+                                    Err(error) => format!("TRAIN_OWNER_PUBLICATION_REQUIRED: publication held: {error}"),
+                                }
                             } else if created {
                                 match git_ops.push_branch(&branch_name) {
                                     Ok(()) => {

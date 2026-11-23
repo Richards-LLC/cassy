@@ -24,6 +24,23 @@ fn same_slug(value: &Value, expected: &str) -> bool {
 }
 
 impl<P: Provider> GitHubChecks<P> {
+    pub(crate) fn landing_pr(&self, sha: &str) -> Result<(u64, String, String), String> {
+        let prs = self.provider.publication(&format!("commits/{sha}/pulls?per_page=100"))?;
+        let rows = prs.as_array().ok_or_else(|| pending("landing PR association unavailable"))?;
+        if rows.len() >= 100 { return Err(pending("landing PR association truncated")); }
+        let mut matches = Vec::new();
+        for pr in rows {
+            if pr["merge_commit_sha"].as_str() != Some(sha) || pr["merged_at"].as_str().is_none() { continue; }
+            if !same_slug(&pr["head"]["repo"]["full_name"], &self.slug)
+                || !same_slug(&pr["base"]["repo"]["full_name"], &self.slug) { return Err(pending("landing PR repository disagrees")); }
+            matches.push((pr["number"].as_u64().ok_or_else(|| pending("PR number missing"))?,
+                pr["head"]["sha"].as_str().ok_or_else(|| pending("PR head missing"))?.to_string(),
+                pr["head"]["ref"].as_str().ok_or_else(|| pending("PR branch missing"))?.to_string()));
+        }
+        if matches.len() != 1 { return Err(pending("landing PR association ambiguous or missing")); }
+        Ok(matches.remove(0))
+    }
+
     /// Local reusable workflows share the root run, so terminal root status
     /// covers the downstream install proof and publication jobs as well.
     /// Older independently dispatched/unknown chains cannot earn this proof.
@@ -103,6 +120,7 @@ impl<P: Provider> GitHubChecks<P> {
             let tag = &repository["ref"];
             let release = &repository["release"];
             if (!tag.is_null() && tag.pointer("/target/target/oid").and_then(Value::as_str) != Some(landing))
+                || (!tag.is_null() && operation.tag_object.is_none())
                 || (!release.is_null() && (release["tagName"] != scope.tag || release["isDraft"] != false
                     || release.pointer("/tagCommit/oid").and_then(Value::as_str) != Some(landing)
                     || release["id"].as_str().is_none()))

@@ -16,7 +16,7 @@ name: Release
 #      launch smoke on the packaged macOS archive: the bytes that ship;
 #   4. creates the annotated tag v<version> and the GitHub release
 #      (scripts/release-publish.sh), whose notes carry the PR-opened timer;
-#   5. dispatches the install-path proof;
+#   5. calls the install-path proof in this run, after publication;
 #   6. deploys the tagged Commander dist to hub.petrastella.io after publication.
 # The supervisor host installs on publish (scripts/install-on-publish.sh).
 #
@@ -312,6 +312,13 @@ jobs:
           run-id: ${{ needs.lookup-macos.outputs.found == 'true' && needs.lookup-macos.outputs.run-id || github.run_id }}
           github-token: ${{ github.token }}
 
+      - name: Load the audited publication helper
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/publication-helper"
+          tar -xzf release/cas-x86_64-unknown-linux-gnu.tar.gz -C "$RUNNER_TEMP/publication-helper" cas
+          echo "CAS_BIN=$RUNNER_TEMP/publication-helper/cas" >> "$GITHUB_ENV"
+
       - id: publish
         name: Create Release
         env:
@@ -340,47 +347,6 @@ jobs:
           set -euo pipefail
           scripts/cleanup-merged-epics.sh "$GITHUB_SHA" "origin/$DEFAULT_BRANCH" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # GITHUB_TOKEN-created releases do not fan out a release.published event
-      # to other workflows. Dispatch the proof explicitly after all assets are
-      # published, and record the run id so the release receipt can verify it.
-      - name: Dispatch install path proof
-        if: needs.detect.outputs.dry-run != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.detect.outputs.tag }}
-        run: |
-          set -euo pipefail
-          DISPATCH_STARTED_AT="$(date -u +%s)"
-          export DISPATCH_STARTED_AT
-          gh workflow run install-path-proof.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$VERSION" \
-            -f version="$VERSION"
-
-          proof_run_id=''
-          for _attempt in {1..12}; do
-            proof_run_id="$(
-              gh run list \
-                --repo "$GITHUB_REPOSITORY" \
-                --workflow install-path-proof.yml \
-                --event workflow_dispatch \
-                --limit 20 \
-                --json databaseId,event,headSha,createdAt \
-                --jq 'map(select(.event == "workflow_dispatch" and .headSha == env.GITHUB_SHA and ((.createdAt | fromdateiso8601) >= (env.DISPATCH_STARTED_AT | tonumber)))) | sort_by(.createdAt) | last | .databaseId // empty'
-            )"
-            if [[ -n "$proof_run_id" ]]; then
-              break
-            fi
-            sleep 5
-          done
-          test -n "$proof_run_id"
-          {
-            echo 'Install-path proof dispatch receipt:'
-            echo "- workflow: install-path-proof.yml"
-            echo "- tag: $VERSION"
-            echo "- run id: $proof_run_id"
-          } >> "$GITHUB_STEP_SUMMARY"
-
       # A dry run proves tag and release creation, then removes both so no
       # throwaway object outlives the run.
       - name: Delete the dry-run prerelease
@@ -391,6 +357,8 @@ jobs:
         run: |
           set -euo pipefail
           case "$TAG" in dryrun-*) ;; *) echo "::error::refusing to delete non-dry-run tag $TAG"; exit 1 ;; esac
+          bound="$("$CAS_BIN" factory train publication is-bound-tag --tag "$TAG")"
+          test "$bound" = false || { echo "::error::enrolled or unknown tag binding; cleanup held"; exit 1; }
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
           elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
@@ -398,8 +366,24 @@ jobs:
           fi
           echo "deleted dry-run prerelease $TAG" >> "$GITHUB_STEP_SUMMARY"
 
+  # This child has no edge back to tag/Release creation or hosted deployment.
+  # Its failure remains post-publication evidence; transfer waits for its actual
+  # terminal jobs rather than mistaking the publisher shell's exit for settlement.
+  install-proof:
+    name: Install path proof
+    needs: [detect, release]
+    if: >-
+      !cancelled()
+      && needs.release.outputs.published == 'true'
+      && needs.detect.outputs.dry-run != 'true'
+    uses: ./.github/workflows/install-path-proof.yml
+    with:
+      version: ${{ needs.detect.outputs.tag }}
+    permissions:
+      contents: read
+
   # No dependency points back to this job: uploads and verification add no work
-  # to commit -> main or main -> published. A later install-proof dispatch error
+  # to commit -> main or main -> published. A later install-proof failure
   # must not suppress a hub update for a release already published successfully.
   deploy-hub:
     name: Deploy released Commander to hosted hub

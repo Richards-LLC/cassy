@@ -384,8 +384,12 @@ prepare() {
     fi
     local ci_trailer=()
     [[ -z "${train_ci_start:-}" ]] || ci_trailer=(-m "Train-CI-Head: $train_ci_start")
+    local owner_trailer=()
+    if "$train_tracking"; then
+        owner_trailer=(-m "Release-Train: $(jq -er .train_id <<<"$context")")
+    fi
     git -c core.hooksPath=/dev/null commit --quiet -m "release: v$version" \
-        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version." "${ci_trailer[@]}"
+        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version." "${ci_trailer[@]}" "${owner_trailer[@]}"
     say "committed release v$version on $branch ($(git rev-parse --short HEAD))"
     printf '%s\n' "$version"
 }
@@ -420,7 +424,8 @@ open_or_update_pr() {
     # Build concurrency stays independent; only landing must be a singleton.
     singleton_queue <<<"$state"
     if ! admitted <<<"$state"; then
-        "$gh_bin" pr merge "$pr_number" --auto --merge >/dev/null
+        CAS_ROOT="$release_store_root" "${release_candidate:-$cas_bin}" factory train publication arm-pr \
+            --pr "$pr_number" --sha "$(git rev-parse HEAD)" >/dev/null
         state="$(pr_state)"
         singleton_queue <<<"$state"
     fi
@@ -467,7 +472,8 @@ query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
 }
 
 publish_branch() {
-    git push --quiet "$remote" "HEAD:refs/heads/$branch"
+    CAS_ROOT="$release_store_root" "${release_candidate:-$cas_bin}" factory train publication publish-branch \
+        --branch "$branch" --sha "$(git rev-parse HEAD)" --remote "$remote"
 }
 
 # GH #2027: a Cassy gate refusing the cut of a green train tip is a release

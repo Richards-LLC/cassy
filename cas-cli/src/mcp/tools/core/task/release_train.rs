@@ -121,38 +121,52 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// cas-25f1: a train's lane must exist on origin the moment it opens, or a
-/// worker retargeted there cannot fetch it. Idempotent: an existing local lane
-/// is kept, a lane already on origin is left alone, and the push retries.
-fn publish_train_branch(repo: &Path, lane: &str, integration: &str) -> Result<(), String> {
-    let run = |args: &[&str]| {
-        std::process::Command::new("git").arg("-C").arg(repo).args(args).output()
-            .map_err(|error| error.to_string())
-    };
-    if ref_exists(repo, &format!("origin/{lane}")) {
+/// A new train target and its initial authority are one expected-absent
+/// atomic publication. Existing targets require explicit owner enrollment.
+pub(crate) fn publish_train_branch(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, train: &Task, integration: &str) -> Result<(), String> {
+    use crate::worktree::git::train_authority::Snapshot;
+    let lane = train.effective_epic_branch().ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train lane missing")?;
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let project = crate::cloud::resolve_canonical_id(root)
+        .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: canonical project missing")?;
+    if let Some(snapshot) = Snapshot::read_optional(repo, &train.id)? {
+        if snapshot.record.project != project || snapshot.record.target != lane {
+            return Err("TRAIN_TRANSFER_CONFLICT: existing train authority scope differs".into());
+        }
+        let (live, actor) = crate::train_owner::local_owner_fence(root, repo, lane)?
+            .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train authority disappeared")?;
+        live.validate_admission(repo, &actor)?;
+        crate::train_owner::repair_projection(root, store, train, &live)?;
         return Ok(());
     }
+    // A missing authority on a formerly enrolled train is never recreated.
+    if store.get_execution_state(&train.id).map_err(|error| error.to_string())?
+        .as_ref().and_then(|state| state.get("train_owner")).is_some()
+        || git.fetch_merge_target(lane).map_err(|error| error.to_string())?.is_some()
+    {
+        return Err("TRAIN_OWNER_PUBLICATION_REQUIRED: existing target requires explicit current-owner enrollment and readback".into());
+    }
+    let owner = train.epic_verification_owner.as_deref()
+        .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: new train has no registered owner")?;
+    let agent = crate::store::open_agent_store(root).map_err(|error| error.to_string())?
+        .get(owner).map_err(|error| error.to_string())?;
+    if agent.role != crate::types::AgentRole::Supervisor || !agent.is_alive()
+        || agent.machine_id.as_deref() != Some(crate::types::Agent::get_or_generate_machine_id().as_str())
+    {
+        return Err("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train owner is not a live local supervisor".into());
+    }
+    let actor = crate::train_owner::identity(&agent, owner)?;
     if !ref_exists(repo, lane) {
         let base = [format!("origin/{integration}"), integration.to_string()]
             .into_iter().find(|candidate| ref_exists(repo, candidate))
             .ok_or_else(|| format!("no `{integration}` to cut `{lane}` from"))?;
-        let output = run(&["branch", lane, &base])?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
+        git.create_branch_from(lane, &base).map_err(|error| error.to_string())?;
     }
-    let mut last = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(attempt));
-        }
-        let output = run(&["push", "origin", &format!("refs/heads/{lane}:refs/heads/{lane}")])?;
-        if output.status.success() {
-            return Ok(());
-        }
-        last = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    }
-    Err(last)
+    let head = git.resolve_commit(lane).ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train source missing")?;
+    let checks = crate::train_owner::provider::GitHubChecks::new(repo)?;
+    let snapshot = Snapshot::enroll(repo, &project, &train.id, lane, &actor, &head, None, &checks)?;
+    crate::train_owner::repair_projection(root, store, train, &snapshot)?;
+    Ok(())
 }
 
 /// Prefer shared origin history over a machine's possibly stale local branch.
@@ -259,7 +273,7 @@ pub(crate) fn mark_cut_trains(
     // An explicitly cut train rolls over even when default train joining is
     // disabled (for example an operator-promoted epic).
     if !retired.is_empty() {
-        let successor = ensure_successor(repo, store, &cut, integration)?;
+        let successor = ensure_successor(cas_root, repo, store, &cut, integration)?;
         for train in retired.iter().filter(|train| train.id != cut_id) {
             let mut row = store.get(&train.id).map_err(|error| error.to_string())?;
             row.labels.retain(|label| !label.starts_with(SUCCESSOR_LABEL));
@@ -285,14 +299,14 @@ const ROLLOVER_PENDING: &str = "release-train-rollover:";
 
 /// Called under the train lock. The durable link makes retries resume the
 /// same successor; following links also handles a later cut of that train.
-fn ensure_successor(repo: &Path, store: &dyn cas_store::TaskStore, train: &Task, integration: &str) -> Result<Task, String> {
+fn ensure_successor(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, train: &Task, integration: &str) -> Result<Task, String> {
     let mut previous = store.get(&train.id).map_err(|error| error.to_string())?;
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = previous.labels.iter().find_map(|label| label.strip_prefix(SUCCESSOR_LABEL)) {
         if !seen.insert(previous.id.clone()) { return Err("release train successor cycle".into()); }
         let next = store.get(id).map_err(|error| error.to_string())?;
         if !next.is_terminal() && !is_cut_train(&next) && !accepts_no_work(&next) {
-            publish_train_branch(repo, next.effective_epic_branch().ok_or("successor has no lane")?, integration)?;
+            publish_train_branch(root, repo, store, &next, integration)?;
             return Ok(next);
         }
         previous = next;
@@ -310,7 +324,7 @@ fn ensure_successor(repo: &Path, store: &dyn cas_store::TaskStore, train: &Task,
             let id = store.generate_id().map_err(|error| error.to_string())?;
             let mut next = Task::new(id, RELEASE_TRAIN_TITLE.into());
             next.task_type = TaskType::Epic;
-            next.labels.push(RELEASE_TRAIN_LABEL.into());
+            next.labels.extend([RELEASE_TRAIN_LABEL.into(), crate::train_owner::ENROLLED.into()]);
             next.branch = Some(format!("epic/release-train-vnext-{}", next.id));
             next.origin_project = previous.origin_project.clone();
             next.epic_verification_owner = previous.epic_verification_owner.clone();
@@ -322,7 +336,7 @@ fn ensure_successor(repo: &Path, store: &dyn cas_store::TaskStore, train: &Task,
     previous.labels.push(format!("{SUCCESSOR_LABEL}{}", next.id));
     previous.updated_at = chrono::Utc::now();
     store.update(&previous).map_err(|error| error.to_string())?;
-    publish_train_branch(repo, next.effective_epic_branch().unwrap(), integration)?;
+    publish_train_branch(root, repo, store, &next, integration)?;
     Ok(next)
 }
 
@@ -398,7 +412,7 @@ pub(crate) fn successor_for_target(root: &Path, target: &str) -> Result<Option<T
     let repo = crate::train_guardrails::train_repo_root(root, &train).map_err(|error| error.to_string())?;
     let integration = train.deliverables.work_target.as_ref().ok_or("train has no integration target")?.target_branch.clone();
     let _lock = lock_trains_blocking(root).map_err(|error| error.to_string())?;
-    ensure_successor(&repo, store.as_ref(), &train, &integration).map(Some)
+    ensure_successor(root, &repo, store.as_ref(), &train, &integration).map(Some)
 }
 
 /// Checked at target resolution and again under the delivery-target lock.
@@ -577,7 +591,8 @@ impl CasCore {
             .map_err(|error| McpError::invalid_params(error, None))?
         {
             let lane = train.effective_epic_branch().unwrap_or(&integration);
-            let _ = publish_train_branch(&repo, lane, &integration);
+            let published = publish_train_branch(&self.cas_root, &repo, store, &train, &integration);
+            if let Err(error) = published { return Err(McpError::invalid_params(error, None)); }
             return Ok((Some(train.id.clone()), format!(
                 "\n\nRELEASE TRAIN: joined {} ({lane}); its delivery merges into the train, which reaches `{integration}` once per release. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane.", train.id
             )));
@@ -586,7 +601,7 @@ impl CasCore {
             "title": RELEASE_TRAIN_TITLE,
             "task_type": "epic",
             "priority": 1,
-            "labels": RELEASE_TRAIN_LABEL,
+            "labels": format!("{RELEASE_TRAIN_LABEL},{}", crate::train_owner::ENROLLED),
             "description": format!(
                 "Default target for tasks created without an epic. Children merge into this lane; the release goes to `{integration}` once."
             ),
@@ -605,7 +620,7 @@ impl CasCore {
         match train {
             Some(train) => {
                 let lane = train.effective_epic_branch().unwrap_or(&integration);
-                let published = match publish_train_branch(&repo, lane, &integration) {
+                let published = match publish_train_branch(&self.cas_root, &repo, store, &train, &integration) {
                     Ok(()) => String::new(),
                     Err(error) => format!(" Publishing `{lane}` to origin failed ({error}); push it before retargeting work there."),
                 };

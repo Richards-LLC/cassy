@@ -49,9 +49,9 @@ pub(crate) trait TrainQueue {
     fn enqueue(&self, pr: u64) -> Result<()>;
 }
 
-pub(crate) struct GhTrainQueue(pub PathBuf);
+pub(crate) struct GhTrainQueue<'a>(pub PathBuf, pub &'a CasCore);
 
-impl GhTrainQueue {
+impl GhTrainQueue<'_> {
     fn gh(&self, args: &[&str]) -> Result<String> {
         let output = crate::gh_budget::output(
             Command::new("gh").args(args).current_dir(&self.0),
@@ -65,7 +65,7 @@ impl GhTrainQueue {
     }
 }
 
-impl TrainQueue for GhTrainQueue {
+impl TrainQueue for GhTrainQueue<'_> {
     fn open_pr(&self, branch: &str) -> Result<Option<u64>> {
         let number = self.gh(&[
             "pr", "list", "--head", branch, "--state", "open", "--json", "number", "--jq",
@@ -74,7 +74,7 @@ impl TrainQueue for GhTrainQueue {
         Ok(number.parse().ok())
     }
     fn enqueue(&self, pr: u64) -> Result<()> {
-        self.gh(&["pr", "merge", &pr.to_string(), "--auto", "--merge"]).map(drop)
+        crate::train_owner::publication::arm_pr(Some(self.1), &self.0, pr, None).map_err(anyhow::Error::msg)
     }
 }
 

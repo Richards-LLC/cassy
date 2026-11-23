@@ -39,6 +39,14 @@ while read -r sha ref; do
     [[ -n "$sha" ]] || continue
     [[ "$ref" == "refs/remotes/origin/$shipped" ]] || continue
     branch="refs/heads/${ref#refs/remotes/origin/}"
+    # Enrollment survives merged/terminal tasks. An unreadable authority or
+    # unsupported helper holds cleanup; train retirement is a separate action.
+    enrolled="$("${CAS_BIN:-cas}" factory train publication is-enrolled --branch "$branch")"
+    case "$enrolled" in
+        true) printf 'Preserved enrolled train %s\n' "$branch"; continue ;;
+        false) ;;
+        *) printf 'Unknown train enrollment for %s; deletion held\n' "$branch" >&2; exit 1 ;;
+    esac
     # A branch that advances after the fetch must survive. Never force away
     # new work or an epic merely merged into some later default-branch tip.
     git push --force-with-lease="$branch:$sha" origin ":$branch"

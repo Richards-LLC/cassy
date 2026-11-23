@@ -22,6 +22,7 @@ mod remote_attach;
 // liveness signal `cas factory is-wedged` reads (cas-4513).
 pub(crate) mod wedged;
 mod worktree_ops;
+mod train_publication;
 
 use crate::cli::Cli;
 use crate::config::Config;
@@ -827,6 +828,8 @@ pub struct OwnerTransferArgs {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum TrainCommand {
+    /// Owner-aware publication and provider-verified CI continuations.
+    Publication(Box<train_publication::PublicationArgs>),
     /// Explicit ownership transfer; never infers quiescence from heartbeat age.
     OwnerTransfer(Box<OwnerTransferArgs>),
     /// Merge this train's parked deliveries in order; the daemon resumes
@@ -1476,6 +1479,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
                 Ok(())
             }
+            FactoryCommands::Train { command: TrainCommand::Publication(args) } => train_publication::execute(args, cas_root),
             FactoryCommands::Train { command: TrainCommand::OwnerTransfer(transfer) } => {
                 let OwnerTransferArgs { train, operation, expected_authority, expected_generation, transfer_id,
                     request_id, reason, successor, expected_target, evidence, stopped_or_fenced } = &**transfer;
@@ -1527,6 +1531,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 let core = crate::mcp::CasCore::for_cli(root.to_path_buf());
                 let queue = crate::train_guardrails::GhTrainQueue(
                     root.parent().unwrap_or(root).to_path_buf(),
+                    &core,
                 );
                 let receipt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()

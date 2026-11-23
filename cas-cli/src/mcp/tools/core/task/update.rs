@@ -1899,7 +1899,10 @@ impl CasCore {
             let supplied = labels.split(',').map(str::trim).collect::<Vec<_>>();
             if task.labels.iter().any(|label| label == crate::train_owner::ENROLLED)
                 != supplied.contains(&crate::train_owner::ENROLLED)
-                || (super::release_train::is_release_train(&task) && !supplied.contains(&super::release_train::RELEASE_TRAIN_LABEL)) {
+                // Like the store fence: an unowned, unenrolled train has no
+                // authority to protect, so its labels stay freely replaceable.
+                || (super::release_train::is_release_train(&task) && task.epic_verification_owner.is_some()
+                    && !supplied.contains(&super::release_train::RELEASE_TRAIN_LABEL)) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS,
                     crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: enrollment metadata is managed by the train authority")));
             }

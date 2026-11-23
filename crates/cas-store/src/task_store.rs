@@ -275,8 +275,11 @@ impl SqliteTaskStore {
                 let enrolled = labels.iter().any(|label| label == "train-owner-enrolled-v1");
                 let release = kind == "epic" && labels.iter().any(|label| label == "release-train");
                 let enrollment_added = !enrolled && task.labels.iter().any(|label| label == "train-owner-enrolled-v1");
+                // A finished unenrolled train may release its owner; that
+                // grants no one authority. Replacing an owner never passes.
+                let released = !enrolled && task.is_terminal() && task.epic_verification_owner.is_none();
                 let protected_changed = (enrolled || (release && owner.is_some())) && (
-                    task.epic_verification_owner != owner
+                    (task.epic_verification_owner != owner && !released)
                     || (release && !task.labels.iter().any(|label| label == "release-train"))
                     || (enrolled && (!task.labels.iter().any(|label| label == "train-owner-enrolled-v1")
                         || task.branch != branch || task.task_type.to_string() != kind

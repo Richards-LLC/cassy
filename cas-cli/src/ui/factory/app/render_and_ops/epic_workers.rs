@@ -1170,7 +1170,8 @@ fn checkout_ref_for_spawn_base_observed(
 
 #[derive(Clone, Copy)]
 enum EpicBasePublication {
-    Published,
+    /// `authority_refs`: the verifying origin read listed train authority refs.
+    Published { authority_refs: bool },
     Unpublished,
     Unverified,
 }
@@ -1455,16 +1456,20 @@ fn refresh_epic_base_from_parent(
             "EPIC BASE RESET (UNPUBLISHED, {label}): '{epic_branch}' ({epic_sha}) reset to recorded parent '{parent_ref}' ({parent_sha}); {reason}. Previous tip retained at '{recovery}'. Publication is handled separately before worker checkout."
         )));
     }
-    if !matches!(publication, EpicBasePublication::Published) {
+    let EpicBasePublication::Published { authority_refs } = publication else {
         return Ok(Some(format!(
             "EPIC BASE FAST-FORWARDED (LOCAL): epic base '{epic_branch}' ({epic_sha}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({parent_sha}); publication is handled separately; the refreshed local tip will be used."
         )));
-    }
+    };
 
     // This path is selected only after a verified origin fetch. A failed
     // push retains the safe local fast-forward for the worker checkout.
+    // That read listed origin's train authority refs; with none, no train
+    // fences this branch and the fence needs no second origin read.
     let short = refname.strip_prefix("refs/heads/").unwrap_or(&refname);
-    if let Err(refusal) = crate::worktree::git::train_authority::refuse_unfenced(repo_root, short) {
+    if authority_refs
+        && let Err(refusal) = crate::worktree::git::train_authority::refuse_unfenced(repo_root, short)
+    {
         return Ok(Some(format!(
             "EPIC BASE FAST-FORWARDED (UNPUBLISHED): epic base '{epic_branch}' advanced locally to its recorded parent '{parent_branch}'; {refusal}. The worker worktree will be cut from the refreshed local tip."
         )));
@@ -2759,7 +2764,7 @@ impl WorkerSpawnContext {
                                 }
                             } else {
                                 let publication = if existing_remote {
-                                    EpicBasePublication::Published
+                                    EpicBasePublication::Published { authority_refs: observation.authority_refs }
                                 } else if matches!(observation.remote, Ok(None) | Ok(Some(false))) && !observation.previous_remote {
                                     EpicBasePublication::Unpublished
                                 } else {

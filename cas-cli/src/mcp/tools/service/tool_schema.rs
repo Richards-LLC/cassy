@@ -10,6 +10,7 @@
 
 use rmcp::model::{JsonObject, Tool};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Formats defined by JSON Schema 2020-12. Any other `format` (schemars'
@@ -167,6 +168,35 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
     for name in hidden {
         properties.remove(&name);
     }
+    // Definitions only a hidden field referenced would still load into every
+    // agent's context (cas-6456's owner_transfer types on coordination).
+    let mut referenced = BTreeSet::new();
+    let mut pending = vec![Value::Object(properties.clone())];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Object(object) => {
+                if let Some(Value::String(target)) = object.get("$ref")
+                    && let Some(name) = target.strip_prefix("#/$defs/")
+                    && referenced.insert(name.to_string())
+                    && let Some(definition) = schema.get("$defs").and_then(|defs| defs.get(name))
+                {
+                    pending.push(definition.clone());
+                }
+                pending.extend(object.into_values());
+            }
+            Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    if let Some(Value::Object(definitions)) = schema.get_mut("$defs") {
+        definitions.retain(|name, _| referenced.contains(name));
+        if definitions.is_empty() {
+            schema.remove("$defs");
+        }
+    }
+    let Some(Value::Object(properties)) = schema.get_mut("properties") else {
+        return;
+    };
     if tool_name == "coordination" {
         for (name, description) in COORDINATION_DESCRIPTIONS {
             if let Some(Value::Object(property)) = properties.get_mut(*name) {

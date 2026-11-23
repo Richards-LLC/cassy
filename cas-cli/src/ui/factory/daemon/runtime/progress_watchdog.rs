@@ -472,8 +472,13 @@ mod tests {
             tasks.update(&train).unwrap();
             sweep(185);
             train.labels.retain(|label| !label.starts_with("release-train-frozen:"));
-            train.epic_verification_owner = Some("peer-owner".into());
             tasks.update(&train).unwrap();
+            // A foreign owner arrives only through the verified authority projection.
+            assert!(tasks.project_train_owner(&tasks.get(&train.id).unwrap(), &cas_types::TrainOwnerProjection {
+                train: train.id.clone(), project: "fixture".into(), target: train.branch.clone().unwrap(),
+                authority: "a".repeat(40), owner: "peer-owner".into(), incarnation: "peer-process".into(),
+                epoch: 1, generation: "peer-generation".into(), phase: "active".into(),
+            }).unwrap());
             sweep(230);
             assert_eq!(queue.peek_all(50).unwrap().len(), rows.len());
         }

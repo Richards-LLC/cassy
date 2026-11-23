@@ -1012,18 +1012,6 @@ pub struct FactoryRequest {
     pub ttl_secs: Option<i64>,
 }
 
-/// Unified coordination operations request combining agent, factory, and worktree operations.
-///
-/// Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup,
-///   session_start, session_end, loop_start, loop_cancel, loop_status, lease_history,
-///   queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message,
-///   message_ack, message_status.
-/// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity,
-///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
-///   remind, remind_list, remind_cancel, restart_spawn_queue, restart_supervisor, claim, claim_status,
-///   release_claim, transfer_claim, accept_claim.
-/// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
-///   worktree_merge, worktree_status.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainOwnerTransferAction {
@@ -1033,8 +1021,8 @@ pub enum TrainOwnerTransferAction {
     Abort,
 }
 
-/// Train transfer input contains references and audit data, never caller or
-/// successor incarnation claims. The service resolves registered identities.
+// Train transfer input: references and audit data, never caller or successor
+// incarnation claims; the service resolves registered identities (cas-6456).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TrainOwnerTransferRequest {
@@ -1048,6 +1036,18 @@ pub struct TrainOwnerTransferRequest {
     pub successor: Option<String>,
 }
 
+/// Unified coordination operations request combining agent, factory, and worktree operations.
+///
+/// Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup,
+///   session_start, session_end, loop_start, loop_cancel, loop_status, lease_history,
+///   queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message,
+///   message_ack, message_status.
+/// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity,
+///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
+///   remind, remind_list, remind_cancel, restart_spawn_queue, restart_supervisor, claim, claim_status,
+///   release_claim, transfer_claim, accept_claim.
+/// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
+///   worktree_merge, worktree_status.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinationRequest {

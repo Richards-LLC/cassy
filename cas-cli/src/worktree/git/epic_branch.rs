@@ -12,6 +12,9 @@ pub(crate) struct EpicPublicationObservation {
     pub remote: Result<Option<bool>, String>,
     pub base_fetched: bool,
     pub previous_remote: bool,
+    /// The same origin read listed train authority refs (cas-6456). With
+    /// none, no train fences `branch`, so publication needs no second read.
+    pub authority_refs: bool,
 }
 
 pub(crate) struct EpicBranchReadiness {
@@ -112,22 +115,22 @@ impl GitOperations {
         base: Option<&str>,
     ) -> EpicPublicationObservation {
         let previous_remote = self.resolve_commit(&format!("origin/{branch}")).is_some();
+        let head = format!("refs/heads/{branch}");
+        let mut authority_refs = false;
         let remote = if !self.has_origin_remote() {
             Ok(None)
         } else {
             let mut command = Command::new("git");
             command
-                .args([
-                    "ls-remote",
-                    "--heads",
-                    "origin",
-                    &format!("refs/heads/{branch}"),
-                ])
+                .args(["ls-remote", "--refs", "origin", &head, "refs/cas/train-owner/*"])
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .current_dir(&self.repo_root);
             match Self::run_command_bounded(command, Duration::from_secs(10)) {
                 Ok(output) if output.status.success() => {
-                    if output.stdout.is_empty() {
+                    let listed = String::from_utf8_lossy(&output.stdout);
+                    let names: Vec<&str> = listed.lines().filter_map(|line| line.split_once('\t').map(|(_, name)| name)).collect();
+                    authority_refs = names.iter().any(|name| name.starts_with("refs/cas/train-owner/"));
+                    if !names.contains(&head.as_str()) {
                         Ok(Some(false))
                     } else {
                         self.fetch_branch(branch)
@@ -154,6 +157,7 @@ impl GitOperations {
             remote,
             base_fetched,
             previous_remote,
+            authority_refs,
         }
     }
 

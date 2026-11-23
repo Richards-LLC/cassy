@@ -6820,10 +6820,8 @@ impl FactoryDaemon {
                                 .any(|agent| {
                                     let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
                                         self.app.cas_dir(), agent) else { return false };
-                                    let observed = crate::mcp::tools::service::harness_observation::latest_turn_observations(
-                                        &path, cas_mux::SupervisorCli::Claude);
-                                    [observed.wake, observed.reaction, observed.completion].into_iter().flatten()
-                                        .any(|turn| turn.at >= chrono::DateTime::<chrono::Utc>::from(verification.launched_wall))
+                                    crate::mcp::tools::service::harness_observation::claude_turn_activity_since(
+                                        &path, chrono::DateTime::<chrono::Utc>::from(verification.launched_wall))
                                 });
                         if awaiting_first_prompt {
                             if verification.registered_at.is_some_and(|registered_at|
@@ -20750,7 +20748,11 @@ mod tests {
     #[tokio::test]
     async fn first_prompt_timeout_is_task_bound_and_preserves_live_progress_cas_3b23() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        for (has_pane, takes_prompt) in [(true, false), (false, false), (true, true)] {
+        // The last case is GH #2338: a long first turn still running, whose
+        // turn-start record has scrolled out of the transcript's tail window.
+        for (has_pane, takes_prompt, long_turn) in
+            [(true, false, false), (false, false, false), (true, true, false), (true, true, true)]
+        {
             let temp = tempfile::tempdir().unwrap();
             let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
             let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
@@ -20806,7 +20808,15 @@ mod tests {
             assert!(daemon.spawn_verifications.contains_key(worker));
             assert!(!daemon.dead_workers.contains(worker));
             if takes_prompt {
-                std::fs::write(&transcript, turn(chrono::Utc::now())).unwrap();
+                let now = chrono::Utc::now();
+                let mut records = turn(now);
+                if long_turn {
+                    let record = |kind: &str, body: serde_json::Value| format!("{}\n", serde_json::json!({
+                        "type": kind, "timestamp": now.to_rfc3339(), "message": body }));
+                    records += &record("attachment", serde_json::json!("x".repeat(300 * 1024)));
+                    records += &record("assistant", serde_json::json!({"role": "assistant", "content": []}));
+                }
+                std::fs::write(&transcript, records).unwrap();
             }
             daemon.spawn_verifications.get_mut(worker).unwrap().registered_at =
                 Some(Instant::now() - Duration::from_secs(301));

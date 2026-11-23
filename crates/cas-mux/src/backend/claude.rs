@@ -62,6 +62,7 @@ impl Backend for Claude {
             launch.config_dir,
             launch.cas_root,
         );
+        crate::gateway::apply(&mut config, launch.cas_root, launch.name);
         config
     }
 

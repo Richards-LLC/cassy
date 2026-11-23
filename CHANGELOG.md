@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.52.0] - 2026-11-23
+
+### Fixed — CI watcher
+
+- **Cassy no longer trips GitHub's secondary rate limit every half hour** — Was: every minute the CI watcher ran one `gh pr list` per parked delivery, about 111 a minute across this machine's projects, most of them train lanes that never get a PR, until GitHub refused all Cassy calls for ~30 minutes at a time. Now: one batched PR read per repository per poll covers every parked delivery and is matched locally, so 111 deliveries cost one call a poll instead of 111.
+
+### Fixed — CI
+
+- **Reuse the lane build after own tests** — Python helpers run by impact-selected tests no longer write bytecode into the watched source tree, avoiding an unnecessary cas rebuild when inventorying the ring. The measured post-test build fell from 302 s to 0.59 s with the bytecode producer selected, preserving all 11,533 executed native test identities; the code tip after probe removal recorded 0.25 s. Test selection and attribution remain unchanged.
+
+### Fixed — Factory coordination
+
+- **Actionable worker handoffs wake promptly** — Ready messages and merge requests bypass the supervisor message wake cap and burst debounce, as blockers already do. Status traffic remains capped and quiet messages remain inbox-only.
+
+### Added — Factory workers
+
+- **Workers can use the home gateway** — Was: every Claude and Codex worker talked to its provider directly with its own account login, and Cassy had no way to send worker traffic through the operator's own model hub. Now: a project that sets `factory.gateway.enabled = true` routes its workers through the hub named by `factory.gateway.endpoint` and `factory.gateway.key_file` (loopback or tailnet only, key file mode 0600), while each worker keeps its usual account directory for hooks, MCP and sessions. If the hub is not ready when a worker starts, that worker starts direct on the same account, and `worker_status` shows which transport each worker uses. Off by default; with the setting absent or false, launches are unchanged.
+
 ## [4.51.0] - 2026-11-23
 
 ### Fixed — Worker check

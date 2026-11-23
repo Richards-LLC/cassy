@@ -2632,7 +2632,10 @@ impl Pty {
         }
 
         for (key, value) in &config.env {
-            if key != WORKER_CREDENTIAL_GRANT_ENV && key != WORKER_CREDENTIAL_WARNING_ENV {
+            if key != WORKER_CREDENTIAL_GRANT_ENV
+                && key != WORKER_CREDENTIAL_WARNING_ENV
+                && key != crate::gateway_key::GATEWAY_KEY_FILE_ENV
+            {
                 cmd.env(key, value);
             }
         }
@@ -2671,6 +2674,24 @@ impl Pty {
             cmd.env_remove("OPENAI_API_KEY");
             cmd.env_remove("CODEX_API_KEY");
             cmd.env_remove("CODEX_ACCESS_TOKEN");
+        }
+
+        // Home-gateway workers authenticate with the hub's client key. It is
+        // read here, after the inherited-credential strip above, so the only
+        // token the child holds is this one, and no config, argv or log ever
+        // carries it.
+        cmd.env_remove(crate::gateway_key::GATEWAY_KEY_FILE_ENV);
+        if let Some(path) = config.env.iter().rev().find_map(|(key, value)| {
+            (key == crate::gateway_key::GATEWAY_KEY_FILE_ENV).then_some(value)
+        }) {
+            let key = crate::gateway_key::read_gateway_key(std::path::Path::new(path))
+                .map_err(|error| Error::pty(format!("gateway worker cannot start: {error}")))?;
+            let name = if is_codex {
+                crate::gateway_key::CODEX_GATEWAY_KEY_ENV
+            } else {
+                "ANTHROPIC_AUTH_TOKEN"
+            };
+            cmd.env(name, key);
         }
 
         // Spawn the child process
@@ -4923,6 +4944,71 @@ echo SMOKE_DONE
                             || arg.contains("fixture-account-never-forward"))
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn gateway_key_reaches_only_the_child_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let seen = temp.path().join("seen");
+        let codex = temp.path().join("codex");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\n{{ printf 'key=%s file=%s openai=%s\\n' \"${{CAS_GATEWAY_API_KEY-unset}}\" \"${{CAS_FACTORY_GATEWAY_KEY_FILE-unset}}\" \"${{OPENAI_API_KEY-unset}}\"; printf '%s\\n' \"$@\"; }} > {}\n",
+                shell_quote(&seen.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(temp.path().join("cas"), "fixture preflight only").unwrap();
+        env.set("PATH", temp.path());
+        env.set("OPENAI_API_KEY", "inherited-never-forward");
+        let key = temp.path().join("client.key");
+        std::fs::write(&key, "fixture-gateway-key\n").unwrap();
+        for (mode, expected) in [
+            (Some(0o600), Some("key=fixture-gateway-key file=unset openai=unset")),
+            (Some(0o644), None),
+            (None, Some("key=unset file=unset openai=unset")),
+        ] {
+            let mut config = PtyConfig::codex(
+                "gateway-probe", "worker", temp.path().to_path_buf(),
+                None, None, None, None, None, None,
+            );
+            config.env.push(("CAS_FACTORY_CODEX_HOME_SOURCE".into(), "explicit".into()));
+            if let Some(mode) = mode {
+                std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+                config.env.push((
+                    crate::gateway_key::GATEWAY_KEY_FILE_ENV.into(),
+                    key.to_string_lossy().into_owned(),
+                ));
+            }
+            let _ = std::fs::remove_file(&seen);
+            let Some(expected) = expected else {
+                let error = Pty::spawn("gateway-probe", config).err().expect("a shared key file must refuse the spawn");
+                assert!(!error.to_string().contains("fixture-gateway-key"));
+                continue;
+            };
+            let mut pty = Pty::spawn("gateway-probe", config).unwrap();
+            let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Exited(code)) => {
+                        assert_eq!(code, Some(0));
+                        break;
+                    }
+                    Some(PtyEvent::Output(_)) => {}
+                    event => panic!("gateway launch did not complete: {event:?}"),
+                }
+            }
+            let seen = std::fs::read_to_string(&seen).unwrap();
+            let (environment, argv) = seen.split_once('\n').unwrap();
+            assert_eq!(environment, expected);
+            assert!(!argv.contains("fixture-gateway-key"), "the key must never reach argv");
         }
     }
 

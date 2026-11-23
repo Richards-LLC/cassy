@@ -29,6 +29,7 @@
 
 mod backend;
 mod error;
+pub mod gateway;
 mod harness;
 mod input_stream;
 mod mux;

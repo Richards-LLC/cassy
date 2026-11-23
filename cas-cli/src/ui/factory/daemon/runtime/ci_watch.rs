@@ -133,6 +133,17 @@ pub(crate) trait CiTransport {
         &self,
         branch: &str,
     ) -> Result<Vec<DeliveryPullRequest>, CiWatchError>;
+    /// The PRs of every branch, newest first, in one read where the transport
+    /// can (cas-a9eb): a poll asks once however many deliveries are parked.
+    fn delivery_pull_requests_batch(
+        &self,
+        branches: &[&str],
+    ) -> Result<BTreeMap<String, Vec<DeliveryPullRequest>>, CiWatchError> {
+        branches
+            .iter()
+            .map(|branch| Ok(((*branch).to_string(), self.delivery_pull_requests(branch)?)))
+            .collect()
+    }
     /// cas-0f05: every run for one commit, whatever its status.
     fn runs_for_sha(&self, _sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
         Ok(Vec::new())
@@ -1410,7 +1421,7 @@ impl CiTransport for GhCiTransport {
         let fresh = |cached: &[u8]| {
             let same = serde_json::from_slice::<serde_json::Value>(cached)
                 .is_ok_and(|entry| entry["signature"] == signature.as_str());
-            if same { OUTSIDE_LISTING_RUNS_TTL } else { Duration::ZERO }
+            if same { crate::gh_budget::jittered(OUTSIDE_LISTING_RUNS_TTL, &key) } else { Duration::ZERO }
         };
         let bytes = crate::gh_budget::shared_read_by(&key, fresh, || {
             let answer = self.gh_bytes(&[
@@ -1493,22 +1504,54 @@ impl CiTransport for GhCiTransport {
         &self,
         branch: &str,
     ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
-        self.gh_json(&[
-            "pr".to_string(),
-            "list".to_string(),
-            "--repo".to_string(),
-            self.repo.clone(),
-            "--state".to_string(),
-            "all".to_string(),
-            "--head".to_string(),
-            branch.to_string(),
-            "--limit".to_string(),
-            "20".to_string(),
-            "--json".to_string(),
-            "number,headRefName,headRefOid,state,mergedAt,mergeCommit".to_string(),
-        ])
+        Ok(self.delivery_pull_requests_batch(&[branch])?.remove(branch).unwrap_or_default())
+    }
+
+    /// One GraphQL request for every branch, matched to its PRs locally
+    /// (cas-a9eb). One `gh pr list` per parked delivery per poll, 111 a minute
+    /// for train lanes that never get a PR, tripped GitHub's secondary limit
+    /// and held every Cassy call in backoff for half an hour at a time. The
+    /// branch names travel as variables, so none is spliced into the query.
+    fn delivery_pull_requests_batch(
+        &self,
+        branches: &[&str],
+    ) -> Result<BTreeMap<String, Vec<DeliveryPullRequest>>, CiWatchError> {
+        let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
+            .ok_or_else(|| CiWatchError::Unavailable("invalid GitHub repository for the delivery PR lookup".to_string()))?;
+        let mut found = BTreeMap::new();
+        for chunk in branches.chunks(DELIVERY_PR_BATCH) {
+            let variables: String = (0..chunk.len()).map(|n| format!(", $h{n}: String!")).collect();
+            let fields: String = (0..chunk.len()).map(|n| format!(
+                " pr{n}: pullRequests(headRefName: $h{n}, states: [OPEN, CLOSED, MERGED], first: 20, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number headRefName headRefOid state mergedAt mergeCommit {{ oid }} }} }}"
+            )).collect();
+            let query = format!("query($owner: String!, $name: String!{variables}) {{ repository(owner: $owner, name: $name) {{{fields} }} }}");
+            let mut args = vec![
+                "api".to_string(), "graphql".to_string(),
+                "-f".to_string(), format!("query={query}"),
+                "-f".to_string(), format!("owner={}", repo.owner),
+                "-f".to_string(), format!("name={}", repo.repo),
+            ];
+            for (n, branch) in chunk.iter().enumerate() {
+                args.push("-f".to_string());
+                args.push(format!("h{n}={branch}"));
+            }
+            let answer: serde_json::Value = self.gh_json(&args)?;
+            for (n, branch) in chunk.iter().enumerate() {
+                let pulls = serde_json::from_value(answer["data"]["repository"][format!("pr{n}")]["nodes"].clone())
+                    .map_err(|e| CiWatchError::Malformed(format!("invalid delivery PR JSON: {e}")))?;
+                found.insert((*branch).to_string(), pulls);
+            }
+        }
+        Ok(found)
     }
 }
+
+/// Branches asked in one request, so a poll reads at most one request per 150
+/// watched branches. A query must stay bounded: 150 lookups of 20 PRs are 3,000
+/// of GitHub's 500,000 nodes and well inside the command-line limit, so a
+/// project's whole parked set (111 today) is one read; only a larger one takes
+/// another.
+const DELIVERY_PR_BATCH: usize = 150;
 
 fn merge_group_pr_number(branch: &str) -> Option<u64> {
     let (_, suffix) = branch.rsplit_once("/pr-")?;
@@ -1524,10 +1567,13 @@ pub(crate) fn collect_delivery_pr_observations(
     deliveries: &[AwaitingMergeDelivery],
 ) -> Result<Vec<DeliveryPrObservation>, CiWatchError> {
     let mut observations = Vec::new();
+    let branches: BTreeSet<&str> = deliveries.iter().map(|delivery| delivery.branch.as_str()).collect();
+    let pulls = transport.delivery_pull_requests_batch(&branches.into_iter().collect::<Vec<_>>())?;
     for delivery in deliveries {
-        let pulls = transport.delivery_pull_requests(&delivery.branch)?;
         let candidate = pulls
+            .get(&delivery.branch)
             .into_iter()
+            .flatten()
             .filter(|pull| pull.head_branch == delivery.branch)
             .filter(|pull| {
                 if let Some(number) = delivery.pr_number {
@@ -1539,7 +1585,8 @@ pub(crate) fn collect_delivery_pr_observations(
                         .is_none_or(|tip| tip == pull.head_sha)
                 }
             })
-            .max_by_key(|pull| pull.number);
+            .max_by_key(|pull| pull.number)
+            .cloned();
         let Some(pull) = candidate else {
             continue;
         };
@@ -2743,7 +2790,7 @@ mod tests {
         let gh = temp.path().join("gh");
         crate::test_paths::warm_stub(
             &gh,
-            "#!/bin/sh\nprintf '%s' '[{\"number\":932,\"headRefName\":\"factory/calm-octopus-51\",\"headRefOid\":\"worker-tip\",\"state\":\"MERGED\",\"mergedAt\":\"2026-09-21T12:00:00Z\",\"mergeCommit\":{\"oid\":\"merge-tip\"}}]'\n",
+            "#!/bin/sh\nprintf '%s' '{\"data\":{\"repository\":{\"pr0\":{\"nodes\":[{\"number\":932,\"headRefName\":\"factory/calm-octopus-51\",\"headRefOid\":\"worker-tip\",\"state\":\"MERGED\",\"mergedAt\":\"2026-09-21T12:00:00Z\",\"mergeCommit\":{\"oid\":\"merge-tip\"}}]}}}}'\n",
         );
         let transport = GhCiTransport {
             repo: "org/repo".to_string(),
@@ -2759,6 +2806,72 @@ mod tests {
         assert_eq!(pulls.len(), 1);
         assert_eq!(pulls[0].number, 932);
         assert_eq!(pulls[0].merge_commit.as_ref().unwrap().oid, "merge-tip");
+    }
+
+    /// cas-a9eb: 111 parked deliveries, nearly all train lanes that never get a
+    /// PR, were each looked up on every 60 s poll and tripped GitHub's secondary
+    /// limit. A poll now asks GitHub once for all of them, however many there
+    /// are and whatever a cache holds; a PR opening between polls is seen on the
+    /// next poll, and its merge on the one after.
+    #[test]
+    fn parked_deliveries_cost_one_pr_read_a_poll_however_many_cas_a9eb() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let dir = env.home().join("gh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gh = dir.join("gh");
+        // GitHub for this test: every read of PRs is one logged call; a batched
+        // query answers each `h<i>=<branch>` variable as `pr<i>` from
+        // `<branch with / as _>.json` (no PRs when absent).
+        crate::test_paths::warm_stub(&gh, &r#"#!/bin/sh
+echo "$1 $2" >> 'DIR/calls.log'
+case "$1 $2" in
+'pr list') echo '[]' ;;
+'api graphql')
+  out=''; sep=''
+  for a in "$@"; do case "$a" in h[0-9]*=*)
+    i=${a%%=*}; i=${i#h}; f="DIR/$(echo "${a#*=}" | tr / _).json"; nodes='[]'; [ -f "$f" ] && nodes=$(cat "$f")
+    out="$out$sep\"pr$i\":{\"nodes\":$nodes}"; sep=,;; esac; done
+  printf '{"data":{"repository":{%s}}}' "$out" ;;
+*) exit 97 ;;
+esac
+"#.replace("DIR", &dir.display().to_string()));
+        let pull = |branch: &str, state: &str| serde_json::json!([{"number": 9, "headRefName": branch, "headRefOid": "tip",
+            "state": state, "mergedAt": (state == "MERGED").then_some("2026-11-23T01:00:00Z"),
+            "mergeCommit": (state == "MERGED").then(|| serde_json::json!({"oid": "merge-tip"}))}]).to_string();
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().count());
+        const PARKED: usize = 111;
+        const POLLS: usize = 10;
+        let deliveries: Vec<AwaitingMergeDelivery> = (0..PARKED).map(|n| AwaitingMergeDelivery {
+            task_id: format!("cas-{n}"), worker: format!("w{n}"), branch: format!("factory/w{n}-cas-{n}"),
+            branch_tip: None, pr_number: None,
+        }).collect();
+        let poll = || collect_delivery_pr_observations(&GhCiTransport {
+            repo: "org/repo".to_string(), cwd: dir.clone(), gh_binary: gh.clone(),
+            completed: Default::default(), recent: Default::default(),
+        }, &deliveries).unwrap();
+
+        let mut per_poll = Vec::new();
+        for _ in 0..POLLS {
+            let before = calls();
+            assert!(poll().is_empty());
+            per_poll.push(calls() - before);
+        }
+        assert_eq!(per_poll, [1; POLLS], "PR reads per poll for {PARKED} parked deliveries, the first included");
+
+        let lane = deliveries[7].branch.clone();
+        std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "OPEN")).unwrap();
+        let seen = poll();
+        assert_eq!(seen.iter().map(|o| (o.task_id.as_str(), o.pr_number, o.merge_commit.as_deref())).collect::<Vec<_>>(), [("cas-7", 9, None)]);
+        std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "MERGED")).unwrap();
+        assert_eq!(poll().iter().map(|o| o.merge_commit.as_deref()).collect::<Vec<_>>(), [Some("merge-tip")]);
+        assert_eq!(calls(), POLLS + 2, "a PR's opening and its merge are each seen on the next poll, still one read");
+
+        // Run lists cached together do not expire together, and none outlives its lifetime.
+        let expiry = |sha: &str| crate::gh_budget::jittered(OUTSIDE_LISTING_RUNS_TTL, &format!("runs org/repo {sha}"));
+        let (a, b) = (expiry(&format!("{:040x}", 1)), expiry(&format!("{:040x}", 2)));
+        assert_ne!(a, b);
+        assert!(a.max(b) <= OUTSIDE_LISTING_RUNS_TTL && a.min(b) >= OUTSIDE_LISTING_RUNS_TTL.mul_f64(0.9));
     }
 
     #[test]

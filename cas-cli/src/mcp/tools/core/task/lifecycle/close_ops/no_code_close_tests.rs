@@ -2490,7 +2490,7 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
 /// cas-db91 (GH #1698): after a supervisor rebinds a task to its rebuilt
 /// `-r2` lane, close measures `-r2`, whether its tip is local or only on
 /// origin, or still empty (an approved empty rebind, GH #1673), never the old
-/// per-task lane that still carries the first build.
+/// per-task lane that still carries the first build. G-81 judges the same lane.
 #[tokio::test]
 async fn rebound_r2_lane_is_the_close_measured_branch_cas_db91() {
     for (remote_only, empty) in [(false, false), (true, false), (false, true)] {
@@ -2539,6 +2539,14 @@ async fn rebound_r2_lane_is_the_close_measured_branch_cas_db91() {
         }
         assert_eq!(close_measured_factory_branch(repo, &f.task(id), WORKER).trim_start_matches("origin/"),
             rebuilt, "remote_only={remote_only} empty={empty}");
+        // G-81 judges that same lane. The first build is pushed with unmerged
+        // commits and would proceed; an empty, unpushed `-r2` lane must refuse by name.
+        let reality = check_close_merge_reality(repo, &f.task(id), WORKER, "main");
+        match (empty, reality) {
+            (true, MergeRealityOutcome::Refuse(message)) => assert!(message.contains(&rebuilt), "{message}"),
+            (false, MergeRealityOutcome::Proceed) => {}
+            (empty, _) => panic!("G-81 judged the wrong lane: remote_only={remote_only} empty={empty}"),
+        }
     }
 }
 

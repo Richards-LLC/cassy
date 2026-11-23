@@ -17556,7 +17556,14 @@ pub(crate) fn resolve_close_delivery_branch(
             return Ok(delivery.branch);
         }
     }
-    if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
+    // cas-db91 (GH #1698): a lane bound by rebind (e.g. `-r2`) before its
+    // first commit is still this task's lane. The per-task name may hold the
+    // earlier build; never fall back to it while the recorded start exists.
+    if let Some(delivery) = task_attribution::validated_started_delivery(repo_path, task)?
+        && (!delivery.commits.is_empty()
+            || task.deliverables.factory_branch_start.as_ref()
+                .is_some_and(|start| start.branch != format!("factory/{assignee}")))
+    {
         return Ok(delivery.branch);
     }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {

@@ -1807,8 +1807,10 @@ mod tests {
         let reads = std::fs::read_to_string(&reads).unwrap_or_default();
         assert_eq!(reads.lines().filter(|line| line.contains("git fetch ")).count(), fixture.ids.len(), "target fetches:\n{reads}");
         for index in 1..=fixture.ids.len() {
-            let source = format!("git ls-remote --heads origin refs/heads/factory/worker-{index} ");
-            assert_eq!(reads.lines().filter(|line| *line == source).count(), 1, "source publication reads:\n{reads}");
+            // Each line names upload-pack's parent and grandparent (`a | b`).
+            let source = format!("git ls-remote --heads origin refs/heads/factory/worker-{index}");
+            assert_eq!(reads.lines().filter(|line| line.split(" | ").any(|caller| caller.trim_end() == source)).count(), 1,
+                "source publication reads:\n{reads}");
         }
         assert_eq!(reads.lines().count(), fixture.ids.len() * 2, "one source proof and one shared target/close fetch per entry:\n{reads}");
     }

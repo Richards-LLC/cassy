@@ -78,6 +78,31 @@ fn train_owner_projection_cas_6456() {
     stale_owner.epic_verification_owner = original.epic_verification_owner;
     assert!(store.update_from_sync(&stale_owner, &accepted).unwrap().is_none());
     assert_eq!(store.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some("accepted"));
+
+    // An unenrolled owned train: only finishing it may release its owner;
+    // no write replaces the owner, open or finished. Enrolled trains above
+    // never release through task metadata.
+    let mut legacy = Task::new("cas-6456-legacy".into(), "Legacy train".into());
+    legacy.task_type = TaskType::Epic;
+    legacy.labels = vec!["release-train".into()];
+    legacy.epic_verification_owner = Some("prior".into());
+    store.add(&legacy).unwrap();
+    let legacy = store.get(&legacy.id).unwrap();
+    for (status, owner, allowed) in [
+        (TaskStatus::Open, None, false),
+        (TaskStatus::Open, Some("taker"), false),
+        (TaskStatus::Closed, Some("taker"), false),
+        (TaskStatus::Closed, None, true),
+    ] {
+        let mut attempted = legacy.clone();
+        attempted.status = status;
+        attempted.epic_verification_owner = owner.map(Into::into);
+        assert_eq!(store.update(&attempted).is_ok(), allowed, "{status:?} {owner:?}");
+    }
+    let mut released = accepted.clone();
+    released.status = TaskStatus::Closed;
+    released.epic_verification_owner = None;
+    assert!(store.update(&released).is_err());
 }
 
 /// cas-7678: the factory daemon opens the task store uncached many times a

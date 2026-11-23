@@ -21822,6 +21822,32 @@ fn advance_clean_epic_after_child_integration(
         ));
     }
 
+    let has_origin = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if has_origin {
+        // Closing advances an existing shared lane, never recreates a deleted one.
+        match crate::worktree::GitOperations::new(repo_path.to_path_buf())
+            .observe_epic_publication(epic_branch, None)
+            .remote
+        {
+            Ok(Some(true)) => {}
+            Ok(_) => {
+                return Some(format!(
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id}; current lane is absent on origin; automatic resurrection refused. No refs advanced or pushed; child close remains valid."
+                ));
+            }
+            Err(error) => {
+                return Some(format!(
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id}; {error}. Child close remains valid; no refs advanced or pushed."
+                ));
+            }
+        }
+
+    }
+
     // A child may close without owning the train. Only the authenticated
     // owner can advance its shared target; otherwise leave all refs intact.
     let publication = (|| -> Result<bool, String> {
@@ -21845,11 +21871,6 @@ fn advance_clean_epic_after_child_integration(
         Ok(false) => {}
     }
 
-    let has_origin = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo_path)
-        .output()
-        .is_ok_and(|output| output.status.success());
     if !has_origin {
         return Some(
             match fast_forward_local_epic_ref(repo_path, epic_branch, &integration_tip) {
@@ -21865,24 +21886,6 @@ fn advance_clean_epic_after_child_integration(
                 ),
             },
         );
-    }
-
-    // Closing advances an existing shared lane, never recreates a deleted one.
-    match crate::worktree::GitOperations::new(repo_path.to_path_buf())
-        .observe_epic_publication(epic_branch, None)
-        .remote
-    {
-        Ok(Some(true)) => {}
-        Ok(_) => {
-            return Some(format!(
-                "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id}; current lane is absent on origin; automatic resurrection refused. No refs advanced or pushed; child close remains valid."
-            ));
-        }
-        Err(error) => {
-            return Some(format!(
-                "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id}; {error}. Child close remains valid; no refs advanced or pushed."
-            ));
-        }
     }
 
     let push = Command::new("git")

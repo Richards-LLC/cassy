@@ -352,9 +352,9 @@ impl GitOperations {
         if !origin.is_some_and(|origin| origin.branch == branch) {
             return Err("automatic publication refused: the factory did not record creating this lane under its current name; no local ref advanced or remote ref created".into());
         }
-        // First-use publication is generic epic setup. It must never create
-        // or resurrect a recorded/enrolled train target as a side effect.
-        super::train_authority::refuse_unfenced(&self.repo_root, branch)?;
+        // The fresh observation above already ruled out a matching authority.
+        // Retain the pending-enrollment hold without another origin read.
+        super::train_authority::require_no_missing_enrollment(&self.repo_root, branch)?;
         if let Some(base) = base {
             let base_label = Self::visible_git_label(base);
             if !observation.base_fetched {

@@ -3372,6 +3372,9 @@ const startTime = new Date().toISOString(), result = { workerIndex: 0, parallelI
 const test = { timeout: 30000, annotations: [], expectedStatus: 'passed', projectId: '', projectName: '',
   results: listing ? [] : [result], status: listing ? 'skipped' : 'expected' };
 const specCount = listed.reduce((sum, file) => sum + specsOf(file).length, 0);
+// With a `.record-runs` marker beside the config, each executed test's title is appended once per repeat to `.ran`.
+if (!listing && fs.existsSync(path.join(path.dirname(config), '.record-runs')))
+  for (const file of listed) for (const spec of specsOf(file)) fs.appendFileSync(path.join(path.dirname(config), '.ran'), `${spec.title}\n`.repeat(repeats));
 const noTests = 'Error: No tests found.\nMake sure that arguments are regular expressions matching test files.\nYou may need to escape symbols like "$" or "*" and quote the arguments.';
 const report = {
   config: { argv: process.argv, configFile: config, rootDir: root, failOnFlakyTests: false, forbidOnly: false, fullyParallel: false, globalSetup: null,
@@ -3470,28 +3473,36 @@ process.exit(listed.length ? 0 : 1);
         write("node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        // GH #2349: Playwright greps the title followed by the tags, so one
-        // spec declares its test with the tag option and one without.
-        let (tagged, untagged) = ("tests/e2e/sign-in.spec.ts", "tests/e2e/sign-out.spec.ts");
-        let source = |title: &str, option: &str, body: &str| format!(
-            "import {{ test }} from '@playwright/test';\ntest('{title}', {option}async () => {{ {body} }});\n");
-        let sources = |body: &str| {
-            write(tagged, &source("hermetic sign in", "{ tag: ['@staging', '@smoke'] }, ", body));
-            write(untagged, &source("hermetic sign out", "", body));
-        };
-        sources("throw 0;");
+        // GH #2349: Playwright greps the title followed by the tags, so a test
+        // declared with the tag option is `title @tag`. One spec holds tests
+        // whose titles share a prefix, tagged or not; each must run alone.
+        write(".gitignore", ".ran\n");
+        write(".record-runs", "");
+        let spec = "tests/e2e/sign-in.spec.ts";
+        let source = |body: &str| format!(
+            "import {{ test }} from '@playwright/test';\n\
+             test('hermetic sign in', {{ tag: ['@staging', '@smoke'] }}, async () => {{ {body} }});\n\
+             test('hermetic sign in extra', async () => {{ {body} }});\n\
+             test('hermetic sign in extra later', {{ tag: ['@staging'] }}, async () => {{ {body} }});\n");
+        write(spec, &source("throw 0;"));
         git(&["add", "."]);
         git(&["commit", "--quiet", "-m", "base"]);
         let base = git(&["rev-parse", "HEAD"]);
-        sources("");
+        write(spec, &source(""));
         git(&["commit", "--quiet", "-am", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
 
-        let specs = [tagged.to_string(), untagged.to_string()];
-        let tests = changed_tests(repo.path(), &base, &head, &specs, None).unwrap();
-        assert_eq!(tests, [id(tagged, "hermetic sign in"), id(untagged, "hermetic sign out")]);
+        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
+        assert_eq!(tests, [id(spec, "hermetic sign in"), id(spec, "hermetic sign in extra"), id(spec, "hermetic sign in extra later")]);
         let cas_root = tempfile::tempdir().unwrap();
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        // Each target's own run executes that test five times and no neighbour.
+        for target in &tests {
+            let _ = std::fs::remove_file(repo.path().join(".ran"));
+            execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, std::slice::from_ref(target), None, &[]).unwrap();
+            let ran = std::fs::read_to_string(repo.path().join(".ran")).unwrap();
+            assert_eq!(ran.lines().collect::<Vec<_>>(), vec![target.name.as_str(); 5], "{target:?}");
+        }
         // Worker-check discovers the owning config and records five capped passes.
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
@@ -3500,8 +3511,8 @@ process.exit(listed.length ? 0 : 1);
         let config = "playwright.hermetic.config.js";
         let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
         assert_eq!(prescribed.len(), 1);
-        assert!(prescribed[0].contains(&format!("-- playwright --config {config} {tagged} {untagged}`")), "{prescribed:?}");
-        let args: Vec<String> = ["playwright", "--config", config, tagged, untagged].map(String::from).into();
+        assert!(prescribed[0].contains(&format!("-- playwright --config {config} {spec}`")), "{prescribed:?}");
+        let args: Vec<String> = ["playwright", "--config", config, spec].map(String::from).into();
         let explicit = repo.path().join(invocation(&args).unwrap().config.unwrap());
         execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&explicit), &tests, None, &[]).unwrap();
         // An explicit caller config stays authoritative: the default lists no

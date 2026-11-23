@@ -47,15 +47,15 @@ function fleetPermissionMarkup(id: string, kind: 'operate' | 'manage', name: str
   const state = gate.allowed ? 'Allowed' : gate.state;
   // cas-a217: say which permission allows Commander write grants.
   const also = kind === 'manage' ? '<p class="field-hint fleet-permission-also">Also needed to grant a task write access outside its worktree.</p>' : '';
-  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}">${escapeHtml(state)}</span></p>`;
-  if (gate.allowed) return `<div class="fleet-permission" data-permission="${kind}" data-allowed="true">${head}${also}</div>`;
+  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name" data-testid="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}" data-testid="fleet-permission-state">${escapeHtml(state)}</span></p>`;
+  if (gate.allowed) return `<div class="fleet-permission" data-testid="fleet-permission" data-permission="${kind}" data-allowed="true">${head}${also}</div>`;
   const reason = `<p class="field-hint fleet-permission-reason" id="fleet-reason-${key}">${escapeHtml(gate.reason)}</p>`;
   // GH #1220: a disabled lookalike suggested a fleet action. The permission
   // name and its reason are followed directly by the actual re-pair command.
   const grant = gate.grantable
     ? `<div class="fleet-permission-grant"><button type="button" class="fleet-permission-allow" data-fleet-allow="${escapeHtml(id)}" aria-describedby="fleet-reason-${key}">Allow managing workers</button></div>`
     : `<p class="field-hint fleet-permission-invite" id="fleet-invite-${key}">Run this on ${escapeHtml(label)} and open the link it prints in this browser:</p><div class="pair-code-actions fleet-permission-command"><code>${commandTokensMarkup(gate.command)}</code><button type="button" class="fleet-permission-copy" data-command="${escapeHtml(gate.command)}" aria-describedby="fleet-invite-${key}">Copy command</button></div>`;
-  return `<div class="fleet-permission" data-permission="${kind}" data-allowed="false">${head}${reason}${also}${grant}</div>`;
+  return `<div class="fleet-permission" data-testid="fleet-permission" data-permission="${kind}" data-allowed="false">${head}${reason}${also}${grant}</div>`;
 }
 
 /** The Fleet permissions block of one paired machine. */
@@ -109,7 +109,7 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span data-reconnecting="${state === 'Reconnecting'}" class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnownSuffix(sessions, lastKnown)}`}</span><span title="Web client release and build">Web ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" data-testid="pairing-dot" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span data-reconnecting="${state === 'Reconnecting'}" data-testid="machine-badge-state" class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta" data-testid="hub-footer-meta"><span data-testid="hub-footer-sessions">${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnownSuffix(sessions, lastKnown)}`}</span><span title="Web client release and build">Web ${escapeHtml(build)}</span></div>`;
 }
 
 function lastKnownSuffix(sessions: number, lastKnown: boolean | number): string {
@@ -144,7 +144,7 @@ export function orderPairedMachines<T extends Pick<PairedMachineRow, 'connected'
 }
 
 export function pairedMachinesDialogMarkup(): string {
-  return `<dialog id="paired-machines-dialog" aria-labelledby="paired-machines-title"><header class="machines-dialog-heading">${cloudBrand()}<button id="paired-machines-close" type="button" aria-label="Close paired machines">×</button></header><h2 id="paired-machines-title">Paired machines</h2><p class="machine-register-hint">Paired with this browser. Removing a machine here leaves its other devices connected.</p><div id="paired-machines-list"></div><p id="paired-machines-error" role="alert" hidden></p><button id="paired-machines-add" type="button">Pair a machine</button></dialog>`;
+  return `<dialog id="paired-machines-dialog" aria-labelledby="paired-machines-title"><header class="machines-dialog-heading">${cloudBrand()}<button id="paired-machines-close" type="button" aria-label="Close paired machines">×</button></header><h2 id="paired-machines-title">Paired machines</h2><p class="machine-register-hint" data-testid="machine-register-hint">Paired with this browser. Removing a machine here leaves its other devices connected.</p><div id="paired-machines-list"></div><p id="paired-machines-error" role="alert" hidden></p><button id="paired-machines-add" type="button">Pair a machine</button></dialog>`;
 }
 
 /** Keyed register: status ticks preserve focused controls and removal confirmation. */
@@ -157,8 +157,8 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
   for (const row of rows) {
     let node = Array.from(container.children).find(node => (node as HTMLElement).dataset.machineId === row.id) as HTMLElement | undefined;
     if (!node) {
-      node = document.createElement('section'); node.className = 'paired-machine'; node.dataset.machineId = row.id;
-      node.innerHTML = '<h3></h3><p class="paired-machine-address"></p><p class="paired-machine-state"></p><p class="paired-machine-seen"></p><p class="paired-machine-runtime"></p><section class="paired-machine-fleet" hidden></section><button type="button" class="paired-machine-remove">Remove from this browser</button>';
+      node = document.createElement('section'); node.className = 'paired-machine'; node.dataset.machineId = row.id; node.dataset.testid = 'paired-machine';
+      node.innerHTML = '<h3></h3><p class="paired-machine-address"></p><p class="paired-machine-state" data-testid="paired-machine-state"></p><p class="paired-machine-seen" data-testid="paired-machine-seen"></p><p class="paired-machine-runtime" data-testid="paired-machine-runtime"></p><section class="paired-machine-fleet" hidden></section><button type="button" class="paired-machine-remove">Remove from this browser</button>';
       const button = node.querySelector<HTMLButtonElement>('.paired-machine-remove')!;
       button.onclick = async () => {
         if (button.dataset.confirm !== 'true') { button.dataset.confirm = 'true'; button.textContent = 'Confirm removal'; return; }

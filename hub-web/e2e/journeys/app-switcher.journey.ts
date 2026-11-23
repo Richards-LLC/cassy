@@ -68,14 +68,14 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await journey.open();
         await expect(switcher).toBeHidden();
         await openApps();
-        await expect(switcher.locator('[aria-current="page"] .app-switcher-name')).toHaveText("Commander");
+        await expect(switcher.locator('[aria-current="page"]').getByText("Commander", { exact: true })).toHaveText("Commander");
         await expect(switcher.getByRole("link", { name: "Explorer (opens in a new tab)" })).toBeVisible();
       });
       await journey.stage("Switch to Explorer from the list", async () => {
         await openApps();
         const explorerLink = switcher.getByRole("link", { name: "Explorer (opens in a new tab)" });
         await followToExplorer(page, explorerLink, requests, EXPLORER_HOME);
-        await expect(page.locator(".conversation-list-heading")).toBeVisible();
+        await expect(page.getByTestId("conversation-list-heading")).toBeVisible();
         // cas-2a26 (journey eval 3.51.0 F02): back in Commander's tab the list
         // header is as it was, with no menu left open over it.
         await expect(switcher).toBeHidden();
@@ -89,9 +89,10 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(apps).toBeFocused();
       });
       await journey.stage("Open this project's tasks in Explorer", async () => {
-        await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
+        await list.getByRole("button", { name: /^cas-src on / }).click();
         if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
-        const link = page.locator("#status-view, .conversation-context").getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" });
+        // The rail on desktop; on a phone, the Tasks & progress sheet.
+        const link = page.getByRole("complementary", { name: "Conversation context" }).or(page.getByRole("dialog", { name: "Tasks & progress" })).getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" });
         await expect(link).toBeVisible();
         await followToExplorer(page, link, requests, PROJECT_EXPLORER);
         if (width === 1280) {
@@ -106,7 +107,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
           await page.keyboard.press("Escape");
           await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
         }
-        await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
+        await list.getByRole("button", { name: /^gabber-studio on / }).click();
         await expect(page.getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" })).toHaveCount(0);
         if (width === 390) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
         await openApps();

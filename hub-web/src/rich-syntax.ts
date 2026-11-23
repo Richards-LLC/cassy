@@ -103,6 +103,7 @@ export function highlightCode(pre: HTMLPreElement, language: string): string | u
     fragment.append(document.createTextNode(source.slice(cursor, start)));
     const span = document.createElement("span");
     span.className = `syntax-${kind}`;
+    span.dataset.testid = `syntax-${kind}`;
     span.textContent = source.slice(start, end);
     fragment.append(span);
     cursor = end;

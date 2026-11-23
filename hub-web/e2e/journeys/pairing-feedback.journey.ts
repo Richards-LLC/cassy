@@ -1,10 +1,21 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS } from "./world";
 import { showConversationList } from "./responsive-goals";
-import type { Page, TestInfo, Route } from "@playwright/test";
+import type { Locator, Page, TestInfo, Route } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 
 test.describe.configure({ mode: "parallel" });
+
+const pairDialog = (page: Page) => page.getByRole("dialog", { name: "Pair a machine", exact: true });
+// Timeout advice turns the status region into an alert; either role is the same node.
+const pairingFeedback = (dialog: Locator) => dialog.getByRole("status", { name: "Pairing status", exact: true })
+  .or(dialog.getByRole("alert", { name: "Pairing status", exact: true }));
+// The footer opener reads "<machine> <state>", or "Paired machines Loading…" before the catalog.
+const pairedMachinesToggle = (page: Page) => page.getByRole("complementary", { name: "Supervisor conversations" })
+  .getByRole("button", { name: /^(Atlas\b|Paired machines )/ });
+const inventorySheet = (page: Page) => page.getByRole("dialog", { name: / browser installations$/ });
+const inventoryRow = (page: Page) => inventorySheet(page).getByTestId("installation-inventory-row");
+const inventoryClose = (page: Page) => inventorySheet(page).getByRole("button", { name: "Close", exact: true });
 
 async function captureRendered(page: Page, info: TestInfo, name: string): Promise<void> {
   await page.screenshot({ path: info.outputPath(`${name}.png`) });
@@ -30,14 +41,14 @@ for (const width of [390, 1280]) {
           if (blocked) { held = route; return; }
           return route.fallback();
         });
-        const dialog = page.locator("#pair-dialog");
+        const dialog = pairDialog(page);
         await journey.stage("A timed-out pairing puts the cause and next action in view", async () => {
           await page.goto(`./#pair=${"t".repeat(43)}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=machine:read,session:read,pane:read`);
           await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
           await dialog.getByRole("button", { name: "Pair", exact: true }).click();
           await expect.poll(() => Boolean(held)).toBe(true);
           await page.clock.runFor(10_001);
-          const feedback = dialog.locator(".pair-status");
+          const feedback = pairingFeedback(dialog);
           await expect(feedback).toBeVisible();
 
           await expect(feedback).toBeInViewport({ ratio: 1 });
@@ -66,7 +77,7 @@ for (const width of [390, 1280]) {
           held = undefined;
           await dialog.getByRole("button", { name: "Pair", exact: true }).click();
           await expect.poll(() => Boolean(held)).toBe(true);
-          const feedback = dialog.locator(".pair-status");
+          const feedback = pairingFeedback(dialog);
           await expect(feedback).toHaveAttribute("role", "status");
 
           expect(await dialog.evaluate(el => el.contains(document.activeElement)), "retry focus remains in the dialog").toBe(true);
@@ -81,7 +92,7 @@ for (const width of [390, 1280]) {
         const hub = await journey.hub({ machines: [ATLAS] });
         await journey.stage("Pair a browser with a recognizable name", async () => {
           await page.goto(`./#pair=${"i".repeat(43)}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=machine:read,session:read,pane:read`);
-          const dialog = page.locator("#pair-dialog");
+          const dialog = pairDialog(page);
           await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
           const browserName = dialog.getByRole("textbox", { name: "Name for this browser" });
           await browserName.fill("   ");
@@ -95,19 +106,19 @@ for (const width of [390, 1280]) {
           expect([...hub.installations.values()][0]!.device_label).toBe("Work laptop");
         });
         await journey.stage("Recognize this browser without reading protocol fields", async () => {
-          if (width === 390) await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
+          if (width === 390) await expect(page.getByTestId("conversation-thread-slot").getByTestId("conversation-thread")).toBeVisible();
           await showConversationList(page);
-          await page.locator("#paired-machines-toggle").click();
+          await pairedMachinesToggle(page).click();
           await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
-          const row = page.locator(".installation-inventory-row");
+          const row = inventoryRow(page);
           await expect(row.getByRole("heading", { name: "Work laptop · This browser", exact: true })).toBeVisible();
           const visible = await row.innerText();
           expect(visible).toContain("Daniel");
           expect(visible).toContain("Active");
           expect(visible).not.toMatch(/Generation|Signing key|key epoch|\d{4}-\d{2}-\d{2}T/);
           expect(visible).not.toContain([...hub.installations.keys()][0]!);
-          await expect(row.locator("time")).toHaveCount(2);
-          for (const time of await row.locator("time").all()) {
+          await expect(row.getByTestId("installation-time")).toHaveCount(2);
+          for (const time of await row.getByTestId("installation-time").all()) {
             await expect(time).toHaveAttribute("title", /.+/);
             await expect(time).not.toHaveText(/\d{4}-\d{2}-\d{2}T/);
             await expect(time).toBeVisible();
@@ -116,7 +127,7 @@ for (const width of [390, 1280]) {
           // cas-205e QA F01: in the sheet's default view (no scrolling) Revoke
           // shows whole, above the Close bar, which is the sheet's footer and
           // never inside the scroller over its last row.
-          const clearance = await page.locator(".installation-inventory").evaluate((sheet) => {
+          const clearance = await inventorySheet(page).evaluate((sheet) => {
             const bar = sheet.querySelector(":scope > .dialog-actions")!;
             const body = sheet.querySelector(".installation-inventory-body")!;
             const button = [...sheet.querySelectorAll("button")].find((b) => b.textContent === "Revoke this browser's access")!;
@@ -129,22 +140,22 @@ for (const width of [390, 1280]) {
           await captureRendered(page, info, "inventory");
         });
         await journey.stage("Inspect exact technical identity from the keyboard", async () => {
-          const row = page.locator(".installation-inventory-row");
-          const summary = row.locator("summary");
+          const row = inventoryRow(page);
+          const summary = row.getByText("Technical details", { exact: true });
           await summary.focus();
           await page.keyboard.press("Enter");
-          const technical = row.locator("details");
+          const technical = row.getByRole("group");
           await expect(technical).toHaveAttribute("open", "");
           await expect(technical).toContainText([...hub.installations.keys()][0]!);
-          await expect(technical.locator('[data-field="key_fingerprint"]')).toBeVisible();
+          await expect(technical.getByTestId("key-fingerprint")).toBeVisible();
           await summary.press("Enter");
           await expect(technical).not.toHaveAttribute("open", "");
-          await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+          await inventoryClose(page).click();
           await expect(page.getByRole("button", { name: "Browser installations on Atlas", exact: true })).toBeFocused();
           const longName = "LongBrowserName".repeat(7);
           [...hub.installations.values()][0]!.device_label = longName;
           await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
-          const longHeading = page.locator(".installation-inventory-row h3");
+          const longHeading = inventoryRow(page).getByRole("heading", { level: 3 });
           await expect(longHeading).toContainText(String(longName));
           const bounds = await longHeading.evaluate(el => {
             const heading = el.getBoundingClientRect();
@@ -156,7 +167,7 @@ for (const width of [390, 1280]) {
           expect(bounds.rowRight).toBeLessThanOrEqual(bounds.sheetRight);
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
           await page.screenshot({ path: info.outputPath("inventory-long.png") });
-          await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+          await inventoryClose(page).click();
         });
       });
     });

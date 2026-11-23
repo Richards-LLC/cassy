@@ -131,17 +131,17 @@ function jumpToTurn(document: Document, history: ConversationHistory | undefined
 function renderWaiting(document: Document, list: HTMLElement, waiting: readonly OperatorReply[], pinned?: number, history?: ConversationHistory): void {
   list.replaceChildren(...[...waiting].reverse().map((reply) => {
     const item = document.createElement("li");
-    const jump = document.createElement("button"); jump.type = "button"; jump.className = "context-jump";
+    const jump = document.createElement("button"); jump.type = "button"; jump.className = "context-jump"; jump.dataset.testid = "context-jump";
     jump.dataset.kind = reply.kind ?? "ask";
     jump.dataset.replyTo = String(reply.notification_id);
     jump.dataset.owner = "operator";
     jump.dataset.requestId = String(reply.notification_id);
     if (reply.task_id) jump.dataset.taskId = reply.task_id;
     const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : reply.kind === "secret" ? "Secret" : "Question";
-    const text = document.createElement("span"); text.className = "context-text"; appendEmojiText(document, text, entryText(reply.message));
+    const text = document.createElement("span"); text.className = "context-text"; text.dataset.testid = "context-text"; appendEmojiText(document, text, entryText(reply.message));
     jump.append(kind, text);
     // A blocker says how it clears (journey F12); the jump alone did not.
-    if (reply.kind === "blocker") { const hint = document.createElement("span"); hint.className = "context-hint"; hint.textContent = BLOCKER_HINT; jump.append(hint); }
+    if (reply.kind === "blocker") { const hint = document.createElement("span"); hint.className = "context-hint"; hint.dataset.testid = "context-hint"; hint.textContent = BLOCKER_HINT; jump.append(hint); }
     if (reply.notification_id === pinned) { const mark = document.createElement("span"); mark.className = "context-hint context-pinned"; mark.textContent = PINNED_MARK; jump.append(mark); jump.dataset.pinned = "true"; }
     jump.onclick = () => jumpToTurn(document, history, reply.notification_id);
     item.append(jump);
@@ -158,7 +158,7 @@ function renderAttachments(document: Document, list: HTMLElement, attachments: r
     const mark = attachmentTypeMark(attachment.mime, attachment.name);
     const size = attachmentSize(attachment.size_bytes);
     const plate = document.createElement("span"); plate.className = "context-plate"; plate.textContent = mark; plate.setAttribute("aria-hidden", "true");
-    const name = document.createElement("span"); name.className = "context-text"; name.textContent = attachment.name;
+    const name = document.createElement("span"); name.className = "context-text"; name.dataset.testid = "context-text"; name.textContent = attachment.name;
     const meta = document.createElement("span"); meta.className = "context-meta"; meta.textContent = size;
     link.setAttribute("aria-label", `${attachment.name}, ${mark}${size ? `, ${size}` : ""}. Open`);
     link.append(plate, name, meta);

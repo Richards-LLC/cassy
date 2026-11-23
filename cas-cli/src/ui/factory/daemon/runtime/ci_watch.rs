@@ -1241,9 +1241,26 @@ impl GhCiTransport {
     }
 }
 
-/// How long a commit's whole run list is reused while the newest runs show the
-/// same runs (cas-0bc1).
-const PARKED_RUNS_TTL: Duration = Duration::from_secs(300);
+/// How long the run list of a commit the newest runs do not cover is reused
+/// while the newest runs show the same runs of it (cas-0bc1). A finished commit
+/// changes only by a rerun of an old run, which the newest runs cannot show; 15
+/// minutes bounds that miss at 4 requests an hour per commit.
+const OUTSIDE_LISTING_RUNS_TTL: Duration = Duration::from_secs(900);
+
+/// The runs read in one request. A shorter answer holds every run of the repo.
+const RUNS_PAGE: usize = 100;
+
+/// Whether the newest runs hold every run of the commit. They hold every run
+/// newer than their oldest, so a commit is covered once its first run, the push
+/// or merge group that created it, is among them; a commit with no listed run,
+/// or only later ones (a schedule or a dispatch), may have older runs left out.
+fn listing_covers(recent: &[CiRun], listed: &[CiRun]) -> bool {
+    recent.len() < RUNS_PAGE
+        || listed
+            .iter()
+            .min_by_key(|run| run.id)
+            .is_some_and(|first| matches!(first.event.as_str(), "push" | "merge_group"))
+}
 
 /// The runs of one commit by id, attempt and status, so a new run, a rerun or
 /// a finished run changes it.
@@ -1297,7 +1314,7 @@ impl GhCiTransport {
             "GET".to_string(),
             format!("repos/{}/actions/runs", self.repo),
             "-f".to_string(),
-            "per_page=100".to_string(),
+            format!("per_page={RUNS_PAGE}"),
         ])?;
         let _ = self.recent.set(response.workflow_runs.clone());
         Ok(response.workflow_runs)
@@ -1375,24 +1392,25 @@ impl CiTransport for GhCiTransport {
         }
     }
 
-    /// Every run of the commit. A run still going shows in the newest runs,
-    /// and that is all a pending `ci_completed` reminder waits on. Otherwise
-    /// the commit's whole list is read (older runs may have left the newest
-    /// 100), and re-read only when the newest runs of the commit changed or
-    /// five minutes passed: one call for a parked delivery, not one a poll
+    /// Every run of the commit. The newest runs answer it when a run is still
+    /// going (all a pending `ci_completed` reminder waits on) or when they hold
+    /// every run of the commit. Only a commit they cut off is read by its own
+    /// request, and re-read when its newest runs changed or 15 minutes passed:
+    /// at most 4 requests an hour for a parked delivery, not one a poll
     /// (cas-0bc1: 4,319 core calls an hour exhausted the quota).
     fn runs_for_sha(&self, sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
-        let listed: Vec<CiRun> = self.recent_runs()?.into_iter().filter(|run| run.head_sha == sha).collect();
+        let recent = self.recent_runs()?;
+        let listed: Vec<CiRun> = recent.iter().filter(|run| run.head_sha == sha).cloned().collect();
         let signature = runs_signature(&listed);
         note_runs_signature(&self.repo, sha, &signature);
-        if listed.iter().any(|run| run.status != "completed") {
+        if listed.iter().any(|run| run.status != "completed") || listing_covers(&recent, &listed) {
             return Ok(listed);
         }
         let key = format!("runs {} {sha}", self.repo);
         let fresh = |cached: &[u8]| {
             let same = serde_json::from_slice::<serde_json::Value>(cached)
                 .is_ok_and(|entry| entry["signature"] == signature.as_str());
-            if same { PARKED_RUNS_TTL } else { Duration::ZERO }
+            if same { OUTSIDE_LISTING_RUNS_TTL } else { Duration::ZERO }
         };
         let bytes = crate::gh_budget::shared_read_by(&key, fresh, || {
             let answer = self.gh_bytes(&[
@@ -2359,8 +2377,9 @@ mod tests {
     /// cas-0bc1 (soundwave and prowl, Nov 22): each pending `ci_completed`
     /// reminder and each parked delivery cost one run read per commit per 30 s
     /// poll, and exhausted the shared quota (4,319 core calls an hour). Forty
-    /// commits over ten polls cost one run list a poll plus one read each; a
-    /// finished commit's check-runs are read once until its runs change.
+    /// commits over ten polls cost one run list a poll; a commit the list cuts
+    /// off costs one read of its own per cache lifetime, counted across the
+    /// expiry; a finished commit's check-runs are read once until its runs change.
     #[test]
     fn parked_commits_cost_one_run_list_a_poll_not_one_read_each_cas_0bc1() {
         use super::super::queue_and_events;
@@ -2384,10 +2403,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, body: serde_json::Value| std::fs::write(dir.join(name), body.to_string()).unwrap();
         write("runs.json", serde_json::json!({"workflow_runs": []}));
+        write("by-sha.json", serde_json::json!({"workflow_runs": []}));
         write("checks.json", serde_json::json!({"check_runs": []}));
         let gh = dir.join("gh");
         crate::test_paths::warm_stub(&gh, &format!(
-            "#!/bin/sh\necho \"$@\" >> '{dir}/calls.log'\ncase \"$4\" in\nrepos/org/repo/actions/runs) cat '{dir}/runs.json' ;;\nrepos/org/repo/commits/*/check-runs) cat '{dir}/checks.json' ;;\nrepos/org/repo/actions/runs/7/jobs) cat '{dir}/jobs.json' ;;\nrepos/org/repo/branches/*) cat '{dir}/branch.json' ;;\n*) exit 97 ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{dir}/calls.log'\ncase \"$4\" in\nrepos/org/repo/actions/runs) case \"$*\" in *head_sha=*) cat '{dir}/by-sha.json' ;; *) cat '{dir}/runs.json' ;; esac ;;\nrepos/org/repo/commits/*/check-runs) cat '{dir}/checks.json' ;;\nrepos/org/repo/actions/runs/7/jobs) cat '{dir}/jobs.json' ;;\nrepos/org/repo/branches/*) cat '{dir}/branch.json' ;;\n*) exit 97 ;;\nesac\n",
             dir = dir.display(),
         ));
         let calls = || std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().count());
@@ -2396,15 +2416,19 @@ mod tests {
             completed: Default::default(), recent: Default::default(),
         };
         // A poll builds its own transport. Nothing has run yet for any commit.
-        for _ in 0..POLLS {
-            let candidates = queue_and_events::ci_completed_candidates(&root, "bc1");
-            assert_eq!(candidates.len(), PARKED);
-            assert!(collect_ci_wakes(&transport(), &candidates).is_empty());
-        }
-        assert!(calls() <= POLLS + PARKED, "{} core calls for {PARKED} commits over {POLLS} polls", calls());
+        let poll = |count: usize| {
+            for _ in 0..count {
+                let candidates = queue_and_events::ci_completed_candidates(&root, "bc1");
+                assert_eq!(candidates.len(), PARKED);
+                assert!(collect_ci_wakes(&transport(), &candidates).is_empty());
+            }
+        };
+        poll(POLLS);
+        assert!(calls() <= POLLS + 1, "{} core calls for {PARKED} commits over {POLLS} polls", calls());
 
-        // Its runs finish: the first look reads the run list, the commit's runs and
-        // its checks; four more polls add only their run lists.
+        // Its runs finish: the first look reads the run list and its checks (the
+        // list holds every run of the repo, so it is the commit's runs too); four
+        // more polls add only their run lists.
         let sha = &shas[0];
         let run = |attempt: u64, status: &str| serde_json::json!({"workflow_runs": [{"id": 7, "run_attempt": attempt,
             "name": "CI", "head_branch": "factory/x", "head_sha": sha, "html_url": "https://github.test/runs/7",
@@ -2418,7 +2442,7 @@ mod tests {
             assert_eq!(transport.runs_for_sha(sha).unwrap().len(), 1);
             assert_eq!(transport.check_runs_for_sha(sha).unwrap().unwrap().len(), 1);
         }
-        assert_eq!(calls() - before, 3 + 4);
+        assert_eq!(calls() - before, 2 + 4);
 
         // A rerun is seen in the run list, and the finished checks are read again.
         write("runs.json", run(2, "in_progress"));
@@ -2428,7 +2452,7 @@ mod tests {
         let polled = transport();
         polled.runs_for_sha(sha).unwrap();
         polled.check_runs_for_sha(sha).unwrap();
-        assert_eq!(calls() - before, 3);
+        assert_eq!(calls() - before, 2);
 
         // A red run's failing job and its branch tip are read once while it stays red.
         write("jobs.json", serde_json::json!({"jobs": [{"name": "Scoped Validation", "conclusion": "failure", "steps": []}]}));
@@ -2440,6 +2464,28 @@ mod tests {
             assert_eq!(polled.branch_tip("factory/x").unwrap().as_deref(), Some("abc"));
         }
         assert_eq!(calls() - before, 2);
+
+        // Now the newest 100 runs cut every parked commit off. Each is read by its
+        // own request once, not once a poll, and again only after its cache
+        // expires: the recurring refresh is counted across the expiry.
+        let others: Vec<_> = (0..100u64).map(|n| serde_json::json!({"id": 1000 + n, "run_attempt": 1,
+            "name": "CI", "head_branch": "main", "head_sha": format!("{:040x}", 5000 + n),
+            "html_url": "https://github.test/runs/x", "status": "completed", "conclusion": "success",
+            "event": "push", "check_suite_id": 1000 + n})).collect();
+        write("runs.json", serde_json::json!({"workflow_runs": others}));
+        let before = calls();
+        poll(POLLS);
+        assert_eq!(calls() - before, POLLS + PARKED, "one run list a poll, one read of its own per cut-off commit");
+        let before = calls();
+        poll(POLLS);
+        assert_eq!(calls() - before, POLLS, "no cut-off commit is read again before its cache expires");
+        for entry in std::fs::read_dir(env.home().join(".cas/gh-cache")).unwrap().flatten() {
+            let aged = std::time::SystemTime::now() - Duration::from_secs(20 * 60);
+            let _ = std::fs::File::options().write(true).open(entry.path()).and_then(|file| file.set_modified(aged));
+        }
+        let before = calls();
+        poll(POLLS);
+        assert_eq!(calls() - before, POLLS + PARKED, "expiry costs one read per cut-off commit, not one a poll");
     }
 
     /// cas-e845 / cas-ae6a: `ci_completed` waits only while a check-run of the

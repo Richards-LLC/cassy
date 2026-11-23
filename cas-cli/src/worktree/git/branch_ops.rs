@@ -1269,6 +1269,7 @@ impl GitOperations {
     }
 
     // gate-audit[proven_merge]: selector Internal publication provenance selects merge validation with G-160 versus ordinary source pre-push checks; no caller override is accepted.
+    // gate-audit[fence_observed]: selector Chooses where the unfenced-target check reads the train fence (the caller's just-fetched mirror or origin); both refuse a fenced target with G-113.
     pub(super) fn publish_pinned_source_with_lease(
         &self,
         branch: &str,

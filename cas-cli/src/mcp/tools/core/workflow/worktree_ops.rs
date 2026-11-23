@@ -754,17 +754,44 @@ fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) 
     Some(BranchCiLookup { state, repo: Some(repo), repository_lookup_attempted: true, gh_failed: false })
 }
 
+thread_local! {
+    static STANDING_CI_READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// cas-0bc1: run `read` as a standing poll, one whose answer only informs a
+/// reminder, an alert or a hint, so its commit check reads may come from the
+/// machine-wide shared answer (a minute while a check is unfinished, ten once
+/// all finished). Every other read of a commit's checks is fresh: merge
+/// admission, a pending-CI merge retry, release close, epic CI and the
+/// post-merge proof decide on the exact commit and never see an older answer.
+/// The scope is the current thread; a read on a thread it did not start stays
+/// fresh.
+pub(crate) fn standing_ci_reads<T>(read: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STANDING_CI_READS.with(|standing| standing.set(self.0));
+        }
+    }
+    let _restore = Restore(STANDING_CI_READS.with(|standing| standing.replace(true)));
+    read()
+}
+
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
+/// Fresh unless the caller is inside [`standing_ci_reads`].
 #[track_caller]
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
-    // cas-0bc1: every parked delivery's tip was read again by each merge alert
-    // and admission lookup, 988 core calls an hour. One answer per commit for
-    // every reader on the machine; a failure is never kept.
+    let endpoint = format!("repos/{repo}/commits/{sha}/check-runs");
+    if !STANDING_CI_READS.with(std::cell::Cell::get) {
+        return gh_api_get(&endpoint, cwd, binary);
+    }
+    // Every parked delivery's tip was read again by each merge alert and
+    // idle-relay lookup, 988 core calls an hour. A failure is never kept.
     let shared = crate::gh_budget::shared_read_by(
         &crate::gh_budget::check_runs_key(repo, sha),
         crate::gh_budget::check_runs_ttl,
         || {
-            let output = gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary);
+            let output = gh_api_get(&endpoint, cwd, binary);
             if output.success { Ok(output.stdout) } else { Err(output) }
         },
     );
@@ -7143,6 +7170,51 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    /// cas-0bc1: a pending-CI merge retry and merge admission decide on the
+    /// exact commit, so they read its checks as they are now. Only a standing
+    /// poll may be answered from the shared copy.
+    #[test]
+    fn only_standing_polls_may_read_a_shared_check_runs_answer_cas_0bc1() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let dir = env.home().join("gh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gh = dir.join("gh");
+        crate::test_paths::warm_stub(
+            &gh,
+            &format!("#!/bin/sh\necho x >> '{d}/calls.log'\ncat '{d}/checks.json'\n", d = dir.display()),
+        );
+        let publish = |status: &str| {
+            std::fs::write(dir.join("checks.json"), format!(r#"{{"check_runs":[{{"status":"{status}"}}]}}"#)).unwrap();
+        };
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().count());
+        let sha = "a".repeat(40);
+        let status = |output: GhApiOutput| {
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["check_runs"][0]["status"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        publish("in_progress");
+        assert_eq!(status(super::fetch_branch_ci(&sha, &dir, "org/repo", &gh)), "in_progress");
+        publish("completed");
+        assert_eq!(status(super::fetch_branch_ci(&sha, &dir, "org/repo", &gh)), "completed");
+        assert_eq!(calls(), 2, "an admission read asks GitHub every time");
+
+        super::standing_ci_reads(|| super::fetch_branch_ci(&sha, &dir, "org/repo", &gh));
+        publish("in_progress");
+        let standing = super::standing_ci_reads(|| super::fetch_branch_ci(&sha, &dir, "org/repo", &gh));
+        assert_eq!(status(standing), "completed", "a standing poll shares one answer");
+        assert_eq!(calls(), 3);
+        assert_eq!(
+            status(super::fetch_branch_ci(&sha, &dir, "org/repo", &gh)),
+            "in_progress",
+            "the scope ended: the next admission read is fresh again",
+        );
+        assert_eq!(calls(), 4);
     }
 
     #[test]

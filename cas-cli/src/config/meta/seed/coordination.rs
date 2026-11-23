@@ -125,6 +125,18 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             use_cases: &["Configure supported Claude launch options"],
         });
     }
+    for (key, name, description, value_type, default) in [
+        ("factory.gateway.enabled", "Worker Home-Gateway Transport", "Opt this project's Claude and Codex workers into the home gateway. Only the project's own setting enables it. Workers keep their native account directory; if the hub is not ready at spawn, the worker starts direct and worker_status says so.", ConfigType::Bool, "false"),
+        ("factory.gateway.endpoint", "Home-Gateway Endpoint", "Hub base URL without /v1, usually set in the user-level ~/.cas/config.toml. Only loopback and tailnet hosts (100.64.0.0/10, *.ts.net) are accepted. Empty clears it.", ConfigType::String, ""),
+        ("factory.gateway.key_file", "Home-Gateway Client Key File", "Path to the hub client key file, mode 0600. Only the path is stored; the key is read when a worker starts. Empty clears it.", ConfigType::String, ""),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description, value_type, default,
+            constraint: Constraint::None, advanced: true, requires_feature: None,
+            keywords: &["factory", "worker", "gateway", "hub", "proxy", "transport"],
+            use_cases: &["Route workers through the operator's own model hub"],
+        });
+    }
     registry.register(ConfigMeta {
         key: "factory.claude.worker_mcp", section: "factory",
         name: "Claude Worker MCP Scope",

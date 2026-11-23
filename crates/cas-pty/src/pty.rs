@@ -4949,6 +4949,71 @@ echo SMOKE_DONE
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn gateway_key_reaches_only_the_child_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let seen = temp.path().join("seen");
+        let codex = temp.path().join("codex");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\n{{ printf 'key=%s file=%s openai=%s\\n' \"${{CAS_GATEWAY_API_KEY-unset}}\" \"${{CAS_FACTORY_GATEWAY_KEY_FILE-unset}}\" \"${{OPENAI_API_KEY-unset}}\"; printf '%s\\n' \"$@\"; }} > {}\n",
+                shell_quote(&seen.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(temp.path().join("cas"), "fixture preflight only").unwrap();
+        env.set("PATH", temp.path());
+        env.set("OPENAI_API_KEY", "inherited-never-forward");
+        let key = temp.path().join("client.key");
+        std::fs::write(&key, "fixture-gateway-key\n").unwrap();
+        for (mode, expected) in [
+            (Some(0o600), Some("key=fixture-gateway-key file=unset openai=unset")),
+            (Some(0o644), None),
+            (None, Some("key=unset file=unset openai=unset")),
+        ] {
+            let mut config = PtyConfig::codex(
+                "gateway-probe", "worker", temp.path().to_path_buf(),
+                None, None, None, None, None, None,
+            );
+            config.env.push(("CAS_FACTORY_CODEX_HOME_SOURCE".into(), "explicit".into()));
+            if let Some(mode) = mode {
+                std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+                config.env.push((
+                    crate::gateway_key::GATEWAY_KEY_FILE_ENV.into(),
+                    key.to_string_lossy().into_owned(),
+                ));
+            }
+            let _ = std::fs::remove_file(&seen);
+            let Some(expected) = expected else {
+                let error = Pty::spawn("gateway-probe", config).err().expect("a shared key file must refuse the spawn");
+                assert!(!error.to_string().contains("fixture-gateway-key"));
+                continue;
+            };
+            let mut pty = Pty::spawn("gateway-probe", config).unwrap();
+            let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Exited(code)) => {
+                        assert_eq!(code, Some(0));
+                        break;
+                    }
+                    Some(PtyEvent::Output(_)) => {}
+                    event => panic!("gateway launch did not complete: {event:?}"),
+                }
+            }
+            let seen = std::fs::read_to_string(&seen).unwrap();
+            let (environment, argv) = seen.split_once('\n').unwrap();
+            assert_eq!(environment, expected);
+            assert!(!argv.contains("fixture-gateway-key"), "the key must never reach argv");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn codex_supervisor_spawn_forwards_effective_account_home_to_cas() {
         use std::os::unix::fs::PermissionsExt;
 

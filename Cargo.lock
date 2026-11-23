@@ -872,6 +872,7 @@ dependencies = [
  "cas-types",
  "criterion 0.6.0",
  "crossterm 0.29.0",
+ "dirs",
  "fs2",
  "ghostty_vt",
  "hex",
@@ -889,6 +890,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-width 0.2.0",
+ "ureq",
  "url",
 ]
 

@@ -10354,6 +10354,7 @@ impl CasCore {
                 });
             if delivery_proven_on_integration {
                 if let Some(note) = advance_clean_epic_after_child_integration(
+                    Some(self),
                     &close_project_root,
                     &epic.id,
                     epic_branch,
@@ -21767,6 +21768,7 @@ fn validate_lagging_epic_receipt_on_integration_branch(
 /// shared epic history.
 // gate-audit[forward]: G-125 Epic-close reconciliation helper; it returns a refusal to the registered parent decision.
 fn advance_clean_epic_after_child_integration(
+    core: Option<&CasCore>,
     repo_path: &std::path::Path,
     epic_id: &str,
     epic_branch: &str,
@@ -21818,6 +21820,29 @@ fn advance_clean_epic_after_child_integration(
              Cassy will not auto-merge or overwrite shared epic history. Child close remains valid; \
              supervisor action: inspect and explicitly reconcile `{epic_branch}` with `{integration_branch}`."
         ));
+    }
+
+    // A child may close without owning the train. Only the authenticated
+    // owner can advance its shared target; otherwise leave all refs intact.
+    let publication = (|| -> Result<bool, String> {
+        if crate::worktree::git::train_authority::fencing(repo_path, epic_branch)?.is_some() {
+            crate::train_owner::publication::publish_branch(core, repo_path, epic_branch, &integration_tip, "origin")?;
+            return Ok(true);
+        }
+        crate::worktree::git::train_authority::refuse_unfenced(repo_path, epic_branch)?;
+        Ok(false)
+    })();
+    match publication {
+        Err(error) => return Some(format!(
+            "decision: CAS_EPIC_ADVANCEMENT_V1 HELD epic={epic_id}; {error}. Child close remains valid; train owner publication required."
+        )),
+        Ok(true) => {
+            let convergence = fast_forward_local_epic_ref(repo_path, epic_branch, &integration_tip);
+            return Some(format!(
+                "decision: CAS_EPIC_ADVANCEMENT_V1 ADVANCED epic={epic_id} branch={epic_branch}; atomic owner publication to {integration_tip}; local convergence: {convergence:?}."
+            ));
+        }
+        Ok(false) => {}
     }
 
     let has_origin = Command::new("git")
@@ -31445,6 +31470,7 @@ mod merge_state_gate_tests {
         integration: &str,
     ) -> Option<String> {
         advance_clean_epic_after_child_integration(
+            None,
             repo,
             id,
             branch,
@@ -31495,6 +31521,22 @@ mod merge_state_gate_tests {
             original_epic_tip,
             resolve_branch_sha(p, "epic/clean").unwrap()
         );
+
+        use crate::worktree::git::train_authority::{Identity, Snapshot, TransferChecks};
+        struct Clear;
+        impl TransferChecks for Clear {
+            fn external_clear(&self, _: &Snapshot) -> Result<serde_json::Value, String> { Ok(serde_json::json!({"fixture":"clear"})) }
+            fn publishers_stopped(&self, _: &Snapshot) -> Result<serde_json::Value, String> { Ok(serde_json::json!({"fixture":"stopped"})) }
+        }
+        let train_tip = resolve_branch_sha(p, "epic/clean").unwrap();
+        let authority = Snapshot::enroll(p, "fixture", "cas-clean", "epic/clean",
+            &Identity { owner:"owner".into(), incarnation:"fixture".into() }, &train_tip, Some(&train_tip), &Clear).unwrap();
+        commit_file_at(p, "enrolled.rs", "// enrolled\n", "2026-08-15T02:00:30Z");
+        git(p, &["push", "-q", "origin", "main"]);
+        advance_recorded_epic(p, "cas-clean", "epic/clean", "main").unwrap();
+        assert_eq!(resolve_branch_sha(p, "epic/clean"), Some(train_tip.clone()));
+        assert_eq!(authority.observed_target(p).unwrap(), train_tip);
+        assert_eq!(Snapshot::read(p, "cas-clean").unwrap().tip, authority.tip);
 
         git(p, &["push", "-q", "origin", "--delete", "epic/clean"]);
         git(p, &["fetch", "-q", "--prune", "origin"]);

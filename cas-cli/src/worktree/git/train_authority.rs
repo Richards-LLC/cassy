@@ -128,6 +128,7 @@ fn record_commit(repo: &Path, parent: Option<&str>, record: &Record) -> Result<S
 /// refuse: an unknown fence never falls back to an unfenced write.
 pub(crate) fn fencing(repo: &Path, branch: &str) -> Result<Option<Snapshot>, String> {
     if !branch.starts_with("epic/") || !GitOperations::new(repo.to_path_buf()).has_origin_remote() {
+        require_no_missing_enrollment(repo, branch)?;
         return Ok(None);
     }
     let refs = command(repo, &["ls-remote", "--refs", "origin", "refs/cas/train-owner/*"], None)?;
@@ -138,6 +139,7 @@ pub(crate) fn fencing(repo: &Path, branch: &str) -> Result<Option<Snapshot>, Str
             return Ok(Some(snapshot));
         }
     }
+    require_no_missing_enrollment(repo, branch)?;
     Ok(None)
 }
 
@@ -161,7 +163,24 @@ pub(crate) fn observed_fencing(repo: &Path, branch: &str) -> Result<Option<Snaps
             return Ok(Some(snapshot));
         }
     }
+    require_no_missing_enrollment(repo, branch)?;
     Ok(None)
+}
+
+/// A removed authority or remote is an unavailable fence, never an explicit
+/// return to legacy behavior. Daemon/direct publishers also use this lookup.
+fn require_no_missing_enrollment(repo: &Path, branch: &str) -> Result<(), String> {
+    if !branch.starts_with("epic/") { return Ok(()); }
+    let Ok(root) = crate::store::find_cas_root_ignoring_env(repo) else { return Ok(()); };
+    let store = crate::store::open_task_store_local(&root).map_err(|error| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error}"))?;
+    for train in store.list(None).map_err(|error| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error}"))? {
+        if train.effective_epic_branch() != Some(branch) { continue; }
+        let recorded = store.get_execution_state(&train.id).map_err(|error| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error}"))?;
+        if train.labels.iter().any(|label| label == crate::train_owner::ENROLLED)
+            || recorded.as_ref().and_then(|state| state.get("train_owner")).is_some()
+        { return Err("TRAIN_TRANSFER_FENCE_UNAVAILABLE: recorded enrollment has no discoverable authority".into()); }
+    }
+    Ok(())
 }
 
 fn fence_required(branch: &str, snapshot: Option<Snapshot>) -> Result<(), String> {

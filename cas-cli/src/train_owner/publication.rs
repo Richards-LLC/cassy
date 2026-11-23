@@ -188,7 +188,7 @@ pub(crate) fn reconcile(repo: &Path, train: &str, id: &str, run: u64, attempt: u
 pub(crate) fn disarm_pr(core: &crate::mcp::CasCore, repo: &Path, train: &str, id: &str) -> Result<(), String> {
     use crate::worktree::git::train_authority::{ExternalAction, Phase};
     let snapshot = Snapshot::read(repo, train)?;
-    let actor = core.resolve_live_supervisor_authority().map_err(|error| error.to_string())?;
+    let actor = core.resolve_live_supervisor_authority().map_err(|error| format!("TRAIN_OWNER_GENERATION_CHANGED: {error:?}"))?;
     if !crate::cloud::peer_mailbox::owns_recipient(&core.cas_root, &actor, &snapshot.record.identity.owner)
         || super::identity(&actor, &snapshot.record.identity.owner)? != snapshot.record.identity
         || snapshot.record.phase != Phase::Draining

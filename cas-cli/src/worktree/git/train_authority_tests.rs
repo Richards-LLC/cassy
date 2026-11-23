@@ -667,6 +667,8 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     let mut local = tasks.get(&train.id).unwrap();
     command(&fixture.left, &["remote", "remove", "origin"], None).unwrap();
     assert!(crate::train_owner::authority(&root, &local).is_err());
+    assert!(crate::train_owner::local_owner_fence(&root, &fixture.left, &target).is_err());
+    assert!(crate::train_owner::publication_fence(&core, &fixture.left, &target).is_err());
     local.labels.retain(|label| label != crate::train_owner::ENROLLED);
     assert!(crate::train_owner::authority(&root, &local).unwrap().is_none());
     let unavailable = fixture.left.join("missing-origin.git");

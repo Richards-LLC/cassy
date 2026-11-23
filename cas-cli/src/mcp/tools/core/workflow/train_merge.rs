@@ -1821,25 +1821,39 @@ mod tests {
         let fixture = Fixture::build(false);
         fixture.start().await;
         let origin = fixture.root.join("origin.git");
-        // The successor's accepted authority record, staged on origin.
+        // The successor's authority, written by production enrollment on a
+        // mirror of origin, then held on origin until the transfer lands.
+        struct Clear;
+        impl crate::worktree::git::train_authority::TransferChecks for Clear {
+            fn external_clear(&self, _: &crate::worktree::git::train_authority::Snapshot) -> Result<serde_json::Value, String> {
+                Ok(serde_json::json!({"provider": "fixture", "prs": [], "runs": []}))
+            }
+            fn publishers_stopped(&self, _: &crate::worktree::git::train_authority::Snapshot) -> Result<serde_json::Value, String> {
+                Ok(serde_json::json!({"runtime": "fixture", "disposition": "fenced"}))
+            }
+        }
         let staging = tempfile::tempdir().unwrap();
-        git(staging.path(), &["init", "-qb", "authority"]);
-        git(staging.path(), &["config", "user.name", "Cassy test"]);
-        git(staging.path(), &["config", "user.email", "test@example.invalid"]);
-        let target_sha = git(fixture._repo.path(), &["rev-parse", "epic/train"]);
-        commit(staging.path(), "authority.json", &serde_json::json!({
-            "protocol": 1, "project": "fixture", "train": "cas-train", "target": "epic/train",
-            "identity": {"owner": "successor", "incarnation": "successor-process"},
-            "epoch": 2, "generation": "successor-generation", "phase": "active",
-            "target_sha": target_sha, "operation": "transfer-accept", "transfer": null,
-        }).to_string());
-        git(staging.path(), &["push", "-q", origin.to_str().unwrap(), "authority:refs/hold/authority"]);
-        // The transfer lands just before the second entry's origin read.
+        let mirror = staging.path().join("origin.git");
+        let successor = staging.path().join("successor");
+        git(staging.path(), &["clone", "-q", "--bare", origin.to_str().unwrap(), mirror.to_str().unwrap()]);
+        git(staging.path(), &["clone", "-q", mirror.to_str().unwrap(), successor.to_str().unwrap()]);
+        git(&successor, &["config", "user.name", "Cassy test"]);
+        git(&successor, &["config", "user.email", "test@example.invalid"]);
+        let target_sha = git(&successor, &["rev-parse", "origin/epic/train"]);
+        crate::worktree::git::train_authority::Snapshot::enroll(
+            &successor, "fixture", "cas-train", "epic/train",
+            &crate::worktree::git::train_authority::Identity { owner: "successor".into(), incarnation: "successor-process".into() },
+            &target_sha, Some(&target_sha), &Clear,
+        ).unwrap();
+        git(&origin, &["fetch", "-q", mirror.to_str().unwrap(), "refs/cas/train-owner/cas-train:refs/hold/authority"]);
+        // The transfer lands just before the second entry's target fetch.
+        // Git may start upload-pack through `sh -c`, so the fetch is the
+        // parent or the grandparent (as in train_merge_reads_origin_once_per_entry).
         let reads = fixture.root.join("origin-reads.log");
         let reader = fixture.root.join("transfer-on-second-read");
         std::fs::write(&reader, format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$(ps -o args= -p $PPID)\" >> '{reads}'\n\
-             [ \"$(grep -c 'git fetch' '{reads}')\" = 2 ] && git --git-dir='{origin}' update-ref refs/cas/train-owner/cas-train refs/hold/authority\n\
+            "#!/bin/sh\nprintf '%s | %s\\n' \"$(ps -o args= -p $PPID)\" \"$(ps -o args= -p \"$(ps -o ppid= -p $PPID | tr -d ' ')\")\" >> '{reads}'\n\
+             [ \"$(grep -c 'git fetch ' '{reads}')\" = 2 ] && git --git-dir='{origin}' update-ref refs/cas/train-owner/cas-train refs/hold/authority\n\
              exec git upload-pack \"$@\"\n",
             reads = reads.display(), origin = origin.display(),
         )).unwrap();

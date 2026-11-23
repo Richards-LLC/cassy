@@ -145,7 +145,12 @@ impl CasCore {
                 snapshot.prepare(&repo, &identity, &successor, &request.transfer_id)?
             }
             Action::Quiesce | Action::Abort => {
-                if !snapshot.record.transfer.as_ref().is_some_and(|t| t.id == request.transfer_id) {
+                // Adoption holds recovery without creating a successor transfer.
+                // The current owner was authenticated above; abort keeps the
+                // Snapshot's provider, publisher and exact-target checks.
+                let recovery_abort = request.operation == Action::Abort
+                    && snapshot.record.phase == Phase::RecoveryHeld && snapshot.record.transfer.is_none();
+                if !recovery_abort && !snapshot.record.transfer.as_ref().is_some_and(|t| t.id == request.transfer_id) {
                     return Err(refusal("TRAIN_TRANSFER_CONFLICT: transfer id changed"));
                 }
                 if request.operation == Action::Quiesce { snapshot.quiesce(&repo, &identity, checks)? }

@@ -24,7 +24,7 @@ metadata:
 5. Reuse auth state from role setup projects, with a fresh context/page per test. Namespace mutating accounts/data by run, worker and shard; prefer isolation over locks. For Firebase/Nuxt/Quasar, load [nuxt-quasar-firebase.md](references/nuxt-quasar-firebase.md).
 6. Use role/label locators, then a stable test id, scoped to a semantic container. Assert fixture-derived values, state and structure. Load [locators-and-accessibility.md](references/locators-and-accessibility.md) for Quasar teleports, accessibility and the single allowed CSS assertion category.
 7. Load the page fresh at each viewport, capture at that viewport, and verify keyboard/recovery paths. Seed → planner → generator → review is the agent flow; review the final assertion against the title before accepting generated code. Generate official agents/skills in scratch and diff them against this policy.
-8. Run the named affected selection. Classify failures against base and tip using the same seed/runtime/target before calling a regression. Diagnostics belong to `cas-playwright-debug`; measured suite audits belong to `cas-test-audit`.
+8. Run the named affected selection. Classify failures against base and tip using the same seed/runtime/target before calling a regression. Before rewriting or trusting an inherited suite, run the [static staleness scan](references/staleness-scan.md) and settle each non-CURRENT grade from the cited source line. Diagnostics belong to `cas-playwright-debug`; measured suite audits belong to `cas-test-audit`.
 
 ## Fast by design
 

@@ -292,6 +292,8 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-playwright-tests/references/configuration.md", content: include_str!("builtins/skills/cas-playwright-tests/references/configuration.md") },
     BuiltinFile { path: "skills/cas-playwright-tests/references/locators-and-accessibility.md", content: include_str!("builtins/skills/cas-playwright-tests/references/locators-and-accessibility.md") },
     BuiltinFile { path: "skills/cas-playwright-tests/references/current-api.md", content: include_str!("builtins/skills/cas-playwright-tests/references/current-api.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/staleness-scan.md", content: include_str!("builtins/skills/cas-playwright-tests/references/staleness-scan.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/scripts/staleness-scan.py", content: include_str!("builtins/skills/cas-playwright-tests/scripts/staleness-scan.py") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile {
         path: "skills/finish/SKILL.md",
@@ -1092,6 +1094,8 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-playwright-tests/references/configuration.md", content: include_str!("builtins/skills/cas-playwright-tests/references/configuration.md") },
     BuiltinFile { path: "skills/cas-playwright-tests/references/locators-and-accessibility.md", content: include_str!("builtins/skills/cas-playwright-tests/references/locators-and-accessibility.md") },
     BuiltinFile { path: "skills/cas-playwright-tests/references/current-api.md", content: include_str!("builtins/skills/cas-playwright-tests/references/current-api.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/staleness-scan.md", content: include_str!("builtins/skills/cas-playwright-tests/references/staleness-scan.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/scripts/staleness-scan.py", content: include_str!("builtins/skills/cas-playwright-tests/scripts/staleness-scan.py") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile { path: "skills/cas-writing-tests/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-writing-tests/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-playwright-tests/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-playwright-tests/agents/openai.yaml") },
@@ -1894,6 +1898,8 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-playwright-tests/references/configuration.md", content: include_str!("builtins/skills/cas-playwright-tests/references/configuration.md") },
     BuiltinFile { path: "skills/cas-playwright-tests/references/locators-and-accessibility.md", content: include_str!("builtins/skills/cas-playwright-tests/references/locators-and-accessibility.md") },
     BuiltinFile { path: "skills/cas-playwright-tests/references/current-api.md", content: include_str!("builtins/skills/cas-playwright-tests/references/current-api.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/staleness-scan.md", content: include_str!("builtins/skills/cas-playwright-tests/references/staleness-scan.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/scripts/staleness-scan.py", content: include_str!("builtins/skills/cas-playwright-tests/scripts/staleness-scan.py") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile {
         path: "skills/finish/SKILL.md",

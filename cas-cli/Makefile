@@ -217,6 +217,7 @@ test-ci-tiers:
 	cd .. && bash scripts/test-cassy-actions-cache-job-lock.sh
 	cd .. && python3 scripts/test-model-boundary.py
 	cd .. && python3 scripts/test-test-audit.py
+	cd .. && python3 scripts/test-staleness-scan.py
 	cd .. && node --test scripts/test-walk-kit.mjs
 	cd .. && bash scripts/test-cas-image-generate.sh
 	cd .. && bash scripts/test-check-changelog-lint.sh

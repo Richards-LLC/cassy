@@ -1882,15 +1882,38 @@ fn verify_repeats(
     mut run: impl FnMut(usize) -> Result<(bool, Value)>,
 ) -> Result<usize> {
     let mut count = 0;
+    // cas-c1df: rows of one table may share a runtime name, so a template's
+    // pass count says nothing about how many rows it expands to. The first
+    // iteration fixes which rows the changed tests ran and how many share each
+    // name; every later iteration must run exactly those, or a row went missing.
+    let mut first_rows = None;
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
-        count = validate_report(
+        let (found, rows) = validate_report_rows(
             runner,
             repo,
             &report,
             tests,
             if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
+            &BTreeSet::new(),
         )?;
+        count = found;
+        match &first_rows {
+            None => first_rows = Some(rows),
+            Some(first) if *first != rows => {
+                let changed = first
+                    .keys()
+                    .chain(rows.keys())
+                    .find(|row| first.get(*row) != rows.get(*row))
+                    .map(|row| format!("{} :: {}", row.path, row.name))
+                    .unwrap_or_default();
+                bail!(
+                    "{runner} stability iteration {} ran different rows than iteration 1: {changed}",
+                    iteration + 1
+                );
+            }
+            Some(_) => {}
+        }
         if !success {
             bail!(
                 "{runner} stability failed at iteration {}; no retry",
@@ -1915,6 +1938,15 @@ fn validate_report_with_inherited(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
     inherited: &BTreeSet<(Identity, String)>,
 ) -> Result<usize> {
+    validate_report_rows(runner, repo, report, tests, repeats, inherited).map(|(count, _)| count)
+}
+
+/// [`validate_report_with_inherited`], also returning how many passing results
+/// each runtime row a changed test selected produced (cas-c1df).
+fn validate_report_rows(
+    runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
+    inherited: &BTreeSet<(Identity, String)>,
+) -> Result<(usize, BTreeMap<Identity, usize>)> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
     if runner == "playwright" {
         let root = report
@@ -2028,7 +2060,8 @@ fn validate_report_with_inherited(
     }
     // A template identity is proved when every row it selected passed. Distinct
     // rows may share one runtime name (GH #2138, #2225); each passed, so the
-    // name holds at least one passing result per repeat.
+    // name holds at least one passing result per repeat. How many rows share a
+    // name is held across iterations by `verify_repeats` (cas-c1df).
     for test in tests {
         let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
         if rows.peek().is_none() || rows.any(|(_, count)| *count < repeats) {
@@ -2043,7 +2076,12 @@ fn validate_report_with_inherited(
         bail!("{runner} ran tests outside the changed selection");
     }
     if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
-    Ok(results.len())
+    let rows = results
+        .iter()
+        .filter(|(ran, _)| tests.iter().any(|test| test.selects(ran)))
+        .map(|(ran, count)| (ran.clone(), *count))
+        .collect();
+    Ok((results.len(), rows))
 }
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
@@ -3021,6 +3059,20 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let mut missing = report.clone();
         missing["testResults"][0]["assertionResults"].as_array_mut().unwrap().truncate(5);
         assert!(validate_report("vitest", Path::new("/project"), &missing, &templates, 1).is_err());
+        // One of two rows sharing a name is gone while its sibling still passes
+        // ("keeps input intact"): in any of the five iterations that is refused.
+        let mut one_duplicate = report.clone();
+        one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
+        let iterations = |lost: Option<usize>| {
+            let (full, short) = (report.clone(), one_duplicate.clone());
+            verify_repeats("vitest", Path::new("/project"), &templates, move |iteration| {
+                Ok((true, if Some(iteration) == lost { short.clone() } else { full.clone() }))
+            })
+        };
+        iterations(None).expect("five complete iterations are accepted");
+        for lost in 0..5 {
+            assert!(iterations(Some(lost)).is_err(), "iteration {lost} lost one duplicate row");
+        }
     }
 
     #[test]

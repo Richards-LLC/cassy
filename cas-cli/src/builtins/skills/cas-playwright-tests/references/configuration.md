@@ -81,6 +81,7 @@ test('creator publishes a draft @as-creator', async ({ page }) => { /* … */ })
 ```
 
 - Each test gets a fresh signed-in context, and the report names the persona (`[as-admin] › …`). A missing persona secret fails setup; a missing state file fails that project.
+- Write tags in the title string, not the `{ tag: [...] }` option. Playwright appends option tags to the text `--grep` matches, so Cassy's changed-test stability run, which selects one test with an anchored title grep, finds zero tests and the delivery cannot park (GH #2349, open).
 - Project-level `grepInvert` and `testIgnore` replace the top-level ones, so spread the shared lists into every project.
 - The environment variable is the only switch. Run a paid lane with `E2E_LIVE=1 npx playwright test --grep @live` and post-deploy smoke with `TEST_ENV=staging npx playwright test --grep @staging`. A command-line `--grep-invert @live` is opt-out, so a whole-package or agent run that forgets it spends money.
 - Prove the gate with `--list` with and without the variable: zero tests, then N.

@@ -259,9 +259,18 @@ fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: 
 
 /// Repository paths of the JSON files a source imports by relative literal.
 fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
+    Ok(relative_literals(path, source)?.into_iter()
+        .filter(|resolved| resolved.extension().is_some_and(|extension| extension == "json"))
+        .filter_map(|resolved| resolved.to_str().map(str::to_owned))
+        .collect())
+}
+
+/// Repository paths that a source's relative string literals name, resolved
+/// from the source's own directory (`'./scenarios.json'`, `'../prisma/migrations'`).
+fn relative_literals(path: &str, source: &str) -> Result<Vec<PathBuf>> {
     let directory = Path::new(path).parent().unwrap_or(Path::new(""));
-    let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s]+\.json)["'`]"#)?;
-    Ok(literal.captures_iter(source).filter_map(|capture| {
+    let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s$]+)["'`]"#)?;
+    Ok(literal.captures_iter(source).map(|capture| {
         let mut resolved = PathBuf::new();
         for part in directory.join(&capture[1]).components() {
             match part {
@@ -270,7 +279,7 @@ fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
                 other => resolved.push(other),
             }
         }
-        resolved.to_str().map(str::to_owned)
+        resolved
     }).collect())
 }
 
@@ -295,6 +304,34 @@ pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec
         }
     }
     Ok(specs)
+}
+
+/// GH #2224, #2266: for each changed `input` under `package`, the test files
+/// at `head` that read it through a relative literal: the input itself (a JSON
+/// catalogue), a module import without its extension (a fixture), or a
+/// directory holding it inside the package (Prisma migrations). An input read
+/// any other way has no covering spec here and maps to an empty list.
+pub(super) fn covering_specs(repo: &Path, head: &str, package: &str, inputs: &[&str]) -> Result<BTreeMap<String, Vec<String>>> {
+    let listed = super::git(repo, &["ls-tree", "-r", "--name-only", head, "--", if package.is_empty() { "." } else { package }])?;
+    let mut covering: BTreeMap<String, Vec<String>> = inputs.iter().map(|input| ((*input).to_owned(), Vec::new())).collect();
+    for spec in listed.lines().filter(|path| javascript(path) && test_match(path, runner_hint(repo, path))) {
+        let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
+        let literals = relative_literals(spec, &source)?;
+        for input in inputs {
+            let input_path = Path::new(input);
+            let reads = |resolved: &Path| {
+                let inside = resolved.starts_with(package) && resolved != Path::new(package) && !Path::new(spec).starts_with(resolved);
+                resolved == input_path
+                    || (javascript(input) && (input_path.with_extension("") == resolved
+                        || input_path.parent() == Some(resolved) && input_path.file_stem().is_some_and(|stem| stem == "index")))
+                    || (inside && input_path.starts_with(resolved))
+            };
+            if literals.iter().any(|resolved| reads(resolved)) {
+                covering.entry((*input).to_owned()).or_default().push(spec.to_owned());
+            }
+        }
+    }
+    Ok(covering)
 }
 
 fn show(repo: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {

@@ -1521,8 +1521,19 @@ elif 'related' in a:
 elif '--runTestsByPath' in a:
     target = pathlib.Path(a[a.index('--runTestsByPath') + 1]).resolve()
     specs = [p for p in specs if p == target]
+def assertions(p):
+    # Real Jest registers one test per expanded it.each row, titled by its interpolation.
+    status = 'failed' if 'throw 0' in p.read_text() else 'passed'
+    names = []
+    for table, title in re.findall(r"it\.each\(\[(.*?)\]\)\('([^']*)'", p.read_text()):
+        for row in re.findall(r"\{([^}]*)\}", table):
+            name = title
+            for key, value in re.findall(r"(\w+):\s*'([^']*)'", row):
+                name = name.replace('$' + key, value)
+            names.append(name)
+    return [{'fullName': name, 'status': status} for name in names or ['claims']]
 results = [{'name': str(p), 'status': 'failed' if 'throw 0' in p.read_text() else 'passed',
-    'assertionResults': [{'fullName': 'claims', 'status': 'failed' if 'throw 0' in p.read_text() else 'passed'}]} for p in specs]
+    'assertionResults': assertions(p)} for p in specs]
 ok = bool(results) and all(r['status'] == 'passed' for r in results)
 pathlib.Path(a[a.index('--outputFile') + 1]).write_text(json.dumps({'success': ok, 'testResults': results}))
 pathlib.Path('target').mkdir(exist_ok=True)

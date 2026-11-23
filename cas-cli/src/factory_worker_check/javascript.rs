@@ -2026,10 +2026,12 @@ fn validate_report_with_inherited(
             bail!("{runner} stability report was unsuccessful");
         }
     }
-    // A template identity is proved when every row it selected passed.
+    // A template identity is proved when every row it selected passed. Distinct
+    // rows may share one runtime name (GH #2138, #2225); each passed, so the
+    // name holds at least one passing result per repeat.
     for test in tests {
         let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
-        if rows.peek().is_none() || rows.any(|(_, count)| *count != repeats) {
+        if rows.peek().is_none() || rows.any(|(_, count)| *count < repeats) {
             bail!(
                 "{runner} stability requires {repeats} passing results: {} :: {}",
                 test.path,
@@ -2041,7 +2043,8 @@ fn validate_report_with_inherited(
         bail!("{runner} ran tests outside the changed selection");
     }
     if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
-    Ok(results.len())
+    // Jest/Vitest count executed rows, not distinct names (GH #2166, #2246).
+    Ok(if runner == "playwright" { results.len() } else { results.values().sum() })
 }
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
@@ -2993,6 +2996,22 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             let rows = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed", "assertionResults":[
                 {"fullName":"row a","status":"passed"}, {"fullName":"row b","status":"passed"}]}]});
             validate_report(runner, repo, &rows, &template, 1).unwrap();
+            let indexed = [Identity { parameterized: true, ..id("a.test.js", "row $#") }];
+            let mut index_rows = rows.clone();
+            index_rows["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"row 0","status":"passed"}, {"fullName":"row 1","status":"passed"}]);
+            validate_report(runner, repo, &index_rows, &indexed, 1).unwrap();
+            // GH #2138: two passing rows with one static title prove it and count as two.
+            let mut shared = rows.clone();
+            shared["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"group changed","status":"passed"}, {"fullName":"group changed","status":"passed"}]);
+            assert_eq!(validate_report(runner, repo, &shared, &selected, 1).unwrap(), 2);
+            // GH #2225, #2252: `$field` rows that expand to one title prove the template.
+            let field = [Identity { parameterized: true, ..id("a.test.js", "case $name") }];
+            let mut field_rows = rows.clone();
+            field_rows["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"case alpha","status":"passed"}, {"fullName":"case alpha","status":"passed"}]);
+            assert_eq!(validate_report(runner, repo, &field_rows, &field, 1).unwrap(), 2);
             let mut failed_row = rows.clone();
             failed_row["testResults"][0]["assertionResults"][1]["status"] = json!("failed");
             assert!(validate_report(runner, repo, &failed_row, &template, 1).is_err());

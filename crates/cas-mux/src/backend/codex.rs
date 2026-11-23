@@ -86,6 +86,7 @@ impl Backend for Codex {
         // The whole native listing goes; the contract names the role skills.
         // `$name` still expands a skill it no longer lists.
         config.args.extend(["-c".to_string(), "skills.include_instructions=false".to_string()]);
+        crate::gateway::apply(&mut config, launch.cas_root, launch.name);
         config
     }
 

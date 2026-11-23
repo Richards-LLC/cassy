@@ -890,6 +890,11 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_home: Option<String>,
 
+    /// Opt-in home-gateway transport for Claude and Codex workers. The
+    /// user-level config names the hub; only a project's `enabled` routes.
+    #[serde(default, skip_serializing_if = "cas_types::factory_gateway::FactoryGatewayConfig::is_default")]
+    pub gateway: cas_types::factory_gateway::FactoryGatewayConfig,
+
     /// cas-3f93: absolute base for regenerable worker build output. When set,
     /// each managed worker's Cargo target lives at
     /// `<scratch_root>/<project-key>/targets/<worktree>` and target baselines
@@ -1395,6 +1400,7 @@ impl Default for FactoryConfig {
             worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
             codex_home: None,
+            gateway: Default::default(),
             scratch_root: None,
             worker_local_gate: None,
             release_command: None,

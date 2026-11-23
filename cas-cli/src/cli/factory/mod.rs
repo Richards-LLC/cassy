@@ -740,9 +740,9 @@ pub struct KillAllArgs {
 #[derive(clap::ValueEnum, Debug, Clone, PartialEq, Eq)]
 pub enum OwnerTransferAction { Prepare, Quiesce, Accept, Abort, Force, AdoptTarget }
 
-// `cas factory train owner-transfer`. Its own `Args` keeps the arguments out
-// of the shared subcommand builder's stack frame, which overflowed the 2 MiB
-// test thread parsing `Cli` once the train added commands (cas-6456).
+// `cas factory train owner-transfer`, boxed: inline, its eleven arguments
+// grew every `Cli` value and the derived parser's frame until parsing `Cli`
+// overflowed a 2 MiB test thread once the train added commands (cas-6456).
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct OwnerTransferArgs {
     pub train: String,
@@ -777,7 +777,7 @@ pub struct OwnerTransferArgs {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum TrainCommand {
     /// Explicit ownership transfer; never infers quiescence from heartbeat age.
-    OwnerTransfer(OwnerTransferArgs),
+    OwnerTransfer(Box<OwnerTransferArgs>),
     /// Merge this train's parked deliveries in order; the daemon resumes
     /// automatically after candidate verification or pending CI.
     Merge {
@@ -1409,8 +1409,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
                 Ok(())
             }
-            FactoryCommands::Train { command: TrainCommand::OwnerTransfer(OwnerTransferArgs { train, operation, expected_authority,
-                expected_generation, transfer_id, request_id, reason, successor, expected_target, evidence, stopped_or_fenced }) } => {
+            FactoryCommands::Train { command: TrainCommand::OwnerTransfer(transfer) } => {
+                let OwnerTransferArgs { train, operation, expected_authority, expected_generation, transfer_id,
+                    request_id, reason, successor, expected_target, evidence, stopped_or_fenced } = &**transfer;
                 use cas_mcp::types::{TrainOwnerTransferAction as Action, TrainOwnerTransferRequest};
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train owner-transfer requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::for_cli(root.to_path_buf());

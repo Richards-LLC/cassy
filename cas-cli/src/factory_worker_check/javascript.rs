@@ -44,6 +44,11 @@ pub(super) fn javascript(path: &str) -> bool {
     )
 }
 
+/// A package's `package.json` selects that package's own run (GH #2164).
+pub(super) fn package_manifest(path: &str) -> bool {
+    Path::new(path).file_name().is_some_and(|name| name == "package.json")
+}
+
 pub(super) fn test_file(path: &str) -> bool {
     let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
     [".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
@@ -72,7 +77,7 @@ pub(crate) struct Invocation {
     pub(crate) files: Vec<String>,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`; `<package>/package.json` runs that package";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
@@ -113,7 +118,7 @@ pub(crate) fn invocation(args: &[String]) -> Option<Invocation> {
                 return None;
             }
             config = Some(value.to_string());
-        } else if safe_path(arg) && javascript(arg) {
+        } else if safe_path(arg) && (javascript(arg) || package_manifest(arg)) {
             files.push(arg.to_string());
         } else {
             return None;
@@ -1518,18 +1523,12 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
         }
     }
     for (scope, (file, cause)) in &widened {
-        match execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file, cause)), test_env) {
-            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !matches!(scope, super::widened::Scope::Package(_)) => {
-                let package = super::widened::owning_package(&repo, file, invocation.runner);
-                eprintln!("{scope:?} selected no test ({error:#}); running its package {package:?} instead");
-                let cause = format!("{cause}; {scope:?} selected no test");
-                execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((&package, file, &cause)), test_env)?;
-            }
-            result => { result?; }
-        }
+        execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file, cause)), test_env)?;
     }
     if tests.is_empty() { return Ok(()); }
     let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None, test_env)?;
+    // The selection ran no test; its owning package's run already printed.
+    if proof.tests.is_empty() { return Ok(()); }
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -1844,7 +1843,8 @@ fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
 /// import, else the nearest directory with runner evidence. Conflicting or
 /// absent evidence leaves the runner unknown.
 pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
-    let source = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
+    // A package manifest's dependencies are not a test API import.
+    let source = if package_manifest(path) { String::new() } else { std::fs::read_to_string(repo.join(path)).unwrap_or_default() };
     // GH #2380: a unit test may drive a browser through `@playwright/test`'s
     // library (`chromium`); its test API import names the runner.
     if source.contains("'vitest'") || source.contains("\"vitest\"") {
@@ -1899,7 +1899,34 @@ fn runner_path(repo: &Path, package: &Path, runner: &str) -> Result<PathBuf> {
     }
 }
 
+/// The one execution boundary (GH #2369): a selection that cannot run a test,
+/// because it selects none or names a spec no runner config lists, runs the
+/// owning package instead, and park accepts that package receipt for the
+/// selection's inputs. A failing run still fails: unsure means run more.
 fn execute_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    runner: &str,
+    runner_config: Option<&Path>,
+    tests: &[Identity],
+    widened: Option<(&super::widened::Scope, &str, &str)>,
+    test_env: &[String],
+) -> Result<Proof> {
+    let error = match execute_selection(cas_root, repo, head, runner, runner_config, tests, widened, test_env) {
+        Err(error) if error.downcast_ref::<ZeroTests>().is_some()
+            && !matches!(widened, Some((super::widened::Scope::Package(_), _, _))) => error,
+        result => return result,
+    };
+    let file = widened.map(|(_, file, _)| file).or_else(|| tests.first().map(|test| test.path.as_str()))
+        .context("an empty selection names no input")?;
+    let package = super::widened::owning_package(repo, file, runner);
+    let cause = format!("{}; no runnable focused selection: {error:#}", widened.map_or("changed tests", |(_, _, cause)| cause));
+    eprintln!("Running {file}'s package {package:?} instead: {error:#}");
+    execute_selection(cas_root, repo, head, runner, runner_config, &[], Some((&package, file, cause.as_str())), test_env)
+}
+
+fn execute_selection(
     cas_root: &Path,
     repo: &Path,
     head: &str,
@@ -2115,6 +2142,12 @@ fn execute_tests(
         };
         count += if widened.is_some() && runner == "playwright" {
             let (success, report) = run(0)?;
+            // A run that found no test is no failure to attribute.
+            fn ran_a_test(suite: &Value) -> bool {
+                suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
+                    || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(ran_a_test))
+            }
+            if !ran_a_test(&report) { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
             let inherited = if success { BTreeSet::new() } else {
                 let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
                     &executable, &config, &report, &environment, high)
@@ -2437,7 +2470,7 @@ fn listing_owner(
         }
         if directory == repo { break; }
     }
-    bail!(crate::gates::tag("G-61", format!("no Playwright config lists {spec}")))
+    bail!(ZeroTests::new(format!("no Playwright config lists {spec}")))
 }
 
 /// Test identities in a Playwright JSON report, named as `playwright_results` names them.
@@ -2621,6 +2654,7 @@ fn validate_report_with_inherited(
             bail!("{runner} stability report was unsuccessful");
         }
     }
+    if results.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
     // A template identity is proved when every row it selected passed. Distinct
     // rows may share one runtime name (GH #2138, #2225), so how many rows there
     // must be comes from the source table, not from the run (cas-c1df).
@@ -2666,7 +2700,6 @@ fn validate_report_with_inherited(
     if !tests.is_empty() && results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
-    if results.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
     for file in files {
         if !results.keys().any(|ran| ran.path == *file) {
             bail!(crate::gates::tag("G-61", format!("{runner} executed no test of the required spec {file}")));

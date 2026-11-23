@@ -223,7 +223,9 @@ fn listed_park_refusals(
         let present: Vec<String> = changed_paths.iter().filter(|path| std::process::Command::new("git")
             .args(["cat-file", "-e", &format!("{head}:{path}")]).current_dir(proof_repo)
             .output().is_ok_and(|output| output.status.success())).cloned().collect();
-        let missing = stability::missing(&passing, &tests);
+        let mut missing = stability::missing(&passing, &tests);
+        // GH #2369: a selection that could not run a test ran its package.
+        missing.retain(|test| !widen::package_proves(&passing, &test.path));
         // GH #2320: a test gated to another OS selects nothing here, so this
         // host can never run it. Lane CI's Rust test job, green at this tip,
         // proves the lane OS's tests; any other OS needs five passes recorded
@@ -2549,18 +2551,21 @@ sys.exit(0 if ok else 1)
         );
     }
 
-    /// GH #2380, #2369, #2355, #2362, #2378 replayed through park: every gate
-    /// family shape ends in a runnable prescription whose passing receipt is
-    /// accepted, or in acceptance, never an impossible demand.
+    /// GH #2380, #2369, #2355, #2362, #2378 replayed through park, plus a named
+    /// changed-test selection that runs zero tests: every gate family shape
+    /// ends in a runnable prescription whose passing receipt is accepted, or in
+    /// acceptance, never an impossible demand.
     #[test]
     fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
         use crate::factory_worker_check::{javascript, widened};
         let _env = crate::test_support::TestEnvGuard::new();
-        const VITEST: &str = "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nrelated = 'related' in args\nresults = [] if related else [{'name': str(Path('pages/index.test.ts').resolve()), 'status': 'passed',\n    'assertionResults': [{'fullName': 'renders', 'status': 'passed'}]}]\nPath(args[args.index('--outputFile') + 1]).write_text(json.dumps({'success': not related, 'testResults': results}))\nraise SystemExit(1 if related else 0)\n";
+        // `related` finds no importer; a named run matches no runtime name;
+        // the package run passes.
+        const VITEST: &str = "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nrelated = 'related' in args\nnamed = '--testNamePattern' in args\nresults = [] if related else [{'name': str(Path('pages/index.test.ts').resolve()), 'status': 'passed',\n    'assertionResults': [{'fullName': 'renders at runtime' if named else 'renders', 'status': 'skipped' if named else 'passed'}]}]\nPath(args[args.index('--outputFile') + 1]).write_text(json.dumps({'success': not related, 'testResults': results}))\nraise SystemExit(1 if related else 0)\n";
         const REGISTRY: &str = "journeys:\n- id: join\n  status: live\n  spec: tests/journeys/join.spec.ts\n- id: delete\n  status: live\n  spec: tests/journeys/O1.spec.ts\n- id: audit\n  status: live\n  spec: tests/journeys/Q1.spec.ts\n";
         let pw = "import { test } from '@playwright/test';\n";
         // (issue, base files, delivered files, deleted files)
-        let rows: [(&str, Vec<(&str, String)>, Vec<(&str, String)>, Vec<&str>); 5] = [
+        let rows: [(&str, Vec<(&str, String)>, Vec<(&str, String)>, Vec<&str>); 6] = [
             ("#2380", vec![
                 ("package.json", "{}".into()), ("playwright.config.ts", "export default {};\n".into()),
                 ("docs/qa/journeys.yaml", REGISTRY.into()),
@@ -2575,6 +2580,11 @@ sys.exit(0 if ok else 1)
                 ("apps/web/pages/files.vue", "<template><p /></template>\n".into()),
                 ("apps/web/pages/index.test.ts", "import { it } from 'vitest';\nit('renders', () => {});\n".into()),
             ], vec![("apps/web/pages/files.vue", "<template><p>files</p></template>\n".into())], vec![]),
+            // A named changed-test selection that runs zero tests.
+            ("named", vec![
+                ("apps/web/package.json", "{}".into()), ("apps/web/vitest.config.ts", "export default {};\n".into()),
+                ("apps/web/pages/index.test.ts", "import { it } from 'vitest';\nit('renders', () => {});\n".into()),
+            ], vec![("apps/web/pages/index.test.ts", "import { it } from 'vitest';\nit('renders', () => { 1; });\n".into())], vec![]),
             ("#2355", vec![
                 ("package.json", "{}".into()), ("playwright.config.ts", "export default {};\n".into()),
                 ("docs/LOCAL_GATES.md", "gates\n".into()),
@@ -2658,7 +2668,7 @@ sys.exit(0 if ok else 1)
                     widened::record(root.path(), &repo, &head, widened::Proof { runner: "vitest".into(),
                         scope: widened::Scope::File(spec.into()), reason: String::new(), configs: Default::default() }, 1).unwrap();
                 }
-                "#2369" => {
+                "#2369" | "named" => {
                     let runner = repo.join("apps/web/node_modules/.bin/vitest");
                     std::fs::create_dir_all(runner.parent().unwrap()).unwrap();
                     std::fs::write(&runner, VITEST).unwrap();
@@ -2667,7 +2677,8 @@ sys.exit(0 if ok else 1)
                         std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
                     }
                     let [run] = prescribed.as_slice() else { panic!("{issue}: {held:?}") };
-                    let args = ["vitest", "related", "--run"].into_iter().map(String::from).chain(run.files.clone()).collect::<Vec<_>>();
+                    let related = if issue == "#2369" { vec!["related", "--run"] } else { Vec::new() };
+                    let args = std::iter::once("vitest").chain(related).map(String::from).chain(run.files.clone()).collect::<Vec<_>>();
                     if let Err(error) = javascript::execute(root.path(), &args, &repo, &[]) {
                         failures.push((issue, vec![format!("{error:#}")]));
                         continue;

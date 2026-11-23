@@ -82,15 +82,22 @@ pub(crate) fn owning_package(repo: &Path, path: &str, runner: &str) -> Scope {
         .unwrap_or_else(|| package(repo, path))
 }
 
-/// The package runs that prove a widened scope (GH #2369): run more, never
-/// an impossible narrower demand. A crate or package is its own owner.
-fn owners(repo: &Path, scope: &Scope) -> Vec<Scope> {
-    let (Scope::File(path) | Scope::Related(path)) = scope else { return Vec::new() };
+/// The JavaScript package runs that prove `path` (GH #2369): run more, never
+/// an impossible narrower demand. Rust keeps its own crate proof.
+fn owners(repo: &Path, path: &str) -> Vec<Scope> {
+    if !javascript::javascript(path) { return Vec::new(); }
     let mut owners = vec![package(repo, path)];
     if let Some(runner) = javascript::runner_hint(repo, path).filter(|runner| *runner != "node --test") {
         owners.push(owning_package(repo, path, runner));
     }
     owners
+}
+
+/// Whether a passing run of the package owning `path` is recorded: it proves
+/// that file's changed tests and widened scopes alike (GH #2369).
+pub(crate) fn package_proves(passing: &PassingTests<'_>, path: &str) -> bool {
+    owners(passing.repo, path).iter().any(|owner| passing.records().iter()
+        .filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| &proof.scope == owner))
 }
 
 /// The test files the journey registry declares at `head`. Their declared lane
@@ -145,7 +152,7 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
             && (proof.scope == Scope::File(spec.into()) || matches!(&proof.scope, Scope::Related(_))));
     scopes.iter().filter(|scope| {
         // GH #2369: the owning package's own passing run proves any input in it.
-        if owners(passing.repo, scope).iter().any(|owner| recorded(owner)) { return false; }
+        if let Scope::File(path) | Scope::Related(path) = scope && package_proves(passing, path) { return false; }
         if let Scope::Related(helper) = scope {
             let consumers = javascript::related_tests(passing.repo, helper)
                 .filter(|(runner, _)| *runner == "playwright").map(|(_, specs)| specs).unwrap_or_default();
@@ -192,7 +199,11 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
         };
         let named = if unresolved.is_empty() { String::new() } else { format!("no spec reads {}; ", unresolved.join(", ")) };
         let Some(path) = path else {
-            return vec![format!("{named}the package needs one capped run of a changed JavaScript file in {scope:?}: `cas factory worker-check --cas-root {} -- <runner> <changed .js/.ts file>`", cas_root.display())];
+            // GH #2164: the package's manifest selects its own run.
+            let Scope::Package(directory) = scope else { return Vec::new() };
+            let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
+            return javascript::runner_hint(repo, &manifest).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright"])
+                .into_iter().map(|runner| format!("{named}cas factory worker-check --cas-root {} -- {runner} {manifest}", cas_root.display())).collect();
         };
         let note = (!named.is_empty() && found.is_some()).then(|| format!("{}the covering specs' passes do not prove the package; run the whole package instead", named));
         note.into_iter().chain(javascript::runner_hint(repo, path).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"])
@@ -289,6 +300,15 @@ mod tests {
         for command in &commands {
             let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
             assert_eq!(javascript::invocation(&args).map(|run| run.files), Some(vec![paths[2].clone()]), "{command}");
+        }
+        // GH #2164: with no JavaScript input left, the package's manifest
+        // selects its own run, and that selection widens to this package.
+        let commands = commands(Path::new("/cas"), repo.path(), &paths[..2], &scopes, &Default::default());
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let files = javascript::invocation(&args).map(|run| run.files).unwrap_or_default();
+            assert_eq!(files.iter().map(|file| scope(repo.path(), file)).collect::<Vec<_>>(), scopes, "{command}");
         }
     }
 }

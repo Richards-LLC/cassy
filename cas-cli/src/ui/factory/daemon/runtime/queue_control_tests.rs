@@ -1208,10 +1208,11 @@ async fn failed_inject_during_recycle_keeps_mail_for_the_successor_gh_1731() {
         let mut daemon = super::super::provisioning_tests::daemon(&root);
         daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(root.clone(), None);
         if successor_queued {
+            // The shape the recycle requeues while crash cleanup is pending.
             daemon.pending_spawns.push_back(PendingSpawn::Recycle {
                 request_id: 1,
                 name: "worker-a".into(),
-                spec: None,
+                spec: Some(cas_mux::WorkerSpec::builtin_default()),
                 dead_worker_recovery: false,
                 stopped: true,
             });

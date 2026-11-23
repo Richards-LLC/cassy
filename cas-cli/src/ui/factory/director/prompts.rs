@@ -2749,7 +2749,8 @@ mod tests {
             task_id: id.to_string(),
             task_title: id.to_string(),
             task_status: status,
-            close_rejected_reason: None,
+            // A parked delivery's lease carries its close refusal (cas-627f).
+            close_rejected_reason: (status == TaskStatus::AwaitingMerge).then(|| "MERGE REQUIRED".to_string()),
             pending_qa: None,
         };
         for (old_status, survives) in [(TaskStatus::InProgress, false), (TaskStatus::AwaitingMerge, true)] {

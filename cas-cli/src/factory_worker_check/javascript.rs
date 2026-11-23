@@ -1282,47 +1282,18 @@ pub(crate) fn jest_owner(repo: &Path, path: &str) -> Option<PathBuf> {
     config.strip_prefix(repo).ok().map(Path::to_path_buf)
 }
 
-/// Whether the local Playwright, run with `config`, lists a test in `spec`:
-/// the config's own `testDir`, `testMatch`, `testIgnore` and projects decide
-/// ownership (GH #2195). Listing loads the config without starting servers.
-fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> bool {
-    fn lists(suite: &Value) -> bool {
-        suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
-            || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(lists))
-    }
-    let Ok(playwright) = runner_path(repo, dir, "playwright") else { return false };
-    let Ok(output) = Command::new(playwright).current_dir(dir).env("CI", "1")
-        .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"])
-        .arg(regex::escape(&spec.to_string_lossy())).output()
-    else { return false };
-    output.status.success()
-        && serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|report| lists(&report))
-}
-
-/// The repository-relative non-default Playwright config that lists `path`,
-/// when its directory's default config does not (GH #2195).
-pub(crate) fn playwright_owner(repo: &Path, path: &str) -> Option<PathBuf> {
-    let (dir, config) = runner_root(repo, path, "playwright").ok()?;
-    let config = config?;
-    if runner_config(&dir, "playwright").as_ref() == Some(&config) { return None; }
-    config.strip_prefix(repo).ok().map(Path::to_path_buf)
-}
-
 /// The runner configs in `dir`, nearest default first. Jest repositories keep
-/// further configs beside it (`jest-integration.config.js`) for other specs, as
-/// Playwright ones do (`playwright.hermetic.config.ts`).
+/// further configs beside it (`jest-integration.config.js`) for other specs.
 fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
     let mut configs: Vec<PathBuf> = runner_config(dir, runner).into_iter().collect();
-    if matches!(runner, "jest" | "playwright") {
-        let defaults = if runner == "jest" { JEST_CONFIGS } else { PLAYWRIGHT_CONFIGS };
+    if runner == "jest" {
         let mut extra: Vec<PathBuf> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                (if runner == "jest" { name.contains("jest") } else { name.starts_with("playwright") })
-                    && name.contains(".config.") && javascript(&name) && !defaults.contains(&name.as_str())
+                name.contains("jest") && name.contains(".config.") && !JEST_CONFIGS.contains(&name.as_str())
             })
             .map(|entry| entry.path())
             .collect();
@@ -1335,8 +1306,7 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
 /// The runner's working directory and explicit config for a test file: the
 /// nearest ancestor holding that runner's config, else the nearest
 /// package.json. A nested package.json must not hide the config and its
-/// transforms (cas-1468). For Jest, or for one of several Playwright configs
-/// (GH #2195), the config must select the file: a spec
+/// transforms (cas-1468). For Jest the config must select the file: a spec
 /// outside the default config's `testRegex` belongs to the config that
 /// matches it (GH #2058); with no such config the nearest one stays.
 fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
@@ -1344,17 +1314,8 @@ fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option
     let mut current = spec.parent().context("test parent")?.to_path_buf();
     let (mut package, mut nearest) = (None, None);
     loop {
-        let configs = runner_configs(&current, runner);
-        // One Playwright config owns its directory; among several, the one
-        // listing the spec does (GH #2195).
-        let several = configs.len() > 1;
-        for config in configs {
-            let selects = match runner {
-                "jest" => jest_config_selects(repo, &current, &config, &spec),
-                "playwright" if several => playwright_config_selects(repo, &current, &config, &spec),
-                _ => true,
-            };
-            if selects {
+        for config in runner_configs(&current, runner) {
+            if runner != "jest" || jest_config_selects(repo, &current, &config, &spec) {
                 return Ok((current, Some(config)));
             }
             nearest.get_or_insert_with(|| (current.clone(), Some(config)));

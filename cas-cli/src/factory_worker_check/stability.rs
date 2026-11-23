@@ -223,8 +223,7 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
 pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -> Vec<String> {
     let command = |runner: &str, files: &str| format!(
         "`cas factory worker-check --cas-root {} -- {runner} {files}`", cas_root.display());
-    // Files group by runner and by the config that lists them: Jest (GH #2058),
-    // or a Playwright config other than the default (GH #2195).
+    // Files group by runner and, for Jest, by the config that lists them (GH #2058).
     let mut known: BTreeMap<(&str, Option<String>), BTreeSet<&str>> = BTreeMap::new();
     let mut unknown = BTreeSet::new();
     let mut rust = false;
@@ -232,11 +231,8 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
         if test.path.ends_with(".rs") {
             rust = true;
         } else if let Some(runner) = super::javascript::runner_hint(repo, &test.path) {
-            let owner = match runner {
-                "jest" => super::javascript::jest_owner(repo, &test.path),
-                "playwright" => super::javascript::playwright_owner(repo, &test.path),
-                _ => None,
-            }.map(|config| config.display().to_string());
+            let owner = (runner == "jest").then(|| super::javascript::jest_owner(repo, &test.path)).flatten()
+                .map(|config| config.display().to_string());
             known.entry((runner, owner)).or_default().insert(test.path.as_str());
         } else {
             unknown.insert(test.path.as_str());

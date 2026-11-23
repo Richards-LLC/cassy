@@ -4789,3 +4789,54 @@ async fn revalidated_landed_task_closes_without_delivery_and_frees_queue_gh1695(
     assert!(result.is_ok(), "{closed}\n---\n{result:?}");
     assert_eq!(f.task(&next.id).status, TaskStatus::InProgress);
 }
+
+/// GH #2384: an operations-only epic whose branch is the repository's root
+/// commit has no structural range to lint. Its approved epic verification and
+/// code-free children close it by the ordinary path; a child code delivery
+/// keeps the pre-close hook and its refusal.
+#[tokio::test]
+async fn ops_only_epic_on_root_commit_closes_by_ordinary_path_gh2384() {
+    use cas_store::VerificationStore;
+    use cas_types::{Verification, VerificationProvenance, VerificationStatus, VerificationType};
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let epic_branch = "epic/ops-cas-e2384";
+    let f = fixture(&mut env, epic_branch);
+    let root = git(f.dir.path(), &["rev-parse", epic_branch]);
+    assert!(git(f.dir.path(), &["rev-list", "--parents", "-n1", &root]).split_whitespace().count() == 1);
+    let mut epic = assigned("cas-e2384", TaskType::Epic, epic_branch);
+    epic.assignee = None;
+    epic.branch = Some(epic_branch.into());
+    epic.epic_verification_owner = Some("nocode-supervisor-session".into());
+    f.put(&epic);
+    let mut child = assigned("cas-c2384", TaskType::Chore, epic_branch);
+    child.status = TaskStatus::Closed;
+    child.assignee = None;
+    child.execution_note = Some("no-code".into());
+    child.external_ref = Some(PROOF.into());
+    child.deliverables.commit_hash = Some(root.clone());
+    f.put(&child);
+    open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+        child.id.clone(), epic.id.clone(), DependencyType::ParentChild,
+    )).unwrap();
+    let mut verdict = Verification::new("ver-e2384".into(), epic.id.clone());
+    verdict.verification_type = VerificationType::Epic;
+    verdict.status = VerificationStatus::Approved;
+    verdict.summary = "Operations epic reviewed".into();
+    verdict.provenance = VerificationProvenance::SupervisorDirect;
+    verdict.agent_id = Some("nocode-supervisor-session".into());
+    verdict.issuer_agent_id = verdict.agent_id.clone();
+    cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+    let close = serde_json::json!({"action":"close", "id":epic.id, "reason":"All operations children verified"});
+
+    let refused = call(&f.supervisor, close.clone()).await;
+    assert!(refused.contains("G-41"), "a child code delivery keeps the hook: {refused}");
+    assert_ne!(f.task(&epic.id).status, TaskStatus::Closed);
+
+    child.deliverables.commit_hash = None;
+    f.put(&child);
+    let response = call(&f.supervisor, close).await;
+    let closed = f.task(&epic.id);
+    assert_eq!(closed.status, TaskStatus::Closed, "{response}");
+    assert!(closed.notes.contains("ver-e2384"), "audit names the verdict: {}", closed.notes);
+}

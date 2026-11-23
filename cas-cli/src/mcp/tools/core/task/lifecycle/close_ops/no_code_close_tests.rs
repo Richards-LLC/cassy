@@ -506,6 +506,11 @@ async fn no_code_park_reuses_published_bundle_and_skips_nested_raw_files_gh2212(
     }).to_string()).unwrap();
     let id = "cas-2212";
     let (checkout, lane) = issue_delivery(&f, id, "main");
+    // The no-code declaration and its portable proof are recorded on the task.
+    let mut declared = f.task(id);
+    declared.execution_note = Some("no-code".into());
+    declared.external_ref = Some(PROOF.into());
+    f.put(&declared);
     std::fs::write(checkout.join(".gitignore"), ".cas/\ndurable-artifacts/\ntarget/\n").unwrap();
     std::fs::write(checkout.join("runbook.md"), "deploy runbook\n").unwrap();
     git(&checkout, &["add", ".gitignore", "runbook.md"]);
@@ -554,7 +559,7 @@ async fn no_code_park_reuses_published_bundle_and_skips_nested_raw_files_gh2212(
         .mount(&server).await;
 
     let reply = call(&f.worker, serde_json::json!({
-        "action": "close", "id": id, "execution_note": "no-code", "external_ref": PROOF,
+        "action": "close", "id": id,
         "reason": format!("PASS bundle `{}` summary `{}`", published[0].display(), summary.display()),
     })).await;
     let task = f.task(id);

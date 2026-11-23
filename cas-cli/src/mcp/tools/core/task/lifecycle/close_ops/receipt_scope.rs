@@ -1065,11 +1065,13 @@ mod tests {
 
     #[test]
     fn park_requires_owned_test_stability_with_shared_carry_forward_cas_9e02e() {
-        use crate::factory_worker_check::stability::{self, Identity, Proof};
+        use crate::factory_worker_check::{PassingTests, widened, stability::{self, Identity, Proof}};
         for runner in ["nextest", "vitest", "jest", "playwright"] {
             let repo = changelog_fixture();
             let root = tempfile::tempdir().unwrap();
             let rust = runner == "nextest";
+            // GH #2243: the reported Vitest proof covered one `.each` template.
+            let each = matches!(runner, "vitest" | "jest");
             let path = if rust { "src/child.rs" } else { "owned.test.js" };
             if rust {
                 std::fs::create_dir_all(repo.path().join("src")).unwrap();
@@ -1077,12 +1079,14 @@ mod tests {
                 std::fs::write(repo.path().join("src/lib.rs"), "mod child;\n").unwrap();
             }
             let old = if rust { "#[test]\nfn untouched() {}\n" } else { "test('untouched', () => {});\n" };
-            let added = if rust { "#[test]\nfn owned() {}\n" } else { "test('owned', () => {});\n" };
+            let added = if rust { "#[test]\nfn owned() {}\n" }
+                else if each { "test.each([1, 2])('owned %s', () => {});\n" } else { "test('owned', () => {});\n" };
             std::fs::write(repo.path().join(path), old).unwrap();
             let base = commit_changelog_fixture(repo.path(), "base test");
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &base])
                 .current_dir(repo.path()).status().unwrap().success());
-            let identity = Identity::exact(path, if rust { "child::owned" } else { "owned" });
+            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true } }
+                else { Identity::exact(path, if rust { "child::owned" } else { "owned" }) };
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
                 tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
             std::fs::write(repo.path().join(path), format!("{old}{added}")).unwrap();
@@ -1101,15 +1105,28 @@ mod tests {
             assert_eq!(packages, if rust { vec!["fixture".to_string()] } else { vec![] });
             let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
             assert!(admitted.is_none(), "{runner}: {admitted:?}");
-            std::fs::write(repo.path().join("README.md"), "new delivery tip\n").unwrap();
+            let scope = if rust { widened::Scope::Crate("fixture".into()) } else { widened::Scope::Package(String::new()) };
+            widened::record(root.path(), repo.path(), &head, widened::Proof { runner: runner.into(),
+                scope: scope.clone(), reason: "widened:unclassified".into() }, 1).unwrap();
+            // GH #2243/#2288: the docs-only child a close itself asks for,
+            // replayed from cas-e705's be8ba51e0c.
+            for (fragment, body) in [("changelog.d/cas-9e02e.md", "### Fixed\n- fixture\n"),
+                ("docs/product-overview.d/cas-9e02e.md", "fixture\n"),
+                ("docs/qa/bug-families/fixture-family.yaml", "tasks:\n  - cas-9e02e\nsummary: fixture\n")] {
+                std::fs::create_dir_all(repo.path().join(fragment).parent().unwrap()).unwrap();
+                std::fs::write(repo.path().join(fragment), body).unwrap();
+            }
             let moved = commit_changelog_fixture(repo.path(), "move source tip");
             assert!(park_refusal(root.path(), repo.path(), &task, &paths, &moved, "main", None).is_none(),
                 "{runner}: a docs-only commit must carry the tested input proof forward");
+            let carried = PassingTests::new(root.path(), repo.path(), &moved).with_target("main");
+            assert!(widened::missing(&carried, std::slice::from_ref(&scope)).is_empty(), "{runner}: widened run carries");
             // The product work is now on the target. A test-only correction
             // still owes stability, including when the test name is unchanged.
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &moved])
                 .current_dir(repo.path()).status().unwrap().success());
             let edited = if rust { "#[test]\nfn owned() { assert_eq!(1, 1); }\n" }
+                else if each { "test.each([1, 2])('owned %s', (row) => { expect(row).toBe(row); });\n" }
                 else { "test('owned', () => { expect(1).toBe(1); });\n" };
             std::fs::write(repo.path().join(path), format!("{old}{edited}")).unwrap();
             let changed = commit_changelog_fixture(repo.path(), "edit only the owned test");
@@ -1127,6 +1144,9 @@ mod tests {
             stability::invalidate(root.path(), repo.path(), &retry, &[identity.clone()]).unwrap();
             let held = park_refusal(root.path(), repo.path(), &task, &test_paths, &retry, "main", None).unwrap();
             assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains(&identity.name), "{held}");
+            widened::invalidate(root.path(), repo.path(), &moved, &scope).unwrap();
+            let withdrawn = PassingTests::new(root.path(), repo.path(), &moved).with_target("main");
+            assert_eq!(widened::missing(&withdrawn, std::slice::from_ref(&scope)), [scope], "{runner}: failed rerun withdraws");
         }
     }
 

@@ -1685,8 +1685,15 @@ fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<Strin
     if changed.is_empty() { return Some(BTreeSet::new()); }
     let tree = delivered_tree(repo, head)?;
     let mut inputs = BTreeSet::new();
+    // cas-3080/cas-d9c72: the bug-family fragment a close asks for is QA
+    // registry data, not a runner input. Its `.yaml` extension alone must not
+    // void tested-input proof; a Rust source naming it still does.
+    let registry = crate::qa_registry::DEFAULT_PATH;
+    let bug_family = |path: &str| path != registry && crate::qa_registry::is_registry_input(registry, path);
     let external = changed.iter().filter(|path| {
-        if !close_doc_fragment(path) && (is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path)) {
+        if !close_doc_fragment(path)
+            && ((!bug_family(path) && is_test_or_build_input_path(path)) || tree.is_workspace_crate_path(path))
+        {
             inputs.insert((*path).clone()); false
         } else { true }
     }).cloned().collect::<Vec<_>>();

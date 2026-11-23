@@ -2025,12 +2025,15 @@ struct RemoteMergeSource {
 /// Return the worktree owner and source ref for a System-B merge id.
 fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
     let token = id.strip_prefix("factory/").unwrap_or(id);
-    if let Some(worker) = task_id.and_then(|task_id| token.strip_suffix(&format!("-{task_id}"))) {
-        if !worker.is_empty() {
-            return (worker.to_string(), format!("factory/{token}"));
-        }
+    let branch = format!("factory/{token}");
+    // cas-dc08: the worker is the name whose own task ref is the known task.
+    if let Some(worker) = task_id
+        .and_then(|task_id| token.strip_suffix(task_id)?.strip_suffix('-'))
+        .filter(|worker| crate::factory_isolation::own_task_branch_task_id(worker, &branch) == task_id)
+    {
+        return (worker.to_string(), branch);
     }
-    (token.to_string(), format!("factory/{token}"))
+    (token.to_string(), branch)
 }
 
 /// Delivery spellings are matched against an already-authorized worker/task;
@@ -2419,11 +2422,15 @@ impl CasCore {
 }
 
 /// A branch-only merge request can name its task through the canonical
-/// `factory/<worker>-<task-id>` suffix. The task row still authorizes it.
-fn per_task_merge_identity(id: &str) -> Option<(&str, &str)> {
-    let token = id.strip_prefix("factory/")?;
-    let (worker, suffix) = token.rsplit_once("-cas-")?;
-    (!worker.is_empty() && !suffix.is_empty()).then_some((worker, suffix))
+/// `factory/<worker>-<task-id>` suffix: every `(worker, task ref)` split the
+/// shared task-ref grammar accepts (cas-dc08; any task prefix, not only
+/// `cas-`). The task row, assigned to that worker, still authorizes it.
+fn per_task_merge_identities(id: &str) -> impl Iterator<Item = (&str, &str)> {
+    let token = id.strip_prefix("factory/").unwrap_or_default();
+    token.match_indices('-').filter_map(move |(at, _)| {
+        let worker = &token[..at];
+        crate::factory_isolation::own_task_branch_task_id(worker, id).map(|task| (worker, task))
+    })
 }
 
 /// Resolve whether an identity token (assignee field or agent id/name) belongs
@@ -4601,14 +4608,14 @@ impl CasCore {
         }
         let cas_root = self.cas_root.clone();
         let inferred_task_id = if task_id.is_none() {
-            per_task_merge_identity(id).and_then(|(worker, suffix)| {
-                let candidate = format!("cas-{suffix}");
-                self.open_task_store()
-                    .ok()?
-                    .get(&candidate)
-                    .ok()
-                    .filter(|task| task.assignee.as_deref() == Some(worker))
-                    .map(|_| candidate)
+            self.open_task_store().ok().and_then(|tasks| {
+                per_task_merge_identities(id).find_map(|(worker, task_ref)| {
+                    tasks
+                        .get(task_ref)
+                        .ok()
+                        .filter(|task| task.assignee.as_deref() == Some(worker))
+                        .map(|_| task_ref.to_string())
+                })
             })
         } else {
             None
@@ -8641,9 +8648,14 @@ mod tests {
 
     #[test]
     fn per_task_merge_id_uses_worker_worktree_and_task_branch_gh_1040() {
-        assert_eq!(
-            super::per_task_merge_identity("factory/daring-jay-42-cas-1e7d"),
-            Some(("daring-jay-42", "1e7d")),
+        assert!(
+            super::per_task_merge_identities("factory/daring-jay-42-cas-1e7d")
+                .any(|split| split == ("daring-jay-42", "cas-1e7d")),
+        );
+        assert!(
+            super::per_task_merge_identities("factory/daring-jay-42-gh-77")
+                .any(|split| split == ("daring-jay-42", "gh-77")),
+            "a task prefix other than cas- parses too",
         );
         assert_eq!(
             super::system_b_merge_source("factory/daring-jay-42-cas-1e7d", Some("cas-1e7d")),

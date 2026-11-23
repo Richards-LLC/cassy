@@ -53,9 +53,19 @@ for (const [name, viewport, colorScheme] of [
     });
     await journey.stage("Scroll up to request one older page", async () => {
       // Stop above the tail, then use an actual reading gesture near the top.
-      await thread.evaluate(element => { element.scrollTop = 300; });
-      await thread.hover(); await page.mouse.wheel(0, -250);
-      await expect.poll(() => hub.historyRequests.length).toBe(3);
+      // Jump to latest may re-window the thread to its tail; a gesture near
+      // the top first mounts the cached turns, and only one with every cached
+      // turn mounted asks for the next page (cas-9fcc: one gesture is not
+      // always enough). Each gesture must do one of the two.
+      const first = () => renderedTurns(page).first().getAttribute("data-key");
+      for (let wheels = 0; wheels < 8 && hub.historyRequests.length === 2; wheels++) {
+        const before = await first();
+        await thread.evaluate(element => { element.scrollTop = 300; });
+        await thread.hover(); await page.mouse.wheel(0, -250);
+        await expect.poll(async () => hub.historyRequests.length > 2 || await first() !== before,
+          { message: "a gesture near the top mounts cached turns or requests the next page" }).toBe(true);
+      }
+      expect(hub.historyRequests).toHaveLength(3);
       expect(hub.historyRequests.at(-1)).toMatchObject({ before: 51 });
       await expect.poll(() => renderedTurns(page).count()).toBeLessThanOrEqual(80);
       await expect(releaseTurn(page, 150)).not.toBeInViewport();

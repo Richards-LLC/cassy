@@ -1,3 +1,0 @@
-### Added — Factory workers
-
-- **Workers can use the home gateway** — Was: every Claude and Codex worker talked to its provider directly with its own account login, and Cassy had no way to send worker traffic through the operator's own model hub. Now: a project that sets `factory.gateway.enabled = true` routes its workers through the hub named by `factory.gateway.endpoint` and `factory.gateway.key_file` (loopback or tailnet only, key file mode 0600), while each worker keeps its usual account directory for hooks, MCP and sessions. If the hub is not ready when a worker starts, that worker starts direct on the same account, and `worker_status` shows which transport each worker uses. Off by default; with the setting absent or false, launches are unchanged.

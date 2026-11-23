@@ -2892,6 +2892,11 @@ mod tests {
     #[test]
     fn playwright_helper_runs_through_its_importing_specs_gh2146() {
         use super::super::widened::{self, Scope};
+        // `execute` takes the same build admission as a real capped run. Held
+        // guard: admission off and HOME private, so neither this host's memory
+        // pressure or live cargo builders nor ~/.cas decides the result (the
+        // lane CI failure on run 45127045758 was "memory PSI exceeds 10%").
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let cas = tempfile::tempdir().unwrap();
         let repo = cas.path().join("worktrees/web");
         std::fs::create_dir_all(&repo).unwrap();

@@ -2934,6 +2934,10 @@ retain one-pass crate coverage. Vitest, Jest and Playwright use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`;
 Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
 of the changed tests alone, which `node:test` cannot retry.
+A spec that only a sibling config lists, such as `jest-integration.config.js` or
+`playwright.hermetic.config.ts`, runs under that config. The runner's own listing
+decides ownership, and the prescribed command names it with `--config`; a
+caller's `--config` always wins (GH #2058, #2195).
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
 When discovery cannot classify an input, the capped runner widens to the whole

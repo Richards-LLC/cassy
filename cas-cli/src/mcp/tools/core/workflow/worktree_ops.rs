@@ -450,7 +450,24 @@ pub(crate) fn delivery_tip_ci_reading(sha: &str, cwd: &Path) -> (&'static str, S
     }
 }
 
+/// GH #2320: the exact tip's lane CI verdict, and whether a lane job that
+/// runs this delivery's Rust tests passed there (the slim lane's impact own
+/// tests, or a full-suite shard). A lint, typecheck or docs check never counts.
+pub(crate) fn delivery_tip_rust_tests(sha: &str, cwd: &Path) -> (&'static str, bool) {
+    match delivery_tip_ci_runs(sha, cwd) {
+        Ok((conclusion, runs)) => (conclusion, conclusion == "success" && runs.iter().any(|run|
+            run.get("conclusion").and_then(serde_json::Value::as_str) == Some("success")
+                && run.get("name").and_then(serde_json::Value::as_str).is_some_and(|name|
+                    name.contains("Scoped Validation — impact own tests") || name.contains("Fast Validation — suite shard")))),
+        Err(_) => ("unknown", false),
+    }
+}
+
 fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Result<&'static str, String> {
+    delivery_tip_ci_runs(sha, cwd).map(|(conclusion, _)| conclusion)
+}
+
+fn delivery_tip_ci_runs(sha: &str, cwd: &Path) -> Result<(&'static str, Vec<serde_json::Value>), String> {
     let binary = crate::github_repo::gh_binary();
     let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT)?;
     let query = format!("repos/{}/commits/{sha}/check-runs", repo.canonical);
@@ -462,19 +479,19 @@ fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Result<&'static str, String>
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| observed(format!("invalid JSON: {error}")))?;
     let runs = parsed.get("check_runs").and_then(serde_json::Value::as_array)
-        .ok_or_else(|| observed("response omitted check_runs".into()))?;
+        .ok_or_else(|| observed("response omitted check_runs".into()))?.clone();
     if runs.is_empty() { return Err(observed("no check runs for this commit".into())); }
     if runs.iter().any(|run| matches!(run.get("status").and_then(serde_json::Value::as_str),
         Some("queued" | "in_progress" | "requested" | "waiting" | "pending"))) {
-        return Ok("pending");
+        return Ok(("pending", runs));
     }
     if runs.iter().any(|run| {
         run.get("status").and_then(serde_json::Value::as_str) != Some("completed")
             || run.get("conclusion").and_then(serde_json::Value::as_str).is_none()
     }) { return Err(observed("a check run has no completed conclusion".into())); }
     match classify_branch_ci_response("", sha, output) {
-        BranchCiState::Green { .. } => Ok("success"),
-        BranchCiState::Red { .. } => Ok("failure"),
+        BranchCiState::Green { .. } => Ok(("success", runs)),
+        BranchCiState::Red { .. } => Ok(("failure", runs)),
         BranchCiState::NoChecks { reason, .. }
         | BranchCiState::Unknown { reason, .. }
         | BranchCiState::MissingCommit { reason, .. }
@@ -2025,12 +2042,15 @@ struct RemoteMergeSource {
 /// Return the worktree owner and source ref for a System-B merge id.
 fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
     let token = id.strip_prefix("factory/").unwrap_or(id);
-    if let Some(worker) = task_id.and_then(|task_id| token.strip_suffix(&format!("-{task_id}"))) {
-        if !worker.is_empty() {
-            return (worker.to_string(), format!("factory/{token}"));
-        }
+    let branch = format!("factory/{token}");
+    // cas-dc08: the worker is the name whose own task ref is the known task.
+    if let Some(worker) = task_id
+        .and_then(|task_id| token.strip_suffix(task_id)?.strip_suffix('-'))
+        .filter(|worker| crate::factory_isolation::own_task_branch_task_id(worker, &branch) == task_id)
+    {
+        return (worker.to_string(), branch);
     }
-    (token.to_string(), format!("factory/{token}"))
+    (token.to_string(), branch)
 }
 
 /// Delivery spellings are matched against an already-authorized worker/task;
@@ -2419,11 +2439,15 @@ impl CasCore {
 }
 
 /// A branch-only merge request can name its task through the canonical
-/// `factory/<worker>-<task-id>` suffix. The task row still authorizes it.
-fn per_task_merge_identity(id: &str) -> Option<(&str, &str)> {
-    let token = id.strip_prefix("factory/")?;
-    let (worker, suffix) = token.rsplit_once("-cas-")?;
-    (!worker.is_empty() && !suffix.is_empty()).then_some((worker, suffix))
+/// `factory/<worker>-<task-id>` suffix: every `(worker, task ref)` split the
+/// shared task-ref grammar accepts (cas-dc08; any task prefix, not only
+/// `cas-`). The task row, assigned to that worker, still authorizes it.
+fn per_task_merge_identities(id: &str) -> impl Iterator<Item = (&str, &str)> {
+    let token = id.strip_prefix("factory/").unwrap_or_default();
+    token.match_indices('-').filter_map(move |(at, _)| {
+        let worker = &token[..at];
+        crate::factory_isolation::own_task_branch_task_id(worker, id).map(|task| (worker, task))
+    })
 }
 
 /// Resolve whether an identity token (assignee field or agent id/name) belongs
@@ -4601,14 +4625,14 @@ impl CasCore {
         }
         let cas_root = self.cas_root.clone();
         let inferred_task_id = if task_id.is_none() {
-            per_task_merge_identity(id).and_then(|(worker, suffix)| {
-                let candidate = format!("cas-{suffix}");
-                self.open_task_store()
-                    .ok()?
-                    .get(&candidate)
-                    .ok()
-                    .filter(|task| task.assignee.as_deref() == Some(worker))
-                    .map(|_| candidate)
+            self.open_task_store().ok().and_then(|tasks| {
+                per_task_merge_identities(id).find_map(|(worker, task_ref)| {
+                    tasks
+                        .get(task_ref)
+                        .ok()
+                        .filter(|task| task.assignee.as_deref() == Some(worker))
+                        .map(|_| task_ref.to_string())
+                })
             })
         } else {
             None
@@ -8649,9 +8673,14 @@ mod tests {
 
     #[test]
     fn per_task_merge_id_uses_worker_worktree_and_task_branch_gh_1040() {
-        assert_eq!(
-            super::per_task_merge_identity("factory/daring-jay-42-cas-1e7d"),
-            Some(("daring-jay-42", "1e7d")),
+        assert!(
+            super::per_task_merge_identities("factory/daring-jay-42-cas-1e7d")
+                .any(|split| split == ("daring-jay-42", "cas-1e7d")),
+        );
+        assert!(
+            super::per_task_merge_identities("factory/daring-jay-42-gh-77")
+                .any(|split| split == ("daring-jay-42", "gh-77")),
+            "a task prefix other than cas- parses too",
         );
         assert_eq!(
             super::system_b_merge_source("factory/daring-jay-42-cas-1e7d", Some("cas-1e7d")),

@@ -281,27 +281,27 @@ pub(crate) fn adopted_worker_supervisor(cas_root: &Path, worker: &Agent) -> Opti
     successor
 }
 
-/// The worker a factory branch belongs to: `factory/<worker>` or the
-/// per-task form `factory/<worker>-<task>`. The longest matching registered
-/// worker name wins, so `factory/ab-cd-cas-1` resolves to `ab-cd`, not `ab`.
+/// The registered agent a factory branch belongs to: `factory/<name>` or the
+/// per-task form `factory/<name>-<task>`, described by the one ownership
+/// resolver (cas-dc08). The longest matching name wins, so
+/// `factory/ab-cd-cas-1` resolves to `ab-cd`, not `ab`.
 pub fn worker_for_branch<'a>(agents: &'a [Agent], branch: &str) -> Option<&'a str> {
     let branch = branch
         .trim()
         .trim_start_matches("refs/heads/")
         .trim_start_matches("refs/remotes/")
         .trim_start_matches("origin/");
-    let rest = branch.strip_prefix("factory/").unwrap_or(branch);
-    agents
-        .iter()
-        .filter(|agent| agent.role == AgentRole::Worker)
-        .map(|agent| agent.name.as_str())
-        .filter(|name| {
-            rest.eq_ignore_ascii_case(name)
-                || rest
-                    .get(..name.len() + 1)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&format!("{name}-")))
-        })
-        .max_by_key(|name| name.len())
+    let branch = format!("factory/{}", branch.strip_prefix("factory/").unwrap_or(branch));
+    let factory = |agent: &&Agent| matches!(agent.role, AgentRole::Worker | AgentRole::Supervisor);
+    let names: Vec<String> = agents.iter().filter(factory).map(|agent| agent.name.clone()).collect();
+    match crate::factory_isolation::branch_ownership("", Some(&branch), &names) {
+        crate::factory_isolation::BranchOwnership::Sibling { owner } => agents
+            .iter()
+            .filter(factory)
+            .map(|agent| agent.name.as_str())
+            .find(|name| name.trim() == owner),
+        _ => None,
+    }
 }
 
 /// The foreign owner of a merge target: the worker or branch `id` names, or

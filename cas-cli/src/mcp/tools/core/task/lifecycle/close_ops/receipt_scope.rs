@@ -1576,7 +1576,7 @@ raise SystemExit(1 if failed else 0)
         for spec in specs { pass(&mixed, spec); }
         let refusals = park_refusals(root.path(), &repo, &task, &paths, &mixed, "main", None);
         assert!(refusals.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61") && reply.contains(unread)), "{refusals:?}");
-        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &mixed), &scopes, &covering), [package.clone()]);
+        assert_eq!(widened::missing(&crate::factory_worker_check::PassingTests::new(root.path(), &repo, &mixed), &scopes, &covering), [package.clone()]);
         let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
         assert!(commands.iter().any(|command| command.contains(unread)));
         for command in &commands {

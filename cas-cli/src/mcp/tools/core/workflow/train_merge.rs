@@ -598,6 +598,13 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     Ok(git.is_ancestor(&entry.sha, &target))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs before each later entry's review starts, standing in for a
+    /// candidate preparation slow enough to outlast the lease (GH #2311).
+    static PREFETCH_PROBE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// GH #2169: only publication is ordered. Every delivery from `from` on gets
 /// its candidate and verifier through the same preparation the head uses.
 /// Enqueue starts reviews immediately; active appends leave them to the daemon,
@@ -607,6 +614,8 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
 /// answer here; any other refusal surfaces again when the entry is the head.
 fn start_queued_reviews(core: &CasCore, queue: &Queue, tasks: &dyn crate::store::TaskStore, from: usize) {
     for entry in queue.entries.iter().skip(from) {
+        #[cfg(test)]
+        PREFETCH_PROBE.with_borrow_mut(|probe| if let Some(probe) = probe { probe() });
         let Ok(task) = tasks.get(&entry.task) else { continue };
         if task.status != TaskStatus::AwaitingMerge
             || task.deliverables.factory_branch_anchor.as_deref() != Some(&entry.sha)
@@ -1310,6 +1319,46 @@ mod tests {
                 assert!(git.is_ancestor(sha, "origin/epic/train"), "{holder}: {sha}");
             }
         }
+    }
+
+    /// GH #2311: later entries' reviews took longer than the advancement
+    /// lease, so every pass lost it before reaching the head. The head must
+    /// publish first, and prefetch must stop at the lost lease.
+    #[tokio::test]
+    async fn head_advances_when_prefetch_outlasts_the_lease_gh_2311() {
+        let mut fixture = Fixture::build(false);
+        fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        std::fs::write(fixture.root.join("config.toml"),
+            "[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        for id in &fixture.ids[1..] {
+            let mut task = tasks.get(id).unwrap();
+            task.depth = TaskDepth::Deep;
+            tasks.update(&task).unwrap();
+        }
+        fixture.start_with(&fixture.ids[..1]).await;
+        fixture.start_with(&fixture.ids[1..]).await;
+        let queue_path = path(&fixture.root, fixture._repo.path(), "epic/train").unwrap();
+        let probes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (seen, expired) = (probes.clone(), queue_path.clone());
+        PREFETCH_PROBE.set(Some(Box::new(move || {
+            seen.set(seen.get() + 1);
+            let mut queue: serde_json::Value = serde_json::from_slice(&std::fs::read(&expired).unwrap()).unwrap();
+            queue["advancement"]["expires_at"] = serde_json::json!(chrono::Utc::now() - chrono::Duration::seconds(1));
+            std::fs::write(&expired, serde_json::to_vec(&queue).unwrap()).unwrap();
+        })));
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        PREFETCH_PROBE.set(None);
+
+        let queue = read(&queue_path).unwrap().unwrap();
+        let git = GitOperations::new(fixture._repo.path().to_path_buf());
+        assert!(git.is_ancestor(&fixture.shas[0], "origin/epic/train"), "head starved: {}", queue.render());
+        assert_eq!(queue.next, 1, "{}", queue.render());
+        assert!(cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[1]).unwrap().is_some());
+        // One prefetch step found the lease gone and started nothing more.
+        assert_eq!(probes.get(), 1);
+        assert!(cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[2]).unwrap().is_none());
     }
 
     #[tokio::test]

@@ -379,7 +379,10 @@ impl CasCore {
                 let agents = self.open_agent_store().map_err(|e| anyhow::anyhow!(e.to_string()))?.list(None)?;
                 let entries = validated_entries(&self.cas_root, &repo, &target, train, session, &*tasks,
                     &agents, ids.to_vec(), &mut std::collections::BTreeSet::new())?;
-                queue.entries.truncate(queue.next);
+                for stale in queue.entries.drain(queue.next..) {
+                    queue.outcomes.push(format!("{} {} held under prior owner generation {}",
+                        stale.task, stale.sha, queue.owner_generation));
+                }
                 queue.entries.extend(entries);
                 queue.ci_override = None;
                 queue.waiting = None;

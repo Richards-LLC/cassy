@@ -183,6 +183,21 @@ fn held_by_prior_owner(root: &Path, actor: &cas_types::Agent, queue: &Queue, epi
     Ok(!continues && crate::cloud::peer_mailbox::supervisor_is_live(root, &queue.supervisor))
 }
 
+/// cas-6456: an enrolled train's queue continues only under the generation
+/// that admitted it; a successor never stamps its own onto stale entries.
+/// Legacy unenrolled queues keep the GH #2316 adoption.
+fn needs_readmission(root: &Path, queue: &Queue, epic: &cas_types::Task, generation: &str) -> Result<bool> {
+    Ok(queue.owner_generation != generation
+        && crate::train_owner::authority(root, epic).map_err(anyhow::Error::msg)?.is_some())
+}
+
+fn readmission_required(queue: &Queue) -> String {
+    crate::gates::tag("G-113", format!(
+        "TRAIN_OWNER_GENERATION_CHANGED: train merge {} was admitted under another owner generation; \
+         re-admit its deliveries with factory action=train_merge id={} task_ids=[...]",
+        queue.id, queue.train))
+}
+
 /// Checked before preparing a candidate and again under the normal target
 /// lock. The queue creates its reservation under that same lock, so a single
 /// merge already in flight cannot slip between reservation and publication.
@@ -221,6 +236,7 @@ pub(crate) fn admit(
         let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
         ensure!(!held_by_prior_owner(root, &actor, &queue, &epic, &generation)?,
             crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
+        ensure!(!needs_readmission(root, &queue, &epic, &generation)?, readmission_required(&queue));
         ensure!(
             permit == Some(queue.id.as_str())
                 && task == Some(queue.entries[queue.next].task.as_str()),
@@ -355,6 +371,19 @@ impl CasCore {
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
             ensure!(!held_by_prior_owner(&self.cas_root, &actor, &queue, &epic, &generation)?,
                 crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
+            if needs_readmission(&self.cas_root, &queue, &epic, &generation)? {
+                // Explicit re-admission: unprocessed entries are rebuilt from
+                // their current parked anchors and the prior CI decision is
+                // not replayed; candidate digests already carry the generation.
+                let ids = ordered.with_context(|| readmission_required(&queue))?;
+                let agents = self.open_agent_store().map_err(|e| anyhow::anyhow!(e.to_string()))?.list(None)?;
+                let entries = validated_entries(&self.cas_root, &repo, &target, train, session, &*tasks,
+                    &agents, ids.to_vec(), &mut std::collections::BTreeSet::new())?;
+                queue.entries.truncate(queue.next);
+                queue.entries.extend(entries);
+                queue.ci_override = None;
+                queue.waiting = None;
+            }
             if queue.reclaim_advancement() { save(&path, &mut queue)?; }
             queue.supervisor = actor.id.clone();
             queue.owner_generation = generation.clone();
@@ -844,6 +873,16 @@ mod tests {
         git(repo, &["rev-parse", "HEAD"])
     }
 
+    struct Clear;
+    impl crate::worktree::git::train_authority::TransferChecks for Clear {
+        fn external_clear(&self, _: &crate::worktree::git::train_authority::Snapshot) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({"provider": "fixture", "prs": [], "runs": []}))
+        }
+        fn publishers_stopped(&self, _: &crate::worktree::git::train_authority::Snapshot) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({"runtime": "fixture", "disposition": "fenced"}))
+        }
+    }
+
     struct Fixture {
         _repo: tempfile::TempDir,
         _env: crate::test_support::TestEnvGuard,
@@ -1049,6 +1088,65 @@ mod tests {
         let adopted = queue();
         assert_eq!(adopted.supervisor, "supervisor-2");
         assert_eq!(adopted.entries.len(), fixture.ids.len());
+    }
+
+    /// cas-6456: a dead prior owner's queue on an enrolled train is not
+    /// adopted under the successor's generation. Only an explicit re-admission
+    /// continues it, rebuilt from deliveries that are still parked.
+    #[tokio::test]
+    async fn successor_readmits_stale_enrolled_queue_explicitly_cas_6456() {
+        let fixture = Fixture::new();
+        fixture.start().await;
+        let config = fixture.root.join("config.toml");
+        let body = std::fs::read_to_string(&config).unwrap() + "[project]\ncanonical_id = 'fixture'\n";
+        std::fs::write(&config, body).unwrap();
+        let agents = fixture.core.open_agent_store().unwrap();
+        let mut prior = agents.get("supervisor").unwrap();
+        prior.status = cas_types::AgentStatus::Shutdown;
+        agents.update(&prior).unwrap();
+        let mut successor = Agent::new("supervisor-2".into(), "supervisor-2".into());
+        successor.role = AgentRole::Supervisor;
+        successor.factory_session = Some("queue-session".into());
+        successor.machine_id = Some(Agent::get_or_generate_machine_id());
+        successor.cc_session_id = Some("successor-harness".into());
+        successor.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut successor, std::process::id());
+        agents.register(&successor).unwrap();
+        agents.update(&successor).unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut epic = tasks.get("cas-train").unwrap();
+        epic.labels.push(crate::train_owner::ENROLLED.into());
+        tasks.update(&epic).unwrap();
+        let repo = fixture._repo.path();
+        let head = git(repo, &["rev-parse", "epic/train"]);
+        let identity = crate::train_owner::identity(&successor, "supervisor-2").unwrap();
+        let snapshot = crate::worktree::git::train_authority::Snapshot::enroll(
+            repo, "fixture", "cas-train", "epic/train", &identity, &head, Some(&head), &Clear,
+        ).unwrap();
+        crate::train_owner::repair_projection(&fixture.root, tasks.as_ref(), &epic, &snapshot).unwrap();
+        let takeover = |ids: Option<&[String]>| {
+            let core = CasCore::with_daemon(fixture.root.clone(), None, None);
+            core.set_agent_id_for_testing("supervisor-2".into());
+            core.train_merge("cas-train", ids, false, None)
+        };
+        let queue = || read(&path(&fixture.root, repo, "epic/train").unwrap()).unwrap().unwrap();
+        let stale = queue().owner_generation;
+
+        let refused = takeover(None).unwrap_err().to_string();
+        assert!(refused.contains("TRAIN_OWNER_GENERATION_CHANGED"), "{refused}");
+        assert_eq!((queue().supervisor, queue().owner_generation), ("supervisor".into(), stale.clone()));
+
+        // A delivery returned to its worker since admission is not retained.
+        let mut returned = tasks.get(&fixture.ids[1]).unwrap();
+        returned.status = TaskStatus::Open;
+        tasks.update(&returned).unwrap();
+        assert!(takeover(Some(&fixture.ids)).is_err());
+        let readmitted = [fixture.ids[0].clone(), fixture.ids[2].clone()];
+        takeover(Some(&readmitted)).unwrap();
+        let adopted = queue();
+        assert_eq!(adopted.supervisor, "supervisor-2");
+        assert_eq!(adopted.owner_generation, snapshot.record.generation);
+        assert_eq!(adopted.entries.iter().map(|entry| entry.task.clone()).collect::<Vec<_>>(), readmitted);
     }
 
     #[tokio::test]
@@ -1825,15 +1923,6 @@ mod tests {
         let origin = fixture.root.join("origin.git");
         // The successor's authority, written by production enrollment on a
         // mirror of origin, then held on origin until the transfer lands.
-        struct Clear;
-        impl crate::worktree::git::train_authority::TransferChecks for Clear {
-            fn external_clear(&self, _: &crate::worktree::git::train_authority::Snapshot) -> Result<serde_json::Value, String> {
-                Ok(serde_json::json!({"provider": "fixture", "prs": [], "runs": []}))
-            }
-            fn publishers_stopped(&self, _: &crate::worktree::git::train_authority::Snapshot) -> Result<serde_json::Value, String> {
-                Ok(serde_json::json!({"runtime": "fixture", "disposition": "fenced"}))
-            }
-        }
         let staging = tempfile::tempdir().unwrap();
         let mirror = staging.path().join("origin.git");
         let successor = staging.path().join("successor");

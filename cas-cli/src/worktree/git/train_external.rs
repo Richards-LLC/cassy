@@ -349,16 +349,4 @@ impl Snapshot {
         next.operation = format!("settle-external:{id}");
         live.append(repo, next)
     }
-
-    pub(crate) fn cancel_unstarted_external(&self, repo: &Path, actor: &Identity, id: &str) -> Result<Self, String> {
-        let live = self.coherent(repo)?;
-        live.require_actor(actor)?;
-        let operation = live.continuation(id)?;
-        if !operation.started.is_empty() || !operation.claims.is_empty() { return Err(pending()); }
-        let mut next = live.record.clone();
-        next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap().terminal =
-            Some(serde_json::json!({"disposition": "cancelled_before_start", "authority": live.tip}));
-        next.operation = format!("cancel-unstarted-external:{id}");
-        live.append(repo, next)
-    }
 }

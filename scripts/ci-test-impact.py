@@ -475,7 +475,9 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     # Preserve archive compiler identity while binding the actual runtime.
     selection = dict(selection, configuration=proof_configuration(root, selection.get("configuration")))
     started = time.monotonic()
-    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
+    # build.rs watches scripts/ recursively. Python helpers invoked by tests
+    # must not create __pycache__ there and invalidate the build just consumed.
+    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()), PYTHONDONTWRITEBYTECODE="1")
     invocation = ["nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"]
     status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), *invocation], cwd=root, env=env).returncode
     receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)

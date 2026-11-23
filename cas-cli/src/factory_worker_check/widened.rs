@@ -5,7 +5,8 @@ use super::*;
 pub(crate) enum Scope {
     File(String),
     /// The runner's dependency graph, rooted at this source file, rather than a
-    /// package pass that may execute thousands of unrelated tests.
+    /// package pass that may execute thousands of unrelated tests. A Playwright
+    /// helper's graph is the specs importing it (GH #2146).
     Related(String),
     Package(String),
     Crate(String),
@@ -26,7 +27,7 @@ pub(super) fn valid(proof: &Proof) -> bool {
         && match &proof.scope {
             Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
-            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest") && !path.is_empty() && relative(path),
+            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest" | "playwright") && !path.is_empty() && relative(path),
             Scope::Package(path) => proof.runner != "nextest" && relative(path),
         }
 }
@@ -35,7 +36,9 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) {
         let runner = javascript::runner_hint(repo, path);
         if javascript::test_match(path, runner) { return Scope::File(path.into()); }
-        if matches!(runner, Some("jest" | "vitest")) { return Scope::Related(path.into()); }
+        if matches!(runner, Some("jest" | "vitest")) || !javascript::playwright_importers(repo, path).is_empty() {
+            return Scope::Related(path.into());
+        }
     }
     let rust = path.ends_with(".rs");
     let manifest = if rust { "Cargo.toml" } else { "package.json" };
@@ -68,7 +71,9 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
             return vec![format!("cas factory worker-check --cas-root {} -- nextest run -p {package} --lib -E 'test({package})'", cas_root.display())];
         }
         if let Scope::Related(path) = scope {
-            let runner = if javascript::runner_hint(repo, path) == Some("vitest") {
+            let runner = if !javascript::playwright_importers(repo, path).is_empty() {
+                "playwright"
+            } else if javascript::runner_hint(repo, path) == Some("vitest") {
                 "vitest related --run"
             } else { "jest --findRelatedTests" };
             return vec![format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())];

@@ -329,10 +329,10 @@ jobs:
           cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
       - id: cleanup-epics
-        name: Delete merged epic branches
+        name: Delete the shipped release epic branch
         if: needs.detect.outputs.dry-run != 'true'
         # Housekeeping failure must not undo a published release. Git's lease
-        # refusal stays in the log; a later release safely retries cleanup.
+        # refusal stays in the log; replaying this release retries its cleanup.
         continue-on-error: true
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

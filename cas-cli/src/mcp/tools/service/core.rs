@@ -623,6 +623,7 @@ impl CasService {
         let core = self.inner.clone();
         let completion_receipt = req.completion_receipt;
         let external_verification_receipt = req.external_verification_receipt;
+        let operator_decision = req.operator_decision;
         super::mutation_receipt::run_on_blocking_pool(async move {
             core.cas_task_close_with_dispositions(
                 Parameters(inner_req),
@@ -632,6 +633,7 @@ impl CasService {
                 evidence_only,
                 inline_external_ref,
                 inline_execution_note,
+                operator_decision,
             )
             .await
         })
@@ -705,6 +707,12 @@ impl CasService {
 
     pub(super) async fn task_list(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskListRequest;
+        if req.offset.is_some() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "offset is unsupported for task list; it is a byte cursor for show/get/notes. Omit offset and use filters or a larger limit to select tasks.",
+            ));
+        }
         let inner_req = TaskListRequest {
             limit: req.limit,
             scope: req.scope.unwrap_or_else(|| "all".to_string()),

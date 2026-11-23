@@ -55,7 +55,8 @@ When the supervisor returns delivery A while queued successor B is running:
 2. Switch to A's branch from `task action=show id=A full=true`, run
    `task action=start id=A`, then correct and re-deliver A, merging its target.
 3. After A closes or parks, switch to B's branch, run
-   `task action=update id=B status=open`, then `task action=start id=B`.
+   `task action=start id=B` directly. Do not insert `status=open`: an existing
+   exact delivery proof locks that ordinary status edit.
 
 ## Blockers and review waits
 
@@ -66,9 +67,13 @@ When required supervisor review, approval or another decision blocks work:
    action, commit and proof; run `task action=update id=<task-id> status=blocked`.
 2. Send `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`
    as the return contract with `status: blocked` and `blocker: <cause>`; omit `kind`.
-3. Wait for the reply and record its decision. Then `task action=update
-   id=<task-id> status=open` and `task action=start id=<task-id>` before resuming.
-   Mark model action you did not observe NOT VERIFIED.
+3. Wait for the reply and record its decision. For approved work in the same
+   scope, run `task action=start id=<task-id>` directly from Blocked; omit
+   `status=open`. Start resumes the worker without replacing an existing exact
+   delivery/verification proof. Keep supplemental findings in progress notes.
+   If the approval requires changing reviewed scope or proof, ask the supervisor
+   to recover that proof cycle before making those changes; workers cannot
+   invalidate it. Mark model action you did not observe NOT VERIFIED.
 
 ## Verification-required close
 

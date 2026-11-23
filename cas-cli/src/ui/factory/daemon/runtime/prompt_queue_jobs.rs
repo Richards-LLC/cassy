@@ -384,6 +384,8 @@ pub(crate) struct QueueSelection {
 pub(crate) enum ClaimOutcome {
     /// The transport claim was taken: the row may be injected on its next pass.
     Claimed(cas_store::ClaimToken),
+    /// The held claim's recipient state was re-read after control took it.
+    Rechecked(cas_store::ClaimToken),
     /// The recipient already has the row: a delivered handoff, a hook or a
     /// poll (review M2), or explicitly settled its own copy. This control
     /// result does not create transport or body evidence.
@@ -1319,7 +1321,7 @@ impl QueueJobs {
     /// Cancel a prepared batch member if its leader was consumed meanwhile.
     /// Late pending completions follow the existing stale-generation release path.
     pub(crate) fn cancel_unadmitted_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
-        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(claim_token),_)) = self.claims.remove(&(row,recipient.to_string())) {
+        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(claim_token) | ClaimOutcome::Rechecked(claim_token),_)) = self.claims.remove(&(row,recipient.to_string())) {
             self.submit_stamp(cas_dir,row,recipient,0,QueueStamp::ReleaseClaim { claim_token });
         }
     }
@@ -1644,7 +1646,7 @@ impl QueueJobs {
                         // A claim nobody takes is released by `expire_claims`.
                         self.claims
                             .insert(key, ClaimState::Ready(done.outcome, Instant::now()));
-                    } else if let ClaimOutcome::Claimed(claim_token) = done.outcome {
+                    } else if let ClaimOutcome::Claimed(claim_token) | ClaimOutcome::Rechecked(claim_token) = done.outcome {
                         // Review M1: a superseded or expired job's claim is
                         // never left holding the row.
                         tracing::debug!(
@@ -2080,20 +2082,14 @@ impl QueueJobs {
         target: &str,
     ) -> ClaimStep {
         let key = (row, recipient.to_string());
-        if !self.claims.contains_key(&key) {
-            self.submit_claim(cas_dir, session, row, recipient, target);
-            if matches!(self.exec, Exec::Inline(_)) {
-                self.apply_completions();
-            }
-        }
-        if !matches!(self.claims.get(&key), Some(ClaimState::Ready(..))) {
+        if !self.claim_resolved(cas_dir, session, row, recipient, target) {
             return ClaimStep::Waiting;
         }
         let Some(ClaimState::Ready(outcome, _)) = self.claims.remove(&key) else {
             return ClaimStep::Waiting;
         };
         match outcome {
-            ClaimOutcome::Claimed(token) => ClaimStep::Claimed(token),
+            ClaimOutcome::Claimed(token) | ClaimOutcome::Rechecked(token) => ClaimStep::Claimed(token),
             ClaimOutcome::HandedOff => ClaimStep::HandedOff,
             ClaimOutcome::NotClaimed | ClaimOutcome::Stale => ClaimStep::NotClaimed,
             ClaimOutcome::Failed(error) => {
@@ -2110,8 +2106,8 @@ impl QueueJobs {
     }
 
     /// Make sure a claim job for `(row, recipient)` is out or back, and say
-    /// whether it is back. A broadcast checks every member this way before
-    /// injecting any (cas-786a6).
+    /// whether its recipient recheck is back. Batches and broadcasts resolve
+    /// every member this way before consuming any token (cas-786a6).
     pub(crate) fn claim_resolved(
         &mut self,
         cas_dir: &Path,
@@ -2122,7 +2118,17 @@ impl QueueJobs {
     ) -> bool {
         let key = (row, recipient.to_string());
         if !self.claims.contains_key(&key) {
-            self.submit_claim(cas_dir, session, row, recipient, target);
+            self.submit_claim_job(cas_dir, session, row, recipient, target, None);
+            if matches!(self.exec, Exec::Inline(_)) {
+                self.apply_completions();
+            }
+        }
+        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(token), _)) = self.claims.get(&key) {
+            // A named inbox poll may have taken over this reservation
+            // while its job result waited for the next control pass.
+            // Re-read on the store lane before this token can be consumed.
+            let token = *token;
+            self.submit_claim_job(cas_dir, session, row, recipient, target, Some(token));
             if matches!(self.exec, Exec::Inline(_)) {
                 self.apply_completions();
             }
@@ -2130,7 +2136,7 @@ impl QueueJobs {
         matches!(self.claims.get(&key), Some(ClaimState::Ready(..)))
     }
 
-    fn submit_claim(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str) {
+    fn submit_claim_job(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str, held: Option<cas_store::ClaimToken>) {
         let generation = self.generation();
         let ready = Arc::clone(&self.ready);
         let spec = JobSpec {
@@ -2153,20 +2159,45 @@ impl QueueJobs {
             ClaimState::Pending(generation),
         );
         let submitted = self.submit_job(spec, false, move || {
-            let done = run_claim_for_inject(
+            let done = if let Some(token) = held {
+                let result = (|| -> anyhow::Result<ClaimOutcome> {
+                    let queue = job_thread_prompt_queue(&job_dir)?;
+                    let Some(fresh) = queue.queued_prompt(row)? else { return Ok(ClaimOutcome::Stale); };
+                    if fresh.target != job_target || fresh.factory_session.as_deref().is_some_and(|session| session != job_session) {
+                        return Ok(ClaimOutcome::Stale);
+                    }
+                    if matches!(queue.recipient_delivery(row, &job_recipient)?, Some(cas_store::RecipientDelivery::Settled(_)))
+                        || queue.recipient_handed_off(row, &job_recipient)? {
+                        return Ok(ClaimOutcome::HandedOff);
+                    }
+                    if fresh.processed_at.is_some()
+                        || queue.recipient_receipt(row, &job_recipient)? != Some(cas_store::SurfacingSource::TransportClaimed) {
+                        return Ok(ClaimOutcome::Stale);
+                    }
+                    Ok(ClaimOutcome::Rechecked(token))
+                })();
+                let outcome = result.unwrap_or_else(|error| ClaimOutcome::Failed(error.to_string()));
+                if !matches!(outcome, ClaimOutcome::Rechecked(_)) {
+                    defer_stamp(&job_dir, row, &job_recipient, &QueueStamp::ReleaseClaim { claim_token:token }, "prepared claim retired");
+                }
+                ClaimDone { row, recipient:job_recipient.clone(), generation, cas_dir:job_dir.clone(), outcome, retargeted:vec![] }
+            } else { run_claim_for_inject(
                 &job_dir,
                 &job_session,
                 row,
                 &job_recipient,
                 &job_target,
                 generation,
-            );
+            ) };
             // Wake the loop: the row's next selection can inject it.
             ready.store(true, Ordering::Release);
             QueueJobOutcome::Claimed(done)
         });
         if !accepted(&submitted) {
             self.claims.remove(&(row, recipient.to_string()));
+            if let Some(token) = held {
+                defer_stamp(cas_dir, row, recipient, &QueueStamp::ReleaseClaim { claim_token:token }, "claim recheck refused");
+            }
         }
     }
 
@@ -2200,7 +2231,7 @@ impl QueueJobs {
                 if now.saturating_duration_since(*since) < CLAIM_READY_TTL {
                     return true;
                 }
-                if let ClaimOutcome::Claimed(token) = outcome {
+                if let ClaimOutcome::Claimed(token) | ClaimOutcome::Rechecked(token) = outcome {
                     released.push((*row, recipient.clone(), *token));
                 }
                 false
@@ -2224,6 +2255,12 @@ impl QueueJobs {
         self.claims.contains_key(&(row, recipient.to_string()))
     }
 
+    /// Observe the prepared result without advancing its recipient recheck.
+    #[cfg(test)]
+    pub(crate) fn claim_ready(&self, row: i64, recipient: &str) -> bool {
+        matches!(self.claims.get(&(row, recipient.to_string())), Some(ClaimState::Ready(..)))
+    }
+
     /// Rows claim jobs re-targeted since the last call.
     pub(crate) fn take_claim_retargeted(&mut self) -> Vec<i64> {
         std::mem::take(&mut self.claim_retargeted)
@@ -2241,10 +2278,20 @@ impl QueueJobs {
         // Rows whose claims are back join the batch (a claimed row is not
         // selectable again, spec §4.5 rule 1).
         let ready = self.take_claim_ready_rows();
+        // cas-20f6: QueueSelect's writes run ahead of queued claim jobs, so
+        // this selection may have read a carried row, or a carried batch's
+        // passenger, before its claim landed. The carry owns those rows: a
+        // fresh copy delivered separately splits one directed batch into
+        // two turns. A fresh batch naming an owned row waits for the next
+        // selection, after the carry has delivered or released it.
+        let owned: HashSet<i64> = self.carried.values()
+            .chain(ready.iter())
+            .flat_map(|(row, facts)| std::iter::once(row.id).chain(facts.message_batch.iter().map(|member| member.id)))
+            .collect();
+        let facts = &selection.facts;
+        selection.rows.retain(|row| !owned.contains(&row.id) && facts.get(&row.id)
+            .is_none_or(|facts| facts.message_batch.iter().all(|member| !owned.contains(&member.id))));
         for (row, facts) in ready {
-            if selection.rows.iter().any(|selected| selected.id == row.id) {
-                continue;
-            }
             selection.facts.insert(row.id, facts);
             selection.rows.push(row);
         }

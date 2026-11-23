@@ -13,6 +13,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import shlex
 import signal
 import subprocess
 import statistics
@@ -26,6 +27,8 @@ import zipfile
 
 VERSION = 1
 SAFE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+# The capped worker's positive named-filter grammar (factory_worker_check::named_filter).
+WORKER_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_:.-]*")
 
 
 def git(root, *args):
@@ -242,7 +245,10 @@ def plan(root, base, zero, history, delivery=False):
         for path in result["paths"]:
             if path.startswith((".claude/", ".codex/", ".grok/", "docs/", "changelog.d/")):
                 continue
-            if path.startswith(("scripts/", ".github/")):
+            # Commander e2e specs, helpers and the hub double never compile into
+            # Rust; lane-journeys runs them. Only a Rust test naming one is
+            # selected, so a journey-only diff runs no Rust (cas-a658).
+            if path.startswith(("scripts/", ".github/", "hub-web/e2e/")):
                 contract_paths.append(path)
                 continue
             if path in {"Cargo.toml", "Cargo.lock", ".config/nextest.toml"} or path.startswith((".cargo/", "vendor/")):
@@ -389,6 +395,18 @@ def lane_split(root, selection):
             selected.append(f"(package({command['package']}) and ({args[args.index('-E') + 1]}))")
         selected = " or ".join(selected)
     own = [row["filter"] for row in selection.get("file_contracts", [])]
+    # GH #2140: `own` is lane CI's nextest expression. The capped worker admits
+    # only positive named filters per package and harness, so each own part
+    # also gets that admitted superset, or is named as lane-CI-only.
+    worker, ci_only = {}, []
+    def prove(package, harness, name):
+        worker.setdefault((package, harness), []).append(f"test({name})")
+    for row in selection.get("file_contracts", []):
+        package, _, harness = row["binary"].partition("::")
+        if WORKER_NAME.fullmatch(row["test"]):
+            prove(row["package"], harness or None, row["test"])
+        else:
+            ci_only.append(row["filter"])
     try:
         crates, _ = workspace(root)
         direct = sorted(name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths))
@@ -398,12 +416,20 @@ def lane_split(root, selection):
     for name in direct:
         if name != "cas":
             own.append(f"package({name})")
+            ci_only.append(f"package({name})")
             continue
         modules = sorted({p.split("/")[2].removesuffix(".rs") for p in paths if p.startswith("cas-cli/src/")} - {"lib", "main"})
-        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        modules = [module for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules]
+        for module in modules:
+            prove("cas", None, f"{module}::")
         for stem, target in sorted(mapping.items()):
             if any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for p in paths):
                 parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
+                if target == stem:
+                    ci_only.append(f"(package(cas) and binary({target}))")
+                else:
+                    prove("cas", target, f"{stem}::")
         if parts:
             own.append("(package(cas) and (" + " or ".join(parts) + "))")
     # Existing whole-tree refusal audits belong before the ring for production
@@ -412,6 +438,7 @@ def lane_split(root, selection):
     if any(path.endswith(".rs") and "/tests/" not in path for path in paths):
         audit = "(package(cas) and binary(cas) and test(gates::registry_tests::))"
         own.append(audit)
+        prove("cas", None, "gates::registry_tests::")
         selected = f"({selected}) or ({audit})" if selected else audit
         if not build:
             build = ["-p", "cas", "--lib"]
@@ -421,7 +448,14 @@ def lane_split(root, selection):
             if "--test" in build and "--lib" not in build:
                 build.append("--lib")
     own = " or ".join(own) or None
-    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
+    commands = []
+    for (package, harness), filters in sorted(worker.items(), key=lambda item: (item[0][0], item[0][1] or "")):
+        args = ["nextest", "run", "-p", package, *(["--lib"] if harness is None else ["--test", harness]),
+                "-E", " | ".join(sorted(set(filters)))]
+        commands.append({"args": args, "command": "cas factory worker-check --cas-root \"$CAS_ROOT\" -- "
+                         + " ".join(shlex.quote(arg) for arg in args)})
+    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected,
+            "worker": commands, "ci_only": ci_only}
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 def lane_count(root, source, expression):
@@ -442,8 +476,11 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     selection = dict(selection, configuration=proof_configuration(root, selection.get("configuration")))
     started = time.monotonic()
     env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
-    status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), "nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"], cwd=root, env=env).returncode
+    invocation = ["nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"]
+    status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), *invocation], cwd=root, env=env).returncode
     receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)
+    receipt["invocation"] = invocation
+    write(destination, receipt)
     # Attribution may clear the status only when every unsuccessful test is
     # named: the summary's run-minus-passed count must match the parsed set.
     counts = re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:\s+(\d+) passed", strip_ansi(log.read_text()))
@@ -580,7 +617,10 @@ def web_results(root, report):
         for suite in suites:
             names = ancestry + (suite["title"],) if ancestry or suite.get("column", 0) else ancestry
             for spec in suite.get("specs", []):
-                path = str((report_root / spec["file"]).resolve().relative_to(root.resolve()))
+                # Playwright writes spec paths with Node's lexical path.relative
+                # from an unresolved rootDir to the real file. Join them lexically
+                # too; resolving `..` through a symlink (macOS /var) doubles /private.
+                path = str(Path(os.path.normpath(report_root / spec["file"])).resolve().relative_to(root))
                 for test in spec["tests"]:
                     attempts = test["results"]
                     if test.get("expectedStatus") != "passed" or len(attempts) != 1 or attempts[0].get("retry", 0):
@@ -643,7 +683,7 @@ def replay_web(checkout, failures, settings, destination, phase, run):
 
 
 # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
-def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base", web=None):
+def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base", web=None, invocation=None):
     """Reuse exact-base failures, replay misses, and fail closed on incomplete work."""
     started = time.monotonic()
     # Twenty minutes for lookup/preparation/build/test, within the existing
@@ -710,6 +750,24 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
         print(f"Lane impact: {result['error']}", file=sys.stderr)
     elif pending:
         try:
+            if not web:
+                # cas-c53a1: replay the original archive/build, filter and shard
+                # BEFORE the base build replaces dependencies in root/target.
+                # Cargo can otherwise reuse those newer base artifacts when
+                # rebuilding head, turning a deterministic regression green.
+                if (not isinstance(invocation, list) or invocation[:2] != ["nextest", "run"]
+                        or not all(isinstance(arg, str) for arg in invocation)):
+                    raise RuntimeError("missing original Rust invocation; attribution requires a fresh lane receipt")
+                head_log = Path(destination).with_suffix(".head.log")
+                head_log.write_text("")
+                cargo = os.environ.get("CARGO", "cargo")
+                status = timed_command([cargo, *invocation], "head_test_seconds", head_log, dict(os.environ), cwd=root)
+                head_text = strip_ansi(head_log.read_text())
+                at_head = {failure_key(f) for f in parse_failures(head_text)}
+                if not sum(map(int, re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:", head_text))):
+                    raise RuntimeError("head rerun completed without executed tests")
+                if status and not at_head:
+                    raise RuntimeError(f"head rerun failed without a test result: {status}")
             preparation = time.monotonic()
             try:
                 subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=remaining())
@@ -755,19 +813,11 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
             if passed_at_base:
                 # cas-ae6ae: one failure here and one pass at base is not causal
                 # proof, and a log cannot show a repeat (nextest prints every
-                # FAIL twice; CI runs without retries). Rerun them once at this
-                # delivery's head in the same pass: "caused" fails again there.
+                # FAIL twice; CI runs without retries). The original Rust
+                # invocation was replayed before the base build; web replays
+                # are independent of that shared Cargo target.
                 if web:
                     at_head = replay_web(root, passed_at_base, web, destination, "head", timed_command)
-                else:
-                    head_expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in passed_at_base)
-                    head_log = Path(destination).with_suffix(".head.log")
-                    head_log.write_text("")
-                    status = timed_command([cargo, "nextest", "run", *build, "-E", head_expression, "--no-fail-fast", "--no-tests=pass"],
-                                           "head_test_seconds", head_log, env, cwd=root)
-                    at_head = {failure_key(f) for f in parse_failures(strip_ansi(head_log.read_text()))}
-                    if status and not at_head:
-                        raise RuntimeError(f"head rerun failed without a test result: {status}")
                 result["caused"] = [f for f in passed_at_base if failure_key(f) in at_head]
                 result["unattributed"] = [f for f in passed_at_base if failure_key(f) not in at_head]
             result["unresolved"] = []
@@ -798,11 +848,13 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
 
 
 def lane_base(root, recorded_ref, inferred):
-    """Resolve the recorded attribution base without changing the impact range.
+    """Attribute against the newest target commit already contained in HEAD.
 
-    A record that is missing or not an ancestor of HEAD falls back to the
-    inferred base; the returned source names which one was used.
+    The plan resolves the live target merge-base. A recorded ancestor is
+    only a fallback when that target cannot be resolved.
     """
+    if inferred:
+        return inferred, "live target merge-base"
     if not recorded_ref:
         return inferred, "inferred: no record requested"
     found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{recorded_ref}^{{commit}}"], cwd=root, capture_output=True, text=True)
@@ -860,6 +912,9 @@ def lane(root, args):
         write(out, {"plan": selection, "split": split})
         outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": selection["base_source"]}
         print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
+        # GH #2140: the own expression above is lane CI's; these are the worker's.
+        print("Worker proof: " + ("; ".join(row["command"] for row in split["worker"]) or "none")
+              + "; lane CI only: " + (", ".join(split["ci_only"]) or "none"))
         print("Subprocess suites: " + ", ".join(selection.get("subprocess_stems", [])))
         status = 0
     else:
@@ -868,7 +923,8 @@ def lane(root, args):
         if args.phase == "attribute":
             receipt = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())
             return lane_attribute(root, selection.get("attribution_base", selection.get("base", "")), receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"),
-                                  receipt.get("configuration"), selection.get("attribution_base_source", "no attribution base"))
+                                  receipt.get("configuration"), selection.get("attribution_base_source", "no attribution base"),
+                                  invocation=receipt.get("invocation"))
         source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
         receipt = out.with_name(f"{args.phase}-receipt.json")
         status, failed = 0, False

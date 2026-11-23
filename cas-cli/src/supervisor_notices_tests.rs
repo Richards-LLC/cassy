@@ -249,3 +249,29 @@ fn release_and_binary_skew_notices_wake_once() {
     }
     assert!(!is_action_envelope("<cas-supervisor-notice kind=\"status\" notification_id=\"1\">\nFYI\n</cas-supervisor-notice>"));
 }
+
+/// GH #2310: a train's notices go to its owner only. An owner who is not a
+/// supervisor of this machine is a live peer elsewhere; the local supervisor,
+/// focused or not, is not the owner and must not be woken for it.
+#[test]
+fn train_release_notice_reaches_only_its_owner_gh_2310() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut local = Agent::new_with_role("local-sup".into(), "soundwave".into(), AgentRole::Supervisor);
+    local.factory_session = Some("local-session".into());
+    open_agent_store(&root).unwrap().register(&local).unwrap();
+    let mut train = cas_types::Task::new("cas-train".into(), "Train".into());
+    train.task_type = TaskType::Epic;
+    let queued = || open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+
+    train.epic_verification_owner = Some("remote-sup".into());
+    release_action(&root, &train, ReleaseNoticePhase::CutReady, "tip-1", "cut it").unwrap();
+    assert!(queued().is_empty(), "a non-owner supervisor gets no train notice");
+    assert!(open_supervisor_queue_store(&root).unwrap().peek(&local.id, 10).unwrap().is_empty());
+
+    train.epic_verification_owner = Some(local.id.clone());
+    release_action(&root, &train, ReleaseNoticePhase::CutReady, "tip-1", "cut it").unwrap();
+    let rows = queued();
+    assert_eq!(rows.len(), 1, "the owner still gets it");
+    assert_eq!(rows[0].target, local.name);
+}

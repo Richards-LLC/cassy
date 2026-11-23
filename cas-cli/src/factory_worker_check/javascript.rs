@@ -2998,7 +2998,7 @@ mod tests {
         let playwright = repo.join("node_modules/.bin/playwright");
         std::fs::create_dir_all(playwright.parent().unwrap()).unwrap();
         std::fs::write(&playwright, format!(r#"#!/usr/bin/env python3
-import json, os, re, sys
+import datetime, hashlib, json, os, re, sys
 from pathlib import Path
 a = sys.argv[1:]
 config = Path(a[a.index('--config') + 1]).name
@@ -3010,15 +3010,34 @@ if shown and not listing and os.path.exists({omit:?}) and Path(spec).name == 'su
     shown = 'e2e/journeys/read-history.journey.ts'
 grep = a[a.index('--grep') + 1] if '--grep' in a else None
 repeats = int(a[a.index('--repeat-each') + 1]) if '--repeat-each' in a else 1
+started = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+source = Path(shown).read_text() if shown else ''
 specs = []
-for title in re.findall(r'\btest\("([^"]+)"', Path(shown).read_text()) if shown else []:
+for found in re.finditer(r'\btest\("([^"]+)"', source):
+    title = found.group(1)
     if grep and not re.search(grep, title):
         continue
-    # Real Playwright emits one test entry per repeat, empty results when listing.
-    entry = {{'projectId': 'journeys', 'projectName': 'journeys', 'expectedStatus': 'passed', 'annotations': [], 'results': [] if listing else [{{'status': 'passed', 'retry': 0}}]}}
-    specs.append({{'file': shown, 'title': title, 'tests': [entry] * (1 if listing else repeats)}})
-suites = [{{'title': Path(shown).name, 'column': 0, 'specs': specs, 'suites': []}}] if shown else []
-report = json.dumps({{'config': {{'rootDir': os.getcwd()}}, 'errors': [], 'suites': suites}})
+    line = source.count('\n', 0, found.start()) + 1
+    column = found.start() - (source.rfind('\n', 0, found.start()) + 1) + 1
+    result = {{'workerIndex': 0, 'parallelIndex': 0, 'status': 'passed', 'duration': 5, 'errors': [], 'stdout': [], 'stderr': [], 'retry': 0, 'startTime': started, 'annotations': [], 'attachments': []}}
+    # Playwright 1.64/1.65 JSON reporter (lib/runner/index.js _serializeTest): one test entry per
+    # project and repeat; discovery runs nothing, so its results are empty and the test is skipped.
+    entry = {{'timeout': 30000, 'annotations': [], 'expectedStatus': 'passed', 'projectId': 'journeys', 'projectName': 'journeys',
+              'results': [] if listing else [result], 'status': 'skipped' if listing else 'expected'}}
+    specs.append({{'title': title, 'ok': True, 'tags': [], 'tests': [entry] * (1 if listing else repeats),
+                  'id': hashlib.sha1((shown + ':' + title).encode()).hexdigest()[:20], 'file': shown, 'line': line, 'column': column}})
+count = sum(len(spec['tests']) for spec in specs)
+suites = [{{'title': Path(shown).name, 'file': shown, 'column': 0, 'line': 0, 'specs': specs}}] if shown else []
+root = os.getcwd()
+report = json.dumps({{
+    'config': {{'configFile': str(Path(a[a.index('--config') + 1]).resolve()), 'forbidOnly': False, 'fullyParallel': False, 'globalSetup': None,
+               'globalTeardown': None, 'globalTimeout': 0, 'grep': {{}}, 'grepInvert': None, 'maxFailures': 0, 'metadata': {{}},
+               'preserveOutput': 'always', 'quiet': False, 'reporter': [['json']], 'reportSlowTests': {{'max': 5, 'threshold': 300000}},
+               'rootDir': root, 'shard': None, 'tags': [], 'updateSnapshots': 'missing', 'version': '1.65.1', 'webServer': None, 'workers': 1,
+               'projects': [{{'outputDir': root + '/test-results', 'repeatEach': repeats, 'retries': 0, 'metadata': {{}}, 'id': 'journeys',
+                             'name': 'journeys', 'testDir': root, 'testIgnore': [], 'testMatch': ['**/*.@(spec|test).?(c|m)[jt]s?(x)'], 'timeout': 30000}}]}},
+    'suites': suites, 'errors': [],
+    'stats': {{'startTime': started, 'duration': 10, 'expected': 0 if listing else count, 'skipped': count if listing else 0, 'unexpected': 0, 'flaky': 0}}}})
 # The JSON reporter writes to PLAYWRIGHT_JSON_OUTPUT_FILE when it is set and to stdout otherwise.
 if os.environ.get('PLAYWRIGHT_JSON_OUTPUT_FILE'):
     Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_FILE']).write_text(report)

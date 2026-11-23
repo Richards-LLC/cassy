@@ -1259,6 +1259,7 @@
       "dab26dc49a342066c58e37215a9a07b0f1e9fd0768115e000fdc920bf44b9fd4"
     ],
     "skills/cas-playwright-tests/SKILL.md": [
+      "1b784537457f578dfc46317b8195c63079297488e52eb138bdbefc21ad15c6a8",
       "318c652847fea5598286e6b6b72f14acf023b0b9f96c51369d324d18dab0c0cb",
       "3d395b2fda5b2a530c0b55eebb296dabc36c90a2d7882f673aff9110f759d404",
       "f6c7b4dac44cac075de05f6651052d76a0ddd8a97052873e12b45bd9cf1cdace"
@@ -1267,11 +1268,13 @@
       "8619a54e8c098122a7f3881394f84ca89b684366e848233a29ad18b6ec363935"
     ],
     "skills/cas-playwright-tests/references/configuration.md": [
+      "0b896c6854a77cdf647cd358026dd7471fab00ddd9ae4746d2c7e91cc3406e00",
       "0fd978df37bfc2be2ab4275e80e59f1c4ccd10a66c78435a265114a05a1dec5f",
       "68af5a4de30a57271bb0c41a8ea97e1b663273c0fc0a2092ee8541d7b9ada500"
     ],
     "skills/cas-playwright-tests/references/current-api.md": [
-      "3dff0732fe5bcc06d1d3b7d4e4345a5401fbce58ce87a206ffdc6c443995dc68"
+      "3dff0732fe5bcc06d1d3b7d4e4345a5401fbce58ce87a206ffdc6c443995dc68",
+      "de95875d033ceb73e6e955acb2eae3e5497acf6e9abf8994ccf26a85382dd4ba"
     ],
     "skills/cas-playwright-tests/references/locators-and-accessibility.md": [
       "3be5690426625309ec72e03680e60e0de062a6eb0c2f19f156311046aeb8fba3"
@@ -1280,7 +1283,8 @@
       "2babef830194cc73d07cb9d376efe71c5c59dcf01759669e2b4ea30857465dab",
       "527a5e5a292cce26dd06f949a3a5f238a9ccc84f00a72250cfcc28895348db8c",
       "79a37680d28c0f5484462e76740ac04615230d0f1123ca7bf5ee73c20b5fc33f",
-      "a6c88d043fc5af29fdb3a07cd14ee866a520f2a5e62995c71b1095b7fcb80254"
+      "a6c88d043fc5af29fdb3a07cd14ee866a520f2a5e62995c71b1095b7fcb80254",
+      "e9fb6231fc67b70785e1fcd420fb5e315626e248a5434c3e06393a66ac7b0d8e"
     ],
     "skills/cas-qa-craft/SKILL.md": [
       "019600c3f25b2b5ded69bcfdf4a3eb645316b908988f4d985c9ece602dd718a0",

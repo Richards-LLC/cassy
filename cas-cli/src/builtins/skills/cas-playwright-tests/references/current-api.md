@@ -15,6 +15,25 @@ Verify the latest stable package/lock and matching browser binaries using offici
 - getByRef('e2') consumes the current AI-mode snapshot's reference. Refresh snapshots after changes and translate exploratory refs into durable semantic locators before committing a spec.
 - Use .visible() for hidden retained matches and the public upload/drop/passkey APIs for those behaviors; let actionability wait for non-inert controls rather than forcing clicks.
 
+## Async jobs
+
+For a flow that starts a background job, read the job id from the submit response and grade the job on its server status; open the result screen only after a terminal status.
+
+```ts
+test.setTimeout(15 * 60_000); // the poll must fit inside the test timeout
+const submitted = page.waitForResponse((r) => r.request().method() === 'POST'
+  && new URL(r.url()).pathname === '/api/jobs');  // armed before the click
+await page.getByRole('button', { name: 'Run audit' }).click();
+const { jobId } = await (await submitted).json();
+await expect.poll(async () => {
+  const res = await page.request.get(`${apiURL}/api/jobs/${jobId}`);
+  return res.ok() ? (await res.json()).status : `http_${res.status()}`;
+}, { timeout: 10 * 60_000, intervals: [10_000] })
+  .toMatch(/^(complete|failed)$/); // every terminal status, copied from the backend
+```
+
+Matching every terminal status ends the wait early on failure. Copy the names from the backend code: a guessed `completed` for a real `analysis_complete` polls until the timeout. Then assert success separately: the final status plus the domain result.
+
 ## Reports and iteration
 
 Use the failures console reporter with complete structured journey reports. --add-reporter adds a diagnostic reporter without replacing configured reporters. ['html', { onlyFailures: true, open: 'never' }] and onlyFailures on JSON/JUnit are for non-journey reports without success-evidence obligations only.

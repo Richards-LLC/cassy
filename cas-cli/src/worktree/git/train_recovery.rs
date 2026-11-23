@@ -103,6 +103,7 @@ impl Snapshot {
                 accepted: None,
                 operator_claim: None,
                 audit: None,
+                external_operations: Vec::new(),
             },
         };
         let external = checks.external_clear(&snapshot)?;

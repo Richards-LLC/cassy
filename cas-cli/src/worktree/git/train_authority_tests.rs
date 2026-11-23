@@ -824,6 +824,49 @@ impl TransferChecks for Settled {
 
 #[test]
 fn train_authority_abort_reaccept_cas_6456() {
+    // An API call may be accepted after its launcher crashes. Even a fresh
+    // empty provider queue cannot erase its unclaimed release/proof chain.
+    // Drive the real two-clone transfer, not just reservation serialization.
+    {
+        let fixture = Fixture::new();
+        let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+        let path = ".github/workflows/release.yml";
+        std::fs::create_dir_all(fixture.left.join(".github/workflows")).unwrap();
+        std::fs::write(fixture.left.join(path), "name: Release\non: push\njobs: {}\n").unwrap();
+        command(&fixture.left, &["add", path], None).unwrap();
+        let source = fixture.candidate(&fixture.left, "reserved-source");
+        assert!(first.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &source).unwrap().is_published());
+        let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();
+        let scope = ExternalScope {
+            repository: "test/fixture".into(), source: source.clone(), pr: 17, tag: "v9.99.1".into(),
+            actions: vec![ExternalAction::ArmPr, ExternalAction::PublishTag, ExternalAction::CreateRelease],
+            workflows: vec![WorkflowScope { path: path.into(), revision: command(&fixture.left,
+                &["rev-parse", &format!("{source}:{path}")], None).unwrap(), jobs: vec!["release".into()] }],
+        };
+        let operation = uuid::Uuid::new_v4().to_string();
+        let reserved = first.reserve_external(&fixture.left, &fixture.actor, &operation, &scope).unwrap();
+        assert_eq!(reserved.record.protocol, 2);
+        assert_eq!(reserved.reserve_external(&fixture.left, &fixture.actor, &operation, &scope).unwrap().tip, reserved.tip);
+        let restarted = Snapshot::read(&fixture.right, "cas-6456").unwrap();
+        assert_eq!(restarted.external_operation(&operation).unwrap().scope, scope);
+        let successor = Identity { owner: "owner-b".into(), incarnation: "machine-b/session-b/process-b".into() };
+        let draining = restarted.prepare(&fixture.right, &fixture.actor, &successor, "reserved-transfer").unwrap();
+        let before = draining.tip.clone();
+        let checks = Settled::default();
+        let error = draining.quiesce(&fixture.right, &fixture.actor, &checks).unwrap_err();
+        assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING"));
+        let error = draining.abort(&fixture.left, &fixture.actor, &checks).unwrap_err();
+        assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING"));
+        let claim = OperatorClaim { operator: "operator".into(), reason: "fenced".into(), evidence: "host stopped".into(), stopped_or_fenced: "all prior hosts".into() };
+        let error = draining.force_quiesce(&fixture.left, &successor, "reserved-transfer", &claim, &checks).unwrap_err();
+        assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING"));
+        assert!(draining.reserve_external(&fixture.left, &fixture.actor, &uuid::Uuid::new_v4().to_string(), &scope).is_err());
+        let live = Snapshot::read(&fixture.right, "cas-6456").unwrap();
+        assert_eq!(live.tip, before);
+        assert_eq!(live.record.generation, first.record.generation);
+        assert_eq!(live.record.transfer.unwrap().successor, successor);
+        assert_eq!(fixture.target(), source);
+    }
     let fixture = Fixture::new();
     let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();
     let successor = Identity {

@@ -48,6 +48,8 @@ pub(crate) struct Record {
     pub operator_claim: Option<serde_json::Value>,
     #[serde(default)]
     pub audit: Option<serde_json::Value>,
+    #[serde(default)]
+    pub external_operations: Vec<ExternalOperation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +66,9 @@ pub(crate) use transfer::TransferChecks;
 #[path = "train_recovery.rs"]
 mod recovery;
 pub(crate) use recovery::OperatorClaim;
+#[path = "train_external.rs"]
+mod external;
+pub(crate) use external::{ExternalAction, ExternalOperation, ExternalScope, RunClaim, WorkflowScope};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Snapshot {
@@ -234,7 +239,8 @@ impl Snapshot {
         let tip = tip.to_string();
         let record: Record = serde_json::from_str(&command(repo, &["show", &format!("{tip}:authority.json")], None)?)
             .map_err(|e| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: invalid record: {e}"))?;
-        if record.protocol != 1 || record.train != train {
+        if !matches!(record.protocol, 1 | 2) || record.train != train
+            || (record.protocol == 1 && !record.external_operations.is_empty()) {
             return Err("TRAIN_TRANSFER_FENCE_UNAVAILABLE: record scope/protocol mismatch".into());
         }
         Ok(Self { reference, tip, record, transition_audit: None })

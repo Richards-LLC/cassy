@@ -1661,7 +1661,7 @@ fn execute_tests(
     };
     if let Some((scope, _, cause)) = widened {
         super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")) }, count as u64)?;
-        println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
+        println!("widened: PASS {head} {scope:?} {count} passed tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
 }
@@ -3016,6 +3016,20 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             failed_row["testResults"][0]["assertionResults"][1]["status"] = json!("failed");
             assert!(validate_report(runner, repo, &failed_row, &template, 1).is_err());
         }
+    }
+
+    /// GH #2246, #2166: Jest printed `Tests: 2957 passed` while the widened
+    /// receipt said 2955: tests sharing a name in one file collapsed into one
+    /// identity. The count is the passing results the runner reported.
+    #[test]
+    fn widened_jest_count_is_the_runners_passing_results_gh2246() {
+        let report = json!({"success":true,"testResults":[
+            {"name":"/project/a.test.js","status":"passed","assertionResults":[
+                {"fullName":"pool drains","status":"passed"}, {"fullName":"pool drains","status":"passed"}]},
+            // Jest 30 reports a suite holding a pending test as "focused".
+            {"name":"/project/b.test.js","status":"focused","assertionResults":[
+                {"fullName":"resets","status":"passed"}, {"fullName":"needs db","status":"pending"}]}]});
+        assert_eq!(validate_report("jest", Path::new("/project"), &report, &[], 1).unwrap(), 3);
     }
 
     #[test]

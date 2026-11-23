@@ -1067,11 +1067,13 @@ impl GitOperations {
 
     /// A target refresh must update its exact origin ref even when the
     /// repository's configured fetch refspec only tracks another branch.
+    /// The same read mirrors origin's train authority refs (pruned), so the
+    /// entry's publication fence needs no second origin read (cas-6456).
     fn fetch_merge_target_bounded(&self, target: &str, timeout: Duration) -> Result<String> {
         let remote = format!("refs/remotes/origin/{target}");
         let mut command = Command::new("git");
-        command.args(["fetch", "--no-write-fetch-head", "origin",
-            &format!("+refs/heads/{target}:{remote}")])
+        command.args(["fetch", "--prune", "--no-write-fetch-head", "origin",
+            &format!("+refs/heads/{target}:{remote}"), super::train_authority::OBSERVED_REFSPEC])
             .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(&self.repo_root);
         let output = Self::run_command_bounded(command, timeout)?;
@@ -1118,6 +1120,7 @@ impl GitOperations {
         head: &str,
         reconcile_peer: bool,
         fence: Option<(&super::train_authority::Snapshot, &super::train_authority::Identity)>,
+        fence_observed: bool,
     ) -> TargetPushOutcome {
         let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
         if !self.has_origin_remote() {
@@ -1148,7 +1151,7 @@ impl GitOperations {
                     reason: "the merge does not contain the observed origin tip".into(),
                 };
             }
-            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, None, PUSH_TIMEOUT)
+            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, None, fence_observed, PUSH_TIMEOUT)
         };
         let first = publish(head, &expected);
         if !reconcile_peer || !matches!(first, TargetPushOutcome::NonFastForward { .. }) {
@@ -1262,7 +1265,7 @@ impl GitOperations {
         head: &str,
         timeout: Duration,
     ) -> TargetPushOutcome {
-        self.publish_pinned_source_with_lease(branch, head, None, false, None, timeout)
+        self.publish_pinned_source_with_lease(branch, head, None, false, None, false, timeout)
     }
 
     // gate-audit[proven_merge]: selector Internal publication provenance selects merge validation with G-160 versus ordinary source pre-push checks; no caller override is accepted.
@@ -1273,6 +1276,7 @@ impl GitOperations {
         expected: Option<&str>,
         proven_merge: bool,
         authority: Option<&super::train_authority::AtomicUpdate>,
+        fence_observed: bool,
         timeout: Duration,
     ) -> TargetPushOutcome {
         let remote_ref = format!("origin/{branch}");
@@ -1282,8 +1286,15 @@ impl GitOperations {
                 reason: "pinned source does not resolve".into(),
             };
         };
+        // `fence_observed`: the caller's fetch under this target lock mirrored
+        // origin's authority refs, so the fence is read locally (cas-6456).
+        let unfenced = || if fence_observed {
+            super::train_authority::refuse_observed_unfenced(&self.repo_root, branch)
+        } else {
+            super::train_authority::refuse_unfenced(&self.repo_root, branch)
+        };
         if authority.is_none()
-            && let Err(reason) = super::train_authority::refuse_unfenced(&self.repo_root, branch)
+            && let Err(reason) = unfenced()
         {
             return TargetPushOutcome::NotPushed {
                 sha: Some(local_sha), remote_sha: self.resolve_commit(&remote_ref), reason,

@@ -183,7 +183,24 @@ pub(crate) fn publication_fence(
     repo: &Path,
     target: &str,
 ) -> Result<Option<(Snapshot, Identity)>, String> {
-    let Some(fenced) = crate::worktree::git::train_authority::fencing(repo, target)? else {
+    owner_fence(core, crate::worktree::git::train_authority::fencing(repo, target)?)
+}
+
+/// [`publication_fence`] from the authority refs the caller's target fetch
+/// mirrored under the same target lock: a train merge entry's one origin read.
+pub(crate) fn observed_publication_fence(
+    core: &crate::mcp::CasCore,
+    repo: &Path,
+    target: &str,
+) -> Result<Option<(Snapshot, Identity)>, String> {
+    owner_fence(core, crate::worktree::git::train_authority::observed_fencing(repo, target)?)
+}
+
+fn owner_fence(
+    core: &crate::mcp::CasCore,
+    fenced: Option<Snapshot>,
+) -> Result<Option<(Snapshot, Identity)>, String> {
+    let Some(fenced) = fenced else {
         return Ok(None);
     };
     let train = core.open_task_store().map_err(|e| e.to_string())?

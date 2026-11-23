@@ -657,7 +657,7 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     let daemon = crate::train_owner::local_owner_fence(&root, &fixture.left, &target).unwrap().unwrap();
     assert_eq!(daemon.1, successor_identity);
     let (authority, owner) = crate::train_owner::publication_fence(&core, &fixture.left, &target).unwrap().unwrap();
-    assert!(git.publish_merge_candidate(&target, &head, false, Some((&authority, &owner))).is_published());
+    assert!(git.publish_merge_candidate(&target, &head, false, Some((&authority, &owner)), false).is_published());
     let published = Snapshot::read(&fixture.left, &train.id).unwrap();
     assert_eq!((fixture.target(), published.record.target_sha), (head.clone(), head));
     assert_eq!(published.record.generation, accepted.record.generation);

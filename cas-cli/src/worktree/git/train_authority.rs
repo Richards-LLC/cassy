@@ -133,15 +133,47 @@ pub(crate) fn fencing(repo: &Path, branch: &str) -> Result<Option<Snapshot>, Str
     Ok(None)
 }
 
-/// Every write to an enrolled target goes through [`Snapshot::publish`].
-pub(crate) fn refuse_unfenced(repo: &Path, branch: &str) -> Result<(), String> {
-    match fencing(repo, branch)? {
+/// Local mirror of origin's authority refs. The merge target's per-entry
+/// origin fetch refreshes it under the target lock (cas-6456).
+pub(crate) const OBSERVED_REFSPEC: &str = "+refs/cas/train-owner/*:refs/cas/observed/train-owner/*";
+const OBSERVED_PREFIX: &str = "refs/cas/observed/train-owner/";
+
+/// [`fencing`] answered from the authority refs that the caller's target fetch
+/// just mirrored, so one train merge entry reads origin once. Only a caller
+/// that fetched under the current target lock may use it.
+pub(crate) fn observed_fencing(repo: &Path, branch: &str) -> Result<Option<Snapshot>, String> {
+    if !branch.starts_with("epic/") {
+        return Ok(None);
+    }
+    let refs = command(repo, &["for-each-ref", "--format=%(objectname)\t%(refname)", OBSERVED_PREFIX.trim_end_matches('/')], None)?;
+    for (tip, name) in refs.lines().filter_map(|line| line.split_once('\t')) {
+        let Some(train) = name.strip_prefix(OBSERVED_PREFIX) else { continue };
+        let snapshot = Snapshot::at(repo, train, tip)?;
+        if snapshot.record.target == branch {
+            return Ok(Some(snapshot));
+        }
+    }
+    Ok(None)
+}
+
+fn fence_required(branch: &str, snapshot: Option<Snapshot>) -> Result<(), String> {
+    match snapshot {
         Some(snapshot) => Err(crate::gates::tag("G-113", format!(
             "TRAIN_OWNER_FENCE_REQUIRED: {branch} is fenced by train {}; only its owner's fenced publication may write it",
             snapshot.record.train,
         ))),
         None => Ok(()),
     }
+}
+
+/// Every write to an enrolled target goes through [`Snapshot::publish`].
+pub(crate) fn refuse_unfenced(repo: &Path, branch: &str) -> Result<(), String> {
+    fence_required(branch, fencing(repo, branch)?)
+}
+
+/// [`refuse_unfenced`] from the caller's just-fetched mirror ([`observed_fencing`]).
+pub(crate) fn refuse_observed_unfenced(repo: &Path, branch: &str) -> Result<(), String> {
+    fence_required(branch, observed_fencing(repo, branch)?)
 }
 
 impl Snapshot {
@@ -186,6 +218,13 @@ impl Snapshot {
         let remote = command(repo, &["ls-remote", "--refs", "origin", &reference], None)?;
         let tip = remote.split_whitespace().next().ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: authority missing")?.to_string();
         command(repo, &["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", &reference], None)?;
+        Self::at(repo, train, &tip)
+    }
+
+    /// The authority record at a tip whose objects are already local.
+    fn at(repo: &Path, train: &str, tip: &str) -> Result<Self, String> {
+        let reference = reference(train)?;
+        let tip = tip.to_string();
         let record: Record = serde_json::from_str(&command(repo, &["show", &format!("{tip}:authority.json")], None)?)
             .map_err(|e| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: invalid record: {e}"))?;
         if record.protocol != 1 || record.train != train {
@@ -224,7 +263,7 @@ impl Snapshot {
         let next_tip = record_commit(&git.repo_root, Some(&self.tip), &next)?;
         let update = AtomicUpdate { reference: self.reference.clone(), expected: self.tip.clone(), next: next_tip.clone() };
         let outcome = git.publish_pinned_source_with_lease(
-            &next.target, &head, Some(&live.record.target_sha), proven_merge, Some(&update), TIMEOUT,
+            &next.target, &head, Some(&live.record.target_sha), proven_merge, Some(&update), false, TIMEOUT,
         );
         if outcome.is_published() {
             let confirmed = Self::read(&git.repo_root, &next.train)?;

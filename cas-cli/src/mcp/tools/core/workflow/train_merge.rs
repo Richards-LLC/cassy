@@ -1744,4 +1744,46 @@ mod tests {
         let reads = std::fs::read_to_string(&reads).unwrap_or_default();
         assert_eq!(reads.lines().count(), fixture.ids.len(), "origin reads:\n{reads}");
     }
+
+    /// cas-6456: the one origin read is per entry, after the merge lock.
+    /// A train-owner transfer that lands on origin between two entries
+    /// fences the second, so the prior owner cannot publish it.
+    #[tokio::test]
+    async fn transfer_between_entries_fences_the_next_entry_cas_6456() {
+        let fixture = Fixture::build(false);
+        fixture.start().await;
+        let origin = fixture.root.join("origin.git");
+        // The successor's accepted authority record, staged on origin.
+        let staging = tempfile::tempdir().unwrap();
+        git(staging.path(), &["init", "-qb", "authority"]);
+        git(staging.path(), &["config", "user.name", "Cassy test"]);
+        git(staging.path(), &["config", "user.email", "test@example.invalid"]);
+        let target_sha = git(fixture._repo.path(), &["rev-parse", "epic/train"]);
+        commit(staging.path(), "authority.json", &serde_json::json!({
+            "protocol": 1, "project": "fixture", "train": "cas-train", "target": "epic/train",
+            "identity": {"owner": "successor", "incarnation": "successor-process"},
+            "epoch": 2, "generation": "successor-generation", "phase": "active",
+            "target_sha": target_sha, "operation": "transfer-accept", "transfer": null,
+        }).to_string());
+        git(staging.path(), &["push", "-q", origin.to_str().unwrap(), "authority:refs/hold/authority"]);
+        // The transfer lands just before the second entry's origin read.
+        let reads = fixture.root.join("origin-reads.log");
+        let reader = fixture.root.join("transfer-on-second-read");
+        std::fs::write(&reader, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$(ps -o args= -p $PPID)\" >> '{reads}'\n\
+             [ \"$(grep -c 'git fetch' '{reads}')\" = 2 ] && git --git-dir='{origin}' update-ref refs/cas/train-owner/cas-train refs/hold/authority\n\
+             exec git upload-pack \"$@\"\n",
+            reads = reads.display(), origin = origin.display(),
+        )).unwrap();
+        std::fs::set_permissions(&reader, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", reader.to_str().unwrap()]);
+
+        let _ = resume_pending(&fixture.root, "queue-session").await;
+
+        git(fixture._repo.path(), &["--git-dir", origin.to_str().unwrap(), "rev-parse", "refs/cas/train-owner/cas-train"]);
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        let landed = git(&origin, &["rev-parse", "refs/heads/epic/train"]);
+        assert!(operations.is_ancestor(&fixture.shas[0], &landed), "the first entry publishes before the transfer");
+        assert!(!operations.is_ancestor(&fixture.shas[1], &landed), "the prior owner published past the transfer");
+    }
 }

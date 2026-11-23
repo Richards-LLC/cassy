@@ -127,6 +127,7 @@ impl Snapshot {
             Some(expected_target.unwrap_or("")),
             false,
             Some(&update),
+            false,
             TIMEOUT,
         );
         let confirmed = Self::read(repo, train)?;

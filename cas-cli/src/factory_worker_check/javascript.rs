@@ -2989,7 +2989,8 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let report = json!({"success":true,"testResults":[
             {"name":"/project/a.test.js","status":"passed","assertionResults":[
                 {"fullName":"pool drains","status":"passed"}, {"fullName":"pool drains","status":"passed"}]},
-            {"name":"/project/b.test.js","status":"passed","assertionResults":[
+            // Jest 30 reports a suite holding a pending test as "focused".
+            {"name":"/project/b.test.js","status":"focused","assertionResults":[
                 {"fullName":"resets","status":"passed"}, {"fullName":"needs db","status":"pending"}]}]});
         assert_eq!(validate_report("jest", Path::new("/project"), &report, &[], 1).unwrap(), 3);
     }

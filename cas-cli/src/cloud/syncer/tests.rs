@@ -6384,8 +6384,8 @@ async fn stale_quarantine_entry_for_a_later_local_task_no_longer_blocks_pull_or_
     for id in [stale, leaked] {
         queue.quarantine_row("task", id, "purge-foreign peer-evidence row from verified delete-set").unwrap();
     }
-    std::thread::sleep(Duration::from_millis(20));
-    let live = old(stale);
+    let mut live = old(stale);
+    live.created_at = chrono::Utc::now() + chrono::Duration::seconds(1);
     tasks.add(&live).unwrap();
     queue.enqueue_for_team(EntityType::Task, stale, SyncOperation::Upsert,
         Some(&serde_json::to_string(&live).unwrap()), team).unwrap();

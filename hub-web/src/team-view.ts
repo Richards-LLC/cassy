@@ -103,9 +103,10 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
     if (reason) lane.dataset.urgency = priority === 2 ? "critical" : "waiting";
     const identity = document.createElement("div"); identity.className = "team-identity";
     const model = text("span", [worker.agent?.harness ?? "Harness not reported", worker.agent?.model ?? "Model not reported"].join(" · "), "team-model");
+    model.dataset.testid = "team-model";
     model.dataset.modelReported = String(Boolean(worker.agent?.model)); if (worker.agent?.model) model.dataset.model = worker.agent.model;
     identity.append(text("h3", worker.name), model);
-    const badge = text("span", state, `team-state status-chip status-chip--${statusClass(state)}`); badge.setAttribute("aria-label", `${worker.name}: ${state}`);
+    const badge = text("span", state, `team-state status-chip status-chip--${statusClass(state)}`); badge.setAttribute("aria-label", `${worker.name}: ${state}`); badge.dataset.testid = "team-state";
     if (priorStates.has(worker.name) && priorStates.get(worker.name) !== state) badge.classList.add("team-state--changed");
     const work = text("p", worker.work, "team-task");
     const elapsed = text("p", "Task time not reported", "team-elapsed");

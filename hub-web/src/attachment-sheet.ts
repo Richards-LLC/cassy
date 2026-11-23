@@ -91,7 +91,7 @@ function applyAttachmentNote(sheet: HTMLAnchorElement, note: string | undefined,
     line?.remove();
   } else if (text) {
     const created = !line;
-    if (!line) { line = sheet.ownerDocument.createElement("span"); line.className = "fnote"; }
+    if (!line) { line = sheet.ownerDocument.createElement("span"); line.className = "fnote"; line.dataset.testid = "fnote"; }
     // The card sits in the thread's role=log, which is itself a polite live
     // region, so dropping role=status alone still let the log speak the new
     // words (cas-c945 QA F01). aria-live=off takes the note out of both.
@@ -214,6 +214,7 @@ export function renderVisualPage(document: Document, attachment: ArtifactRef, sh
   figure.dataset.artifactId = attachment.artifact_id;
   const frame = document.createElement("div");
   frame.className = "visual-frame";
+  frame.dataset.testid = "visual-frame";
   const status = document.createElement("p");
   status.className = "visual-status";
   status.textContent = "Loading the page…";

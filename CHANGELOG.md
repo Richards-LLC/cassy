@@ -7,6 +7,83 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.50.0] - 2026-11-23
+
+### Fixed — Factory CI watch
+
+- **Cassy no longer spends the shared GitHub quota on standing CI polls** — Was: every pending CI wake and every parked delivery asked GitHub about its commit on every 30 s poll, and the merge alert and merge admission re-read each commit's checks every time. About 4,600 of the 5,000 core calls an hour went to them, so the quota ran out twice on Nov 22 and merges could not check CI. Now: one list of the newest runs per poll answers every commit with a run still going, a commit the newest runs already hold in full costs no request of its own, a commit they cut off is read by its own request at most twice an hour (sooner when its newest runs change), and the standing polls (CI watch, merge alert, idle relay) share one answer per commit's checks across the machine (a minute while any is unfinished, ten minutes once all finished, dropped as soon as the CI watch sees a new run or attempt). Merge admission, the pending-CI merge retry, release close and the post-merge proof still read the exact commit's checks fresh every time. A red run's failing job, log and artifact list, and a branch's tip, are shared for ten minutes and one minute instead of being re-read on every poll. At the 67 parked deliveries measured on Nov 22 the projected burn is about 2,600 calls an hour, down from 4,600.
+
+### Fixed — Factory worker checks
+
+- **CI guard helpers prove through their node:test guards** — A changed helper under a test directory that only `node:test` guard tests import, such as a check that reads a GitHub Actions workflow, now runs through those guard tests. Park prescribes `worker-check -- node --test <helper>`, which runs the importing guards once, capped, and park accepts that receipt. Before, the helper widened to its whole package, and park could name the workflow YAML as a Playwright test that the capped runner refuses. A failing guard records no proof (GH #2200).
+- **Playwright helpers are proved through every spec that imports them, under each spec's own config** — Was: a changed Playwright helper with no tests of its own widened to a run of its whole package, and a passing run of the consuming spec under a non-default config (such as `playwright.responsive.config.ts`) did not satisfy park. Now: `worker-check -- playwright <helper>` finds the config that lists each importing spec and runs that spec under it, and park accepts the helper once every importing spec has a passing capped run at the tip, whether through the helper's run, the spec's own `--config` run, or its ordinary five-pass stability run when that run executed every test of the spec (a partial selection of a spec's tests proves nothing about the rest). A missing consumer, an unrelated spec, or a run that executed a different spec gives no proof. A helper no spec imports, or that a unit test also imports, keeps its previous proof; a type-only `@playwright/test` import does not make a Vitest consumer a Playwright spec (GH #2146).
+
+### Fixed — Factory
+
+- **A fresh park is no longer reported as missing its completion wake** — Was: a delivery parked while the watchdog sampled was reported as `DELIVERY_WAKE_MISSING` about half a second before its own park finished arming its CI and merge wakes (the wakes existed by the time the notice was queued), as happened to a delivery moved with `transfer adopt_branch`. Now: the check waits 60 seconds after a delivery last changed, enough for its park to arm; a delivery that still has no wake after that is reported as before (GH #2332).
+- **A worker busy in a long first turn is no longer reaped as a failed boot** — Cassy gives a registered Claude worker five minutes to take its first prompt, and it looked for that prompt only in the last quarter megabyte of the worker's transcript. A worker that opened with large reads grew the transcript past that window within seconds, so the check saw no turn and removed a worker that was visibly running tool calls, with its worktree. Now any turn start, assistant output or turn end written since the launch counts, so a progressing worker survives. A worker that never takes its first prompt is still reaped after the same five minutes (GH #2338).
+
+### Changed — Commander accessibility and journey tests
+
+- **Commander names its live regions** — The connection chip, message status, notices, the command palette, pairing status and other live regions or controls that had no accessible name now announce one, so screen readers can tell them apart. Nodes that journey tests check but that have no meaningful role carry a stable test id. Behaviour is unchanged.
+- **Journey specs locate Commander the way a user does** — Every Commander journey finds elements by role, accessible name or test id instead of styling classes. Assertions about surfaces Commander no longer has (terminal panes, the session picker and machine rail, epic tabs, the take-control command) were removed.
+- **Four journey tests are back without their flake** — The phone fleet-feedback test (HUB-J17), the phone walk from the list to a reply and back (HUB-J9), open-reports-without-moving-the-reader (HUB-J4), and project navigation across machines with filters, stopped-session replacement and keyboard collapse (HUB-J14) were deleted as flakes and now return. They wait for layout, or for the machine to be back online, instead of measuring once.
+
+### Fixed — Task close
+
+- **A slow moment no longer refuses every close from a healthy checkout** — When one close's read of its own checkout timed out under load, Cassy remembered that failure for 30 seconds. Every close from the same healthy checkout in that window, such as the rest of a batch, was then refused with G-38 "work target repository unavailable" or "mismatch". Now each close re-reads its own checkout and gets the full lookup budget for it. Unrelated registered roots that hang are still skipped (GH #1941, GH #2178).
+- **Close evidence citations ignore surrounding sentence punctuation** — A close reason that cites a proof log in prose, such as `(target/run.log).` or a path ending in a period, now publishes the existing file instead of refusing it as missing. A path in backticks is read exactly as written, and a file whose own name ends in punctuation, such as `run.log!`, is published as itself rather than as a similarly named sibling.
+
+### Fixed — Factory close proof
+
+- **A close that will be refused says so in seconds** — Was: on a delivery
+  that changed many Commander journey specs, park took 21 minutes to refuse
+  for missing test receipts (GH #2331). Building the refusal's run commands
+  asked each Playwright config, one process per file and per config, which
+  configs owned every changed file, again for each widened scope, and re-read
+  the whole package's imports each time; a config that cannot load on this
+  host was asked again for every file. Now: within one park each runner config
+  is listed once and each package's imports are read once, and a config that
+  cannot load lists nothing. The same delivery is refused in 10 seconds
+  instead of 464, with the same refusal.
+
+### Fixed — Park evidence publication scope
+
+- **Uncited nested files are no longer uploaded at close** — A park publishes only declared evidence: top-level files, LEDGER.md and the paths its rows cite, each read the way the ledger gate reads an evidence cell (one path: relative, absolute inside the directory, or another machine's artifacts path; a cited directory covers its files), files the close reason cites, and the `qa/` bundle and `terminal-qa/` receipt trees that Cassy's verifier reads, so a routed peer reviewer still receives them. A nested file nothing cites, such as a source snapshot or raw captures already bundled, is listed in the evidence report without an upload or a per-file published-artifact note. Previously published copies are still reused, and a cited missing file still refuses the park (GH #2155, #2203, #2212).
+
+## [4.49.0] - 2026-11-23
+
+### Fixed — Focused proof for data, migration and fixture changes
+
+- **Package proof names the specs that read the change, and accepts their runs** — Was: a delivery that renamed a Prisma migration, edited a JSON catalogue or edited a test fixture widened to a package proof. The park then printed `worker-check -- jest <file>.sql|.json`, which the capped runner always refuses. Passing runs of the specs that read those files did not count. Now: the gate finds the test files in that package that read a changed input through a relative path: the JSON file itself, the fixture module, or the migrations directory. It prints one runnable `worker-check` command for exactly those specs and accepts their whole-file passes at the delivered tip as the package proof. The specs' passes count only when every changed input in the package is read by one of them; if any input is read by no spec, the package keeps its own proof requirement and the gate names the unread inputs. When no spec reads the input that way, the gate names a changed JavaScript file to run, or describes the run it needs, never a command that cannot run.
+
+### Fixed — Factory park
+
+- **A lane that changes hub-web source parks with its source proof alone** — Was: the pre-push drift gate made the lane commit the rebuilt `hub-web/dist` bundles, and park then demanded a widened related-tests receipt for each changed bundle, which run no tests and could never earn one, so the lane could neither push without them nor park with them (GH #2329). Now: generated `hub-web/dist` files owe no proof and never widen; the `hub-web/src` files they were built from keep their normal proof.
+
+### Fixed — Factory close proof
+
+- **Tests built only for another OS are proven on that OS** — Was: park asked
+  for five local capped passes of a changed `#[cfg(target_os = "linux")]` test
+  on a macOS worker (and of a macOS-only test on Linux), where the capped
+  runner selects no tests, so the delivery could never park (GH #2320). Now:
+  park reads the test's `target_os` gate, from the function, its modules or
+  its file. Lane CI's Rust test job passing at the delivered tip proves a test
+  that builds on Linux (a lint-only green does not), and a test for any other
+  OS needs five passes recorded on that OS, which park now reads from the
+  receipts synced on the task. The refusal says which, and never asks for a
+  local run.
+
+### Fixed — Rebound delivery branches
+
+- **Close checks name the rebound branch even before its first commit** — After a supervisor rebinds a task to a new lane (for example `factory/<worker>-<task>-r2`), the close checks printed at task start, the publication check and every other close gate now measure that lane, even while it is still empty. Before, an empty rebound lane fell back to the old per-task branch that still held the earlier build (GH #1698).
+
+### Fixed — Factory
+
+- **New worker names can't take another worker's branches** — Was: spawn checked only the store on its own machine, so a custom name such as `swift` could be picked while origin already held `factory/swift-falcon-7`, and the name generator could hand out a name that registration then refused. Overflow minion names such as `kevin-2` also overlapped `kevin`. Now: spawn refuses a name that would share a `factory/` namespace with a registered worker or an existing local or origin branch (`WORKER_NAME_OVERLAPS`), and the generators skip such names. A name's own task branches never block it. Overflow minion names read `kevin2`. `cas factory` checks the final initial names, including `--worker-spec` names, and the daemon's fallback generation skips overlapping names. Workers added later from the GUI or WebSocket are checked the same way before they are bound or launched: a supplied overlapping name is refused and a generated one is redrawn. An unreadable name registry stops the launch or spawn.
+- **`cas doctor` reports overlapping worker names** — Was: an overlap that slipped in from another machine or an older store went unnoticed. Now: a `worker names` row lists each one with the way back. It reports only and changes nothing.
+- **Branch owners are named the same way everywhere** — Was: the SessionStart warning stayed quiet on another worker's `factory/` branch, a CI-retry wake named the raw branch remainder as the worker, and branch-only merges inferred only `cas-` task ids. Now: all three use the shared ownership rule. The warning fires on any factory branch that isn't yours, the wake names the registered owner (or says `unregistered`), and any task prefix is inferred.
+
 ## [4.48.0] - 2026-11-23
 
 ### Fixed — Message delivery honesty (GH #1731)

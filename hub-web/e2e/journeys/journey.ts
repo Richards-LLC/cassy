@@ -249,17 +249,21 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
  * stretched by a loaded host. Resume with page.clock.resume().
  *
  * The page's now is its installed clock's origin plus the ticks run since
- * (journeys never set the system time). It is read just before the hold, and
- * read again if a slow round trip let the clock pass it.
+ * (journeys never set the system time). It is read just before the hold. The
+ * clock keeps running until the hold lands, so a round trip slower than the
+ * lead lets it pass the target; the next attempt leads by at least twice that
+ * measured round trip instead of repeating a lead the host already outran.
  */
 export async function holdPageClock(page: Page, ahead = 250): Promise<void> {
-  for (let attempt = 1; ; attempt += 1) {
+  for (let attempt = 1, lead = ahead; ; attempt += 1) {
+    const started = performance.now();
     const now = await page.evaluate(() => performance.timeOrigin + performance.now());
     try {
-      await page.clock.pauseAt(now + ahead);
+      await page.clock.pauseAt(now + lead);
       return;
     } catch (error) {
       if (attempt === 3 || !String(error).includes("Cannot fast-forward to the past")) throw error;
+      lead = Math.max(lead, 2 * (performance.now() - started));
     }
   }
 }

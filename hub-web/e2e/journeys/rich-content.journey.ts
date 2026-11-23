@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { Locator, Page } from "@playwright/test";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { journeyNow } from "./clock";
@@ -12,10 +13,26 @@ const variants = [
   { name: "phone dark", width: 390, height: 844, scheme: "dark" },
 ] as const;
 
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
+// The header's connection chip; attribute checks read it even while it carries no words.
+const connection = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
+const readingThread = (page: Page) => page.getByTestId("conversation-thread");
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// An attachment's card is a link named "<file name>, <type>, <size>, from …. Open".
+const attachmentLink = (scope: Page | Locator, name: string) => scope.getByRole("link", { name: new RegExp(`^${literal(name)}[,.]`) });
+const attachmentCard = (page: Page, name: string) => page.getByRole("log").getByTestId("rich-attachment").filter({ has: attachmentLink(page, name) });
+const previewNote = (link: Locator) => link.getByRole("status", { name: "Preview status", exact: true });
+const codeFrames = (page: Page) => page.getByRole("log").getByTestId("code-frame");
+const codeFrame = (page: Page, label: string) => codeFrames(page).filter({ has: page.getByRole("button", { name: `Copy source from ${label}`, exact: true }) });
+// A rendered diagram is the frame's figure; it stays mounted (hidden) while the source shows.
+const diagram = (scope: Page | Locator) => scope.getByRole("figure", { includeHidden: true });
+
 test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   const log = page.getByRole("log");
-  const preview = log.locator('a[data-artifact-id="art-cached-image"] .rich-media');
+  const cachedLink = attachmentLink(log, "Cached image.png");
+  const preview = cachedLink.getByTestId("rich-media");
   let attempts = 0;
   let recover = false;
   let beforeReconnect = 0;
@@ -29,42 +46,42 @@ test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", 
   }));
   await journey.stage("A failed image collapses into its own card", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await conversationRow(page).click();
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
     await hub.socketOpen(PELICAN);
     hub.supervisorSays(PELICAN, "Keep this image while reading later updates.", { attachments: [file("art-cached-image", "Cached image.png", "image/png")] });
     await expect(preview).toHaveAttribute("data-preview-state", "waiting");
     await expect(preview).toBeHidden();
-    await expect(log.locator('a[data-artifact-id="art-cached-image"] .preview-note')).toBeVisible();
+    await expect(previewNote(cachedLink)).toBeVisible();
   });
   const cached = (await preview.elementHandle())!;
   await journey.stage("Scroll the failed card out of the DOM, then reconnect the machine", async () => {
     // More than twenty groups makes the real thread window cache the first
     // card; fewer than sixty keeps that same node available for restoration.
     for (let i = 0; i < 84; i++) hub.supervisorSays(PELICAN, `Later update ${i + 1}: the operator is reading the latest work.`);
-    const thread = page.locator(".conversation-reading.thread");
+    const thread = readingThread(page);
     await thread.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event("scroll")); });
     await expect(preview).toHaveCount(0);
     expect(await cached.evaluate(node => node.isConnected)).toBe(false);
     beforeReconnect = attempts;
     expect(beforeReconnect).toBeGreaterThan(0);
     hub.hold(PELICAN); hub.drop(PELICAN);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+    await expect(connection(page)).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
     hub.release(PELICAN);
-    await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
+    await expect(connection(page)).toContainText("Live", { timeout: 30_000 });
     expect(attempts).toBe(beforeReconnect);
   });
   await journey.stage("Scroll back to the same cached card and decode its recovered image", async () => {
     // Keep the failure real until the machine has reconnected offscreen.
     // Initial catalog paints may reattach the card before it leaves the DOM.
     recover = true;
-    await page.locator(".conversation-reading.thread").evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
+    await readingThread(page).evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
     await expect(preview).toHaveCount(1);
     expect(await cached.evaluate(node => node.isConnected)).toBe(true);
     const image = preview.getByRole("img", { name: "Cached image.png", exact: true });
     await expect(image).toBeVisible();
     await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
-    await expect(log.locator('a[data-artifact-id="art-cached-image"] .preview-note')).toHaveCount(0);
+    await expect(previewNote(cachedLink)).toHaveCount(0);
     expect(attempts).toBe(beforeReconnect + 1);
   });
 });
@@ -95,8 +112,8 @@ for (const [index, variant] of variants.entries()) {
 
       await journey.stage("Open plain text without loading rich renderers", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+        await conversationRow(page).click();
+        await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
         await hub.socketOpen(PELICAN);
         hub.supervisorSays(PELICAN, "Evidence is ready to inspect.");
         await expect(log.getByText("Evidence is ready to inspect.")).toBeVisible();
@@ -109,20 +126,21 @@ for (const [index, variant] of variants.entries()) {
         const gate = new Promise<void>(resolve => { release = resolve; });
         await page.route("**/chunk-rich-syntax-*.js", async route => { await gate; await route.continue(); });
         hub.supervisorSays(PELICAN, `# Source ready to copy\n\n\`\`\`ts src/example.ts\n${source}\n\`\`\`\n\n~~~unknown\nUnknown languages stay readable.\n~~~`);
-        const frame = log.locator(".code-frame").first();
-        await expect(frame.locator(".code-frame-label")).toHaveText("src/example.ts");
-        await expect(frame.locator("code")).toHaveText(source, { useInnerText: false });
-        await expect(frame.locator("pre")).toHaveAttribute("data-syntax-state", "loading");
-        const selected = await frame.locator("code").evaluate(code => {
+        const frame = codeFrame(page, "src/example.ts");
+        await expect(frame.getByTestId("code-frame-label")).toHaveText("src/example.ts");
+        await expect(frame.getByRole("code")).toHaveText(source, { useInnerText: false });
+        await expect(frame.getByTestId("markdown-code")).toHaveAttribute("data-syntax-state", "loading");
+        const selected = await frame.getByRole("code").evaluate(code => {
           const selection = getSelection()!;
           selection.setBaseAndExtent(code.firstChild!, 52, code.firstChild!, 8);
           return selection.toString();
         });
         release();
-        await expect(frame.locator("pre")).toHaveAttribute("data-syntax-state", "ready");
-        await expect(frame.locator(".syntax-keyword").first()).toHaveText("const");
-        await expect(frame.locator(".syntax-comment")).toHaveText("// Literal source stays selectable");
-        await expect(frame.locator(".syntax-string")).toContainText("<script>");
+        await expect(frame.getByTestId("markdown-code")).toHaveAttribute("data-syntax-state", "ready");
+        // The first keyword token in source order is the declaration.
+        await expect(frame.getByTestId("syntax-keyword").first()).toHaveText("const");
+        await expect(frame.getByTestId("syntax-comment")).toHaveText("// Literal source stays selectable");
+        await expect(frame.getByTestId("syntax-string")).toContainText("<script>");
         expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
         hub.supervisorSays(PELICAN, "Source review is still open.");
         await expect(log.getByText("Source review is still open.", { exact: true })).toBeVisible();
@@ -131,14 +149,14 @@ for (const [index, variant] of variants.entries()) {
         const wrap = frame.getByRole("button", { name: "Wrap lines in src/example.ts" });
         await wrap.focus(); await page.keyboard.press("Enter");
         await expect(wrap).toHaveAttribute("aria-pressed", "true");
-        await expect(log.locator(".code-frame").nth(1).getByRole("button", { name: "Wrap lines in unknown" })).toHaveAttribute("aria-pressed", "false");
-        expect(await frame.locator("pre").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+        await expect(log.getByRole("button", { name: "Wrap lines in unknown" })).toHaveAttribute("aria-pressed", "false");
+        expect(await frame.getByTestId("markdown-code").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         const copy = frame.getByRole("button", { name: "Copy source from src/example.ts" });
         await copy.focus(); await page.keyboard.press("Enter");
         await expect(frame.getByRole("status")).toBeVisible();
         if (index === 0) expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
-        await expect(log.locator(".code-frame-label").nth(1)).toHaveText("unknown");
+        await expect(codeFrame(page, "unknown").getByTestId("code-frame-label")).toHaveText("unknown");
         // A refused browser clipboard produces a visible recovery action.
         await page.evaluate(() => { Object.defineProperty(navigator.clipboard, "writeText", { configurable: true, value: () => Promise.reject(new Error("Permission denied")) }); });
         await copy.click();
@@ -147,8 +165,8 @@ for (const [index, variant] of variants.entries()) {
         await page.evaluate(() => { Reflect.deleteProperty(navigator.clipboard, "writeText"); });
         const statusSource = "const count = 2;\nconsole.log(count);";
         hub.supervisorSays(PELICAN, `\`\`\`ts smoke.ts\n${statusSource}\n\`\`\``, { kind: "status" });
-        const statusFrame = log.locator(".code-frame").last();
-        await expect(statusFrame.locator(".code-frame-label")).toHaveText("smoke.ts");
+        const statusFrame = codeFrame(page, "smoke.ts");
+        await expect(statusFrame.getByTestId("code-frame-label")).toHaveText("smoke.ts");
         await statusFrame.getByRole("button", { name: "Copy source from smoke.ts" }).click();
         await expect(statusFrame.getByRole("status")).toBeVisible();
         expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(statusSource);
@@ -157,11 +175,11 @@ for (const [index, variant] of variants.entries()) {
       await journey.stage("Read a diagram and inspect its source; bad input stays readable", async () => {
         hub.supervisorSays(PELICAN, "# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```mermaid\ninvalid diagram source\n```");
         await expect(log.getByRole("img", { name: "Mermaid diagram", exact: true })).toBeVisible();
-        const frame = log.locator(".code-frame").filter({ has: page.locator(".rich-diagram") });
+        const frame = codeFrames(page).filter({ has: diagram(page) });
         const source = frame.getByRole("button", { name: "Show source from mermaid" });
         await source.focus(); await page.keyboard.press("Enter");
-        await expect(frame.locator("pre.markdown-code")).toBeVisible();
-        await expect(frame.locator(".rich-diagram")).toBeHidden();
+        await expect(frame.getByTestId("markdown-code")).toBeVisible();
+        await expect(diagram(frame)).toBeHidden();
         // Only the source can overflow or wrap, so only the source view offers Expand and Wrap.
         const wrap = frame.getByRole("button", { name: "Wrap lines in mermaid" });
         await expect(wrap).toBeVisible();
@@ -171,28 +189,32 @@ for (const [index, variant] of variants.entries()) {
         await page.keyboard.press("Enter");
         await expect(expand).toHaveAttribute("aria-expanded", "false");
         await frame.getByRole("button", { name: "Show preview from mermaid" }).focus(); await page.keyboard.press("Enter");
-        await expect(frame.locator(".rich-diagram")).toBeVisible();
+        await expect(diagram(frame)).toBeVisible();
         await expect(expand).toBeHidden();
         await expect(wrap).toBeHidden();
-        await expect(log.locator('[data-rich-state="fallback"]')).toHaveText("invalid diagram source");
+        const fallback = codeFrames(page).filter({ hasText: "invalid diagram source" }).getByTestId("markdown-code");
+        await expect(fallback).toHaveAttribute("data-rich-state", "fallback");
+        await expect(fallback).toHaveText("invalid diagram source");
         expect(richRequests.some((url) => url.includes("chunk-rich-diagram"))).toBe(true);
         // The reply guidance's own flowchart shows whole, with no action to reach its end.
         hub.supervisorSays(PELICAN, "```mermaid\nflowchart TD\n  A[Worker parks the task] --> B[Supervisor merges to the epic]\n  B --> C[Merge queue runs the suite]\n  C -->|green| D[main]\n  C -->|red| B\n```");
-        const flow = log.locator(".code-frame").filter({ hasText: "mermaid" }).filter({ has: page.getByText("Merge queue runs the suite") });
-        await expect(flow.locator(".rich-diagram svg")).toBeVisible();
+        const flow = codeFrames(page).filter({ hasText: "mermaid" }).filter({ has: page.getByText("Merge queue runs the suite") });
+        const flowchart = diagram(flow).getByRole("img");
+        await expect(flowchart).toBeVisible();
         // The SVG can be visible and still have no box for a moment on a fast runner.
-        await expect.poll(async () => (await flow.locator(".rich-diagram svg").boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeGreaterThan(288);
-        expect(await flow.locator(".code-frame-content").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
+        await expect.poll(async () => (await flowchart.boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeGreaterThan(288);
+        expect(await flow.getByTestId("code-frame-content").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
       });
 
       await journey.stage("Expand a unified diff", async () => {
         hub.supervisorSays(PELICAN, `The launch now requires evidence.\n\n\`\`\`diff\n${patch}\n\`\`\``);
-        const summary = log.locator(".rich-diff summary");
+        const summary = log.getByTestId("rich-diff").getByText(/^Show diff · \d+ lines$/);
         await expect(summary).toBeVisible();
-        await expect(log.locator(".rich-diff .diff-line")).toHaveCount(0);
+        const diffLines = log.getByTestId("rich-diff").getByTestId("diff-line");
+        await expect(diffLines).toHaveCount(0);
         await summary.click();
-        await expect(log.locator('[data-change="add"]')).toContainText("+launchWithEvidence()");
-        await expect(log.locator('[data-change="remove"]')).toContainText("-launchWithoutEvidence()");
+        await expect(diffLines.filter({ hasText: "+launchWithEvidence()" })).toHaveAttribute("data-change", "add");
+        await expect(diffLines.filter({ hasText: "-launchWithoutEvidence()" })).toHaveAttribute("data-change", "remove");
         await summary.click();
         // Counts stay local until the ordinary batched flush; read that journal.
         await expect.poll(() => page.evaluate(() => {
@@ -201,7 +223,7 @@ for (const [index, variant] of variants.entries()) {
         })).toBe(true);
         // The same stage, written by hand with no @@ line, tints its changes too.
         hub.supervisorSays(PELICAN, "Delivery got faster.\n\n```diff\n- delivered after 11.5 minutes\n+ delivered in about 1 second\n```");
-        const handwritten = log.locator(".rich-diff").filter({ hasText: "delivered in about 1 second" });
+        const handwritten = log.getByTestId("rich-diff").filter({ hasText: "delivered in about 1 second" });
         const tint = (change: string) => handwritten.locator(`[data-change="${change}"]`).evaluate((node) => getComputedStyle(node).backgroundColor);
         const [added, removed] = [await tint("add"), await tint("remove")];
         expect(added).not.toBe(removed);
@@ -228,19 +250,19 @@ for (const [index, variant] of variants.entries()) {
         try {
           // Preview tickets are visibility-driven; inspect the attachment before
           // waiting for its request, even after a tall wrapped code block.
-          await log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-image"])').scrollIntoViewIfNeeded();
+          await attachmentCard(page, "Evidence screenshot.png").scrollIntoViewIfNeeded();
           await expect.poll(() => attempts).toBe(1);
           hub.hold(PELICAN); hub.drop(PELICAN);
-          await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+          await expect(connection(page)).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
           abortTicket();
-          const preview = log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-image"]) .rich-media');
-          await expect(log.locator('a[data-artifact-id="art-inline-image"] .preview-note')).toBeVisible();
+          const preview = attachmentCard(page, "Evidence screenshot.png").getByTestId("rich-media");
+          await expect(previewNote(attachmentLink(log, "Evidence screenshot.png"))).toBeVisible();
           await expect(preview).toBeHidden();
           hub.release(PELICAN);
-          await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
+          await expect(connection(page)).toContainText("Live", { timeout: 30_000 });
           await expect(image).toBeAttached(); await image.scrollIntoViewIfNeeded();
           expect(attempts).toBe(2);
-          const caption = log.locator('a[data-artifact-id="art-inline-image"]');
+          const caption = attachmentLink(log, "Evidence screenshot.png");
           const before = await caption.boundingBox();
           releaseImage();
           await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
@@ -253,7 +275,7 @@ for (const [index, variant] of variants.entries()) {
       await journey.stage("Read the real PDF first page inline", async () => {
         await page.route(content("art-inline-pdf"), (route) => route.fulfill({ contentType: "application/pdf", body: readFileSync(new URL("../media/evidence.pdf", import.meta.url)) }));
         hub.supervisorSays(PELICAN, "The report is attached.", { attachments: [file("art-inline-pdf", "Evidence report.pdf", "application/pdf")] });
-        const preview = log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-pdf"]) .rich-media');
+        const preview = attachmentCard(page, "Evidence report.pdf").getByTestId("rich-media");
         await preview.scrollIntoViewIfNeeded();
         const before = await preview.boundingBox();
         const pixels = preview.getByRole("img", { name: /PDF preview, page 1 of 1/ });
@@ -266,7 +288,7 @@ for (const [index, variant] of variants.entries()) {
         })).not.toEqual([0, 0, 0, 0]);
         const after = await preview.boundingBox();
         expect(after!.height).toBeCloseTo(before!.height, 0);
-        await expect(log.locator('a[data-artifact-id="art-inline-pdf"]')).toBeVisible();
+        await expect(attachmentLink(log, "Evidence report.pdf")).toBeVisible();
       });
 
       await journey.stage("Play video and audio on demand; unavailable files keep Open", async () => {
@@ -286,11 +308,11 @@ for (const [index, variant] of variants.entries()) {
         });
         await page.route(content("art-inline-audio"), (route) => route.fulfill({ contentType: "audio/wav", body: readFileSync(new URL("../media/evidence.wav", import.meta.url)) }));
         hub.supervisorSays(PELICAN, "The recording and audio are attached.", { attachments: [file("art-inline-video", "Evidence video.webm", "video/webm"), file("art-inline-audio", "Evidence audio.wav", "audio/wav"), file("art-local-preview", "Local screenshot.png", "image/png")] });
-        for (const tag of ["video", "audio"]) {
-          const attachment = log.locator(`.rich-attachment:has(a[data-artifact-id="art-inline-${tag}"])`);
-          const preview = attachment.locator(".rich-media");
+        for (const name of ["Evidence video.webm", "Evidence audio.wav"]) {
+          const attachment = attachmentCard(page, name);
+          const preview = attachment.getByTestId("rich-media");
           // Exercise an unfocused reader's scroll while the preview is lazy.
-          const thread = page.locator(".conversation-reading.thread");
+          const thread = readingThread(page);
           const box = (await thread.boundingBox())!;
           const delta = await preview.evaluate(node => {
             const thread = node.closest<HTMLElement>(".thread")!;
@@ -299,7 +321,8 @@ for (const [index, variant] of variants.entries()) {
           await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
           await page.mouse.wheel(0, delta);
           await expect(preview).toHaveAttribute("data-preview-state", "ready");
-          const player = log.locator(tag);
+          // The player is named for its file, as the card's preview box names "<file> preview".
+          const player = log.getByLabel(name, { exact: true });
           await expect(player).toBeVisible();
           await expect(player).toHaveAttribute("preload", "none");
           // The video deliberately expires once; the replacement resumes the user's play.
@@ -311,13 +334,13 @@ for (const [index, variant] of variants.entries()) {
           expect(await player.evaluate((node: HTMLMediaElement) => { node.pause(); return node.duration; })).toBeGreaterThan(0);
         }
         expect(videoRanges.some((range) => range.startsWith("bytes="))).toBe(true);
-        const unavailable = log.locator('.rich-attachment:has(a[data-artifact-id="art-local-preview"])');
+        const unavailable = attachmentCard(page, "Local screenshot.png");
         // Claim this card as the reader's destination before scrolling: a pending
         // thread resize can otherwise restore the previous reading anchor.
         await unavailable.getByRole("link").focus();
         await unavailable.scrollIntoViewIfNeeded();
-        await expect(unavailable.locator('a.sheet .preview-note')).toBeVisible();
-        await expect(unavailable.locator('.rich-media')).toBeHidden();
+        await expect(previewNote(unavailable.getByRole("link"))).toBeVisible();
+        await expect(unavailable.getByTestId("rich-media")).toBeHidden();
         await expect(unavailable.getByRole("link")).toBeVisible();
         // Read back the transport: exactly one renewal, for the expired video only.
         for (const id of ["art-inline-image", "art-inline-pdf", "art-inline-video", "art-inline-audio", "art-local-preview"]) expect(hub.previewTicketRequests.filter((value) => value === id)).toHaveLength(id === "art-inline-video" ? 2 : 1);
@@ -339,22 +362,22 @@ test("HUB-J22 unavailable syntax color retains source and reading controls", jou
   await page.route("**/chunk-rich-syntax-*.js", route => route.abort("failed"));
   await journey.stage("Open source when its color chunk is unavailable", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await conversationRow(page).click();
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
     const source = 'const unsafe = "<script>still text</script>"; // no colors';
     await hub.socketOpen(PELICAN);
     hub.supervisorSays(PELICAN, `\`\`\`ts fallback.ts\n${source}\n\`\`\``);
-    const frame = page.getByRole("log").locator(".code-frame");
-    await expect(frame.locator("pre")).toHaveAttribute("data-syntax-state", "plain");
-    await expect(frame.locator("code")).toHaveText(source, { useInnerText: false });
-    await expect(frame.locator(".code-syntax-status")).toBeVisible();
+    const frame = codeFrames(page);
+    await expect(frame.getByTestId("markdown-code")).toHaveAttribute("data-syntax-state", "plain");
+    await expect(frame.getByRole("code")).toHaveText(source, { useInnerText: false });
+    await expect(frame.getByTestId("code-syntax-status")).toBeVisible();
     await expect(frame.locator("script")).toHaveCount(0);
     const wrap = frame.getByRole("button", { name: "Wrap lines in fallback.ts" });
     await wrap.focus(); await page.keyboard.press("Enter");
     await expect(wrap).toHaveAttribute("aria-pressed", "true");
     await frame.getByRole("button", { name: "Copy source from fallback.ts" }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
-    await expect(frame.locator('[role="status"]')).toBeVisible();
+    await expect(frame.getByRole("status")).toBeVisible();
   });
 });
 
@@ -377,8 +400,8 @@ for (const variant of variants) {
       const log = page.getByRole("log");
       await journey.stage("A supervisor reply shows its screenshot inline and keeps refused images as text", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+        await conversationRow(page).click();
+        await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
         await hub.socketOpen(PELICAN);
         hub.supervisorSays(PELICAN, `Epic progress, ready for review.\n\n![Epic progress at desktop width](${shown})\n\n![Outside the artifacts directory](/etc/shadow.png)\n\n![Remote](https://example.com/x.png)`);
         const image = log.getByRole("img", { name: "Epic progress at desktop width" });

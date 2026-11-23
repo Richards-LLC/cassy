@@ -1,35 +1,48 @@
 import { test, expect, journeyPart } from "./journey";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { ATLAS } from "./world";
 import type { HubDouble } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+const pairDialog = (page: Page) => page.getByRole("dialog", { name: "Pair a machine", exact: true });
+const pairedMachinesDialog = (page: Page) => page.getByRole("dialog", { name: "Paired machines", exact: true });
+// The footer opener reads "<machine> <state>", or "Paired machines Loading…" before the catalog.
+const pairedMachinesToggle = (page: Page) => page.getByRole("complementary", { name: "Supervisor conversations" })
+  .getByRole("button", { name: /^(Atlas\b|Paired machines )/ });
+const inventorySheet = (page: Page) => page.getByRole("dialog", { name: / browser installations$/ });
+const inventoryRows = (page: Page) => inventorySheet(page).getByTestId("installation-inventory-row");
+const inventoryClose = (page: Page) => inventorySheet(page).getByRole("button", { name: "Close", exact: true });
+/** A row's "Technical details" disclosure and its toggle. */
+const technicalDetails = (row: Locator) => row.getByRole("group");
+const technicalToggle = (technical: Locator) => technical.getByText("Technical details", { exact: true });
+const conversationRows = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^\S+ on / });
+
 async function pair(page: Page, token: string): Promise<void> {
-  if (await page.locator("#paired-machines-dialog").isVisible()) await page.getByRole("button", { name: "Close paired machines", exact: true }).click();
+  if (await pairedMachinesDialog(page).isVisible()) await page.getByRole("button", { name: "Close paired machines", exact: true }).click();
   await page.evaluate((hash) => { location.hash = hash; }, `pair=${token}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt`);
-  const dialog = page.locator("#pair-dialog");
+  const dialog = pairDialog(page);
   await expect(dialog).toBeVisible();
   await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
   await dialog.getByRole("button", { name: "Pair", exact: true }).click();
   await expect(dialog).toBeHidden();
 }
 async function inventory(page: Page): Promise<void> {
-  if (!await page.locator("#paired-machines-dialog").isVisible()) {
+  if (!await pairedMachinesDialog(page).isVisible()) {
     await showConversationList(page);
-    await page.locator("#paired-machines-toggle").click();
+    await pairedMachinesToggle(page).click();
   }
   await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();
-  await expect(page.locator(".installation-inventory").getByRole("status")).toBeVisible();
+  await expect(inventorySheet(page).getByRole("status")).toBeVisible();
 }
 
 /** Protocol evidence remains available, but never leads the default sheet. */
 async function expectGeneration(page: Page, generation: number): Promise<void> {
-  const technical = page.locator(".installation-inventory-row details");
-  await technical.locator("summary").click();
-  await expect(technical.locator('[data-field="credential_generation"]')).toHaveText(String(generation));
-  await technical.locator("summary").click();
+  const technical = technicalDetails(inventoryRows(page));
+  await technicalToggle(technical).click();
+  await expect(technical.getByTestId("credential-generation")).toHaveText(String(generation));
+  await technicalToggle(technical).click();
   await expect(technical).not.toHaveAttribute("open", "");
 }
 
@@ -59,10 +72,10 @@ test("HUB-J2 possession-proven repairs update one browser installation (cas-5e53
     }
     id = [...hub.installations.keys()][0]!;
     await inventory(page);
-    await expect(page.locator(".installation-inventory-row")).toHaveCount(1);
+    await expect(inventoryRows(page)).toHaveCount(1);
     await expectGeneration(page, 5);
-    await expect(page.locator(".installation-inventory-row")).toBeVisible();
-    await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+    await expect(inventoryRows(page)).toBeVisible();
+    await inventoryClose(page).click();
   });
   expect(id!).toBeTruthy();
 });
@@ -77,14 +90,14 @@ test("HUB-J2 another IndexedDB tab adopts the accepted repair (cas-5e53)", journ
   await peer.addInitScript(() => { Object.defineProperty(window, "BroadcastChannel", { value: undefined }); });
   await hub.install(peer);
   await peer.goto(page.url());
-  await expect(peer.locator("#paired-machines-toggle")).toBeAttached();
+  await expect(pairedMachinesToggle(peer)).toBeAttached();
   await journey.stage("M02 another open tab adopts the accepted credential on refusal", async () => {
     await pair(page, "2".repeat(43));
     await inventory(peer);
     await expectGeneration(peer, 2);
     expect(hub.staleInstallationRefusals.length).toBeGreaterThan(0);
     expect(hub.installations.size).toBe(1);
-    await peer.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+    await inventoryClose(peer).click();
     await peer.close();
   });
 });
@@ -94,14 +107,14 @@ test("HUB-J2 cancelling a staged repair restores access on reload (cas-5e53)", j
   await journey.open();
   const id = await pairedInstallation(page, hub);
   await journey.stage("M03 cancelling a staged repair restores access on reload", async () => {
-    if (await page.locator("#paired-machines-dialog").isVisible()) await page.getByRole("button", { name: "Close paired machines", exact: true }).click();
+    if (await pairedMachinesDialog(page).isVisible()) await page.getByRole("button", { name: "Close paired machines", exact: true }).click();
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     let arrived!: () => void;
     const waiting = new Promise<void>((resolve) => { arrived = resolve; });
     await page.route("https://atlas.test/v1/auth/pairing/commit", async (route) => { arrived(); await held; await route.fallback(); });
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${"7".repeat(43)}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt`);
-    const dialog = page.locator("#pair-dialog");
+    const dialog = pairDialog(page);
     await expect(dialog).toBeVisible();
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
@@ -114,7 +127,7 @@ test("HUB-J2 cancelling a staged repair restores access on reload (cas-5e53)", j
     await page.reload();
     await inventory(page);
     await expectGeneration(page, 1);
-    await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+    await inventoryClose(page).click();
   });
 });
 
@@ -132,12 +145,12 @@ test("HUB-J2 the installation inventory on keyboard and phone, and exact-device 
       for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
         for (const colorScheme of ["light", "dark"] as const) {
           await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
-          await expect(page.locator(".installation-inventory-row h3")).toBeVisible();
+          await expect(inventoryRows(page).getByRole("heading", { level: 3 })).toBeVisible();
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
           await page.screenshot({ path: join(qa, `inventory-${colorScheme}-${size}.png`) });
         }
       }
-      const html = await page.locator(".installation-inventory").evaluate((dialog) => dialog.outerHTML);
+      const html = await inventorySheet(page).evaluate((dialog) => dialog.outerHTML);
       const css = await readFile("dist/app.css", "utf8");
       await writeFile(join(qa, "inventory.html"), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}\ndialog{position:fixed;inset:0;margin:auto}</style></head><body>${html}</body></html>`);
       for (const [name, query, media] of [["forced-colors", "(forced-colors: active)", { forcedColors: "active" }], ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }], ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }]] as const) {
@@ -150,32 +163,32 @@ test("HUB-J2 the installation inventory on keyboard and phone, and exact-device 
       await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
     }
 
-    const technical = page.locator(".installation-inventory-row details");
-    await technical.locator("summary").click();
-    await expect(technical.locator("code")).toHaveText(id!);
-    await technical.locator("summary").click();
-    const close = page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true });
+    const technical = technicalDetails(inventoryRows(page));
+    await technicalToggle(technical).click();
+    await expect(technical.getByRole("code")).toHaveText(id!);
+    await technicalToggle(technical).click();
+    const close = inventoryClose(page);
     await close.focus();
     await expect(close).toBeFocused();
     await expect(close).toBeInViewport();
     await close.press("Escape");
-    await expect(page.locator(".installation-inventory")).toHaveCount(0);
+    await expect(inventorySheet(page)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Browser installations on Atlas", exact: true })).toBeFocused();
   });
 
   await journey.stage("M05 explicit exact-device revocation removes this browser access", async () => {
     await inventory(page);
     page.once("dialog", async (dialog) => { expect(dialog.message()).toContain(id!); await dialog.accept(); });
-    await page.locator(".installation-inventory").getByRole("button", { name: "Revoke this browser's access", exact: true }).click();
-    await expect(page.locator(".installation-inventory")).toHaveCount(0);
+    await inventorySheet(page).getByRole("button", { name: "Revoke this browser's access", exact: true }).click();
+    await expect(inventorySheet(page)).toHaveCount(0);
     expect(hub.installations.get(id!)!.revoked_at).not.toBeNull();
     // cas-d043 G09: the page says what happened and lands on the next step.
-    await expect(page.locator("#toast")).toBeVisible();
+    await expect(page.getByRole("status", { name: "Notice" })).toBeVisible();
     await expect(page.locator(":focus")).toHaveAccessibleName(/\S/);
     await page.reload();
-    await expect(page.locator("#conversation-empty")).toBeVisible();
-    await expect(page.locator("#conversation-empty")).toHaveAttribute("data-state", "text");
-    await expect(page.locator(".conversation-row")).toHaveCount(0);
+    await expect(page.getByTestId("conversation-empty")).toBeVisible();
+    await expect(page.getByTestId("conversation-empty")).toHaveAttribute("data-state", "text");
+    await expect(conversationRows(page)).toHaveCount(0);
   });
 });
 
@@ -213,7 +226,7 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
     expect(hub.installations.size).toBe(1);
   });
   await journey.stage("M02 the next repair uses the accepted refresh generation", async () => {
-    await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+    await inventoryClose(page).click();
     await pair(page, "9".repeat(43));
     expect((hub.exchanges.at(-1)!.installation as { expected_generation: number }).expected_generation).toBe(2);
     expect([...hub.installations.values()][0]!.credential_generation).toBe(3);
@@ -236,15 +249,15 @@ test("HUB-J2 an admin invitation offers hub:admin unticked, and its consent read
   await journey.open();
   await journey.stage("The admin invitation offers hub:admin unticked, with what it allows", async () => {
     await page.evaluate((hash) => { location.hash = hash; }, link("a".repeat(43), `${ordinary},hub:admin`));
-    const dialog = page.locator("#pair-dialog");
+    const dialog = pairDialog(page);
     await expect(dialog).toBeVisible();
     const admin = dialog.getByRole("checkbox", { name: /See and revoke other browsers on Atlas/ });
     await expect(admin).toBeVisible();
     await expect(admin, "admin is never pre-ticked: it needs explicit consent").not.toBeChecked();
     // cas-d043 G08: plain words naming the machine, not the raw "hub:admin";
     // the summary claims the power only once the box is ticked.
-    await expect(dialog.locator(".pair-admin-consent label.scope")).toContainText("Atlas");
-    await expect(dialog.locator('.pair-summary-admin')).toBeHidden();
+    await expect(dialog.getByRole("group", { name: "Hub administration", exact: true })).toContainText("Atlas");
+    await expect(dialog.getByTestId("pair-summary-admin")).toBeHidden();
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
   });
 
@@ -253,7 +266,7 @@ test("HUB-J2 an admin invitation offers hub:admin unticked, and its consent read
       await journey.stage(`The consent reads whole at ${size.width}px in ${scheme}`, async () => {
         await page.setViewportSize(size);
         await page.emulateMedia({ colorScheme: scheme });
-        const consent = page.locator("#pair-dialog .pair-admin-consent");
+        const consent = pairDialog(page).getByRole("group", { name: "Hub administration", exact: true });
         await consent.scrollIntoViewIfNeeded();
         await expect(consent).toBeInViewport();
         expect(await consent.evaluate((element) => element.scrollWidth <= element.clientWidth), "the consent note wraps inside its box").toBe(true);
@@ -277,12 +290,12 @@ test("HUB-J2 an admin invitation offers hub:admin unticked, and its consent read
 test("HUB-J2 an installation the hub verified reads as in the operator inbox (cas-4634)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS] });
   await journey.open();
-  const row = page.locator(".installation-inventory-row");
+  const row = inventoryRows(page);
   await journey.stage("M01 a newly paired browser is not in an operator inbox", async () => {
     await pair(page, "e".repeat(43));
     await inventory(page);
     await expect(row).toBeVisible();
-    await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
+    await inventoryClose(page).click();
   });
   await journey.stage("M02 after the hub verifies its enrollment, the row names the operator inbox", async () => {
     const id = [...hub.installations.keys()][0]!;
@@ -290,9 +303,9 @@ test("HUB-J2 an installation the hub verified reads as in the operator inbox (ca
     await inventory(page);
 
     await expect(row, "no account or relay ID is shown as if it were a name").not.toContainText("acct-1");
-    const technical = row.locator("details");
-    await technical.locator("summary").click();
-    await expect(technical.locator('[data-field="epoch"]')).toHaveText("4");
-    await technical.locator("summary").click();
+    const technical = technicalDetails(row);
+    await technicalToggle(technical).click();
+    await expect(technical.getByTestId("epoch")).toHaveText("4");
+    await technicalToggle(technical).click();
   });
 });

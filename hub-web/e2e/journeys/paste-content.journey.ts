@@ -9,6 +9,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import type { Page } from "@playwright/test";
+
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
+const messageStatus = (page: Page) => page.getByTestId("message-status");
+const uploadStrip = (page: Page) => page.getByTestId("composer-uploads");
+const uploadError = (page: Page) => page.getByTestId("upload-error");
+// A sent or received file's card is a link in the conversation log.
+const fileCard = (page: Page, name: string) => page.getByRole("log").getByRole("link").filter({ hasText: name });
 
 const PNG = readFileSync(new URL("../media/evidence.png", import.meta.url)).toString("base64");
 for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "dark"], [390, 844, "light"], [390, 844, "dark"]] as const) {
@@ -45,7 +54,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
       const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
       await journey.stage("Paste plain text inline", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await conversationRow(page).click();
         await field.focus();
         await page.evaluate(() => navigator.clipboard.writeText("A pasted message\nwith a second line"));
         await field.press("ControlOrMeta+V");
@@ -64,14 +73,14 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         await (await chooser).setFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Project file from the phone picker") });
         await expect(page.getByRole("button", { name: "Remove pasted-text.txt", exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "Remove screenshot.png", exact: true })).toBeVisible();
-        await expect(page.locator(".composer-file img")).toBeVisible();
+        await expect(page.getByTestId("composer-file-thumbnail")).toBeVisible();
         await expect(page.getByRole("button", { name: "Remove notes.txt", exact: true })).toBeVisible();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       });
       await journey.stage("A connection loss keeps the files visibly, then reuses the upload identity", async () => {
         await send.click();
-        await expect(page.locator(".composer-uploads")).toBeVisible();
-        await expect(page.locator("#message-status")).toBeHidden();
+        await expect(uploadStrip(page)).toBeVisible();
+        await expect(messageStatus(page)).toBeHidden();
         await expect(page.getByRole("button", { name: "Remove screenshot.png", exact: true })).toBeVisible();
         // The route records the interrupted upload after the page has already
         // shown the retained files: wait for it rather than read it once.
@@ -85,8 +94,8 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         expect(attempts[0]).toBe(attempts[1]);
         sentText = message.text;
         queued = hub.deliverLatest(PELICAN);
-        await expect(page.locator(".composer-uploads")).toBeHidden();
-        await expect(page.locator("#message-status")).toBeHidden();
+        await expect(uploadStrip(page)).toBeHidden();
+        await expect(messageStatus(page)).toBeHidden();
         await expect(field).toHaveValue("");
         if (colorScheme === "light") {
           await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-${width}.png` });
@@ -107,18 +116,19 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         const assertFiles = async (target: typeof page) => {
           const log = target.getByRole("log");
           await expect(log).not.toContainText("/fixture/project/");
-          await expect(log.locator('a.sheet').filter({ hasText: "notes.txt" })).toBeVisible();
+          await expect(fileCard(target, "notes.txt")).toBeVisible();
           const image = log.getByRole("img", { name: "screenshot.png", exact: true });
           await image.scrollIntoViewIfNeeded();
           await expect(image).toBeVisible();
           await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
-          await expect(log.locator('a.sheet').filter({ hasText: "screenshot.png" }).locator('.plate img')).toBeVisible();
+          // The thumbnail sits in the card's own plate.
+          await expect(fileCard(target, "screenshot.png").getByRole("img", { name: "screenshot.png", exact: true })).toBeVisible();
           expect(await image.evaluate((node) => node.getBoundingClientRect().width)).toBe(48);
           expect(await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         };
         await assertFiles(page);
         await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-${width}-${colorScheme}.png` });
-        await page.getByRole("log").locator('a.sheet').filter({ hasText: "screenshot.png" }).click();
+        await fileCard(page, "screenshot.png").click();
         const viewer = page.getByRole("dialog", { name: "Image viewer" });
         await expect(viewer).toBeVisible();
         await expect(viewer.getByRole("img", { name: "screenshot.png", exact: true })).toBeVisible();
@@ -138,7 +148,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
             }] } });
             await remote.install();
             await peer.goto(baseURL!); await remote.seedPaired(); await peer.reload();
-            await peer.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(peer.locator(".conversation-row")).click();
+            await conversationRow(peer).click();
             await assertFiles(peer);
             await peer.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-second-phone.png` });
           } finally { await phone.close(); }
@@ -151,13 +161,13 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         expect(missing.status()).toBe(404);
         await page.route(`https://atlas.test/v1/sessions/${PELICAN}/artifacts/*/content?*`, route => route.fulfill({ response: missing }));
         await page.reload();
-        const sent = page.getByRole("log").locator('a.sheet').filter({ hasText: "screenshot.png" });
-        await expect(sent.locator('.preview-note')).toBeVisible();
-        await expect(sent.locator('.rich-media')).toBeHidden();
+        const sent = fileCard(page, "screenshot.png");
+        await expect(sent.getByRole("status", { name: "Preview status", exact: true })).toBeVisible();
+        await expect(sent.getByTestId("rich-media")).toBeHidden();
         hub.supervisorSays(PELICAN, "This screenshot is unavailable too.", { attachments: [{ artifact_id: "art-failed-preview", name: "Unavailable.png", mime: "image/png", size_bytes: 2048, sha256: "9f".repeat(32) }] });
-        const received = page.getByRole("log").locator('a.sheet').filter({ hasText: "Unavailable.png" });
-        await expect(received.locator('.preview-note')).toBeVisible();
-        await expect(received.locator('.rich-media')).toBeHidden();
+        const received = fileCard(page, "Unavailable.png");
+        await expect(received.getByRole("status", { name: "Preview status", exact: true })).toBeVisible();
+        await expect(received.getByTestId("rich-media")).toBeHidden();
         for (const card of [sent, received]) {
           await card.scrollIntoViewIfNeeded();
           expect((await card.boundingBox())!.height).toBeLessThan(104);
@@ -224,8 +234,8 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
             releaseSaving();
             expect((await next).text).toContain("art-slow-photo/slow-photo.png");
             hub.deliverLatest(PELICAN);
-            await expect(page.locator(".composer-uploads")).toBeHidden();
-            await expect(page.getByRole("log").locator(".conversation-turn").filter({ hasText: "slow-photo.png" }).locator(".conversation-delivered")).toHaveText("Delivered");
+            await expect(uploadStrip(page)).toBeHidden();
+            await expect(page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: "slow-photo.png" }).getByTestId("conversation-delivered")).toHaveText("Delivered");
             expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
           } finally {
             releaseSaving();
@@ -245,17 +255,17 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         await pick([{ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("notes") },
           { name: "unsupported.bin", mimeType: "application/octet-stream", buffer: Buffer.from([0, 1, 2]) }]);
         await send.click();
-        await expect(page.locator(".upload-error")).toBeVisible();
-        await expect(page.locator(".upload-error")).toContainText("unsupported.bin");
-        await expect(page.locator("#message-status")).toBeHidden();
+        await expect(uploadError(page)).toBeVisible();
+        await expect(uploadError(page)).toContainText("unsupported.bin");
+        await expect(messageStatus(page)).toBeHidden();
 
         await page.getByRole("button", { name: "Remove unsupported.bin", exact: true }).click();
         await pick([{ name: "orphan.png", mimeType: "image/png", buffer: Buffer.from(PNG, "base64") }]);
         await send.click();
-        await expect(page.locator(".upload-error")).toBeVisible();
-        await expect(page.locator(".upload-error")).toContainText("orphan.png");
-        await expect(page.locator("#message-status")).toBeHidden();
-        await expect(page.locator(".upload-error")).toBeVisible();
+        await expect(uploadError(page)).toBeVisible();
+        await expect(uploadError(page)).toContainText("orphan.png");
+        await expect(messageStatus(page)).toBeHidden();
+        await expect(uploadError(page)).toBeVisible();
         await expect(page.getByRole("button", { name: "Remove orphan.png", exact: true })).toBeVisible();
         if (width === 390 && colorScheme === "light") {
           for (const [name, media] of [
@@ -264,7 +274,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
             ["contrast-more", { contrast: "more" }],
           ] as const) {
             await page.emulateMedia(media);
-            await expect(page.locator(".upload-error")).toBeVisible();
+            await expect(uploadError(page)).toBeVisible();
             await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/a11y-${name}.png` });
             await page.emulateMedia({ forcedColors: "none", reducedMotion: "no-preference", contrast: "no-preference" });
           }

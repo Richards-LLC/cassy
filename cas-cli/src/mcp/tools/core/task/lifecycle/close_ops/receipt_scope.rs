@@ -130,8 +130,22 @@ fn recorded_class_audit(cas_root: &Path, task_id: &str) -> Option<String> {
         crate::store::open_task_store(cas_root).ok()?.as_ref(), task_id)
 }
 
-/// Every receipt-scope refusal at this tip, not just the first.
+/// Every receipt-scope refusal at this tip, not just the first. Each runner
+/// config is listed once for the whole judgement (GH #2331).
 pub(super) fn park_refusals(
+    cas_root: &Path,
+    proof_repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> Vec<String> {
+    crate::factory_worker_check::javascript::with_listing_cache(||
+        listed_park_refusals(cas_root, proof_repo, task, changed_paths, head, target, delivery_ranges))
+}
+
+fn listed_park_refusals(
     cas_root: &Path,
     proof_repo: &Path,
     task: &Task,
@@ -1146,7 +1160,7 @@ mod tests {
             assert!(admitted.is_none(), "{runner}: {admitted:?}");
             let scope = if rust { widened::Scope::Crate("fixture".into()) } else { widened::Scope::Package(String::new()) };
             widened::record(root.path(), repo.path(), &head, widened::Proof { runner: runner.into(),
-                scope: scope.clone(), reason: "widened:unclassified".into() }, 1).unwrap();
+                scope: scope.clone(), reason: "widened:unclassified".into(), configs: Default::default() }, 1).unwrap();
             // GH #2243/#2288: the docs-only child a close itself asks for,
             // replayed from cas-e705's be8ba51e0c.
             for (fragment, body) in [("changelog.d/cas-9e02e.md", "### Fixed\n- fixture\n"),
@@ -1592,7 +1606,7 @@ raise SystemExit(1 if failed else 0)
                 // This is the producer's expected crate receipt, independent
                 // of the scope the park classifier just returned.
                 widened::record(root.path(), repo.path(), &head,
-                    widened::Proof { runner: "nextest".into(), scope: expected_scope, reason: "widened:fixture-unclassified-input".into() }, 1).unwrap();
+                    widened::Proof { runner: "nextest".into(), scope: expected_scope, reason: "widened:fixture-unclassified-input".into(), configs: Default::default() }, 1).unwrap();
             }
             let passing = PassingTests::new(root.path(), repo.path(), &head);
             assert!(widened::missing(&passing, &scopes, &Default::default()).is_empty(), "{row}");
@@ -1672,6 +1686,7 @@ raise SystemExit(1 if failed else 0)
             .any(|reply| crate::gates::codes_in(reply).contains(&"G-61"));
         let pass = |at: &str, spec: &str| widened::record(root.path(), &repo, at, widened::Proof {
             runner: "jest".into(), scope: widened::Scope::File(spec.into()), reason: "widened:no static changed-test selection".into(),
+            configs: Default::default(),
         }, 1).unwrap();
         assert!(g61(&head));
         pass(&head, specs[0]);

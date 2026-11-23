@@ -31118,6 +31118,73 @@ mod merge_state_gate_tests {
         assert!(prompts.iter().all(|row| !row.source.starts_with(&format!("lifecycle-wake:{}:", crate::factory_delivery_wake::MISSING_WAKE))));
     }
 
+    /// GH #2332: cas-179d, moved with `transfer adopt_branch`, was answered
+    /// with DELIVERY_WAKE_MISSING on its first park. Its wakes were armed,
+    /// 0.6 s after the park committed; a watchdog sweep in that window saw an
+    /// awaiting-merge delivery with no wake yet. A park is observable only
+    /// once its own arming has had time to finish.
+    #[test]
+    fn adopted_park_arms_its_wakes_and_no_sweep_calls_them_missing_gh2332() {
+        use cas_store::{AgentStore, PromptQueueStore, ReminderStatus, TaskStore};
+        use cas_types::{Agent, AgentRole};
+        const SESSION: &str = "relay-fixture-session";
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+        std::fs::write(repo.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["commit", "--allow-empty", "-qm", "base"]);
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let (core, tasks, _, mut task) = close_relay_fixture_cas_3a82(&root);
+        let branch = crate::factory_isolation::worker_task_branch("relay-worker", &task.id);
+        git(repo, &["checkout", "-qb", &branch]);
+        let first = commit_local(repo, "delivery.rs", "first delivery");
+        let origin = dir.path().join("origin.git");
+        git(repo, &["init", "--bare", "-q", origin.to_str().unwrap()]);
+        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", &branch]);
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        });
+        tasks.update(&task).unwrap();
+        task = tasks.get(&task.id).unwrap();
+        core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
+            Some(first.clone()), false, Some(branch.clone()), None, ParkSource::Delivery).unwrap();
+        // `transfer adopt_branch` hands the parked lane to another worker.
+        let mut adopter = Agent::new_with_role("adopter-id".into(), "adopter".into(), AgentRole::Worker);
+        adopter.factory_session = Some(SESSION.into());
+        crate::store::open_agent_store(&root).unwrap().register(&adopter).unwrap();
+        let mut task = tasks.get(&task.id).unwrap();
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("adopter".into());
+        task.deliverables.record_handoff_branch("factory/relay-worker");
+        task.deliverables.parked_branch = Some(branch.clone());
+        task.deliverables.mint_or_append(&first);
+        tasks.update(&task).unwrap();
+        let task = tasks.get(&task.id).unwrap();
+        let second = commit_local(repo, "adopted.rs", "adopted correction");
+        git(repo, &["push", "-q", "origin", &branch]);
+        core.set_agent_id_for_testing("adopter-id".into());
+        // The watchdog samples between the park's commit and its arming.
+        let hook_root = root.clone();
+        crate::mcp::tools::core::task::lifecycle::close_ops::lifecycle_race_hook::after_park(&task.id, move || {
+            crate::ui::factory::daemon::runtime::progress_watchdog::sweep(&hook_root, SESSION, chrono::Utc::now());
+        });
+        core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
+            Some(second.clone()), false, Some(branch.clone()), None, ParkSource::Delivery).unwrap();
+        let reminders = crate::store::open_reminder_store(&root).unwrap();
+        let armed = reminders.list_for_task(&task.id).unwrap().into_iter().filter(|row| row.status == ReminderStatus::Pending
+            && row.trigger_filter.as_ref().and_then(|filter| filter.get("sha").or_else(|| filter.get("commit")))
+                == Some(&serde_json::Value::String(second.clone()))).count();
+        assert_eq!(armed, 2, "the adopted park arms both wakes for its own SHA");
+        let prompts = cas_store::SqlitePromptQueueStore::open(&root).unwrap().peek_all(20).unwrap();
+        assert!(prompts.iter().all(|row| !row.source.starts_with(&format!("lifecycle-wake:{}:", crate::factory_delivery_wake::MISSING_WAKE))),
+            "a sweep inside the arming window reported a wake that was about to exist: {prompts:?}");
+    }
+
     #[test]
     fn park_with_epic_inherited_target_arms_completion_wakes_cas_f16b() {
         use cas_store::TaskStore;

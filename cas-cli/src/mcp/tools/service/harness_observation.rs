@@ -105,6 +105,22 @@ pub(crate) fn latest_turn_observations(
     }
 }
 
+/// Whether a Claude transcript's bounded tail holds a turn record written at or
+/// after `since`: a turn start, assistant output or a turn end. A first turn
+/// that is still running has no end, and a long one (large attachments and
+/// request shapes) pushes its turn-start record out of the tail window, so
+/// `latest_turn_observations` loses the wake and with it the reaction.
+/// Assistant output from this launch proves its first prompt ran (GH #2338).
+pub(crate) fn claude_turn_activity_since(artifact_path: &Path, since: DateTime<Utc>) -> bool {
+    let mut seen = false;
+    super::worker_liveness::tail_records(artifact_path, |value| {
+        seen = seen
+            || json_timestamp(value).is_some_and(|at| at >= since)
+                && (claude_user_text(value).is_some() || claude_is_assistant(value) || claude_is_turn_end(value));
+    });
+    seen
+}
+
 /// Return whether the harness recorded a turn completion after `after`.
 ///
 /// A wake-gate decline is a snapshot of a busy recipient, not a delivery

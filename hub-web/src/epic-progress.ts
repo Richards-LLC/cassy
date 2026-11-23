@@ -55,8 +55,12 @@ function taskList(document: Document, rows: readonly ProjectEpic["rows"][number]
     item.append(element(document, "span", "live-epic-task-title", row.task.title?.trim() || "Untitled task"));
     const meta = element(document, "span", "live-epic-task-meta");
     meta.append(element(document, "span", "live-epic-task-worker", row.worker ?? "Unassigned"));
-    if (multiMachine) meta.append(element(document, "span", "live-epic-task-machine", row.machine));
-    meta.append(element(document, "span", `live-epic-chip live-epic-chip--${row.state.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, row.state));
+    if (multiMachine) {
+      const machine = element(document, "span", "live-epic-task-machine", row.machine); machine.dataset.testid = "live-epic-task-machine";
+      meta.append(machine);
+    }
+    const chip = element(document, "span", `live-epic-chip live-epic-chip--${row.state.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, row.state); chip.dataset.testid = "live-epic-chip";
+    meta.append(chip);
     item.append(meta);
     list.append(item);
   }
@@ -67,7 +71,8 @@ function taskGroup(document: Document, epic: ProjectEpic, label: "In progress" |
   const rows = epic.rows.filter(row => row.group === label);
   if (!rows.length) return undefined;
   const group = element(document, "section", "live-epic-group");
-  group.append(element(document, "h4", "live-epic-group-label", `${label} · ${rows.length}`), taskList(document, rows, multiMachine));
+  const heading = element(document, "h4", "live-epic-group-label", `${label} · ${rows.length}`); heading.dataset.testid = "live-epic-group-label";
+  group.append(heading, taskList(document, rows, multiMachine));
   return group;
 }
 
@@ -105,7 +110,7 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
     line.append(dots);
   }
   toggle.append(line);
-  const panel = element(document, "div", "live-epic-tasks"); panel.id = panelId; panel.hidden = !open;
+  const panel = element(document, "div", "live-epic-tasks"); panel.id = panelId; panel.dataset.testid = "live-epic-tasks"; panel.hidden = !open;
   for (const label of ["In progress", "Open"] as const) {
     const group = taskGroup(document, epic, label, options.multiMachine);
     if (group) panel.append(group);
@@ -116,7 +121,8 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
     // Closed tasks are not part of the status snapshot: Merged lists the
     // merged deliveries it has and points at the full board for the rest.
     const merged = element(document, "details", "live-epic-group live-epic-merged");
-    merged.append(element(document, "summary", "live-epic-group-label", `Merged · ${mergedCount}`));
+    const summary = element(document, "summary", "live-epic-group-label", `Merged · ${mergedCount}`); summary.dataset.testid = "live-epic-group-label";
+    merged.append(summary);
     if (mergedRows.length) merged.append(taskList(document, mergedRows, options.multiMachine));
     const note = element(document, "p", "live-epic-merged-note");
     if (mergedRows.length >= mergedCount) note.hidden = true;
@@ -142,7 +148,7 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
 /** Live epics for the selected project. Absent when there are none. */
 export function liveEpicsSection(document: Document, options: LiveEpicsOptions): HTMLElement | undefined {
   if (!options.live.length && !options.pending.length && !options.failed.length && !options.quiet) return undefined;
-  const section = element(document, "section", "live-epics");
+  const section = element(document, "section", "live-epics"); section.dataset.testid = "live-epics";
   section.setAttribute("aria-labelledby", "live-epics-heading");
   const heading = element(document, "h3", "status-section-label", `Live epics · ${options.live.length}`); heading.id = "live-epics-heading";
   section.append(heading);
@@ -178,7 +184,7 @@ export function liveEpicsSection(document: Document, options: LiveEpicsOptions):
   }
   if (options.quiet) {
     const text = `${options.quiet} quiet open ${options.quiet === 1 ? "epic" : "epics"} in Explorer`;
-    const footer = element(document, "p", "live-epics-footer");
+    const footer = element(document, "p", "live-epics-footer"); footer.dataset.testid = "live-epics-footer";
     if (options.explorerHref) {
       const link = element(document, "a", undefined, text); link.href = options.explorerHref; link.target = "cassy-explorer"; link.rel = "noopener noreferrer";
       footer.append(link);

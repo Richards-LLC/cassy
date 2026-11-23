@@ -17,12 +17,14 @@ export function createCodeFrame(document: Document, { source, language, filename
 } {
   const frame = document.createElement("div");
   frame.className = "code-frame";
+  frame.dataset.testid = "code-frame";
   frame.dataset.wrap = "false";
   frame.dataset.expanded = "false";
   const header = document.createElement("div");
   header.className = "code-frame-header";
   const label = document.createElement("span");
   label.className = "code-frame-label";
+  label.dataset.testid = "code-frame-label";
   label.textContent = filename || language || "Code";
   if (filename && language) label.title = `${filename} · ${language}`;
   const actions = document.createElement("div");
@@ -83,10 +85,12 @@ export function createCodeFrame(document: Document, { source, language, filename
   header.append(label, actions);
   const content = document.createElement("div");
   content.className = "code-frame-content";
+  content.dataset.testid = "code-frame-content";
   content.id = `code-frame-content-${++nextFrame}`;
   expand.setAttribute("aria-controls", content.id);
   const pre = document.createElement("pre");
   pre.className = "markdown-code";
+  pre.dataset.testid = "markdown-code";
   // The nowrap source is keyboard-scrollable even in browsers without automatic
   // focusability for overflow containers.
   pre.tabIndex = 0;
@@ -98,6 +102,7 @@ export function createCodeFrame(document: Document, { source, language, filename
   if (/^(?:[cm]?js|javascript|[cm]?ts|typescript|jsx|tsx|json|py|python|rs|rust|sh|bash|shell)$/i.test(language ?? "")) {
     const note = document.createElement("span");
     note.className = "code-frame-status code-syntax-status";
+    note.dataset.testid = "code-syntax-status";
     note.textContent = "Plain text · loading colors";
     pre.dataset.syntaxState = "loading";
     frame.append(note);

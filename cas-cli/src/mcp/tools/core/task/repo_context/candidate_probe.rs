@@ -35,6 +35,24 @@ static PROBES: OnceLock<Mutex<HashMap<PathBuf, Arc<PendingCandidate>>>> = OnceLo
 /// pending entry until it actually finishes, even after the retry TTL. Thus a
 /// stalled mount cannot create another blocked thread on each start/close.
 pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>, String> {
+    probe_root(path, deadline, ROOT_BUDGET, true)
+}
+
+/// The caller's own checkout is the direct evidence for its work target, so
+/// it gets the whole scan budget and is never answered from an earlier failed
+/// probe: one timeout under load must not refuse every close from a healthy
+/// checkout until the negative entry expires (GH #1941, #2178). A probe still
+/// running is joined, so a stalled mount still holds one thread.
+pub(super) fn probe_own(path: &Path, deadline: Deadline) -> Result<Option<Candidate>, String> {
+    probe_root(path, deadline, SCAN_BUDGET, false)
+}
+
+fn probe_root(
+    path: &Path,
+    deadline: Deadline,
+    root_budget: Duration,
+    reuse_negative: bool,
+) -> Result<Option<Candidate>, String> {
     let pending = {
         let mut probes = PROBES
             .get_or_init(Default::default)
@@ -51,6 +69,13 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
                 Some(Ok(Some(_))) => false, // Healthy identities must always be read fresh.
             }
         });
+        if !reuse_negative
+            && probes.get(path).is_some_and(|pending| {
+                pending.result.lock().unwrap_or_else(|error| error.into_inner()).is_some()
+            })
+        {
+            probes.remove(path);
+        }
         if let Some(pending) = probes.get(path) {
             Arc::clone(pending)
         } else {
@@ -75,7 +100,7 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
             probes.insert(path.to_path_buf(), Arc::clone(&pending));
             let worker = Arc::clone(&pending);
             let path = path.to_path_buf();
-            let probe = BoundedRepoProbe::new(Deadline::after(ROOT_BUDGET), ROOT_BUDGET, 1);
+            let probe = BoundedRepoProbe::new(Deadline::after(root_budget), root_budget, 1);
             let launched = std::thread::Builder::new()
                 .name("known-root-probe".to_string())
                 .spawn(move || {
@@ -113,7 +138,7 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
             pending
         }
     };
-    let budget = ROOT_BUDGET
+    let budget = root_budget
         .saturating_sub(pending.started.elapsed())
         .min(deadline.remaining());
     let result = pending
@@ -129,4 +154,16 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
     result.clone().unwrap_or(Err(BoundedRepoError::TimedOut)).map_err(|error| {
         format!("WORK TARGET REPOSITORY UNAVAILABLE: known-root probe did not complete ({error:?})")
     })
+}
+
+/// Records a finished probe of `path` as an earlier lifecycle call left it.
+#[cfg(test)]
+pub(super) fn record_finished(path: &Path, result: Result<Option<Candidate>, BoundedRepoError>) {
+    let pending = Arc::new(PendingCandidate {
+        started: Instant::now(),
+        result: Mutex::new(Some(result)),
+        ready: Condvar::new(),
+    });
+    PROBES.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner())
+        .insert(path.to_path_buf(), pending);
 }

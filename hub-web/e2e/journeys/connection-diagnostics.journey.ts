@@ -4,6 +4,17 @@ import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { ATLAS } from "./world";
 import { HubDouble } from "./hub-double";
 import { ProtocolClock } from "./protocol-clock";
+import type { Page } from "@playwright/test";
+
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
+const connection = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
+const thread = (page: Page) => page.getByTestId("conversation-thread");
+const connectionLog = (page: Page) => page.getByRole("dialog", { name: "Connection log" });
+const logSummary = (page: Page) => connectionLog(page).getByTestId("connection-log-summary");
+const technical = (page: Page) => connectionLog(page).getByTestId("connection-log-technical");
+const technicalSummary = (page: Page) => technical(page).getByText("Technical details", { exact: true });
+const diagnosticsOutput = (page: Page) => technical(page).getByTestId("connection-log-output");
 
 test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5)", journeyPart, async ({ page, journey }) => {
   const clock = new ProtocolClock(page);
@@ -21,29 +32,29 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     return route.fallback();
   });
   await page.goto("./"); await hub.seedPaired(); await clock.start(); await page.goto("./");
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-  await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
-  await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
+  await conversationRow(page).click();
+  await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
+  await expect(thread(page)).toBeVisible();
   await journey.stage("A healthy public route does not hide an opaque authenticated failure", async () => {
     blocked = true;
     await hub.down("atlas", { sockets: "close" }); await hub.up("atlas");
     await clock.advance(1_000);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+    await expect(connection(page)).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
     await page.getByRole("button", { name: "Connection details", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Connection log" })).toBeVisible();
-    await expect(page.locator(".connection-log-summary")).toBeVisible();
-    await expect(page.locator(".connection-log-summary")).toBeVisible();
+    await expect(logSummary(page)).toBeVisible();
+    await expect(logSummary(page)).toBeVisible();
 
     await expect(page.getByRole("button", { name: "Export safe diagnostics" })).toBeEnabled();
     const close = page.getByRole("button", { name: "Close connection log" });
     await expect(close).toBeVisible();
     expect((await close.boundingBox())!.width).toBeGreaterThanOrEqual(44);
-    await expect(page.locator("#connection-log")).toHaveAccessibleName(/\S/);
-    await expect(page.locator("#connection-log")).toContainText("Atlas · Linux");
-    await expect(page.locator(".connection-log-technical > summary")).toContainText(/\S/);
+    await expect(connectionLog(page)).toHaveAccessibleName(/\S/);
+    await expect(connectionLog(page)).toContainText("Atlas · Linux");
+    await expect(technicalSummary(page)).toContainText(/\S/);
     // cas-97d58 F08: the lead is one plain sentence; the layer and the raw JSON wait behind Technical details.
 
-    await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
+    await expect(technical(page)).not.toHaveAttribute("open", /.*/);
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export safe diagnostics" }).click();
     const download = await downloadPromise;
@@ -56,22 +67,22 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     // Static capture of the real built dialog and exact dist CSS; interaction
     // stays in the journey. Scope polish checks away from the app behind it.
     const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
-    const markup = await page.locator("#connection-log").evaluate(element => element.outerHTML);
+    const markup = await connectionLog(page).evaluate(element => element.outerHTML);
     await writeFile(join(RECEIPTS, "connection-log-snapshot.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Built Commander connection log snapshot</title><style>${css}</style><body>${markup}<script>document.documentElement.dataset.scheme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';const dialog=document.querySelector('dialog');dialog.removeAttribute('open');dialog.showModal();</script></body></html>`);
     // cas-97d58 QA F01: collapsed, Technical details still shows an expand
     // affordance (a chevron), which turns when it opens; keyboard opens it.
-    const summary = page.locator(".connection-log-technical > summary");
+    const summary = technicalSummary(page);
     const chevron = () => summary.evaluate((node) => { const mark = getComputedStyle(node, "::before"); return { content: mark.content, transform: mark.transform, width: mark.width }; });
     const closed = await chevron();
     expect(closed.content).not.toBe("none");
     expect(closed.width).toBe("7px");
     await summary.focus(); await page.keyboard.press("Enter");
-    await expect(page.locator(".connection-log-technical")).toHaveAttribute("open", "");
+    await expect(technical(page)).toHaveAttribute("open", "");
     await expect.poll(async () => (await chevron()).transform).not.toBe(closed.transform);
-    const openMarkup = await page.locator("#connection-log").evaluate(element => element.outerHTML);
+    const openMarkup = await connectionLog(page).evaluate(element => element.outerHTML);
     await writeFile(join(RECEIPTS, "connection-log-snapshot-open.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Built Commander connection log snapshot, details open</title><style>${css}</style><body>${openMarkup}<script>document.documentElement.dataset.scheme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';const dialog=document.querySelector('dialog');dialog.removeAttribute('open');dialog.showModal();</script></body></html>`);
     await page.keyboard.press("Enter");
-    await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
+    await expect(technical(page)).not.toHaveAttribute("open", /.*/);
   });
   await journey.stage("Named connection evidence fits desktop and phone layouts", async () => {
     for (const width of [1280, 390]) for (const scheme of ["light", "dark"] as const) {
@@ -79,21 +90,21 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
       await page.emulateMedia({ colorScheme: scheme });
       await expect(page.getByRole("button", { name: "Export safe diagnostics" })).toBeInViewport();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      expect(await page.locator("#connection-log").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await connectionLog(page).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     }
   });
   await journey.stage("Keyboard close restores focus; successful recovery is recorded", async () => {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("button", { name: "Connection details", exact: true })).toBeFocused();
     blocked = false; await clock.advance(10_000);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
     // Force a second short outage to open the user-facing log, then recover
     // with it open. The summary updates without repeatedly announcing a clock.
     blocked = true; await hub.down("atlas", { sockets: "close" }); await hub.up("atlas"); await clock.advance(1_000);
     await page.getByRole("button", { name: "Connection details", exact: true }).click();
-    await expect(page.locator("#connection-log pre")).toContainText('"recovered": "network_or_browser_policy_unknown"');
+    await expect(diagnosticsOutput(page)).toContainText('"recovered": "network_or_browser_policy_unknown"');
     blocked = false; await clock.advance(10_000);
-    await expect(page.locator(".connection-log-summary")).toBeVisible();
+    await expect(logSummary(page)).toBeVisible();
   });
   await journey.stage("Connection log remains usable across accessibility modes", async () => {
     for (const setting of ["reducedMotion", "forcedColors", "contrast"] as const) {
@@ -120,21 +131,21 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
   await clock.start();
   await journey.stage("Open Details during an outage and leave it open after recovery", async () => {
     await page.goto("./");
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await conversationRow(page).click();
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
     // The header reports the machine connection; it can go Live before the
     // session's first Welcome has painted a thread frame. The outage banner
     // (and its Details control) only exists once that frame is on screen.
-    await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
+    await expect(thread(page)).toBeVisible();
     await hub.down("atlas", { sockets: "close" });
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+    await expect(connection(page)).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
     const details = page.getByRole("button", { name: "Connection details", exact: true });
     await expect(details).toBeVisible();
     await details.click();
     await expect(page.getByRole("dialog", { name: "Connection log" })).toBeVisible();
     await hub.up("atlas");
     await clock.advance(1_000);
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   });
   await journey.stage("Two failed heartbeats show the machine cause despite a live session", async () => {
     await hub.down("atlas");
@@ -146,14 +157,14 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
       await clock.advance(5_000);
       await failed;
     }
-    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "true");
+    await expect(connection(page)).toHaveAttribute("data-degraded", "true");
     // The log's periodic projection is a one-second protocol timer, independent
     // of the five-second heartbeat. Let that tick observe the settled failure.
     await clock.advance(1_000);
-    await expect(page.locator(".connection-log-summary")).toBeVisible();
+    await expect(logSummary(page)).toBeVisible();
 
     // Unsteady: the log agrees with the rail's "checking…" (F08), never "No retry scheduled".
-    await expect(page.locator(".connection-log-summary")).toBeVisible();
+    await expect(logSummary(page)).toBeVisible();
   });
 });
 
@@ -169,11 +180,11 @@ test("HUB-J12 retryable auth-store 503 keeps the pairing and names the hub cause
     return route.fulfill({ status: 503, headers: { "retry-after": "2", "x-cas-refusal": reason }, json: { error: reason, reason, retryable: true } });
   });
   await page.goto("./"); await hub.seedPaired(); await clock.start(); await page.goto("./");
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-  const header = page.locator("#conversation-connection");
-  const summary = page.locator(".connection-log-summary");
+  await conversationRow(page).click();
+  const header = connection(page);
+  const summary = logSummary(page);
   await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
-  await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
+  await expect(thread(page)).toBeVisible();
   await journey.stage("The hub answers retryable 503 auth_store_unavailable", async () => {
     unavailable = true;
     await hub.down("atlas", { sockets: "close" }); await hub.up("atlas");
@@ -183,9 +194,9 @@ test("HUB-J12 retryable auth-store 503 keeps the pairing and names the hub cause
     await expect(summary).toBeVisible();
     await expect(summary).toBeVisible();
 
-    await expect(page.locator(".connection-log-evidence")).toContainText("503");
-    await page.locator(".connection-log-technical summary").click();
-    await expect(page.locator(".connection-log-technical pre")).toContainText("auth_store_unavailable");
+    await expect(technical(page).getByTestId("connection-log-evidence")).toContainText("503");
+    await technicalSummary(page).click();
+    await expect(diagnosticsOutput(page)).toContainText("auth_store_unavailable");
     const capturePath = process.env.QA_CONNECTION_LOG_CAPTURE;
     if (capturePath) {
       const html = await page.evaluate(async () => {

@@ -1698,6 +1698,15 @@ fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path
         && serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|report| lists(&report))
 }
 
+/// Whether the vitest that runs for `path` can transform a `.vue` file: its
+/// config names the Vue plugin, or Nuxt's test config that brings it. With no
+/// config or no plugin `vitest related <file>.vue` crashes (GH #2352).
+pub(crate) fn vitest_loads_vue(repo: &Path, path: &str) -> bool {
+    runner_root(repo, path, "vitest").ok().and_then(|(_, config)| config)
+        .and_then(|config| std::fs::read_to_string(config).ok())
+        .is_some_and(|config| ["plugin-vue", "@nuxt/test-utils", "unplugin-vue"].iter().any(|plugin| config.contains(plugin)))
+}
+
 /// The repository-relative non-default Playwright config that lists `path`,
 /// when its directory's default config does not (GH #2195).
 pub(crate) fn playwright_owner(repo: &Path, path: &str) -> Option<PathBuf> {

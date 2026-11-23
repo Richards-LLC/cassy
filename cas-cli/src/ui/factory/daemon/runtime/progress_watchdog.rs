@@ -39,6 +39,8 @@ pub(crate) struct Observation {
     freeze_held: FreezeHeld,
     close_held: CloseHeld,
     train_ready: bool,
+    /// A parked delivery is among the waiting work.
+    parked: bool,
     /// Completion edges for parked deliveries a recorded hold explains,
     /// decided here (store reads and git) and persisted by `apply`.
     held: Vec<crate::factory_delivery_wake::ArmPlan>,
@@ -139,7 +141,7 @@ pub(crate) fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Opti
         }
         // cas-e239: a delivery the supervisor deliberately holds for a later
         // train waits on that decision, not on anyone here.
-        if is_held(&task.notes) {
+        if is_held(&task.notes) || merge_held(store.as_ref(), task, now) {
             return false;
         }
         if peer_tasks.contains(&task.id) {
@@ -247,6 +249,7 @@ pub(crate) fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Opti
     Some(Observation {
         fingerprint: fingerprint.join("\n"), waiting, supervisor, freeze_held, close_held,
         train_ready: !ready_trains.is_empty(), held, unwatched,
+        parked: tasks.iter().any(|task| task.status == TaskStatus::AwaitingMerge),
     })
 }
 
@@ -303,6 +306,16 @@ fn is_held(notes: &str) -> bool {
     held
 }
 
+/// GH #2278: a supervisor's structured hold for an external review covers
+/// this parked anchor until its deadline. A lapse or a re-park at another
+/// anchor makes the delivery actionable again.
+fn merge_held(store: &dyn cas_store::TaskStore, task: &cas_types::Task, now: DateTime<Utc>) -> bool {
+    store.get_execution_state(&task.id).ok().flatten()
+        .and_then(|state| serde_json::from_value::<cas_types::TaskMergeHold>(state.get("merge_hold")?.clone()).ok())
+        .is_some_and(|hold| hold.until > now
+            && task.deliverables.factory_branch_anchor.as_deref() == Some(hold.anchor.as_str()))
+}
+
 /// A parked delivery already on its recorded target waits for a receipt,
 /// not another local merge. Missing refs remain eligible for escalation.
 fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> bool {
@@ -324,7 +337,7 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
 
 /// The sample's writes, on the store writer: wake edges, notices and pages.
 pub(crate) fn apply(cas_dir: &Path, session: &str, now: DateTime<Utc>, observation: Observation) {
-    let Observation { fingerprint, waiting, supervisor, freeze_held, close_held, train_ready, held, unwatched } = observation;
+    let Observation { fingerprint, waiting, supervisor, freeze_held, close_held, train_ready, parked, held, unwatched } = observation;
     // Preserve held deliveries' own notices, and leave durable completion
     // edges ready for the hold's lift.
     for plan in &held {
@@ -354,8 +367,9 @@ pub(crate) fn apply(cas_dir: &Path, session: &str, now: DateTime<Utc>, observati
     let cadence = quiet / QUIET_SECS;
     if (train_ready || quiet >= QUIET_SECS) && episode.2 != Some(cadence) {
         let detail = format!(
-            "Nothing has moved in this factory for {minutes} min with work open: no task change, lane commit, merge or message from any agent here. Heartbeats do not count.\nWaiting:\n{waiting}\nFind who owes the next step and chase it, take it over, or tell the operator. If nothing moves in another {} min, the operator is paged.",
-            QUIET_SECS / 60
+            "Nothing has moved in this factory for {minutes} min with work open: no task change, lane commit, merge or message from any agent here. Heartbeats do not count.\nWaiting:\n{waiting}\nFind who owes the next step and chase it, take it over, or tell the operator. If nothing moves in another {} min, the operator is paged.{}",
+            QUIET_SECS / 60,
+            if parked { "\nA parked delivery that waits on an external review: hold it with `task action=update id=<id> state_patch={\"merge_hold\":{\"owner\":\"<who>\",\"reason\":\"<why>\",\"until\":\"<RFC3339>\"}}`." } else { "" },
         );
         let key = format!("progress-stall:{session}:{start}:{cadence}");
         let recorded = if train_ready {
@@ -728,6 +742,51 @@ mod tests {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
         }
         assert!(queue.peek_all(50).unwrap().is_empty(), "a held delivery is not a stall");
+    }
+
+    /// GH #2278: a parked delivery the supervisor holds for an external
+    /// review wakes and pages no one until the hold's deadline. After it, the
+    /// delivery is chased again from a fresh quiet period.
+    #[test]
+    fn external_review_hold_quiets_a_parked_delivery_until_its_deadline_gh2278() {
+        const SESSION: &str = "external-review-2278";
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", SESSION)]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut supervisor = Agent::new("supervisor-2278".into(), "supervisor-2278".into());
+        (supervisor.role, supervisor.factory_session) = (AgentRole::Supervisor, Some(SESSION.into()));
+        agents.register(&supervisor).unwrap();
+        let mut worker = Agent::new("worker-2278".into(), "worker-2278".into());
+        (worker.role, worker.status, worker.factory_session) = (AgentRole::Worker, AgentStatus::Shutdown, Some(SESSION.into()));
+        agents.register(&worker).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let anchor = "6f92".repeat(10);
+        let mut parked = Task::new("cas-6f92".into(), "Prompt text awaiting the product owner's review".into());
+        (parked.status, parked.assignee) = (TaskStatus::AwaitingMerge, Some(worker.name.clone()));
+        parked.deliverables.factory_branch_anchor = Some(anchor.clone());
+        parked.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        });
+        // The reported decision note: prose alone never holds a delivery.
+        parked.notes = "[2026-11-21 03:00] ✅ DECISION Not stalled: HELD BY DESIGN for Ben's GitHub review".into();
+        tasks.add(&parked).unwrap();
+        crate::factory_delivery_wake::arm_task(&cas_dir, &parked, &worker.id).unwrap();
+        let now = chrono::Utc::now();
+        tasks.patch_execution_state(&parked.id, &serde_json::json!({"merge_hold": cas_types::TaskMergeHold {
+            owner: "Ben".into(), reason: "GitHub review of prompt text".into(),
+            until: now + chrono::Duration::minutes(180), supervisor: supervisor.name.clone(), anchor,
+        }})).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let sweep = |minutes| super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        for minutes in [0, 45, 90, 135, 179] { sweep(minutes); }
+        let rows = queue.peek_all(50).unwrap();
+        assert!(!rows.iter().any(|row| row.prompt.contains("progress_stalled") || row.target == "operator"), "{rows:?}");
+        for minutes in [181, 226, 271] { sweep(minutes); }
+        let rows = queue.peek_all(50).unwrap();
+        let wakes = rows.iter().filter(|row| row.target == supervisor.name && row.prompt.contains("progress_stalled")).count();
+        let pages = rows.iter().filter(|row| row.target == "operator" && row.prompt.contains("cas-6f92")).count();
+        assert_eq!((wakes, pages), (2, 1), "a lapsed hold is chased again: {rows:?}");
     }
 
     #[test]

@@ -1,4 +1,0 @@
-### Fixed — Jest and Vitest rows that share a runtime title
-
-- **Table rows with the same expanded name are proved and counted** — Distinct `it.each` rows, or repeated static titles, that produce one runtime name used to fail capped stability, because their passing results were counted together against a single expected pass. Capped Jest and Vitest now accept them when every row passes. Their receipts count the rows that ran, not the distinct names, so the totals match the runner's own output.
-- **The package-proof command names a file worker-check accepts** — When a test helper widened stability proof to its whole package, the refusal could name a changed non-JavaScript file (such as a Prisma schema) in its suggested command, which worker-check then refused. It now names the JavaScript input that widened, so the printed command runs and its pass satisfies park.

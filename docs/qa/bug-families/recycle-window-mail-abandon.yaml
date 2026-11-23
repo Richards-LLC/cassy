@@ -1,9 +1,0 @@
-title: Mail to a recycling worker is abandoned before its successor launches
-statement: >-
-  A message whose inject fails while its worker is between recycle shutdown
-  and relaunch stays queued for the successor. Only a target with no current
-  roster entry, no pane and no pending replacement is abandoned, with the
-  supervisor told.
-tasks: [cas-02a5]
-journeys: []
-invariants: []

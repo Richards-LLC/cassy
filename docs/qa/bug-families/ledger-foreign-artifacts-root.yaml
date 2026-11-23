@@ -1,5 +1,0 @@
-title: A ledger written on another machine passes the evidence check once its files are restored
-statement: A LEDGER.md row may cite its capture by the writing machine's absolute artifacts path, such as a prowl /Users path. The evidence-path check maps that path to the same file under the local task directory and still refuses anything outside the ledger directory.
-found: soundwave refused parked prowl deliveries at merge with G-52, "PASS capture is missing, unreadable or outside the ledger directory".
-tasks: [cas-ddc4]
-journeys: [FACTORY-QA-RECEIPT]

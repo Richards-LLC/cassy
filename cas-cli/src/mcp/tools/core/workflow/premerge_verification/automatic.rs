@@ -2205,4 +2205,3 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         assert!(notice.contains("Claude") && notice.contains("review"), "{notice}");
     }
 }
-// cas-ca49 temporary native timing probe: select mcp plus registry parity.

@@ -1173,9 +1173,10 @@ mod tests {
     /// GH #2320 (cas-2e53 at 6e0b5d82ed): park demanded five local capped
     /// passes for a changed `#[cfg(target_os = "linux")]` test on a macOS
     /// worker, where the capped runner selects 0 tests. Replayed as the mirror
-    /// on whichever host runs this: a test gated to the other OS owes proof on
-    /// that OS, from green lane CI when it builds there, else from a recorded
-    /// five-pass receipt, and never a local run.
+    /// on whichever host runs this, with the gate on the test and on its
+    /// module: a test gated to the other OS owes proof on that OS, from green
+    /// lane CI when it builds there, else from a recorded five-pass receipt,
+    /// and never a local run.
     #[test]
     fn changed_test_gated_to_another_os_is_proven_on_that_os_gh2320() {
         use crate::factory_worker_check::stability::{self, Identity, Proof};
@@ -1193,7 +1194,8 @@ mod tests {
         git(&["update-ref", "refs/heads/main", &base]);
         git(&["remote", "add", "origin", "https://github.com/acme/fixture.git"]);
         std::fs::write(repo.path().join("src/child.rs"), format!(
-            "#[test]\nfn host() {{}}\n#[cfg(target_os = \"{other}\")]\n#[test]\nfn planted() {{ assert!(true); }}\n")).unwrap();
+            "#[test]\nfn host() {{}}\n#[cfg(target_os = \"{other}\")]\n#[test]\nfn planted() {{ assert!(true); }}\n\
+             #[cfg(all(unix, target_os = \"{other}\"))]\nmod gated {{\n    #[test]\n    fn nested() {{ assert!(true); }}\n}}\n")).unwrap();
         let head = commit_changelog_fixture(repo.path(), "change a test gated to the other OS");
         crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(child)");
         let mut task = Task::new("cas-a0c0".into(), "platform-gated fixture".into());
@@ -1224,7 +1226,8 @@ mod tests {
         assert_eq!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), lane_proves,
             "green lane CI proves only a test that builds on the lane's OS");
         stability::record(root.path(), repo.path(), &head, Proof { runner: "nextest".into(),
-            tests: vec![Identity::exact("src/child.rs", "child::planted")], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+            tests: ["child::planted", "child::gated::nested"].map(|name| Identity::exact("src/child.rs", name)).into(),
+            consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
         let refusals = park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None);
         assert!(refusals.is_empty(), "a five-pass receipt recorded on the test's OS proves it: {refusals:?}");
     }

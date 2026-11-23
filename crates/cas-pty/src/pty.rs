@@ -2632,7 +2632,10 @@ impl Pty {
         }
 
         for (key, value) in &config.env {
-            if key != WORKER_CREDENTIAL_GRANT_ENV && key != WORKER_CREDENTIAL_WARNING_ENV {
+            if key != WORKER_CREDENTIAL_GRANT_ENV
+                && key != WORKER_CREDENTIAL_WARNING_ENV
+                && key != crate::gateway_key::GATEWAY_KEY_FILE_ENV
+            {
                 cmd.env(key, value);
             }
         }
@@ -2671,6 +2674,24 @@ impl Pty {
             cmd.env_remove("OPENAI_API_KEY");
             cmd.env_remove("CODEX_API_KEY");
             cmd.env_remove("CODEX_ACCESS_TOKEN");
+        }
+
+        // Home-gateway workers authenticate with the hub's client key. It is
+        // read here, after the inherited-credential strip above, so the only
+        // token the child holds is this one, and no config, argv or log ever
+        // carries it.
+        cmd.env_remove(crate::gateway_key::GATEWAY_KEY_FILE_ENV);
+        if let Some(path) = config.env.iter().rev().find_map(|(key, value)| {
+            (key == crate::gateway_key::GATEWAY_KEY_FILE_ENV).then_some(value)
+        }) {
+            let key = crate::gateway_key::read_gateway_key(std::path::Path::new(path))
+                .map_err(|error| Error::pty(format!("gateway worker cannot start: {error}")))?;
+            let name = if is_codex {
+                crate::gateway_key::CODEX_GATEWAY_KEY_ENV
+            } else {
+                "ANTHROPIC_AUTH_TOKEN"
+            };
+            cmd.env(name, key);
         }
 
         // Spawn the child process

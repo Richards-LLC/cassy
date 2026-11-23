@@ -144,9 +144,13 @@ pub(crate) fn is_ask(prompt: &str) -> bool {
 /// sender-pair cap never holds them. It bounds status chatter only.
 /// cas-922d: nor does the burst debounce delay them, and a local worker's
 /// kind counts as a peer's does.
+/// cas-eea8: ready handoffs and merge requests also need immediate action.
 fn waking_kind(prompt: &str) -> bool {
     use crate::cloud::peer_mailbox::PeerMessageKind::{Answer, Ask, Blocker};
     prompt.contains("<cas-blocker ")
+        || crate::prompt_revalidation::parse_worker_action_envelope(prompt)
+            .is_some_and(|action| action.kind == crate::prompt_revalidation::WorkerActionKind::Ready)
+        || crate::prompt_revalidation::parse_merge_request_envelope(prompt).is_some()
         || prompt.contains(&format!("{WAKING_KIND_TAG}ask\"/>"))
         || prompt.contains(&format!("{WAKING_KIND_TAG}answer\"/>"))
         || crate::cloud::peer_mailbox::parse_envelope(prompt)
@@ -779,20 +783,20 @@ mod tests {
                 "lifecycle-wake:test", "supervisor", "<ci-red-run>Review CI</ci-red-run>",
                 Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
             ).unwrap().id();
-            // cas-922d: a blocker skips the debounce, so it would make the
-            // batch due and leave nothing to park in the park-failure case.
+            // Blockers and merge requests skip the debounce, so either would
+            // make the batch due and leave nothing to park in this failure case.
             let blocker = (failure != "park").then(|| enqueue(&cas, &peer,
                 &crate::prompt_revalidation::attach_blocker_envelope(
                     "A decision is required", &peer.name, None,
                 )));
-            let merge = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
+            let merge = (failure != "park").then(|| enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
                 "Please merge the delivery", &crate::prompt_revalidation::MergeRequestEnvelope {
                     task_id: "cas-bc4d".into(), branch_tip: "delivery".into(),
                     target_branch: "epic/test".into(), target_branch_tip: "base".into(),
                     anchor_tip: None, commits_not_on_target_base: 1, pr_number: None,
                     source_freshness_unavailable: None,
                 },
-            ));
+            )));
             match failure {
                 "config" => std::fs::write(cas.join("config.toml"), "[factory\n").unwrap(),
                 "ledger" => {
@@ -826,7 +830,7 @@ mod tests {
                 warn_batching_failure(&cas, &anyhow::anyhow!("still unavailable"), later + Duration::from_secs(1));
                 selected
             });
-            for id in [Some(ordinary), Some(lifecycle), blocker, Some(merge)].into_iter().flatten() {
+            for id in [Some(ordinary), Some(lifecycle), blocker, merge].into_iter().flatten() {
                 assert!(selected.rows.iter().any(|row| row.id == id),
                     "{failure}: batching failure must not lose selected row #{id}");
                 assert!(selected.facts[&id].message_batch.is_empty());
@@ -975,6 +979,7 @@ mod tests {
 
     #[test]
     fn cas_1e7e2_pair_cap_holds_messages_and_surfaces_a_notice() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (_root, cas, peer) = setup();
         let now = Utc::now();
         for lead in 1..=6 {
@@ -1006,11 +1011,64 @@ mod tests {
         assert_eq!(
             readable
                 .iter()
-                .filter(|row| row.prompt.starts_with("Wake cap:"))
+                .filter(|row| row.source == "supervisor-wake-cap")
                 .count(),
             1,
             "one readable notice, no notice storm"
         );
+
+        // cas-eea8: actionable worker messages must start a turn at arrival,
+        // even after six status wakes. Status remains capped; wake=false stays quiet.
+        use crate::prompt_revalidation::{
+            MergeRequestDecision, MergeRequestEnvelope, WorkerActionKind,
+            attach_blocker_envelope, attach_merge_request_envelope, attach_worker_action_envelope,
+        };
+        for kind in ["status", "ready", "merge_request", "blocker", "quiet-ready"] {
+            let (_root, cas, _) = setup();
+            let worker = cas_types::Agent::new_with_role(
+                "worker-id".into(), "worker".into(), cas_types::AgentRole::Worker,
+            );
+            crate::store::open_agent_store(&cas).unwrap().register(&worker).unwrap();
+            let now = DateTime::parse_from_rfc3339("2026-11-23T18:00:00Z").unwrap().with_timezone(&Utc);
+            let spent = now - chrono::Duration::minutes(10);
+            for lead in 1..=6 {
+                record(&cas, -lead, "wake-sup", std::slice::from_ref(&worker.id), spent, spent).unwrap();
+            }
+            let body = "The handoff needs supervisor attention";
+            let prompt = match kind {
+                "merge_request" => attach_merge_request_envelope(body, &MergeRequestEnvelope {
+                    task_id: "cas-eea8".into(), branch_tip: "delivery".into(),
+                    target_branch: "epic/test".into(), target_branch_tip: "base".into(),
+                    anchor_tip: None, commits_not_on_target_base: 1, pr_number: None,
+                    source_freshness_unavailable: None,
+                }),
+                "blocker" => attach_blocker_envelope(body, &worker.name, None),
+                _ => attach_worker_action_envelope(
+                    &format!("{}{body}", if kind == "quiet-ready" { QUIET } else { "" }),
+                    if kind == "status" { WorkerActionKind::Status } else { WorkerActionKind::Ready },
+                    &worker.name, None,
+                ),
+            };
+            let id = enqueue(&cas, &worker, &prompt);
+            let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+            let mut row = queue.queued_prompt(id).unwrap().unwrap();
+            row.created_at = now;
+            let mut rows = vec![row];
+            let mut fact = RowFacts::default();
+            if kind == "merge_request" {
+                // Preserve production's per-task merge revalidation boundary.
+                fact.merge_request = Some((None, MergeRequestDecision::Unverifiable));
+            }
+            let mut facts = HashMap::from([(id, fact)]);
+            schedule(&cas, "wake-session", "wake-sup", &[worker], &mut rows, &mut facts, now).unwrap();
+            let expected = if matches!(kind, "status" | "quiet-ready") { vec![] } else { vec![id] };
+            assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), expected, "{kind}");
+            if !expected.is_empty() {
+                let retry: Option<String> = Connection::open(cas.join("cas.db")).unwrap()
+                    .query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1", [id], |row| row.get(0)).unwrap();
+                assert!(retry.is_none(), "{kind}: an actionable wake must not be parked");
+            }
+        }
     }
 
     #[test]

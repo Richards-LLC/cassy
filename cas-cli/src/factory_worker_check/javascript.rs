@@ -224,8 +224,9 @@ pub(crate) fn changed_tests(
         let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)
             .unwrap_or_default()
             .into_iter()
+            .map(|(identity, body, _)| (identity, body))
             .collect();
-        for (identity, body) in parsed_tests(path, &source, &lines, true)? {
+        for (identity, body, _) in parsed_tests(path, &source, &lines, true)? {
             // Hunk lines may contain several calls. Repeating an unchanged
             // neighbour would violate the delivery-only selection contract.
             if previous.get(&identity) != Some(&body) {
@@ -481,7 +482,18 @@ fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(
 fn source_tests(path: &str, source: &str, lines: &[(usize, usize)]) -> Result<Vec<Identity>> {
     Ok(parsed_tests(path, source, lines, true)?
         .into_iter()
-        .map(|(identity, _)| identity)
+        .map(|(identity, ..)| identity)
+        .collect())
+}
+
+/// How many runtime rows each changed `it.each` test expands to, read from its
+/// literal table in the source, independent of any run (cas-c1df). A test
+/// whose table is not a plain array literal, or that sits under a templated
+/// suite, has no entry.
+fn source_rows(path: &str, source: &str) -> Result<BTreeMap<Identity, usize>> {
+    Ok(parsed_tests(path, source, &[(1, usize::MAX)], false)?
+        .into_iter()
+        .filter_map(|(identity, _, rows)| Some((identity, rows?)))
         .collect())
 }
 
@@ -490,7 +502,7 @@ fn parsed_tests(
     source: &str,
     lines: &[(usize, usize)],
     strict: bool,
-) -> Result<Vec<(Identity, String)>> {
+) -> Result<Vec<(Identity, String, Option<usize>)>> {
     let tree = source_tree(path, source)?;
     let mut aliases = BTreeMap::new();
     imported_aliases(tree.root_node(), source, &mut aliases);
@@ -512,7 +524,7 @@ fn parsed_tests(
         &mut tests,
     )?;
     let mut unique = BTreeSet::new();
-    if tests.iter().any(|(identity, _)| !unique.insert(identity)) {
+    if tests.iter().any(|(identity, ..)| !unique.insert(identity)) {
         bail!("ambiguous source-to-runtime test identity in {path}");
     }
     Ok(tests)
@@ -930,7 +942,7 @@ fn walk(
     force: bool,
     strict: bool,
     aliases: &BTreeMap<String, String>,
-    tests: &mut Vec<(Identity, String)>,
+    tests: &mut Vec<(Identity, String, Option<usize>)>,
 ) -> Result<()> {
     if strict
         && node.kind() == "call_expression"
@@ -957,6 +969,7 @@ fn walk(
             .context("test arguments")?;
         let first = args.named_child(0);
         let mut name = first.and_then(|name| title(name, source));
+        let inherited_template = templated;
         let mut templated = templated || each;
         if suite && supported && name.is_none() && let Some(pattern) = dynamic_suite_title(first, source) {
             name = Some(pattern);
@@ -998,7 +1011,7 @@ fn walk(
                     headers.iter().map(|(_, _, text)| text).collect::<Vec<_>>(),
                 ))?;
                 for name in names {
-                    tests.push((Identity::exact(path, name), fingerprint.clone()));
+                    tests.push((Identity::exact(path, name), fingerprint.clone(), None));
                 }
             }
             return Ok(());
@@ -1074,6 +1087,7 @@ fn walk(
                         parameterized: templated,
                     },
                     text(node, source).to_string(),
+                    (each && !inherited_template).then(|| table_rows(node)).flatten(),
                 ));
             }
             // Test bodies cannot declare additional runnable tests.
@@ -1088,6 +1102,33 @@ fn walk(
         )?;
     }
     Ok(())
+}
+
+/// The row count of `it.each([...])(title, fn)`'s table when it is a plain
+/// array literal: one row per element. A spread, a hole, a variable or a
+/// tagged template gives `None`.
+fn table_rows(call: Node<'_>) -> Option<usize> {
+    let each = call.child_by_field_name("function")?;
+    let arguments = each.child_by_field_name("arguments")?;
+    let table = arguments.named_child(0).filter(|_| arguments.named_child_count() == 1)?;
+    if table.kind() != "array" {
+        return None;
+    }
+    let mut cursor = table.walk();
+    let (mut rows, mut previous_comma) = (0, true);
+    for child in table.children(&mut cursor) {
+        match child.kind() {
+            "[" | "]" | "comment" => {}
+            "," if previous_comma => return None,
+            "," => previous_comma = true,
+            "spread_element" => return None,
+            _ => {
+                rows += 1;
+                previous_comma = false;
+            }
+        }
+    }
+    Some(rows)
 }
 
 fn tree_root(mut node: Node<'_>) -> Node<'_> {
@@ -1486,6 +1527,7 @@ fn execute_tests(
             runner_path(repo, &package, runner)?
         };
         let source = std::fs::read_to_string(repo.join(path))?;
+        let expected_rows = source_rows(path, &source).unwrap_or_default();
         let sites = if widened.is_none() { declared_sites(path, &source)? } else { Vec::new() };
         if !sites.is_empty() {
             if runner != "playwright" {
@@ -1624,7 +1666,7 @@ fn execute_tests(
                 inherited
             };
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
-        } else { verify_repeats(runner, repo, &selected, run)? };
+        } else { verify_repeats(runner, repo, &selected, &expected_rows, run)? };
     }
     Ok(())
     })();
@@ -1879,13 +1921,15 @@ fn verify_repeats(
     runner: &str,
     repo: &Path,
     tests: &[Identity],
+    expected_rows: &BTreeMap<Identity, usize>,
     mut run: impl FnMut(usize) -> Result<(bool, Value)>,
 ) -> Result<usize> {
     let mut count = 0;
     // cas-c1df: rows of one table may share a runtime name, so a template's
-    // pass count says nothing about how many rows it expands to. The first
-    // iteration fixes which rows the changed tests ran and how many share each
-    // name; every later iteration must run exactly those, or a row went missing.
+    // pass count says nothing about how many rows it expands to. `expected_rows`
+    // counts them in the source, so every iteration is held to it; and the first
+    // iteration fixes which rows the changed tests ran, which every later
+    // iteration must repeat.
     let mut first_rows = None;
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
@@ -1896,6 +1940,7 @@ fn verify_repeats(
             tests,
             if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
             &BTreeSet::new(),
+            expected_rows,
         )?;
         count = found;
         match &first_rows {
@@ -1938,14 +1983,15 @@ fn validate_report_with_inherited(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
     inherited: &BTreeSet<(Identity, String)>,
 ) -> Result<usize> {
-    validate_report_rows(runner, repo, report, tests, repeats, inherited).map(|(count, _)| count)
+    validate_report_rows(runner, repo, report, tests, repeats, inherited, &BTreeMap::new())
+        .map(|(count, _)| count)
 }
 
 /// [`validate_report_with_inherited`], also returning how many passing results
 /// each runtime row a changed test selected produced (cas-c1df).
 fn validate_report_rows(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
-    inherited: &BTreeSet<(Identity, String)>,
+    inherited: &BTreeSet<(Identity, String)>, expected_rows: &BTreeMap<Identity, usize>,
 ) -> Result<(usize, BTreeMap<Identity, usize>)> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
     if runner == "playwright" {
@@ -2060,13 +2106,31 @@ fn validate_report_rows(
     }
     // A template identity is proved when every row it selected passed. Distinct
     // rows may share one runtime name (GH #2138, #2225); each passed, so the
-    // name holds at least one passing result per repeat. How many rows share a
-    // name is held across iterations by `verify_repeats` (cas-c1df).
+    // name holds at least one passing result per repeat. The source table says
+    // how many rows there must be, so a template with a counted table needs
+    // exactly that many passing results (cas-c1df). A runtime row that another
+    // changed test also selects cannot be attributed to one table, so it is
+    // left to the iteration-to-iteration comparison in `verify_repeats`.
     for test in tests {
         let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
         if rows.peek().is_none() || rows.any(|(_, count)| *count < repeats) {
             bail!(
                 "{runner} stability requires {repeats} passing results: {} :: {}",
+                test.path,
+                test.name
+            );
+        }
+        let Some(want) = expected_rows.get(test) else { continue };
+        let mut found = 0;
+        let mut shared = false;
+        for (ran, count) in results.iter().filter(|(ran, _)| test.selects(ran)) {
+            found += count;
+            shared |= tests.iter().any(|other| other != test && other.selects(ran));
+        }
+        if !shared && found != want * repeats {
+            bail!(
+                "{runner} stability expects {want} rows from the source table, saw {}: {} :: {}",
+                found / repeats,
                 test.path,
                 test.name
             );
@@ -3059,19 +3123,31 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let mut missing = report.clone();
         missing["testResults"][0]["assertionResults"].as_array_mut().unwrap().truncate(5);
         assert!(validate_report("vitest", Path::new("/project"), &missing, &templates, 1).is_err());
+        // The source tables say how many rows each template has (2, 3 and 2),
+        // whatever any run reports.
+        let expected = source_rows("a.test.ts", source).unwrap();
+        assert_eq!(expected.len(), 3);
+        assert_eq!(expected.values().sum::<usize>(), 7);
+        // Only a plain array literal is counted: a variable, a spread, or a
+        // table under a templated suite is left to the first-iteration check.
+        let uncounted = "const table = [1, 2];\nit.each(table)('row %i', () => {});\nit.each([...table, 3])('more %i', () => {});\ndescribe.each(['a'])('suite %s', () => {\n  it.each([1, 2])('inner %i', () => {});\n});";
+        assert!(source_rows("a.test.ts", uncounted).unwrap().is_empty());
+        let repo = Path::new("/project");
+        verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, report.clone())))
+            .expect("five complete iterations are accepted");
         // One of two rows sharing a name is gone while its sibling still passes
-        // ("keeps input intact"): in any of the five iterations that is refused.
+        // ("keeps input intact"). Missing from every iteration, the source
+        // table still counts it.
         let mut one_duplicate = report.clone();
         one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
-        let iterations = |lost: Option<usize>| {
-            let (full, short) = (report.clone(), one_duplicate.clone());
-            verify_repeats("vitest", Path::new("/project"), &templates, move |iteration| {
-                Ok((true, if Some(iteration) == lost { short.clone() } else { full.clone() }))
-            })
-        };
-        iterations(None).expect("five complete iterations are accepted");
+        assert_eq!(one_duplicate["testResults"][0]["assertionResults"].as_array().unwrap().len(), 6);
+        assert!(verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, one_duplicate.clone()))).is_err());
+        // A table the source cannot count is held to the first iteration's rows.
+        let iterations = |lost: usize| verify_repeats("vitest", repo, &templates, &BTreeMap::new(), |iteration| {
+            Ok((true, if iteration == lost { one_duplicate.clone() } else { report.clone() }))
+        });
         for lost in 0..5 {
-            assert!(iterations(Some(lost)).is_err(), "iteration {lost} lost one duplicate row");
+            assert!(iterations(lost).is_err(), "iteration {lost} lost one duplicate row");
         }
     }
 
@@ -3160,7 +3236,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let tests = [id("a.test.js", "seeded")];
         for fail_at in [None, Some(2)] {
             let mut invocations = 0;
-            let result = verify_repeats("vitest", Path::new("/project"), &tests, |index| {
+            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), |index| {
                 invocations += 1;
                 let pass = Some(index) != fail_at;
                 Ok((

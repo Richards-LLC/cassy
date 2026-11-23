@@ -773,8 +773,12 @@ fn cas_f767_recorded_capacity_wait_keeps_the_idle_relay_quiet() {
         let run = crate::factory_worker_runs::register(&cas_dir, &repo, &log, at).unwrap().expect("worker run");
         crate::factory_worker_runs::finish(&cas_dir, &run, code, at).unwrap();
     };
-    let now = Utc::now();
-    let since = now - chrono::Duration::minutes(22);
+    // A long build episode outlives the fixture's 10-minute claim; the
+    // worker's heartbeat keeps one lease epoch alive throughout.
+    crate::store::open_agent_store(&cas_dir).unwrap().renew_lease("cas-9efb-test", "merge-w", 7200).unwrap();
+    // The director clock walks the episode forward from wall time; each
+    // retry window stays current for the capacity read.
+    let since = Utc::now();
     // Every 2 minutes for 22 minutes: refusal, then the job's EXIT 1.
     for retry in 0..=11 {
         let at = since + chrono::Duration::minutes(2 * retry);
@@ -789,12 +793,15 @@ fn cas_f767_recorded_capacity_wait_keeps_the_idle_relay_quiet() {
         cas_types::AgentRole::Supervisor);
     supervisor.factory_session = crate::store::open_agent_store(&cas_dir).unwrap().get("merge-w").unwrap().factory_session;
     crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
-    assert_eq!(crate::factory_capacity_wait::reconcile(&cas_dir, None, now).unwrap(), 1, "20-minute wait escalates");
+    let last = since + chrono::Duration::minutes(22);
+    assert_eq!(crate::factory_capacity_wait::reconcile(&cas_dir, None, last).unwrap(), 1, "20-minute wait escalates");
     assert_eq!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().pending_count("merge-sup").unwrap(), 1);
     assert!(f.relay().is_empty(), "escalation is the capacity notice, not an extra idle page");
     // Once admitted, a real test failure relays.
     crate::factory_capacity_wait::admitted(&cas_dir, &repo).unwrap();
-    exit(101, now);
+    let failed_at = last + chrono::Duration::minutes(1);
+    exit(101, failed_at);
+    f.app.merge_alert_retries.now = Some(failed_at);
     let failed = f.relay();
     assert_eq!(failed.len(), 1, "an admitted failing run still relays");
     assert!(failed[0].text.contains("EXIT 101"), "the relay names the failed run: {}", failed[0].text);

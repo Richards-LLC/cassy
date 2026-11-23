@@ -134,6 +134,7 @@ pub mod qa_traffic;
 /// cas-e8d1 (GH #1233): open work the record says is done.
 pub(crate) mod backlog_hygiene;
 pub mod qa_author_override;
+pub mod recovery_decision;
 pub(crate) mod phase_outcome;
 pub(crate) mod model_eval;
 pub(crate) mod qa_batch;

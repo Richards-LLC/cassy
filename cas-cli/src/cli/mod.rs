@@ -41,6 +41,7 @@ mod qa_impact;
 mod qa_polish;
 pub(crate) mod qa_post_release;
 pub(crate) mod qa_rapid_response;
+pub(crate) mod task_cmd;
 mod provider_default;
 pub(crate) mod release_report;
 mod release_precheck;
@@ -415,6 +416,10 @@ pub enum Commands {
     #[command(subcommand)]
     Qa(qa::QaCommand),
 
+    /// Operator-only task decisions
+    #[command(subcommand)]
+    Task(task_cmd::TaskCommands),
+
     /// Structural git-history index (backfill/status)
     #[command(subcommand)]
     History(history_cmd::HistoryCommands),
@@ -550,6 +555,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Queue(_)
         | Commands::ClaudeMd(_)
         | Commands::Qa(_)
+        | Commands::Task(_)
         | Commands::Codemap(_)
         | Commands::Gates(_)
         | Commands::History(_)
@@ -906,6 +912,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Sync(_) => "sync".to_string(),
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Qa(_) => "qa".to_string(),
+        Commands::Task(_) => "task".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::Gates(_) => "gates".to_string(),
         Commands::History(_) => "history".to_string(),
@@ -1081,6 +1088,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Sync(cmd) => sync::execute(cmd, cli),
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Qa(cmd) => qa::execute(cmd, cli, cas_root),
+        Commands::Task(cmd) => task_cmd::execute(cmd, cas_root),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Gates(cmd) => gates_cmd::execute(cmd, cli, cas_root),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),

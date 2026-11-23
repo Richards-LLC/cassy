@@ -625,6 +625,13 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub work_target_pinned: bool,
 
+    /// Targets this task was bound to before its current one, oldest first.
+    /// The task store appends on every retarget, so no caller can skip it.
+    /// History reachable from a prior release-train or epic target is gated
+    /// upstream, not another task's foreign work (GH #1442, cas-faa9).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_work_targets: Vec<WorkTarget>,
+
     /// cas-3b42: a live supervisor cleared this no-code task's code target
     /// (`proof_scope_fix target_repo=""`). Only then is the task's work
     /// target absent by review rather than by default, so only commits that
@@ -877,6 +884,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     work_target_pinned: bool,
     #[serde(default)]
+    prior_work_targets: Vec<WorkTarget>,
+    #[serde(default)]
     work_target_cleared: bool,
     #[serde(default)]
     pre_close_hook: Option<PreCloseHookEvidence>,
@@ -943,6 +952,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             integration_batch: value.integration_batch,
             work_target: value.work_target,
             work_target_pinned: value.work_target_pinned,
+            prior_work_targets: value.prior_work_targets,
             work_target_cleared: value.work_target_cleared,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
@@ -1313,6 +1323,17 @@ fn validate_state_string_array(field: &str, value: &Value) -> Result<(), String>
 }
 
 impl TaskDeliverables {
+    /// Record `previous` as a prior target when this task now targets
+    /// something else. Keeps order, never duplicates, ignores no-ops.
+    pub fn record_prior_work_target(&mut self, previous: Option<&WorkTarget>) {
+        let Some(previous) = previous else { return };
+        if self.work_target.as_ref() != Some(previous)
+            && !self.prior_work_targets.contains(previous)
+        {
+            self.prior_work_targets.push(previous.clone());
+        }
+    }
+
     /// cas-e33f: remember the branch of an agent handing this task off.
     /// Blank names and repeats are ignored so repeated transfers between the
     /// same agents do not grow the list.
@@ -2229,10 +2250,19 @@ mod tests {
         deliverables.record_handoff_branch("factory/worker");
         deliverables.record_handoff_branch("  ");
         assert_eq!(deliverables.handoff_branches, vec!["factory/worker"]);
+        // cas-faa9: prior targets follow the same record-once rule and skip
+        // the current target.
+        let train = WorkTarget { repo_selector: "project:p".into(), target_branch: "epic/a".into() };
+        deliverables.work_target = Some(WorkTarget { target_branch: "epic/b".into(), ..train.clone() });
+        for previous in [Some(&train), Some(&train), deliverables.work_target.clone().as_ref(), None] {
+            deliverables.record_prior_work_target(previous);
+        }
+        assert_eq!(deliverables.prior_work_targets, vec![train.clone()]);
 
         let encoded = serde_json::to_value(&deliverables).unwrap();
         let decoded: TaskDeliverables = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.handoff_branches, vec!["factory/worker"]);
+        assert_eq!(decoded.prior_work_targets, vec![train]);
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.handoff_branches.is_empty());
         assert!(

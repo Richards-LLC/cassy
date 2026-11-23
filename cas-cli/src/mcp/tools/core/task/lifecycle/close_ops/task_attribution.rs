@@ -215,7 +215,17 @@ pub(super) fn validated_started_delivery(
     }
     // cas-985f: a worker told to merge the released trunk into its lane brings
     // in other tasks' already-released commits. They are upstream, not foreign.
-    let upstream = released_trunk_ref(repo, &target).map(|reference| format!("^{reference}"));
+    // cas-faa9: so is history from an earlier epic/train target of this task.
+    if !git_ref_exists(repo, &target) {
+        return Err(refuse(&format!(
+            "its target `{}` no longer exists; retarget the task or restore that branch",
+            current_target.target_branch,
+        )));
+    }
+    let upstream: Vec<String> = released_trunk_ref(repo, &target).into_iter()
+        .chain(gated_prior_target_refs(repo, &target, task))
+        .map(|reference| format!("^{reference}"))
+        .collect();
     let mut identity = task_commit_identity(task, None);
     include_superseded_commits(repo, task, &mut identity)?;
     include_cycle_anchors(repo, task, &mut identity);
@@ -316,7 +326,7 @@ pub(super) fn validated_started_delivery(
         if on_lane
             && (merged.is_empty()
                 || !merge_brings_foreign_work(repo, &parents[0], merged, &target,
-                    upstream.as_deref().map(|reference| &reference[1..]), &identity))
+                    &upstream.iter().map(|reference| reference[1..].to_string()).collect::<Vec<_>>(), &identity))
             // The inherited repository identity can recover real WIP, but
             // cannot make an unnamed, unrecorded empty checkpoint task-owned.
             // Such metadata-only commits still need their own attribution.
@@ -596,7 +606,7 @@ fn merge_brings_foreign_work(
     first_parent: &str,
     merged_parents: &[String],
     target: &str,
-    released: Option<&str>,
+    released: &[String],
     identity: &TaskCommitIdentity,
 ) -> bool {
     for parent in merged_parents {
@@ -617,12 +627,12 @@ fn merge_brings_foreign_work(
         ) else {
             return false;
         };
-        let exclude_released = released.map(|reference| format!("^{reference}"));
+        let exclude_released: Vec<String> = released.iter().map(|reference| format!("^{reference}")).collect();
         let Some(off_target) = git_text(
             repo,
             &["rev-list", "--no-merges", parent, &exclude_first, &exclude_target]
                 .into_iter()
-                .chain(exclude_released.as_deref())
+                .chain(exclude_released.iter().map(String::as_str))
                 .collect::<Vec<_>>(),
         ) else {
             return false;
@@ -659,7 +669,45 @@ pub(super) fn upstream_refs(repo: &Path, target: &str, task: &Task) -> Vec<Strin
         .map(|reference| format!("^{reference}"))
         .into_iter()
         .collect();
+    refs.extend(gated_prior_target_refs(repo, target, task).into_iter().map(|reference| format!("^{reference}")));
     refs.extend(authorized_merge_parents(task).into_iter().map(|sha| format!("^{sha}")));
+    refs
+}
+
+/// cas-faa9: refs of this task's earlier targets that are epic or release
+/// train lanes. Their history passed that lane's gates, so a lane cut from
+/// one (a briefed train, the predecessor after a G-100 retarget) carries
+/// upstream, not foreign, work. An arbitrary branch name never qualifies:
+/// the store must hold an epic that owns the lane, in the same repository.
+pub(crate) fn gated_prior_target_refs(repo: &Path, target: &str, task: &Task) -> Vec<String> {
+    let Some(current) = task.deliverables.work_target.as_ref() else { return Vec::new() };
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    let mut candidates: Vec<&str> = task.deliverables.prior_work_targets.iter()
+        .chain(task.deliverables.factory_branch_start.as_ref().map(|start| &start.work_target))
+        .filter(|prior| prior.repo_selector == current.repo_selector)
+        .map(|prior| prior.target_branch.as_str())
+        .filter(|branch| *branch != target && *branch != current.target_branch && is_safe_git_refname(branch))
+        .collect();
+    candidates.dedup();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let Ok((primary, _)) = crate::mcp::tools::core::task::repo_context::git_layout(repo) else { return Vec::new() };
+    let root = primary.join(".cas");
+    if !root.join("cas.db").is_file() {
+        return Vec::new();
+    }
+    let Ok(store) = crate::store::open_task_store_local(&root) else { return Vec::new() };
+    let mut refs = Vec::new();
+    for branch in candidates {
+        if !store.epic_for_branch(branch).ok().flatten().is_some_and(|epic| epic.task_type == TaskType::Epic) {
+            continue;
+        }
+        let reference = preferred_diff_target_ref_for_delivery(repo, branch, task.delivery_mode);
+        if git_ref_exists(repo, &reference) && !refs.contains(&reference) {
+            refs.push(reference);
+        }
+    }
     refs
 }
 
@@ -874,7 +922,7 @@ fn task_delivery_selection(
                         &c.parent,
                         &c.merged_parents,
                         &target,
-                        released.as_deref(),
+                        released.as_slice(),
                         &window.identity,
                     ))
             {

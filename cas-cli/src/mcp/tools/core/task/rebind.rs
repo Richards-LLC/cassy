@@ -109,6 +109,29 @@ use crate::mcp::CasCore;
 
 use super::{lifecycle::close_ops, repo_context, resolve_agent_identity};
 
+/// cas-faa9: the one writer for a start boundary that an identity change
+/// (adoption, transfer, retarget) moves. The previous record stays in the
+/// audit trail; an unchanged record writes nothing.
+pub(crate) fn rebind_start(task: &mut cas_types::Task, start: FactoryBranchStart, actor: &str, reason: &str) {
+    let previous = task.deliverables.factory_branch_start.replace(start.clone());
+    if previous.as_ref() == Some(&start) {
+        return;
+    }
+    let audit_row = serde_json::json!({
+        "actor": actor,
+        "reason": reason,
+        "previous_start": previous,
+        "start": start,
+    });
+    if !task.notes.is_empty() {
+        task.notes.push('\n');
+    }
+    task.notes.push_str(&format!(
+        "[{}] DELIVERY START REBOUND: {audit_row}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+    ));
+}
+
 // gate[G-152 rebind]: Delivery branch rebinding authority and evidence
 fn refused(reason: impl Into<String>) -> McpError {
     CasCore::error(

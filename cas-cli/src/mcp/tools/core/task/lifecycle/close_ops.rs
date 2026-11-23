@@ -17751,8 +17751,12 @@ pub(crate) fn resolve_close_delivery_branch(
     }
     let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    let refspec = format!("{own_ref}:refs/heads/{task_branch}");
-    let [push] = crate::worktree::GitOperations::git_remedies([&["push", "origin", &refspec]])?;
+    // GH #2357: H-40 admits a lane push only when the local and remote
+    // names match, so name the per-task branch locally before publishing it.
+    let [name, push] = crate::worktree::GitOperations::git_remedies([
+        &["branch", &task_branch, &own_ref],
+        &["push", "origin", &task_branch],
+    ])?;
     Err(format!(
         "⚠️ DELIVERY BRANCH UNRESOLVED\n\n\
          task close rejected: task {id} has no branch of its own. `{task_branch}` does not \
@@ -17760,7 +17764,7 @@ pub(crate) fn resolve_close_delivery_branch(
          task's delivery ({foreign}) with no commit claiming {id}. Cassy will not measure \
          another task's delivery as this one.\n\n\
          If the current lane tip is {id}'s delivery, publish that exact tip with \
-         `{push}`, then retry \
+         `{name}` and `{push}`, then retry \
          `{caller}task action=close id={id}`. Otherwise recover {id}'s actual delivery first; \
          do not publish another task's work under its name.",
         id = task.id,
@@ -35942,6 +35946,104 @@ esac
                 p, &own, &head_sha(p), &task.id, None, "epic/next",
             ) {
                 failures.push("mixed epic/main octopus sync must retain the parked delivery identity".into());
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// cas-faa9: replays of Nov 23's G-42 refusals. A worker starts on main,
+    /// is briefed onto a release train and laned off its tip, then the train
+    /// freezes and G-100 retargets the task to a successor cut from main. The
+    /// briefed train's reviewed history is upstream once the store records
+    /// that retarget; an arbitrary branch name never is, and a deleted target
+    /// is named rather than read as an unreadable lane.
+    #[test]
+    fn delivery_identity_family_replays_nov23_g42_refusals_cas_faa9() {
+        struct Case {
+            name: &'static str,
+            // Branch the lane was cut from, and whether an epic owns it.
+            briefed: &'static str,
+            gated: bool,
+            // Record the briefed target in the start (6456) rather than via
+            // a store retarget (eea8, ef8f).
+            in_start: bool,
+            delete_target: bool,
+            own_only: bool,
+        }
+        let mut failures = Vec::new();
+        for case in [
+            Case { name: "eea8 briefed train, G-100 successor", briefed: "epic/train-217f", gated: true, in_start: false, delete_target: false, own_only: true },
+            Case { name: "6456 start recorded on the old train", briefed: "epic/train-b138", gated: true, in_start: true, delete_target: false, own_only: true },
+            Case { name: "control: arbitrary branch is not upstream", briefed: "factory/other-cas-12d1", gated: false, in_start: false, delete_target: false, own_only: false },
+            Case { name: "2307 deleted target", briefed: "epic/train-217f", gated: true, in_start: false, delete_target: true, own_only: false },
+        ] {
+            let dir = init_factory_repo_with_parent("worker", "main");
+            let p = dir.path();
+            std::fs::create_dir_all(p.join(".cas")).unwrap();
+            std::fs::write(p.join(".cas/config.toml"), "[project]\ncanonical_id = \"casfaa9\"\n").unwrap();
+            let store = crate::store::open_task_store_local(&p.join(".cas")).unwrap();
+            store.init().unwrap();
+            let start_base = rev_parse_local(p, "main");
+            git(p, &["branch", "epic/train-a258", "main"]);
+            git(p, &["checkout", "-q", "-b", case.briefed, "main"]);
+            let foreign = commit_local(p, "train.rs", "chore(cas-12d1): reviewed train work");
+            if case.gated {
+                let mut epic = Task::new(format!("cas-e{}", &case.briefed[case.briefed.len() - 4..]), "train".into());
+                epic.task_type = TaskType::Epic;
+                epic.branch = Some(case.briefed.into());
+                store.add(&epic).unwrap();
+            }
+            git(p, &["checkout", "-q", "-B", "factory/worker", case.briefed]);
+            let own = commit_local(p, "own.rs", "fix(cas-test1): own work");
+            let selector = "project:casfaa9".to_string();
+            let target = |branch: &str| cas_types::WorkTarget {
+                repo_selector: selector.clone(), target_branch: branch.into(),
+            };
+            let mut task = worker_task("worker");
+            task.deliverables.work_target = Some(target(if case.in_start { case.briefed } else { "main" }));
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target(if case.in_start { case.briefed } else { "main" }),
+                assignee: "worker".into(), branch: "factory/worker".into(), base_sha: start_base,
+            });
+            store.add(&task).unwrap();
+            // The supervisor's retarget onto the briefed lane, then G-100's
+            // successor retarget, each through the store as in production.
+            for next in [case.briefed, "epic/train-a258"] {
+                let mut moved = store.get(&task.id).unwrap();
+                if moved.deliverables.work_target.as_ref() == Some(&target(next)) {
+                    continue;
+                }
+                moved.deliverables.work_target = Some(target(next));
+                store.update(&moved).unwrap();
+            }
+            let mut task = store.get(&task.id).unwrap();
+            if case.in_start {
+                // 6456's row predates the recorded list; only its start names the train.
+                task.deliverables.prior_work_targets.clear();
+            }
+            if case.delete_target {
+                git(p, &["branch", "-D", "epic/train-a258"]);
+            }
+            match (task_attribution::started_delivery(p, &task), case.own_only) {
+                (Ok(delivery), true) => {
+                    let commits = delivery.map(|delivery| delivery.commits).unwrap_or_default();
+                    if commits != vec![own.clone()] {
+                        failures.push(format!("{}: expected only {own}, got {commits:?}", case.name));
+                    }
+                }
+                (Err(refusal), false) if case.delete_target => {
+                    if !refusal.contains("epic/train-a258") {
+                        failures.push(format!("{}: refusal does not name the missing target: {refusal}", case.name));
+                    }
+                }
+                (Err(refusal), false) => {
+                    if !refusal.contains(&foreign) {
+                        failures.push(format!("{}: refusal does not name {foreign}: {refusal}", case.name));
+                    }
+                }
+                (other, _) => failures.push(format!(
+                    "{}: unexpected {:?}", case.name, other.map(|delivery| delivery.map(|d| d.commits)),
+                )),
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));

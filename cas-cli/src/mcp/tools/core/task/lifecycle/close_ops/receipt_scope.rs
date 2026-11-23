@@ -1560,6 +1560,7 @@ raise SystemExit(1 if failed else 0)
             .any(|reply| crate::gates::codes_in(reply).contains(&"G-61"));
         let pass = |at: &str, spec: &str| widened::record(root.path(), &repo, at, widened::Proof {
             runner: "jest".into(), scope: widened::Scope::File(spec.into()), reason: "widened:no static changed-test selection".into(),
+            configs: Default::default(),
         }, 1).unwrap();
         assert!(g61(&head));
         pass(&head, specs[0]);

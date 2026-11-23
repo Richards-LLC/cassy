@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.51.0] - 2026-11-23
+
+### Fixed — Worker check
+
+- **A Playwright test declared with the tag option can now earn its stability proof** — Was: the capped Playwright stability run selected a test by a title pattern that had to end the line, but Playwright greps the title followed by the test's tags, so a test such as `test('t', { tag: ['@staging'] }, fn)` was never found and could not be parked ("No tests found"). Now: the pattern allows trailing `@tag` words after the title, so tagged and untagged tests are both selected and a different test whose title merely starts the same is still left out (GH #2349).
+- **A Vue component no longer demands a proof that cannot run** — Was: park asked for `vitest related --run <file>.vue` even when the project's vitest has no Vue plugin, so the command crashed while transforming the component and no receipt, or override, could ever close the delivery. Now: a component that vitest cannot load proves through the specs that import it, or through its package's own vitest run, and park only prescribes commands that can run (GH #2352).
+
+### Fixed — Pre-merge verification
+
+- **A held merge that lands on approval now wakes its supervisor** — Was: when the automatic verifier approved a held delivery, Cassy continued the merge and closed the task but sent the supervisor nothing, so the supervisor sat idle until asked and a production release waited 30 minutes. Now: the supervisor gets one wake per approval saying the merge landed and what state the task is in, so promotion, notes and dependents can start at once (GH #2365).
+
+### Changed — Testing skills
+
+- **Playwright authoring covers async jobs, personas and paid lanes** — Was:
+  the Playwright authoring skill had one shared sign-in state, opt-out live
+  smoke and no guidance for background jobs or `.mjs` helpers. Now: it grades
+  background jobs on server status, routes specs to per-persona signed-in
+  projects by tag, gates paid and staging-only tests behind env vars in config,
+  and loads helper `.mjs` as native ESM via `build.external`.
+
 ## [4.50.0] - 2026-11-23
 
 ### Fixed — Factory CI watch

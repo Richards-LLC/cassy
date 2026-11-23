@@ -1411,11 +1411,24 @@ fn passing_test_records(
 /// GH #2378: the other checkouts of this repository. A receipt binds a clean
 /// commit, so a pass in any of them proves the same tree at that head; a
 /// supervisor closing for a stopped worker runs in that worker's worktree.
+/// Read from Git's administrative files, so a close spawns no extra process.
 fn sibling_worktrees(repo: &Path) -> Vec<PathBuf> {
-    git_output(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default().lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .filter_map(|path| Path::new(path).canonicalize().ok())
-        .filter(|path| path != repo)
+    let dot_git = repo.join(".git");
+    let common = if dot_git.is_dir() { dot_git } else {
+        let Some(admin) = std::fs::read_to_string(&dot_git).ok()
+            .and_then(|link| link.trim().strip_prefix("gitdir:").map(|path| repo.join(path.trim())))
+        else { return Vec::new() };
+        match std::fs::read_to_string(admin.join("commondir")) {
+            Ok(common) => admin.join(common.trim()),
+            Err(_) => return Vec::new(),
+        }
+    };
+    let linked = std::fs::read_dir(common.join("worktrees")).into_iter().flatten().flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("gitdir")).ok())
+        .filter_map(|gitdir| Path::new(gitdir.trim()).parent().map(Path::to_path_buf));
+    common.parent().map(Path::to_path_buf).into_iter().chain(linked)
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path != repo && path.join(".git").exists())
         .collect()
 }
 

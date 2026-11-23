@@ -112,7 +112,7 @@ fn plan(settings: &FactoryGatewayConfig, cli: &str, probe: impl Fn(&str, &str) -
     if !settings.enabled || !matches!(cli, "claude" | "codex") {
         return Plan::Off;
     }
-    let routed = settings.clients.as_ref().map_or(true, |clients| clients.iter().any(|c| c.trim() == cli));
+    let routed = settings.clients.as_ref().is_none_or(|clients| clients.iter().any(|c| c.trim() == cli));
     if !routed {
         return Plan::Off;
     }

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -485,6 +486,33 @@ path="tests/builtin_archive_portability_test.rs"
         result = subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(json.loads(destination.read_text())["uncertain"])
+
+    def test_lane_python_children_preserve_watched_build_inputs(self):
+        # The registry parity test imports rust_test_source through this real
+        # command. build.rs watches scripts/, including any new bytecode cache.
+        for name in ('check-test-shape.py', 'rust_test_source.py'):
+            self.put('scripts/' + name, (HERE / name).read_text())
+        fake = self.root / 'fake-cargo'
+        self.put('fake-cargo', '#!' + sys.executable + '\n'
+                 'import subprocess, sys\n'
+                 'subprocess.run([sys.executable, "scripts/check-test-shape.py", '
+                 '"--print-gate-codes"], check=True)\n'
+                 'print("Summary [ 0.01s] 1 test run: 1 passed")\n', executable=True)
+        watched = self.root / 'scripts'
+        def inputs():
+            return {str(path.relative_to(watched)): path.stat().st_mtime_ns
+                    for path in watched.rglob('*')}
+        before = inputs()
+        with patch.dict(os.environ, {'CARGO': str(fake)}), \
+                patch.object(impact, 'proof_configuration', return_value=None):
+            os.environ.pop('PYTHONDONTWRITEBYTECODE', None)
+            os.environ.pop('PYTHONPYCACHEPREFIX', None)
+            result = impact.lane_run(
+                self.root, {'head': self.base, 'mode': 'scoped'},
+                ['-p', 'cas', '--lib'], 'test(gates::registry_tests::)', [],
+                self.root / 'output/own-receipt.json', 'lane-own')
+        self.assertEqual(result, (0, False))
+        self.assertEqual(inputs(), before)
 
     def test_lane_runs_own_module_tests_before_the_ring_that_selects_them(self):
         """cas-08c8 shape: a module edit breaks a consumer suite outside it."""

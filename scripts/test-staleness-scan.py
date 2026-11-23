@@ -42,12 +42,23 @@ class StalenessScan(unittest.TestCase):
                                  'await request.get("/api/v1/items");',
             'e2e/dead.spec.ts': 'await page.goto("/legacy/board");\nawait page.goto("/api/v0/board");',
             'e2e/unsure.spec.ts': 'await page.goto("/");\nawait page.locator("[data-popover-open]").click();',
-        }, '--specs', 'e2e/*.spec.ts', '--routes', 'nuxt:web/pages', '--api', 'nestjs:api',
+            # The same calls, formatted across lines, chained, templated and beside comments.
+            'e2e/twin/current.spec.ts': 'await page\n  .goto(\n    "/p/a/i/7",\n  );\nawait request.get(API +\n  "/api/v1/items/" + `${\n  `${id}`\n}`);\n'
+                                        'await expect(page\n  .getByTestId(\n    `item-card`,\n  )).toBeVisible(); // was "/api/v0/old"',
+            'e2e/twin/stale.spec.ts': '/* await request.get("/api/v0/gone");\n   await page.goto("/gone"); */\nawait page.goto(\n  "/");\n'
+                                      'await expect(\n  page.locator(\n    \'.reply-pending\',\n  ),\n).toHaveCount(0);\nawait request\n  .get(\n    "/api/v1/items");',
+            'e2e/twin/dead.spec.ts': 'await page.goto(\n  "/legacy/board");\nconst ok = /[`"\']/.test(x);\nawait page.waitForURL(\n  "/api/v0/board");',
+            'e2e/twin/unsure.spec.ts': 'await page.goto(\n  "/");\nawait page\n  .locator(\n    "[data-popover-open]",\n  )\n  .click();',
+        }, '--specs', 'e2e/**/*.spec.ts', '--routes', 'nuxt:web/pages', '--api', 'nestjs:api',
            '--api-prefix', r'^/api/', '--sources', 'web', markdown=True)
         rows, table = rows
-        self.assertEqual({spec: row['grade'] for spec, row in rows.items()}, {
-            'e2e/current.spec.ts': 'CURRENT', 'e2e/stale.spec.ts': 'STALE',
-            'e2e/dead.spec.ts': 'DEAD', 'e2e/unsure.spec.ts': 'UNSURE'})
+        grades = {'current': 'CURRENT', 'stale': 'STALE', 'dead': 'DEAD', 'unsure': 'UNSURE'}
+        deps = lambda row: sorted((d['kind'], d['value'], d['verdict']) for d in row['dependencies'])
+        for name, grade in grades.items():
+            plain, twin = rows[f'e2e/{name}.spec.ts'], rows[f'e2e/twin/{name}.spec.ts']
+            self.assertEqual((plain['grade'], twin['grade']), (grade, grade), name)
+            self.assertEqual(deps(twin), deps(plain), name)
+        self.assertEqual(len(rows), 8)
         receipts = {d['kind']: d['source_line'] for d in rows['e2e/current.spec.ts']['dependencies']}
         self.assertEqual(receipts, {'route': 'web/pages/p/[slug]/i/[itemId].vue:1',
                                     'api': 'api/items.controller.ts:3', 'testid': 'web/pages/p/[slug]/i/[itemId].vue:1'})
@@ -78,9 +89,12 @@ class StalenessScan(unittest.TestCase):
             ('testid', 'syntax-keyword'): ('unsure', 'app/src/syntax.ts:1'),
         })
 
-    def test_an_omitted_index_never_grades_current_and_an_empty_one_reports_missing(self):
+    def test_an_omitted_index_or_a_runtime_argument_never_grades_current_and_an_empty_index_reports_missing(self):
         files = {'app/index.html': '<div></div>', 'app/empty/.keep': '',
-                 'app/e2e/a.spec.ts': 'await page.goto("/");\nawait page.getByTestId("card");'}
+                 'app/e2e/a.spec.ts': 'await page.goto("/");\nawait page.getByTestId("card");',
+                 'app/e2e/b.spec.ts': 'await page.goto(url);\nawait page.goto(page.url());'}
+        dynamic = scan(files, '--specs', 'app/e2e/b.spec.ts', '--routes', 'static:app', '--sources', 'app')['app/e2e/b.spec.ts']
+        self.assertEqual((dynamic['grade'], dynamic['unchecked']), ('UNCHECKED', 1))  # goto(url) is unreadable; a reload is not
         omitted = scan(files, '--specs', 'app/e2e/*.spec.ts', '--routes', 'static:app')['app/e2e/a.spec.ts']
         self.assertEqual((omitted['grade'], omitted['ok'], omitted['unchecked']), ('UNCHECKED', 1, 1))
         empty = scan(files, '--specs', 'app/e2e/*.spec.ts', '--routes', 'static:app', '--sources', 'app/empty')['app/e2e/a.spec.ts']

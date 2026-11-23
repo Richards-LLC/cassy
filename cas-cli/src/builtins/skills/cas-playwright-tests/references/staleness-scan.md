@@ -16,14 +16,14 @@ python3 -I <skill-dir>/scripts/staleness-scan.py --root <project> \
   --sources web > <task-artifacts>/staleness.md
 ```
 
-The scan reads each spec and the relative helpers it imports. It does not read app sources that a spec imports. From those files it extracts four kinds of dependency:
+The scan reads each spec and the relative helpers it imports. It does not read app sources that a spec imports. It reads every string literal in those files, whatever the formatting: calls split across lines, chained calls and multi-line or nested template literals all count, and comments never do. Each receipt maps the literal back to its line. From the literals it extracts four kinds of dependency:
 
 - routes passed to `goto`, `toHaveURL` and `waitForURL` (one that matches `--api-prefix` counts as an API path)
 - string literals that match `--api-prefix`
 - test ids from `getByTestId` and `data-testid`
 - classes and `data-*` attributes in `locator()` selectors
 
-It resolves each dependency against the current sources. An exact path must match one route; only a glob or template tail (`/v1/**`, `` `/v1/${id}` ``) or a `startsWith` argument may match the start of a route. A root catch-all (an SPA fallback, a CORS preflight or a Nuxt `[...slug]` page) is ignored, because it would match every path. Test and e2e files are never treated as app sources. The default Markdown output lists every dependency with its spec line and its source receipt; `--json` emits the same data. Omitting `--routes`, `--api` or `--sources` leaves those dependencies unchecked; an index that is given but empty reports them missing.
+It resolves each dependency against the current sources. An exact path must match one route; only a glob or template tail (`/v1/**`, `` `/v1/${id}` ``) or a `startsWith` argument may match the start of a route. A root catch-all (an SPA fallback, a CORS preflight or a Nuxt `[...slug]` page) is ignored, because it would match every path. Test and e2e files are never treated as app sources. The default Markdown output lists every dependency with its spec line and its source receipt; `--json` emits the same data. Omitting `--routes`, `--api` or `--sources` leaves those dependencies unchecked; an index that is given but empty reports them missing. In the spec itself, a supported call whose argument is not a string literal (`goto(url)`, `getByTestId(/^row-/)`, `locator(selector)`) is unchecked too, because its value exists only at runtime; `goto(page.url())` reloads an already graded URL and is skipped. Inside an imported helper such a call is the helper's parameter and is not counted, so read specs that pass literals through helpers by hand.
 
 ## Grades
 
@@ -31,7 +31,7 @@ It resolves each dependency against the current sources. An exact path must matc
 | --- | --- | --- |
 | CURRENT | Every dependency resolves to a cited source line | keep |
 | UNSURE | Nothing is missing, but a test id or `data-*` attribute is only built at runtime | grep the setter, then grade |
-| UNCHECKED | Nothing is missing, but an index was omitted | rerun with the missing index |
+| UNCHECKED | Nothing is missing, but an index was omitted or the spec passes a runtime value to a supported call | rerun with the missing index, or read the call |
 | STALE | At least one dependency is missing | rewrite |
 | DEAD | Dependencies are missing and none resolve | delete, or rewrite from the current app |
 
@@ -62,10 +62,11 @@ python3 -I cas-cli/src/builtins/skills/cas-playwright-tests/scripts/staleness-sc
   --routes static:hub-web --api axum:cas-cli/src/hub --api-prefix '^/v\d+/' --sources hub-web/src
 ```
 
-On November 23, 2026 the scan graded 50 specs: 47 CURRENT, 3 UNSURE, 0 STALE and 0 DEAD. It checked 1,792 dependencies: 1,020 hub API paths, 401 test ids, 188 classes, 115 routes and 68 `data-*` attributes.
+On November 23, 2026 the scan graded 50 specs: 40 CURRENT, 2 UNSURE, 8 UNCHECKED, 0 STALE and 0 DEAD. It checked 1,806 dependencies: 1,020 hub API paths, 401 test ids, 188 classes, 115 routes, 68 `data-*` attributes and 14 runtime arguments.
 
 - Every hub API path that the journeys and the hub double use resolved to a `.route(…)` line in `cas-cli/src/hub/server.rs`.
-- The three UNSURE specs depend on runtime-built test ids. `credential-generation` and `key-fingerprint` come from `installation-inventory.ts`, which sets `testid` from the field name. `syntax-keyword`, `syntax-comment` and `syntax-string` come from `rich-syntax.ts`, which sets `` `syntax-${kind}` ``. Reading those setters settles all three as CURRENT.
+- Runtime-built test ids: `credential-generation` and `key-fingerprint` come from `installation-inventory.ts`, which sets `testid` from the field name. `syntax-keyword`, `syntax-comment` and `syntax-string` come from `rich-syntax.ts`, which sets `` `syntax-${kind}` ``. Reading those setters settles them.
+- The eight UNCHECKED specs pass runtime values: `goto(pairing.href)` in the real-hub journey, `goto(url)` and `goto(baseURL!)`, `locator(id)`, and URL or test-id regexes. Each finding names the call to read.
 <!-- cas-src:else -->
 ## Worked example: a Vite app on a Rust hub
 
@@ -75,5 +76,5 @@ python3 -I <skill-dir>/scripts/staleness-scan.py --root . \
   --routes static:web --api axum:server/src --api-prefix '^/v\d+/' --sources web/src
 ```
 
-On a 50-spec journey suite the scan checked 1,792 dependencies in about a second: 47 CURRENT, 3 UNSURE, 0 STALE, 0 DEAD. All three UNSURE specs used test ids built at runtime (`` `syntax-${kind}` ``, or a field name with `_` replaced by `-`). Reading the setter named in each finding settled them as CURRENT.
+On a 50-spec journey suite the scan checked 1,806 dependencies in about a second: 40 CURRENT, 2 UNSURE, 8 UNCHECKED, 0 STALE, 0 DEAD. The UNSURE specs used test ids built at runtime (`` `syntax-${kind}` ``, or a field name with `_` replaced by `-`); the UNCHECKED ones navigated to runtime URLs or matched by regex. Each finding names the setter or call to read.
 <!-- cas-src:end -->

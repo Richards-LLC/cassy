@@ -17,7 +17,7 @@ metadata:
 
 ## Build the spec
 
-1. Verify the latest stable version and chosen supported Node runtime; upgrade the locked package and matching browser binaries first. Stable verified November 12, 2026: 1.65.0. Recheck upstream on a later upgrade; this is not a permanent version floor.
+1. Verify the latest stable version and chosen supported Node runtime; upgrade the locked package and matching browser binaries first. Stable verified November 21, 2026: 1.65.1. Recheck upstream on a later upgrade; this is not a permanent version floor.
 2. Use the project's canonical config/projects and testMatch allowlist, not per-ticket configs. Apply [configuration.md](references/configuration.md) for retries, reports, required coverage, headless operation and targets. Keep the established integration owner; local --only-changed is iteration, not final proof.
 3. Validate resolved frontend and API origins against a reviewed local/staging allowlist before contexts, login, setup or cleanup. Production is forbidden. Gate remote mutations and cleanup separately; forbidOnly merely rejects focused tests.
 4. Choose hermetic or live. Hermetic tests install a context-wide deny-by-default network allowlist before navigation/popups, block bypassing Service Workers and account for WebSockets/other channels. Live tests use reserved QA identities and explicit mutation permission; keep them out of the hermetic PR lane.

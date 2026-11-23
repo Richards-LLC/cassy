@@ -859,6 +859,28 @@ keep their existing MCP behavior under either value; hooks, account selection,
 Teams and worker credential protections still apply. Invalid values are refused
 by both config commands and TOML loading.
 
+`factory.claude.worker_sandbox` (default `shadow`) controls macOS Claude workers'
+OS sandbox (cas-3751a):
+
+- **`shadow`:** the worker settings carry a generated `sandbox` block, which
+  `cas-mux` completes at launch with the checkout's exact git paths. While the
+  sandbox enforces, the stage-A text guards record would-deny facts for Bash
+  instead of refusing it (`cas gates report`, column `shadowed`).
+- **Grants (cas-f157):** besides the checkout, git paths, the capped runner's
+  `CAS_ROOT` directories and the operator's effective write roots, the profile
+  grants only the worker's current tasks' artifact directories
+  (`<artifacts_root>/<project-key>/<task-id>`) and the checkout's own scratch
+  (its private temporary directory and a relocated Cargo target). The settings
+  are regenerated at every spawn and recycle. Starting a task the running
+  profile does not grant queues one recycle of that worker, and a queue
+  boundary restarts a sandboxed worker before its successor starts.
+- **`off`:** workers launch without the sandbox, and those guards enforce.
+
+Linux workers and supervisors are not sandboxed. The corpus test
+`worker_sandbox::tests::bypass_corpus_is_blocked_through_the_generated_profile`
+runs only when a named capped run passes `CAS_SRT_BIN=<sandbox-runtime srt>`;
+otherwise it skips with a reason.
+
 Use `cas config set factory.claude.remote_control true` to opt in, and
 `cas config set factory.claude.fallback_model sonnet` to choose a fallback.
 An empty fallback value clears it. Explicitly requested unsupported flags
@@ -2934,6 +2956,10 @@ retain one-pass crate coverage. Vitest, Jest and Playwright use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`;
 Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
 of the changed tests alone, which `node:test` cannot retry.
+A spec that only a sibling config lists, such as `jest-integration.config.js` or
+`playwright.hermetic.config.ts`, runs under that config. The runner's own listing
+decides ownership, and the prescribed command names it with `--config`; a
+caller's `--config` always wins (GH #2058, #2195).
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
 When discovery cannot classify an input, the capped runner widens to the whole
@@ -2953,8 +2979,10 @@ If a broader Rust selection fails, prior valid stability can survive for owned
 tests with a positive passing result in every attempted run. Failed or unrun
 tests lose that evidence, and changed inputs still require fresh proof. This
 restores stability only; the failed selection receives no passing crate receipt.
-Stability uses the same receipt carry-forward as crate proof: documentation or
-changelog commits preserve it when no test/build inputs change. Target merges
+Stability and widened receipts use the same receipt carry-forward as crate
+proof: documentation, changelog or `docs/qa/bug-families/` fragment commits
+preserve them when no test/build inputs change. A bug-family YAML counts as an
+input only when a Rust source names it, not by its extension. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
 even when its name is unchanged or its product change is already on the target.
 For widened Playwright proof, a failing journey is replayed at the merge base
@@ -3405,13 +3433,19 @@ Slim lanes omit broad Rust tests for factory pushes, but run the train's
 impact selection (`scripts/ci-test-impact.py`) for the delivery's range on hosted
 runners (cas-2e1b). Selection compares the pushed head with its merge-base with
 the live target, as resolved by the classifier. Content merged in from the
-train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
-is used only for failure attribution, falling back to the inferred base when
-missing or not an ancestor. The plan logs both bases separately.
+train is excluded. Failure attribution uses that same merge-base: the newest
+target commit already contained in the delivery, including train merges after
+task start. The recorded start base in `refs/cas/delivery-base/<branch>` is a
+fallback only when the target cannot be resolved and the record is an ancestor
+of HEAD. The plan logs selection and attribution bases separately.
 `Scoped Validation — impact own tests` builds the selection and runs the changed
 modules' unit tests, edited integration suites, directly changed crates and
 explicit file-reading contracts first; up to three `impact ring` shards run the
-rest from its archive after own tests pass. Agent/config roots `.claude/`,
+rest from its archive after own tests pass. The plan's `own` expression is lane
+CI's (regex and `or` included); the plan also logs `Worker proof`, one admitted
+named-filter `worker-check` command per package and harness covering each own
+part, and `lane CI only` for parts no named filter can express, such as a whole
+crate or integration binary (GH #2140). Agent/config roots `.claude/`,
 `.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
 workflow inputs use their existing script/CI contract tier plus Rust test
 functions with matching file literals, including local helper/constant reads.
@@ -5183,6 +5217,19 @@ earlier registration, so concurrent supervisors should use the default session
 slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
+
+## Divergent unparked task migrations
+
+An ordinary task target edit that excludes an unparked task's recorded start
+base refuses before saving with `rule_id=unparked_target_base_migration` when
+its known local/origin source refs remain at that base. Nonempty or rewritten
+deliveries keep their recorded boundary and existing explicit rebind checks.
+The structured `recovery` names the explicit supervisor `proof_scope_fix`
+request, replacement branch/base and `rebind_branch` request. For an Open task,
+the assigned worker first executes `recovery.start` on the unchanged old lane
+so the supervisor correction applies to an active delivery cycle. Preserve the
+old lane; create the clean replacement from that base, approve its binding,
+then start again. Dirty checkouts and foreign work still refuse rebinding.
 
 ## Bounded MCP task reads
 

@@ -1,9 +1,0 @@
-title: Task list rejects an unsupported byte cursor
-statement: >-
-  The unified task service rejects a supplied list offset with INVALID_PARAMS
-  rather than replaying the first page. A disposable inventory above one hundred
-  tasks retains ordinary limit selection. Show and notes byte pages still
-  reconstruct the full response exactly, including Unicode boundaries.
-tasks: [cas-91db]
-journeys: []
-invariants: []

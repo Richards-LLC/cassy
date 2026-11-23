@@ -93,7 +93,10 @@ impl WorkerHost {
             &std::fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         let Some(host) = metadata.worker_host else { return Ok(None) };
         let project = metadata.project_dir.as_deref().ok_or("Worker host has no project")?;
+        // Both sides physical: metadata may record a logical path such as
+        // macOS /var for /private/var (cas-fd37).
         if crate::store::find_cas_root_ignoring_env(Path::new(project)).map_err(|e| e.to_string())?
+            .canonicalize().map_err(|e| e.to_string())?
             != root.canonicalize().map_err(|e| e.to_string())? {
             return Err("Worker host belongs to another project".into());
         }

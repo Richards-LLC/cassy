@@ -1995,10 +1995,19 @@ impl SqlitePromptQueueStore {
                         let holding = Self::holding_detail_on_conn(tx, prompt.id)?;
                         // cas-acb6e (GH #2231): a hold recorded late explains
                         // only the time after it began, not the whole delay.
-                        let started = envelope.occurrence.min(prompt.created_at);
+                        // GH #1731 §2: a row queued long after its occurrence
+                        // was late before the queue held it; that is a known
+                        // cause, and the queue's own wait starts at enqueue.
+                        let enqueue_lag_secs = (prompt.created_at - envelope.occurrence).num_seconds().max(0);
+                        let enqueued_late = enqueue_lag_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS;
+                        let started = if enqueued_late {
+                            prompt.created_at
+                        } else {
+                            envelope.occurrence.min(prompt.created_at)
+                        };
                         let unrecorded_secs = Self::holding_since_on_conn(tx, prompt.id)?
                             .map_or(0, |since| (since - started).num_seconds().max(0));
-                        let cause = holding.as_deref().map(|detail| {
+                        let held = holding.as_deref().map(|detail| {
                             let text = detail.split_whitespace().collect::<Vec<_>>().join(" ");
                             let mut bounded = text.chars().take(160).collect::<String>();
                             if text.chars().count() > 160 { bounded.push('…'); }
@@ -2007,7 +2016,17 @@ impl SqlitePromptQueueStore {
                             } else {
                                 format!("held: {bounded}")
                             }
-                        }).unwrap_or_else(|| "cause unrecorded".into());
+                        });
+                        let queued_wait_secs = (now - prompt.created_at).num_seconds().max(0);
+                        let cause = match (enqueued_late, held) {
+                            (false, held) => held.unwrap_or_else(|| "cause unrecorded".into()),
+                            (true, Some(held)) => format!("queued {}m after it happened; {held}", enqueue_lag_secs / 60),
+                            (true, None) if queued_wait_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS => format!(
+                                "queued {}m after it happened; then cause unrecorded for {}m",
+                                enqueue_lag_secs / 60, queued_wait_secs / 60,
+                            ),
+                            (true, None) => format!("queued {}m after it happened", enqueue_lag_secs / 60),
+                        };
                         let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
                         summary.push_str(&format!(" [delayed {}m; {cause}]", age_secs / 60));
                     }
@@ -8296,9 +8315,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn release_orphaned_transport_claims(&self, factory_session: &str) -> Result<usize> {
-        crate::shared_db::with_write_retry(|| {
+        let recipients = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let released = conn.execute(
+            let mut released = conn.prepare(
                 "DELETE FROM prompt_queue_recipient_seen
                  WHERE source = 'transport_claimed'
                    AND delivered_at IS NULL
@@ -8309,11 +8328,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                          AND transport_delivered_at IS NULL
                          AND deferred_inbox_at IS NULL
                          AND factory_session = ?
-                   )",
-                params![factory_session],
+                   )
+                 RETURNING recipient",
             )?;
-            Ok(released)
-        })
+            let recipients = released
+                .query_map(params![factory_session], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(recipients)
+        })?;
+        // GH #2062: released rows are visible to hooks again; signal each
+        // recipient once so a boundary that checked during a claim reads them.
+        let mut signalled = std::collections::HashSet::new();
+        for recipient in &recipients {
+            if signalled.insert(recipient.as_str()) {
+                self.signal_inbox(recipient);
+            }
+        }
+        Ok(recipients.len())
     }
 
     fn retarget_operator_rows_to_successor(
@@ -8681,7 +8712,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         token: ClaimToken,
     ) -> Result<bool> {
         let seen_at = token.seen_at();
-        crate::shared_db::with_write_retry(|| {
+        let released = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let changed = conn.execute(
                 // cas-1f0c: once the Teams body fallback has sent the body,
@@ -8692,7 +8723,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![prompt_id, recipient, seen_at],
             )?;
             Ok(changed == 1)
-        })
+        })?;
+        // GH #2062: as in `park_for_busy_recipient`, a released row needs a
+        // fresh signal for the tool boundary that checked during the claim.
+        if released {
+            self.signal_inbox(recipient);
+        }
+        Ok(released)
     }
 
     fn latest_created_at_for_targets_from_sources(
@@ -10317,21 +10354,21 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         detail: Option<&str>,
         recheck_at: DateTime<Utc>,
     ) -> Result<()> {
-        crate::shared_db::with_write_retry(|| {
+        let released = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let open: Option<i64> = tx
+            let open: Option<String> = tx
                 .query_row(
-                    "SELECT id FROM prompt_queue
+                    "SELECT target FROM prompt_queue
                      WHERE id = ? AND processed_at IS NULL AND acked_at IS NULL",
                     params![prompt_id],
                     |row| row.get(0),
                 )
                 .optional()?;
-            if open.is_none() {
+            let Some(target) = open else {
                 // Surfaced, acked or terminal meanwhile: nothing to park.
-                return Ok(());
-            }
+                return Ok(None);
+            };
             Self::atomic_stage_stamp_in_tx(
                 &tx,
                 prompt_id,
@@ -10346,7 +10383,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // keeps the claim while the wake is deferred. Hooks skip claimed
             // rows, so a parked row that kept its claim would be as hidden as
             // an abandoned one. Release it here, atomically with the park.
-            tx.execute(
+            let released = tx.execute(
                 "DELETE FROM prompt_queue_recipient_seen
                  WHERE prompt_id = ?1 AND source = 'transport_claimed'
                    AND teams_body_fallback_at IS NULL
@@ -10354,8 +10391,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![prompt_id],
             )?;
             tx.commit()?;
-            Ok(())
-        })
+            Ok((released > 0).then_some(target))
+        })?;
+        // GH #2062: the released row is visible to hooks again, and a tool
+        // boundary inside the claim window has already checked past its
+        // enqueue signal. Signal again so the next boundary reads it.
+        if let Some(target) = released {
+            self.signal_inbox(&target);
+        }
+        Ok(())
     }
 
     fn list_most_retried_pending(
@@ -11564,6 +11608,44 @@ mod tests {
             assert_eq!(json["holding_detail"], serde_json::json!(detail));
         }
         assert_ne!(summaries[0], summaries[4], "a hold recorded 29 minutes late must be labelled differently");
+    }
+
+    /// GH #1731 §2: `task_started (17:10:32Z) [delayed 15m; cause unrecorded]`.
+    /// A row queued long after its occurrence carries that known cause; only
+    /// a row that waited in the queue with no hold stays unexplained.
+    #[test]
+    fn late_enqueued_lifecycle_digest_names_its_enqueue_delay_gh_1731() {
+        let mut summaries = Vec::new();
+        for enqueued_late in [false, true] {
+            let (temp, store) = create_test_store();
+            use crate::AgentStore;
+            let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role(
+                "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            supervisor.factory_session = Some("session".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-ccef".into(), "relay target".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            let occurrence = Utc::now() - chrono::Duration::minutes(15);
+            let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, occurrence.to_rfc3339());
+            let EnqueueIdempotentResult::Created(id) = store.enqueue_idempotent("lifecycle:1", "supervisor", &body, Some("session"), Some("task_started: cas-ccef"), None, "started-1", Some(&QueueOrigin::Daemon)).unwrap() else { panic!("new relay") };
+            if !enqueued_late {
+                store.conn.lock().unwrap().execute(
+                    "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                    params![occurrence.to_rfc3339(), id],
+                ).unwrap();
+            }
+            let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+            assert_eq!(surfaced.len(), 1);
+            assert!(surfaced[0].summary.is_some());
+            summaries.push(surfaced[0].summary.clone());
+        }
+        assert_ne!(summaries[0], summaries[1], "a late enqueue is a recorded cause, not an unexplained wait");
     }
 
     #[test]

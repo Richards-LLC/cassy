@@ -316,7 +316,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert!(facts::record_false_positive(&store, "G-999", None, "x").is_err());
 
     let counts = facts::summarize(&store, before).unwrap();
-    assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1 });
+    assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1, shadowed: 0 });
     assert_eq!(counts[UNCODED].refused, 1);
 
     // Replay the denied CLI command through its parser, handler and existing
@@ -330,7 +330,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let error = crate::cli::gates_cmd::execute(command, &cli, Some(dir.path())).unwrap_err();
     facts::observe_refusal(dir.path(), None, &format!("{error:#}"));
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-153"),
-        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, ..Default::default() }));
 
     // Exercise the real MCP transport/router with a non-task tool, so a
     // per-task observer cannot make the boundary test pass.
@@ -383,17 +383,17 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     // handler-drain signal, including its observer, rather than polling facts.
     work.wait_idle().await;
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-68"),
-        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
+        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0, shadowed: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
     client.cancel().await.unwrap();
     server.await.unwrap();
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-116"),
-        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, ..Default::default() }));
 
     // Invalid native input returns H-01 before the inner handle_hook route.
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok("{".into()), true).unwrap();
     assert!(facts::hook_denial(&output).is_some_and(|reason| codes_in(reason).contains(&"H-01")));
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-01"),
-        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, ..Default::default() }));
 
     // Drive an allowed stored publication override through the real outer
     // hook path; no Violet operation executes in this fixture.
@@ -407,7 +407,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok(input.clone()), false).unwrap();
     assert!(facts::hook_denial(&output).is_none());
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-07"),
-        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }));
+        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0, shadowed: 0 }));
     // Task notes are append-preserving; use a fresh epic with no approval.
     epic.id = "cas-publication-held".into();
     epic.notes.clear();
@@ -417,7 +417,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok(input.to_string()), false).unwrap();
     assert!(facts::hook_denial(&output).is_some());
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-07"),
-        Some(&facts::Counts { refused: 1, overridden: 1, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, overridden: 1, false_positive: 0, shadowed: 0 }));
 
     // The shared observer distinguishes a tagged accepted override from a
     // successful read quoting the same code.
@@ -431,7 +431,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         override_tag("G-108", override_tag("G-108", tag("G-114", "accepted"))))]));
     facts::observe_tool_result(dir.path(), None, &override_reply);
     assert_eq!(facts::summarize(&store, before).unwrap()["G-108"],
-        facts::Counts { refused: 0, overridden: 1, false_positive: 0 });
+        facts::Counts { refused: 0, overridden: 1, false_positive: 0, shadowed: 0 });
 
     // Replay CAS_SKIP_FAST_ROWS through the real hook. Capture only the
     // executable boundary, then dispatch its exact argv through the real CLI
@@ -450,12 +450,13 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         std::fs::set_permissions(&fake_cas, std::fs::Permissions::from_mode(0o755)).unwrap();
         let script = dir.path().join("fast-rows-pre-push.sh");
         std::fs::write(&script, include_str!("../../../scripts/fast-rows-pre-push.sh")).unwrap();
+        std::fs::write(dir.path().join("worker-run.sh"), include_str!("../../../scripts/worker-run.sh")).unwrap();
         for accepts_fact in [true, false] {
             if !accepts_fact {
                 std::fs::write(&fake_cas, "#!/bin/sh\nexit 1\n").unwrap();
             }
             let mut hook = Command::new("bash").arg(&script).current_dir(dir.path())
-                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv)
+                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv).env_remove("CAS_ROOT")
                 .env("CAS_SKIP_FAST_ROWS", "fixture hotfix")
                 .stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
             writeln!(hook.stdin.take().unwrap(), "refs/heads/factory/fixture {} refs/heads/factory/fixture {}", "1".repeat(40), "0".repeat(40)).unwrap();
@@ -515,7 +516,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         }
         let counts = facts::summarize(&store, before).unwrap();
         for code in ["C-07", "H-38"] {
-            assert_eq!(counts[code], facts::Counts { refused: 1, overridden: 1, false_positive: 0 });
+            assert_eq!(counts[code], facts::Counts { refused: 1, overridden: 1, false_positive: 0, shadowed: 0 });
         }
     }
     assert!(facts::summarize(&store, Utc::now() + chrono::Duration::seconds(5)).unwrap().is_empty());

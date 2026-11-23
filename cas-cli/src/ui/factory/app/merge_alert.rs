@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 const RETRY_INTERVAL: chrono::Duration = chrono::Duration::minutes(1);
 const UNKNOWN_AFTER: chrono::Duration = chrono::Duration::minutes(10);
-const UNBOUND_REMINDER_HORIZON: chrono::Duration = chrono::Duration::minutes(10);
 const SETTLED_RETRY: chrono::Duration = chrono::Duration::minutes(10);
 
 pub(super) type ProbeCache = Arc<Probes>;
@@ -47,7 +46,7 @@ fn prior_ready(cas_dir: &Path, task: &str, tip: &str) -> Option<Ready> {
         &std::fs::read(ready_receipt_path(cas_dir, task, tip)).ok()?,
     ).ok()?;
     (receipt.evidence.task_id == task && receipt.evidence.factory_tip == tip).then(|| Ready {
-        tip: tip.to_string(), ci: "success", evidence: receipt.evidence, worker: receipt.worker,
+        tip: tip.to_string(), ci: "success", ci_source: String::new(), evidence: receipt.evidence, worker: receipt.worker,
     })
 }
 
@@ -479,6 +478,8 @@ pub(super) struct Ready {
     pub evidence: MergeAlertEvidence,
     pub tip: String,
     pub ci: &'static str,
+    /// cas-2421: for unknown CI, the check-runs query and what it observed.
+    pub ci_source: String,
     /// Present for an active delivery whose readiness does not depend on idle/park.
     pub worker: Option<String>,
 }
@@ -535,50 +536,16 @@ pub(super) struct WorkerWait {
     pub completion: Option<crate::factory_worker_runs::Completion>,
 }
 
-/// A self-reminder is a promised wake, not a stalled worker. Old-task,
-/// cancelled, fired and expired reminders cannot hide the current idle signal.
-/// An unbound reminder covers only a near wake/expiry, never a distant promise.
-pub(super) fn worker_has_pending_reminder(
-    data: &DirectorData,
-    worker: &str,
-    task: Option<&str>,
-    now: DateTime<Utc>,
-) -> bool {
-    let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
-    let owns = |id: &str| id == agent.id || id == agent.name;
-    data.reminders.iter().any(|reminder| {
-        // cas-c53a: the store's TTL anchor, used by both checks below: a time
-        // reminder counts from its due time, an event reminder from creation.
-        let ttl_start = match reminder.trigger_type {
-            cas_store::ReminderTriggerType::Time => reminder.trigger_at.unwrap_or(reminder.created_at),
-            cas_store::ReminderTriggerType::Event => reminder.created_at,
-        };
-        let horizon = UNBOUND_REMINDER_HORIZON.num_seconds();
-        let bound_or_soon = match reminder.task_id.as_deref() {
-            Some(id) => Some(id) == task,
-            None => match reminder.trigger_type {
-                cas_store::ReminderTriggerType::Time => reminder.trigger_at.is_some_and(|due| {
-                    (-horizon..=horizon).contains(&due.signed_duration_since(now).num_seconds())
-                }),
-                cas_store::ReminderTriggerType::Event => reminder.ttl_secs > 0 &&
-                    (0..=horizon).contains(&reminder.ttl_secs.saturating_sub(
-                        now.signed_duration_since(ttl_start).num_seconds(),
-                    )),
-            },
-        };
-        reminder.status == cas_store::ReminderStatus::Pending
-            && owns(&reminder.owner_id) && owns(&reminder.target_id)
-            && reminder.origin_session_id.as_deref().is_none_or(owns)
-            && bound_or_soon
-            && (reminder.ttl_secs == 0 || now.signed_duration_since(ttl_start).num_seconds() <= reminder.ttl_secs)
-    })
-}
-
 /// Live registered commands and candidate requests outlive harness turns.
 /// Lane locks and native descendants remain additional positive evidence.
 fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
     use crate::cli::factory::wedged;
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
+    // cas-f767 (GH #2132): a refused capped check records a capacity wait and
+    // its scheduled retry; that exit is a routine wait, not an idle worker.
+    if crate::factory_capacity_wait::view(cas_dir, &agent.id, Utc::now()).is_ok_and(|wait| wait.is_some()) {
+        return true;
+    }
     let Some(stored) = crate::store::open_agent_store(cas_dir).ok().and_then(|store| store.get(&agent.id).ok()) else {
         return false;
     };
@@ -671,7 +638,7 @@ fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&
         _ => return None,
     };
     let tip = evidence.factory_tip.clone();
-    let ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo);
+    let (ci, ci_source) = crate::mcp::tools::core::workflow::delivery_tip_ci_reading(&tip, repo);
     // cas-e48d: the target can gain this delivery while GitHub answers the
     // CI probe. Refresh containment too, so a completed-CI relay cannot quote
     // the pre-CI target. This remains one bounded exact-target check on the
@@ -691,7 +658,7 @@ fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&
         })?;
     if tip != evidence.factory_tip || tip != current { return None; }
     *observed_ci = ci;
-    Some(Ready { evidence, tip, ci, worker: None })
+    Some(Ready { evidence, tip, ci, ci_source, worker: None })
 }
 
 /// The same worker-owned pushed delivery as worktree_merge, with the stricter
@@ -753,7 +720,7 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
     if resolve(&branch).as_deref() != Some(&tip) { return None; }
     *observed_ci = ci;
     if ci != "success" { return None; }
-    Some(Ready { evidence, tip, ci, worker: Some(worker.to_string()) })
+    Some(Ready { evidence, tip, ci, ci_source: String::new(), worker: Some(worker.to_string()) })
 }
 
 #[cfg(test)]

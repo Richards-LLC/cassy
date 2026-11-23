@@ -990,7 +990,31 @@ mod tests {
             let replacement = process();
             record(&daemon, replacement.0.id(), None);
             assert!(reload_observation(daemon.app.cas_dir(), &daemon.session_name, &name, old.0.id()).is_none());
-            record(&daemon, replacement.0.id(), Some("9.99.2"));
+            // GH #2183: the replacement records its startup epoch while
+            // another factory process holds the write lock. Daemon startup
+            // logs a failed epoch write and serves on (daemon.rs:1096), so
+            // the outcome is judged by what status and Reload Cassy see.
+            let db = daemon.app.cas_dir().join("cas.db");
+            let (held, release) = std::sync::mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                let other = rusqlite::Connection::open(db).unwrap();
+                other.execute_batch("BEGIN IMMEDIATE").unwrap();
+                other.execute("INSERT INTO history_epochs (epoch_kind, started_at, pid, recorded_at)
+                    VALUES ('daemon_start', '2026-11-19T20:47:00Z', 7, '2026-11-19T20:47:00Z')", []).unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+                other.execute_batch("COMMIT").unwrap();
+            });
+            release.recv().unwrap();
+            let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
+            epoch.pid = Some(replacement.0.id().into()); epoch.version = Some("9.99.2".into());
+            let _ = cas_store::SqliteHistoryStore::open(daemon.app.cas_dir()).unwrap().record_epoch(&epoch);
+            writer.join().unwrap();
+            let status = crate::factory_binary_skew::snapshot_with_installed(daemon.app.cas_dir(), "9.99.2", Utc::now()).unwrap();
+            let shown = status.servers.iter().filter(|server| server.name == name).map(|server| (server.pid, server.version.clone(), server.session.clone())).collect::<Vec<_>>();
+            let reload = registered_cassy_server(daemon.app.cas_dir(), &daemon.session_name, &name).map(|server| (server.pid, server.version, server.session));
+            assert_eq!(shown, [(replacement.0.id(), Some("9.99.2".to_owned()), Some(daemon.session_name.clone()))], "status names the replacement");
+            assert_eq!(reload.as_ref(), shown.first(), "Reload Cassy selects the server status shows");
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let response = daemon.dispatch_supervisor_command(Request::Status, "reload".into(), owner.clone()).await.unwrap();

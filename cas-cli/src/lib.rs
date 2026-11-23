@@ -62,6 +62,7 @@ pub(crate) mod factory_candidate_queue;
 pub mod factory_ci_retry;
 pub(crate) mod factory_delivery_wake;
 pub(crate) mod factory_worker_check;
+pub(crate) mod worker_sandbox_profile;
 pub(crate) mod factory_capacity_wait;
 pub(crate) mod factory_worker_runs;
 pub mod factory_context_reset;
@@ -134,6 +135,7 @@ pub mod qa_traffic;
 /// cas-e8d1 (GH #1233): open work the record says is done.
 pub(crate) mod backlog_hygiene;
 pub mod qa_author_override;
+pub mod recovery_decision;
 pub(crate) mod phase_outcome;
 pub(crate) mod model_eval;
 pub(crate) mod qa_batch;

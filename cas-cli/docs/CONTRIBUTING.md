@@ -2970,6 +2970,9 @@ from its Jest config root and records proof for that source. It never drops the
 source selector to run the whole package; an empty related selection is not proof.
 Vitest source inputs, including Vue components and shared test helpers, use
 `vitest related --run <source file>` with the same source-specific receipt.
+A Vue component whose vitest config names no Vue plugin (`@vitejs/plugin-vue`
+or Nuxt's test config) cannot be transformed by `vitest related`, so it widens
+to its package run instead, and a Playwright spec importing it still proves it.
 Only Jest treats an arbitrary file under `__tests__` as a test by default;
 Vitest helpers there retain their source role and select importing specs.
 A Playwright helper that only Playwright specs import, directly or through other

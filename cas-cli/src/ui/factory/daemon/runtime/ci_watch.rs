@@ -1243,9 +1243,9 @@ impl GhCiTransport {
 
 /// How long the run list of a commit the newest runs do not cover is reused
 /// while the newest runs show the same runs of it (cas-0bc1). A finished commit
-/// changes only by a rerun of an old run, which the newest runs cannot show; 15
-/// minutes bounds that miss at 4 requests an hour per commit.
-const OUTSIDE_LISTING_RUNS_TTL: Duration = Duration::from_secs(900);
+/// changes only by a rerun of an old run, which the newest runs cannot show; 30
+/// minutes bounds that miss at 2 requests an hour per commit.
+const OUTSIDE_LISTING_RUNS_TTL: Duration = Duration::from_secs(1800);
 
 /// The runs read in one request. A shorter answer holds every run of the repo.
 const RUNS_PAGE: usize = 100;
@@ -1395,8 +1395,8 @@ impl CiTransport for GhCiTransport {
     /// Every run of the commit. The newest runs answer it when a run is still
     /// going (all a pending `ci_completed` reminder waits on) or when they hold
     /// every run of the commit. Only a commit they cut off is read by its own
-    /// request, and re-read when its newest runs changed or 15 minutes passed:
-    /// at most 4 requests an hour for a parked delivery, not one a poll
+    /// request, and re-read when its newest runs changed or 30 minutes passed:
+    /// at most 2 requests an hour for a parked delivery, not one a poll
     /// (cas-0bc1: 4,319 core calls an hour exhausted the quota).
     fn runs_for_sha(&self, sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
         let recent = self.recent_runs()?;
@@ -2480,7 +2480,7 @@ mod tests {
         poll(POLLS);
         assert_eq!(calls() - before, POLLS, "no cut-off commit is read again before its cache expires");
         for entry in std::fs::read_dir(env.home().join(".cas/gh-cache")).unwrap().flatten() {
-            let aged = std::time::SystemTime::now() - Duration::from_secs(20 * 60);
+            let aged = std::time::SystemTime::now() - Duration::from_secs(40 * 60);
             let _ = std::fs::File::options().write(true).open(entry.path()).and_then(|file| file.set_modified(aged));
         }
         let before = calls();

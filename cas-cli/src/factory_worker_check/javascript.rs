@@ -1753,9 +1753,15 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
         let mut runners = local_runners(&current);
-        // A Playwright spec imports its runner; a plain test file beside a
-        // Playwright config belongs to the unit runner.
-        if runners.len() > 1 {
+        // Beside a unit runner, a Playwright config that lists the file owns
+        // it, though it imports `test` from a local fixture (GH #2294); a
+        // plain test file there belongs to the unit runner.
+        if runners.len() > 1 && runners.contains("playwright") {
+            let spec = repo.join(path);
+            if runner_configs(&current, "playwright").iter()
+                .any(|config| playwright_config_selects(repo, &current, config, &spec)) {
+                return Some("playwright");
+            }
             runners.remove("playwright");
         }
         match runners.len() {
@@ -2890,6 +2896,89 @@ process.exit(ok ? 0 : 1);
         assert_eq!(passing().receipts().len(), 1);
     }
 
+    /// A stand-in Playwright emitting what Playwright 1.65.1's JSON reporter
+    /// emits (checked against a real 1.65.1 `--list` and `--repeat-each` run
+    /// of a testDir-only config): one unnamed project (id and name ''),
+    /// rootDir is testDir and files are relative to it; `--list` keeps each
+    /// discovered test with empty results; a run adds one test per repetition,
+    /// each with one result. It lists the files under testDir that the config's
+    /// `**/*<suffix>` testMatch (default `.spec.ts`) and the positional pattern
+    /// name ("No tests found" otherwise), with each spec's own title and line.
+    const STAND_IN_PLAYWRIGHT: &str = r#"#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
+const config = path.resolve(at('--config')), settings = require(config), root = path.join(path.dirname(config), settings.testDir);
+const pattern = new RegExp(a[a.length - 1]), repeats = listing ? 1 : Number(at('--repeat-each'));
+const testMatch = settings.testMatch ?? '**/*.@(spec|test).?(c|m)[jt]s?(x)', suffix = settings.testMatch ? testMatch.replace('**/*', '') : '.spec.ts';
+const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith(suffix)).map((f) => path.join(root, f)) : [];
+const listed = files.filter((file) => pattern.test(file)), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
+const metadata = listing || !listed.length ? {} : { actualWorkers: Math.min(workers, listed.length * repeats) };
+const project = { outputDir, repeatEach: repeats, retries: 0, metadata, id: '', name: '', testDir: root, testIgnore: [], testMatch: [testMatch], timeout: 30000 };
+const startTime = new Date().toISOString(), result = { workerIndex: 0, parallelIndex: 0, status: 'passed', duration: 1, errors: [],
+  stdout: [], stderr: [], retry: 0, startTime, annotations: [], attachments: [] };
+const test = { timeout: 30000, annotations: [], expectedStatus: 'passed', projectId: '', projectName: '',
+  results: listing ? [] : [result], status: listing ? 'skipped' : 'expected' };
+const noTests = 'Error: No tests found.\nMake sure that arguments are regular expressions matching test files.\nYou may need to escape symbols like "$" or "*" and quote the arguments.';
+const report = {
+  config: { argv: process.argv, configFile: config, rootDir: root, failOnFlakyTests: false, forbidOnly: false, fullyParallel: false, globalSetup: null,
+    globalTeardown: null, globalTimeout: 0, grep: {}, grepInvert: null, maxFailures: 0, metadata, preserveOutput: 'always',
+    filteredProjects: [{ grep: {}, grepInvert: null, outputDir, repeatEach: repeats, retries: 0, metadata, name: '', testDir: root,
+      snapshotDir: root, testIgnore: [], testMatch, timeout: 30000, use: {}, dependencies: [], ignoreSnapshots: false, __projectId: '' }],
+    projects: [project], quiet: false, reporter: [['json']], reportSlowTests: { max: 5, threshold: 300000 }, shard: null, tags: [],
+    updateSnapshots: 'default', updateSourceMethod: 'patch', version: '1.65.1', workers, webServer: null },
+  suites: listed.map((file, index) => {
+    const relative = path.relative(root, file);
+    const lines = fs.readFileSync(file, 'utf8').split('\n'), line = lines.findIndex((text) => /^test\(/.test(text));
+    return { title: relative, file: relative, column: 0, line: 0, specs: [{ title: lines[line].match(/^test\('([^']*)'/)[1], ok: true, tags: [],
+      tests: Array(repeats).fill(test), id: `spec-${index}`, file: relative, line: line + 1, column: 1 }] };
+  }),
+  errors: listed.length ? [] : [{ message: noTests, stack: noTests }],
+  stats: { startTime, duration: 1, expected: listing ? 0 : listed.length * repeats, skipped: listing ? listed.length : 0, unexpected: 0, flaky: 0 },
+};
+if (listing) console.log(JSON.stringify(report));
+else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
+process.exit(listed.length ? 0 : 1);
+"#;
+
+    /// GH #2294: Commander journeys import `test` from their local `./journey`
+    /// fixture, so the spec never names `@playwright/test`; beside a Vitest
+    /// config the walk dropped Playwright and G-61 prescribed Vitest, which
+    /// cannot run them. The Playwright config that lists the spec decides.
+    #[test]
+    fn spec_importing_a_local_fixture_is_prescribed_playwright_gh2294() {
+        let repo = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = repo.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("hub-web/package.json", "{}");
+        write("hub-web/vitest.config.ts", "export default {};");
+        // hub-web's journeys project: testDir ./e2e/journeys, testMatch **/*.journey.ts.
+        write("hub-web/playwright.config.js", "module.exports = { testDir: 'e2e/journeys', testMatch: '**/*.journey.ts' };");
+        write("hub-web/node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo.path().join("hub-web/node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        write("hub-web/e2e/journeys/journey.ts", "import { test as base } from '@playwright/test';\nexport const test = base;\n");
+        // cas-9fcc's four journeys, as its G-61 refusal named them.
+        let journeys = ["catalog-refresh", "end-session", "opaque-auth", "reply-voice"]
+            .map(|name| format!("hub-web/e2e/journeys/{name}.journey.ts"));
+        for journey in &journeys {
+            write(journey, "import { test, expect } from './journey';\ntest('journey', async () => {});\n");
+        }
+        // A plain unit test beside both configs still belongs to Vitest.
+        let unit = "hub-web/src/catalog.test.ts";
+        write(unit, "test('catalog', () => {});\n");
+
+        let mut tests: Vec<Identity> = journeys.iter().map(|journey| id(journey, "journey")).collect();
+        tests.push(id(unit, "catalog"));
+        let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests);
+        assert_eq!(prescribed, [
+            format!("`cas factory worker-check --cas-root /cas -- playwright {}`", journeys.join(" ")),
+            format!("`cas factory worker-check --cas-root /cas -- vitest {unit}`"),
+        ]);
+    }
+
     /// GH #2195: tests/e2e specs belong to playwright.hermetic.config.js, but
     /// the capped run and its prescribed command used the default config,
     /// which lists no such spec, so no stability proof could be earned.
@@ -2913,48 +3002,7 @@ process.exit(ok ? 0 : 1);
         write("package.json", "{}");
         write("playwright.config.js", "module.exports = { testDir: 'e2e' };");
         write("playwright.hermetic.config.js", "module.exports = { testDir: 'tests/e2e' };");
-        // A stand-in Playwright emitting what Playwright 1.65.1's JSON reporter
-        // emits for a testDir-only config (checked against a real 1.65.1
-        // `--list` and `--repeat-each` run of this fixture): one unnamed
-        // project (id and name ''), rootDir is testDir and files are relative
-        // to it; `--list` keeps each discovered test with empty results; a run
-        // adds one test per repetition, each with one result. It lists the
-        // `.spec.ts` files under testDir that the positional pattern names
-        // ("No tests found" otherwise).
-        write("node_modules/.bin/playwright", r#"#!/usr/bin/env node
-const fs = require('fs'), path = require('path');
-const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
-const config = path.resolve(at('--config')), root = path.join(path.dirname(config), require(config).testDir);
-const pattern = new RegExp(a[a.length - 1]), repeats = listing ? 1 : Number(at('--repeat-each'));
-const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(root, f)) : [];
-const listed = files.filter((file) => pattern.test(file)), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
-const metadata = listing || !listed.length ? {} : { actualWorkers: Math.min(workers, listed.length * repeats) };
-const testMatch = '**/*.@(spec|test).?(c|m)[jt]s?(x)';
-const project = { outputDir, repeatEach: repeats, retries: 0, metadata, id: '', name: '', testDir: root, testIgnore: [], testMatch: [testMatch], timeout: 30000 };
-const startTime = new Date().toISOString(), result = { workerIndex: 0, parallelIndex: 0, status: 'passed', duration: 1, errors: [],
-  stdout: [], stderr: [], retry: 0, startTime, annotations: [], attachments: [] };
-const test = { timeout: 30000, annotations: [], expectedStatus: 'passed', projectId: '', projectName: '',
-  results: listing ? [] : [result], status: listing ? 'skipped' : 'expected' };
-const noTests = 'Error: No tests found.\nMake sure that arguments are regular expressions matching test files.\nYou may need to escape symbols like "$" or "*" and quote the arguments.';
-const report = {
-  config: { argv: process.argv, configFile: config, rootDir: root, failOnFlakyTests: false, forbidOnly: false, fullyParallel: false, globalSetup: null,
-    globalTeardown: null, globalTimeout: 0, grep: {}, grepInvert: null, maxFailures: 0, metadata, preserveOutput: 'always',
-    filteredProjects: [{ grep: {}, grepInvert: null, outputDir, repeatEach: repeats, retries: 0, metadata, name: '', testDir: root,
-      snapshotDir: root, testIgnore: [], testMatch, timeout: 30000, use: {}, dependencies: [], ignoreSnapshots: false, __projectId: '' }],
-    projects: [project], quiet: false, reporter: [['json']], reportSlowTests: { max: 5, threshold: 300000 }, shard: null, tags: [],
-    updateSnapshots: 'default', updateSourceMethod: 'patch', version: '1.65.1', workers, webServer: null },
-  suites: listed.map((file, index) => {
-    const relative = path.relative(root, file);
-    return { title: relative, file: relative, column: 0, line: 0, specs: [{ title: 'hermetic sign in', ok: true, tags: [],
-      tests: Array(repeats).fill(test), id: `spec-${index}`, file: relative, line: 2, column: 1 }] };
-  }),
-  errors: listed.length ? [] : [{ message: noTests, stack: noTests }],
-  stats: { startTime, duration: 1, expected: listing ? 0 : listed.length * repeats, skipped: listing ? listed.length : 0, unexpected: 0, flaky: 0 },
-};
-if (listing) console.log(JSON.stringify(report));
-else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
-process.exit(listed.length ? 0 : 1);
-"#);
+        write("node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let spec = "tests/e2e/sign-in.spec.ts";

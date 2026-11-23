@@ -28,6 +28,7 @@ pub(crate) struct Transfer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Record {
     pub protocol: u32,
     pub project: String,
@@ -50,6 +51,8 @@ pub(crate) struct Record {
     pub audit: Option<serde_json::Value>,
     #[serde(default)]
     pub external_operations: Vec<ExternalOperation>,
+    #[serde(default)]
+    pub publication_sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +274,9 @@ impl Snapshot {
             return Err("TRAIN_TRANSFER_CONFLICT: candidate does not preserve the recorded target".into());
         }
         let mut next = live.record.clone();
+        next.protocol = 2;
+        next.publication_sequence = next.publication_sequence.checked_add(1)
+            .ok_or("TRAIN_TRANSFER_CONFLICT: publication sequence overflow")?;
         next.target_sha = head.clone();
         next.operation = format!("publish:{}", uuid::Uuid::new_v4());
         let next_tip = record_commit(&git.repo_root, Some(&self.tip), &next)?;

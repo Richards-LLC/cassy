@@ -150,7 +150,7 @@ impl Snapshot {
         if live.record.phase != Phase::Draining || live.record.transfer.is_none() {
             return Err(conflict());
         }
-        let external = checks.external_clear(&live)?;
+        let external = live.external_clear_checked(checks)?;
         let publishers = checks.publishers_stopped(&live)?;
         if external.is_null() || publishers.is_null() {
             return Err("TRAIN_TRANSFER_QUIESCENCE_REQUIRED: missing positive evidence".into());
@@ -162,7 +162,7 @@ impl Snapshot {
             serde_json::json!({"external": external, "publishers": publishers, "authority": live.tip, "target": next.target_sha}),
         );
         let confirmed = live.append(repo, next)?;
-        checks.external_clear(&confirmed)?;
+        confirmed.external_clear_checked(checks)?;
         Ok(confirmed)
     }
 
@@ -180,7 +180,7 @@ impl Snapshot {
             return Err("TRAIN_TRANSFER_TARGET_DIVERGED: operator adoption required".into());
         }
         // Always check, including idempotent projection repair.
-        checks.external_clear(&live)?;
+        live.external_clear_checked(checks)?;
         if live.record.phase == Phase::Active
             && live.record.accepted.as_ref().is_some_and(|a| {
                 a.transfer_id == id
@@ -190,7 +190,7 @@ impl Snapshot {
                     && live.record.identity == *actor
             })
         {
-            checks.external_clear(&live)?;
+            live.external_clear_checked(checks)?;
             return live.coherent(repo);
         }
         if live.tip != self.tip {
@@ -221,7 +221,7 @@ impl Snapshot {
         });
         next.operation = format!("accept:{id}");
         let confirmed = live.append(repo, next)?;
-        checks.external_clear(&confirmed)?;
+        confirmed.external_clear_checked(checks)?;
         Ok(confirmed)
     }
 
@@ -239,7 +239,7 @@ impl Snapshot {
         ) {
             return Err(conflict());
         }
-        checks.external_clear(&live)?;
+        live.external_clear_checked(checks)?;
         checks.publishers_stopped(&live)?;
         let mut next = live.record.clone();
         next.phase = Phase::Active;
@@ -252,7 +252,7 @@ impl Snapshot {
             None => "abort-recovery".into(),
         };
         let confirmed = live.append(repo, next)?;
-        checks.external_clear(&confirmed)?;
+        confirmed.external_clear_checked(checks)?;
         Ok(confirmed)
     }
 }

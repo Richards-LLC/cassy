@@ -14,6 +14,12 @@ fn pending(detail: impl std::fmt::Display) -> String {
 pub(crate) trait Provider {
     fn prs(&self, branch: &str, cursor: Option<&str>) -> Result<Value, String>;
     fn runs(&self, status: &str) -> Result<Value, String>;
+    fn publication(&self, _path: &str) -> Result<Value, String> {
+        Err(pending("publication metadata unavailable"))
+    }
+    fn release(&self, _tag: &str) -> Result<Value, String> {
+        Err(pending("release outcome unavailable"))
+    }
 }
 
 pub(crate) struct Gh {
@@ -38,6 +44,17 @@ impl Gh {
 }
 
 impl Provider for Gh {
+    fn publication(&self, path: &str) -> Result<Value, String> {
+        self.request(&["api", "--method", "GET", &format!("repos/{}/{path}", self.slug)])
+    }
+
+    fn release(&self, tag: &str) -> Result<Value, String> {
+        let (owner, name) = self.slug.split_once('/').ok_or_else(|| pending("invalid repository"))?;
+        self.request(&["api", "graphql", "-f",
+            "query=query($owner:String!,$name:String!,$tag:String!,$ref:String!){repository(owner:$owner,name:$name){nameWithOwner release(tagName:$tag){id tagName isDraft tagCommit{oid}} ref(qualifiedName:$ref){target{oid ... on Tag{target{oid}}}}}}",
+            "-f", &format!("owner={owner}"), "-f", &format!("name={name}"),
+            "-f", &format!("tag={tag}"), "-f", &format!("ref=refs/tags/{tag}")])
+    }
     fn prs(&self, branch: &str, cursor: Option<&str>) -> Result<Value, String> {
         let (owner, name) = self.slug.split_once('/').ok_or_else(|| pending("invalid repository"))?;
         let owner = format!("owner={owner}");
@@ -71,6 +88,7 @@ impl GitHubChecks<Gh> {
 
 impl<P: Provider> TransferChecks for GitHubChecks<P> {
     fn external_clear(&self, snapshot: &Snapshot) -> Result<Value, String> {
+        snapshot.require_external_settled()?;
         let mut cursor = None::<String>;
         let mut seen = std::collections::BTreeSet::new();
         let mut observed = Vec::new();
@@ -136,6 +154,10 @@ impl<P: Provider> TransferChecks for GitHubChecks<P> {
             "unfenced_writers": "detected as target divergence; held until operator adoption"}))
     }
 }
+
+#[path = "provider_run.rs"]
+mod run;
+pub(crate) use run::VerifiedRun;
 
 #[cfg(test)]
 pub(crate) fn fixture_checks<P: Provider>(provider: P) -> GitHubChecks<P> {

@@ -831,17 +831,20 @@ fn train_authority_abort_reaccept_cas_6456() {
         let fixture = Fixture::new();
         let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();
         let path = ".github/workflows/release.yml";
+        let downstream = ".github/workflows/install-path-proof.yml";
         std::fs::create_dir_all(fixture.left.join(".github/workflows")).unwrap();
         std::fs::write(fixture.left.join(path), "name: Release\non: push\njobs: {}\n").unwrap();
-        command(&fixture.left, &["add", path], None).unwrap();
+        std::fs::write(fixture.left.join(downstream), "name: Install proof\non: workflow_call\njobs: {}\n").unwrap();
+        command(&fixture.left, &["add", path, downstream], None).unwrap();
         let source = fixture.candidate(&fixture.left, "reserved-source");
         assert!(first.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &source).unwrap().is_published());
         let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();
         let scope = ExternalScope {
             repository: "test/fixture".into(), source: source.clone(), pr: 17, tag: "v9.99.1".into(),
             actions: vec![ExternalAction::ArmPr, ExternalAction::PublishTag, ExternalAction::CreateRelease],
-            workflows: vec![WorkflowScope { path: path.into(), revision: command(&fixture.left,
-                &["rev-parse", &format!("{source}:{path}")], None).unwrap(), jobs: vec!["release".into()] }],
+            workflows: [path, downstream].into_iter().map(|path| WorkflowScope { path: path.into(), revision: command(&fixture.left,
+                &["rev-parse", &format!("{source}:{path}")], None).unwrap(),
+                jobs: vec![if path == downstream { "install-proof".into() } else { "release".into() }] }).collect(),
         };
         let operation = uuid::Uuid::new_v4().to_string();
         let reserved = first.reserve_external(&fixture.left, &fixture.actor, &operation, &scope).unwrap();
@@ -866,6 +869,99 @@ fn train_authority_abort_reaccept_cas_6456() {
         assert_eq!(live.record.generation, first.record.generation);
         assert_eq!(live.record.transfer.unwrap().successor, successor);
         assert_eq!(fixture.target(), source);
+
+        // Replace provider I/O only: all binding predicates and actual Git
+        // claims, tag+authority publication and transfer remain production code.
+        use serde_json::{Value, json};
+        use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+        struct Runs(Rc<RefCell<BTreeMap<String, Value>>>);
+        impl crate::train_owner::provider::Provider for Runs {
+            fn prs(&self, _: &str, _: Option<&str>) -> Result<Value, String> { Err("not a PR listing".into()) }
+            fn runs(&self, _: &str) -> Result<Value, String> { Err("not a run listing".into()) }
+            fn publication(&self, path: &str) -> Result<Value, String> {
+                self.0.borrow().get(path).cloned().ok_or_else(|| "unknown provider request".into())
+            }
+            fn release(&self, tag: &str) -> Result<Value, String> { self.publication(&format!("release/{tag}")) }
+        }
+        let run = json!({"id":44,"run_attempt":1,"head_sha":source,"path":path,"event":"push",
+            "repository":{"full_name":"test/fixture"},"head_repository":{"full_name":"test/fixture"},
+            "status":"in_progress","conclusion":null,"referenced_workflows":[]});
+        let jobs = json!({"total_count":1,"jobs":[{"id":101,"run_id":44,"run_attempt":1,"head_sha":source,
+            "name":"release","status":"in_progress","conclusion":null,"completed_at":null}]});
+        let model = Rc::new(RefCell::new(BTreeMap::from([
+            ("pulls/17".into(), json!({"number":17,"merged":true,"merge_commit_sha":source,
+                "head":{"sha":source,"repo":{"full_name":"test/fixture"}},"base":{"repo":{"full_name":"test/fixture"}}})),
+            ("actions/runs/44".into(), run.clone()),
+            ("actions/runs/44/attempts/1".into(), run),
+            ("actions/runs/44/attempts/1/jobs?per_page=100&page=1".into(), jobs),
+        ])));
+        for workflow in &scope.workflows {
+            model.borrow_mut().insert(format!("contents/{}?ref={source}", workflow.path), json!({"type":"file","sha":workflow.revision}));
+        }
+        let provider = crate::train_owner::provider::fixture_checks(Runs(model.clone()));
+        let operation_state = draining.external_operation(&operation).unwrap();
+        assert!(provider.verify_publication_run(operation_state, 45, 1).is_err());
+        for (endpoint, pointer, wrong) in [
+            ("pulls/17".to_string(), "/head/sha", json!(fixture.base)),
+            ("actions/runs/44/attempts/1".into(), "/repository/full_name", json!("foreign/repo")),
+            ("actions/runs/44/attempts/1".into(), "/path", json!(downstream)),
+            ("actions/runs/44".into(), "/run_attempt", json!(2)),
+            (format!("contents/{path}?ref={source}"), "/sha", json!(fixture.base)),
+            ("actions/runs/44/attempts/1/jobs?per_page=100&page=1".into(), "/jobs/0/run_id", json!(45)),
+        ] {
+            let original = model.borrow()[&endpoint].clone();
+            *model.borrow_mut().get_mut(&endpoint).unwrap().pointer_mut(pointer).unwrap() = wrong;
+            assert!(provider.verify_publication_run(operation_state, 44, 1).is_err(), "{endpoint} {pointer}");
+            model.borrow_mut().insert(endpoint, original);
+        }
+        let proof = provider.verify_publication_run(operation_state, 44, 1).unwrap();
+        let claimed = draining.claim_external(&fixture.right, &operation, &proof).unwrap();
+        assert_eq!(claimed.record.phase, Phase::Draining);
+        assert_eq!(claimed.record.transfer.as_ref().unwrap().successor, successor);
+        assert_eq!(claimed.claim_external(&fixture.left, &operation, &proof).unwrap().tip, claimed.tip);
+        assert!(claimed.settle_external(&fixture.left, &operation, &proof).is_err());
+        command(&fixture.right, &["tag", "-a", &scope.tag, "-m", "reserved release", &source], None).unwrap();
+        let object = command(&fixture.right, &["rev-parse", &format!("refs/tags/{}", scope.tag)], None).unwrap();
+        command(&fixture.origin, &["config", "receive.advertiseAtomic", "false"], None).unwrap();
+        assert!(claimed.publish_reserved_tag(&fixture.right, &operation, &proof, &object).is_err());
+        assert_eq!(Snapshot::read(&fixture.right, "cas-6456").unwrap().tip, claimed.tip);
+        assert!(command(&fixture.origin, &["rev-parse", &format!("refs/tags/{}", scope.tag)], None).is_err());
+        command(&fixture.origin, &["config", "receive.advertiseAtomic", "true"], None).unwrap();
+        let tagged = claimed.publish_reserved_tag(&fixture.right, &operation, &proof, &object).unwrap();
+        assert_eq!(command(&fixture.origin, &["rev-parse", &format!("refs/tags/{}", scope.tag)], None).unwrap(), object);
+        assert_eq!(tagged.record.generation, reserved.record.generation);
+        assert_eq!(tagged.record.phase, Phase::Draining);
+        assert_eq!(tagged.record.publication_sequence, claimed.record.publication_sequence + 1);
+        assert!(tagged.quiesce(&fixture.left, &fixture.actor, &checks).is_err());
+        let releasing = tagged.start_external_call(&fixture.right, None, &operation, ExternalAction::CreateRelease, Some(&proof)).unwrap();
+        releasing.validate_external_call(&fixture.right, None, &operation, ExternalAction::CreateRelease, Some(&proof)).unwrap();
+        assert!(releasing.start_external_call(&fixture.left, None, &operation, ExternalAction::CreateRelease, Some(&proof)).is_err());
+        // Publisher shell exit alone never settles the run or downstream jobs.
+        model.borrow_mut().get_mut("actions/runs/44/attempts/1/jobs?per_page=100&page=1").unwrap()["jobs"][0]["status"] = json!("completed");
+        assert!(provider.verify_publication_run(releasing.external_operation(&operation).unwrap(), 44, 1).is_err());
+        for endpoint in ["actions/runs/44", "actions/runs/44/attempts/1"] {
+            let mut records = model.borrow_mut();
+            let run = records.get_mut(endpoint).unwrap();
+            run["status"] = json!("completed"); run["conclusion"] = json!("success");
+            run["referenced_workflows"] = json!([{"path":format!("test/fixture/{downstream}@{source}"),"sha":source}]);
+        }
+        model.borrow_mut().insert("actions/runs/44/attempts/1/jobs?per_page=100&page=1".into(), json!({"total_count":2,"jobs":[
+            {"id":101,"run_id":44,"run_attempt":1,"head_sha":source,"name":"release","status":"completed","conclusion":"success","completed_at":"2026-11-23T09:00:00Z"},
+            {"id":102,"run_id":44,"run_attempt":1,"head_sha":source,"name":"install-proof","status":"in_progress","conclusion":null,"completed_at":null}]}));
+        assert!(provider.verify_publication_run(releasing.external_operation(&operation).unwrap(), 44, 1).is_err());
+        model.borrow_mut().get_mut("actions/runs/44/attempts/1/jobs?per_page=100&page=1").unwrap()["jobs"][1] =
+            json!({"id":102,"run_id":44,"run_attempt":1,"head_sha":source,"name":"install-proof","status":"completed","conclusion":"success","completed_at":"2026-11-23T09:01:00Z"});
+        model.borrow_mut().insert(format!("release/{}", scope.tag), json!({"data":{"repository":{
+            "nameWithOwner":"test/fixture","release":{"id":"release-id","tagName":scope.tag,"isDraft":false,"tagCommit":{"oid":source}},
+            "ref":{"target":{"oid":object,"target":{"oid":source}}}}}}));
+        let terminal = provider.verify_publication_run(releasing.external_operation(&operation).unwrap(), 44, 1).unwrap();
+        let settled = releasing.settle_external(&fixture.left, &operation, &terminal).unwrap();
+        let quiesced = settled.quiesce(&fixture.right, &fixture.actor, &checks).unwrap();
+        assert!(quiesced.claim_external(&fixture.left, &operation, &proof).is_err());
+        let accepted = quiesced.accept(&fixture.right, &successor, "reserved-transfer", &reserved.record.generation, &checks).unwrap();
+        assert_ne!(accepted.record.generation, reserved.record.generation);
+        assert_eq!(accepted.external_operation(&operation).unwrap().tag_object.as_deref(), Some(object.as_str()));
+        assert!(accepted.publish_reserved_tag(&fixture.left, &operation, &proof, &object).is_err());
     }
     let fixture = Fixture::new();
     let first = Snapshot::read(&fixture.left, "cas-6456").unwrap();

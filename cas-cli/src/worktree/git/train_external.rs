@@ -98,6 +98,10 @@ impl ExternalScope {
 }
 
 impl Snapshot {
+    pub(super) fn external_clear_checked(&self, checks: &impl TransferChecks) -> Result<serde_json::Value, String> {
+        self.require_external_settled()?;
+        checks.external_clear(self)
+    }
     pub(crate) fn external_operation(&self, id: &str) -> Result<&ExternalOperation, String> {
         self.record.external_operations.iter().find(|operation| operation.id == id)
             .ok_or_else(conflict)
@@ -137,5 +141,183 @@ impl Snapshot {
             return Err(pending());
         }
         Ok(())
+    }
+
+    fn continuation(&self, id: &str) -> Result<&ExternalOperation, String> {
+        if !matches!(self.record.phase, Phase::Active | Phase::Draining) {
+            return Err(conflict());
+        }
+        let operation = self.external_operation(id)?;
+        if operation.generation != self.record.generation || operation.terminal.is_some() {
+            return Err(conflict());
+        }
+        Ok(operation)
+    }
+
+    /// Claim only after the provider verifies the actual run, its source and
+    /// workflow revision. A second run or attempt cannot borrow an operation.
+    pub(crate) fn claim_external(&self, repo: &Path, id: &str, proof: &crate::train_owner::provider::VerifiedRun) -> Result<Self, String> {
+        let live = self.coherent(repo)?;
+        let operation = live.continuation(id)?;
+        if !proof.matches(operation) { return Err(conflict()); }
+        let claim = proof.claim();
+        if let Some(existing) = operation.claims.iter().find(|existing| existing.workflow == claim.workflow) {
+            return if existing.run == claim.run && existing.attempt == claim.attempt && existing.landing == claim.landing {
+                Ok(live)
+            } else { Err(conflict()) };
+        }
+        let mut next = live.record.clone();
+        let operation = next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap();
+        let mut claim = claim.clone();
+        // A claim does not by itself settle anything, even if it observed a
+        // terminal workflow. Settlement is a separate provider read below.
+        claim.terminal = None;
+        operation.claims.push(claim);
+        next.operation = format!("claim-external:{id}");
+        live.append(repo, next)
+    }
+
+    fn require_claim(&self, id: &str, proof: &crate::train_owner::provider::VerifiedRun) -> Result<(), String> {
+        let operation = self.continuation(id)?;
+        let claim = proof.claim();
+        if !proof.matches(operation) || claim.terminal.is_some()
+            || !operation.claims.iter().any(|existing| existing.workflow == claim.workflow
+                && existing.run == claim.run && existing.attempt == claim.attempt && existing.landing == claim.landing)
+        { return Err(conflict()); }
+        Ok(())
+    }
+
+    /// Record an uncertain external call BEFORE invoking it. The caller must
+    /// perform `validate_external_call` immediately before the actual API call.
+    pub(crate) fn start_external_call(&self, repo: &Path, actor: Option<&Identity>, id: &str, action: ExternalAction,
+        proof: Option<&crate::train_owner::provider::VerifiedRun>) -> Result<Self, String> {
+        let live = self.coherent(repo)?;
+        let operation = live.continuation(id)?;
+        if !operation.scope.actions.contains(&action) || operation.started.contains(&action)
+            || action == ExternalAction::PublishTag
+        { return Err(pending()); }
+        match action {
+            ExternalAction::ArmPr => {
+                let actor = actor.ok_or_else(conflict)?;
+                live.require_actor(actor)?;
+                if live.record.phase != Phase::Active || operation.launch_identity != *actor
+                    || operation.expected_target != live.record.target_sha
+                { return Err(conflict()); }
+            }
+            ExternalAction::CreateRelease => {
+                live.require_claim(id, proof.ok_or_else(conflict)?)?;
+                if operation.tag_object.is_none() { return Err(pending()); }
+            }
+            ExternalAction::PublishTag => unreachable!(),
+        }
+        let mut next = live.record.clone();
+        next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap().started.push(action);
+        next.operation = format!("start-external:{id}");
+        live.append(repo, next)
+    }
+
+    pub(crate) fn validate_external_call(&self, repo: &Path, actor: Option<&Identity>, id: &str, action: ExternalAction,
+        proof: Option<&crate::train_owner::provider::VerifiedRun>) -> Result<(), String> {
+        let live = self.coherent(repo)?;
+        let operation = live.continuation(id)?;
+        if !operation.started.contains(&action) || !operation.scope.actions.contains(&action) { return Err(conflict()); }
+        match action {
+            ExternalAction::ArmPr => {
+                live.require_actor(actor.ok_or_else(conflict)?)?;
+                if live.record.phase != Phase::Active || operation.launch_identity != live.record.identity
+                    || operation.expected_target != live.record.target_sha
+                { return Err(conflict()); }
+            }
+            ExternalAction::CreateRelease => {
+                live.require_claim(id, proof.ok_or_else(conflict)?)?;
+                let tag = format!("refs/tags/{}", operation.scope.tag);
+                let remote = command(repo, &["ls-remote", "--refs", "origin", &tag], None)?;
+                if remote.split_whitespace().next() != operation.tag_object.as_deref() { return Err(conflict()); }
+            }
+            ExternalAction::PublishTag => return Err(conflict()),
+        }
+        Ok(())
+    }
+
+    /// The annotated tag and authority advance together, including while
+    /// DRAINING. The immutable successor/old generation survive unchanged.
+    pub(crate) fn publish_reserved_tag(&self, repo: &Path, id: &str, proof: &crate::train_owner::provider::VerifiedRun,
+        object: &str) -> Result<Self, String> {
+        let live = self.coherent(repo)?;
+        live.require_claim(id, proof)?;
+        let operation = live.external_operation(id)?;
+        if !operation.scope.actions.contains(&ExternalAction::PublishTag) || !oid(object)
+            || command(repo, &["cat-file", "-t", object], None)? != "tag"
+            || command(repo, &["rev-parse", &format!("{object}^{{commit}}")], None)? != proof.claim().landing
+        { return Err(conflict()); }
+        // Require the tag header itself to carry the enumerated tag name,
+        // rather than merely accepting another annotated object at that SHA.
+        let annotation = command(repo, &["cat-file", "tag", object], None)?;
+        if !annotation.lines().take_while(|line| !line.is_empty()).any(|line| line == format!("tag {}", operation.scope.tag)) {
+            return Err(conflict());
+        }
+        let tag = format!("refs/tags/{}", operation.scope.tag);
+        let remote = command(repo, &["ls-remote", "--refs", "origin", &tag], None)?;
+        let expected = remote.split_whitespace().next().unwrap_or("");
+        if !expected.is_empty() && expected != object { return Err(conflict()); }
+        if operation.tag_object.as_deref().is_some_and(|prior| prior != object) { return Err(conflict()); }
+        if operation.tag_object.as_deref() == Some(object) {
+            return if expected == object { Ok(live) } else { Err(conflict()) };
+        }
+        let mut next = live.record.clone();
+        let operation = next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap();
+        operation.tag_object = Some(object.into());
+        operation.started.push(ExternalAction::PublishTag);
+        next.publication_sequence = next.publication_sequence.checked_add(1).ok_or_else(conflict)?;
+        next.operation = format!("publish-tag:{id}");
+        let tip = record_commit(repo, Some(&live.tip), &next)?;
+        let authority_lease = format!("--force-with-lease={}:{}", live.reference, live.tip);
+        let tag_lease = format!("--force-with-lease={tag}:{expected}");
+        let authority_update = format!("{tip}:{}", live.reference);
+        let tag_update = format!("{object}:{tag}");
+        let args = ["push", "--atomic", "--porcelain", &authority_lease, &tag_lease, "origin", &authority_update, &tag_update];
+        let mut probe = args.to_vec();
+        probe.push("--dry-run");
+        command(repo, &probe, None)?;
+        let result = command(repo, &args, None);
+        let confirmed = Self::read(repo, &live.record.train)?;
+        if !GitOperations::new(repo.to_path_buf()).is_ancestor(&tip, &confirmed.tip)
+            || confirmed.external_operation(id)?.tag_object.as_deref() != Some(object)
+        { return Err(result.err().unwrap_or_else(conflict)); }
+        let advertised = command(repo, &["ls-remote", "--refs", "origin", &tag], None)?;
+        if advertised.split_whitespace().next() != Some(object)
+            || confirmed.observed_target(repo)? != confirmed.record.target_sha
+        { return Err("TRAIN_TRANSFER_TARGET_DIVERGED: tag publication readback disagrees".into()); }
+        Ok(confirmed)
+    }
+
+    pub(crate) fn settle_external(&self, repo: &Path, id: &str, proof: &crate::train_owner::provider::VerifiedRun) -> Result<Self, String> {
+        let live = self.coherent(repo)?;
+        if !matches!(live.record.phase, Phase::Active | Phase::Draining) { return Err(conflict()); }
+        let operation = live.external_operation(id)?;
+        let claim = proof.claim();
+        if operation.generation != live.record.generation || !proof.matches(operation) || claim.terminal.is_none()
+            || !operation.claims.iter().any(|existing| existing.workflow == claim.workflow
+                && existing.run == claim.run && existing.attempt == claim.attempt && existing.landing == claim.landing)
+        { return Err(pending()); }
+        if operation.terminal.is_some() { return Ok(live); }
+        let mut next = live.record.clone();
+        let operation = next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap();
+        operation.claims.iter_mut().find(|existing| existing.workflow == claim.workflow).unwrap().terminal = claim.terminal.clone();
+        operation.terminal = claim.terminal.clone();
+        next.operation = format!("settle-external:{id}");
+        live.append(repo, next)
+    }
+
+    pub(crate) fn cancel_unstarted_external(&self, repo: &Path, actor: &Identity, id: &str) -> Result<Self, String> {
+        let live = self.coherent(repo)?;
+        live.require_actor(actor)?;
+        let operation = live.continuation(id)?;
+        if !operation.started.is_empty() || !operation.claims.is_empty() { return Err(pending()); }
+        let mut next = live.record.clone();
+        next.external_operations.iter_mut().find(|operation| operation.id == id).unwrap().terminal =
+            Some(serde_json::json!({"disposition": "cancelled_before_start", "authority": live.tip}));
+        next.operation = format!("cancel-unstarted-external:{id}");
+        live.append(repo, next)
     }
 }

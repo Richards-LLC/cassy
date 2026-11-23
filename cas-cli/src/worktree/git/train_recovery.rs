@@ -104,6 +104,7 @@ impl Snapshot {
                 operator_claim: None,
                 audit: None,
                 external_operations: Vec::new(),
+                publication_sequence: 0,
             },
         };
         let external = checks.external_clear(&snapshot)?;
@@ -141,7 +142,7 @@ impl Snapshot {
         if confirmed.observed_target(repo)? != head {
             return Err("TRAIN_TRANSFER_TARGET_DIVERGED: enrollment readback disagrees".into());
         }
-        checks.external_clear(&confirmed)?;
+        confirmed.external_clear_checked(checks)?;
         Ok(confirmed)
     }
 
@@ -196,7 +197,7 @@ impl Snapshot {
         {
             return Err("TRAIN_TRANSFER_CONFLICT: draining successor is immutable".into());
         }
-        let external = checks.external_clear(&live)?;
+        let external = live.external_clear_checked(checks)?;
         if external.is_null() {
             return Err("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING: observation missing".into());
         }
@@ -214,7 +215,7 @@ impl Snapshot {
         );
         next.operation = format!("force-quiesce:{id}");
         let confirmed = live.append(repo, next)?;
-        checks.external_clear(&confirmed)?;
+        confirmed.external_clear_checked(checks)?;
         Ok(confirmed)
     }
 
@@ -237,7 +238,7 @@ impl Snapshot {
                 "TRAIN_TRANSFER_CONFLICT: adoption must name the exact diverged target".into(),
             );
         }
-        checks.external_clear(&live)?;
+        live.external_clear_checked(checks)?;
         let mut next = live.record.clone();
         next.target_sha = observed.clone();
         next.epoch = next
@@ -254,7 +255,7 @@ impl Snapshot {
         );
         next.operation = "adopt-target".into();
         let confirmed = live.append_observing(repo, next, exact_target)?;
-        checks.external_clear(&confirmed)?;
+        confirmed.external_clear_checked(checks)?;
         Ok(confirmed)
     }
 }

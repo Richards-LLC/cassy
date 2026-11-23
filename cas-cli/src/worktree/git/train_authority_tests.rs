@@ -651,6 +651,12 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     let git = GitOperations::new(fixture.left.clone());
     let unfenced = git.publish_pinned_source_to_origin(&target, &head, TIMEOUT);
     assert!(crate::gates::codes_in(&format!("{unfenced:?}")).contains(&"G-113"), "{unfenced:?}");
+    command(&fixture.left, &["update-ref", &format!("refs/heads/{target}"), &head], None).unwrap();
+    for selector in [format!("refs/heads/{target}"), format!("HEAD:refs/heads/{target}"), "--all".into()] {
+        assert!(git.push_branch(&selector).is_err(), "{selector}");
+        assert_eq!(fixture.target(), fixture.base);
+        assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, accepted.tip);
+    }
     let prior = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
     prior.set_agent_id_for_testing(actor.id.clone());
     assert!(crate::train_owner::publication_fence(&prior, &fixture.left, &target).is_err());

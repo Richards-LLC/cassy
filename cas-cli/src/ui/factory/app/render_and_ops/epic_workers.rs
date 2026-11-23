@@ -6830,6 +6830,25 @@ mod spawn_base_tests {
         assert_eq!(git(&repo, &["status", "--porcelain"]), before);
         assert_eq!(head_sha(&origin, "epic/behind"), remote_epic_tip);
         assert_eq!(Snapshot::read(&repo, "cas-spawn6456").unwrap().tip, authority.tip);
+
+        // A local tip already equal to its recorded parent skips refresh.
+        // That shortcut must still never cut a worker from unpublished train
+        // work, nor recreate a deleted target from a stale local base.
+        git(&checkout, &["reset", "--hard", &parent_tip]);
+        let refusal = super::spawn_readiness_tests::prepare_existing_task(
+            &repo, &repo.join(".cas"), "cas-legacy-child",
+        ).err().expect("an ahead enrolled base must remain held");
+        assert_eq!(crate::gates::codes_in(&refusal.to_string()), vec!["G-113"]);
+        assert_eq!(head_sha(&repo, "epic/behind"), parent_tip);
+        assert_eq!(head_sha(&origin, "epic/behind"), remote_epic_tip);
+        git(&origin, &["update-ref", "-d", "refs/heads/epic/behind"]);
+        git(&repo, &["update-ref", "-d", "refs/remotes/origin/epic/behind"]);
+        assert!(super::spawn_readiness_tests::prepare_existing_task(
+            &repo, &repo.join(".cas"), "cas-legacy-child",
+        ).is_err());
+        assert!(!ref_exists(&origin, "epic/behind"));
+        assert_eq!(head_sha(&repo, "epic/behind"), parent_tip);
+        assert_eq!(Snapshot::read(&repo, "cas-spawn6456").unwrap().tip, authority.tip);
     }
 
     /// GH #434 / spawn request 1191: a task-level WorkTarget can name an

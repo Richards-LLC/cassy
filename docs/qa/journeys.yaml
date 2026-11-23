@@ -2760,6 +2760,31 @@ bug_families:
     title: Worker supervisor selection and diagnostics share liveness and reject unavailable ambiguous or foreign session owners
     tasks: [cas-e901]
     journeys: [FACTORY-SUPERVISE]
+  rebound-lane-close-checks:
+    title: Close checks, including the merge-reality gate, measure the rebound lane
+    statement: >-
+      After a supervisor rebinds a task to a rebuilt lane such as task-r2, every
+      close check measures that lane whether its tip is local, only on origin or
+      still empty. The G-81 merge-reality gate judges the same lane, so it neither
+      refuses a published rebound tip nor passes an empty unpushed one because the
+      earlier build is intact.
+    tasks: [cas-db91]
+    journeys: [FACTORY-CLOSE]
+    invariants: []
+  worker-name-overlap-at-spawn:
+    title: New worker names sharing another worker's factory branch namespace
+    statement: >-
+      A new worker name must not extend, or be extended by, a registered worker's
+      name or an existing local or origin factory branch across a hyphen, so no
+      branch has two owners. Spawn, factory launch (final --worker-spec names
+      included) and dynamic GUI or WebSocket spawns refuse a supplied overlapping
+      name, the name generators (daemon fallback included) skip overlapping names
+      and the supervisor's name, a task's own per-task branch never blocks its
+      name, an unreadable name registry stops the launch or spawn, and cas doctor
+      reports overlaps that already exist.
+    tasks: [cas-dc08]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+    invariants: []
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

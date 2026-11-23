@@ -3,6 +3,18 @@ import type { Page } from "@playwright/test";
 import { ATLAS, PELICAN } from "./world";
 import { writeFileSync } from "node:fs";
 
+const conversationList = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" });
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page, project: string) => conversationList(page).getByRole("button", { name: new RegExp(`^${project} on `) });
+const pinnedAsk = (page: Page) => page.getByRole("region", { name: /^Waiting on you: question from / });
+const pinnedExpand = (page: Page) => pinnedAsk(page).getByRole("button", { name: /^Waiting on you:/ });
+const askCards = (page: Page) => page.getByRole("log").getByRole("group", { name: `Question from ${PELICAN}` });
+const askCard = (page: Page, text: string) => askCards(page).filter({ hasText: text });
+const statusView = (page: Page) => page.getByTestId("status-view");
+const statusAgents = (page: Page) => page.getByTestId("status-agent");
+const statusTasks = (page: Page) => page.getByTestId("status-task");
+const releaseProgress = (page: Page) => page.getByTestId("release-progress");
+
 // Independent goals enter the same rendered conversation with a fresh live ask.
 // Capturing four rendering modes must not spend the reply goal's test budget.
 async function openQuestionless(page: Page, journey: Journey) {
@@ -26,12 +38,12 @@ async function openQuestionless(page: Page, journey: Journey) {
     ], focused_epic: null, spawnNames: [],
   } } });
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  await conversationRow(page, "cas-src").click();
   await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
   hub.supervisorSays(PELICAN, "**Earlier question:** which **route** is clearer?", { kind: "ask" });
   const ask = hub.supervisorSays(PELICAN, "**Which plan** should we use?\n\nExplain your choice in a reply.", { kind: "ask" });
-  await expect(page.locator(".pinned-ask")).toBeVisible();
-  await expect(page.locator("#status-view")).toContainText("Polish the conversation");
+  await expect(pinnedAsk(page)).toBeVisible();
+  await expect(statusView(page)).toContainText("Polish the conversation");
   return { hub, ask, workers };
 }
 
@@ -65,34 +77,34 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
     await page.setViewportSize({ width: 1280, height: 800 });
     await expect(page.getByRole("button", { name: "Yes, go ahead", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Hold", exact: true })).toHaveCount(0);
-    await expect(page.locator(`.obj[data-notification-id="${ask}"]`)).toHaveCount(1);
-    await expect(page.locator(".pinned-ask .obj")).toHaveCount(0);
+    await expect(askCard(page, "Which plan should we use?")).toHaveCount(1);
+    await expect(pinnedAsk(page).getByRole("group")).toHaveCount(0);
     // cas-97d58 F09: the rail lists both open questions, each without markdown.
-    for (const entry of await page.locator(".context-text").all()) await expect(entry).not.toContainText("**");
-    await expect(page.locator(".pinned-ask")).not.toContainText("**");
-    await expect(page.locator("#status-view")).toContainText("6");
-    await expect(page.locator("#status-view")).not.toContainText("RAW INTERNAL");
-    await expect(page.locator("#status-view")).toBeVisible();
+    for (const entry of await page.getByTestId("context-text").all()) await expect(entry).not.toContainText("**");
+    await expect(pinnedAsk(page)).not.toContainText("**");
+    await expect(statusView(page)).toContainText("6");
+    await expect(statusView(page)).not.toContainText("RAW INTERNAL");
+    await expect(statusView(page)).toBeVisible();
 
-    await expect(page.locator(".status-agent")).toHaveCount(6);
-    await expect(page.locator(".status-agent").filter({ hasText: workers[0]! })).toBeVisible();
-    await expect(page.locator(".status-agent").filter({ hasText: workers[2]! })).toBeVisible();
-    expect(await page.locator("#status-view").evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-    await expect(page.locator(".release-progress")).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*8)"));
-    await expect(page.locator(".release-progress")).toContainText(new RegExp("(?=[\\s\\S]*/hour)(?=[\\s\\S]*1\\.5)"));
-    await expect(page.locator(".release-progress")).toBeVisible();
-    await expect(page.locator(".release-progress progress")).toHaveAttribute("value", "3");
-    await expect(page.locator(".status-task").filter({ hasText: "Already delivered" })).toBeVisible();
-    await expect(page.locator(".status-task").filter({ hasText: "Another supervisor" })).toHaveCount(0);
-    await expect(page.locator(".status-task").filter({ hasText: "Closed release task" })).toHaveCount(0);
+    await expect(statusAgents(page)).toHaveCount(6);
+    await expect(statusAgents(page).filter({ hasText: workers[0]! })).toBeVisible();
+    await expect(statusAgents(page).filter({ hasText: workers[2]! })).toBeVisible();
+    expect(await statusView(page).evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await expect(releaseProgress(page)).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*8)"));
+    await expect(releaseProgress(page)).toContainText(new RegExp("(?=[\\s\\S]*/hour)(?=[\\s\\S]*1\\.5)"));
+    await expect(releaseProgress(page)).toBeVisible();
+    await expect(releaseProgress(page).getByRole("progressbar")).toHaveAttribute("value", "3");
+    await expect(statusTasks(page).filter({ hasText: "Already delivered" })).toBeVisible();
+    await expect(statusTasks(page).filter({ hasText: "Another supervisor" })).toHaveCount(0);
+    await expect(statusTasks(page).filter({ hasText: "Closed release task" })).toHaveCount(0);
     await page.getByRole("button", { name: "All tasks", exact: true }).click();
-    await expect(page.locator(".status-task").filter({ hasText: "Another supervisor" })).toBeVisible();
-    await expect(page.locator(".status-task").filter({ hasText: "Closed release task" })).toBeVisible();
+    await expect(statusTasks(page).filter({ hasText: "Another supervisor" })).toBeVisible();
+    await expect(statusTasks(page).filter({ hasText: "Closed release task" })).toBeVisible();
     await page.getByRole("button", { name: "Supervisor tasks", exact: true }).click();
-    await expect(page.locator(".status-task").filter({ hasText: "Another supervisor" })).toHaveCount(0);
-    await expect(page.locator(".status-task").filter({ hasText: "Closed release task" })).toHaveCount(0);
+    await expect(statusTasks(page).filter({ hasText: "Another supervisor" })).toHaveCount(0);
+    await expect(statusTasks(page).filter({ hasText: "Closed release task" })).toHaveCount(0);
     const grip = page.getByRole("separator", { name: "Resize tasks and progress" });
-    const panel = page.locator(".conversation-context");
+    const panel = page.getByRole("complementary", { name: "Conversation context" });
     const initialPanelWidth = (await panel.boundingBox())!.width;
     await grip.focus(); await page.keyboard.press("ArrowLeft");
     await expect(grip).toHaveAttribute("aria-valuenow", "336");
@@ -107,24 +119,24 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
     expect(await page.evaluate(() => localStorage.getItem("cassy.context-width"))).toBe(resized);
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(grip).toBeHidden();
-    expect(await page.locator(".conversation-shell").evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    expect(await page.getByTestId("conversation-shell").evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     await page.setViewportSize({ width: 1280, height: 800 });
     // Restore the default width so the rest of this conversation stays comparable.
     await grip.focus(); await page.keyboard.press("Home");
 
   });
   await journey.stage("Jump by keyboard and answer in the composer", async () => {
-    await page.locator(".pinned-expand").focus(); await page.keyboard.press("Enter");
+    await pinnedExpand(page).focus(); await page.keyboard.press("Enter");
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await page.getByRole("textbox", { name: "Your message" }).fill("Use the quieter plan.");
     const sent = hub.nextSend();
     await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect(await sent).toMatchObject({ text: "Use the quieter plan.", in_reply_to: ask });
-    await expect(page.locator(`.obj[data-notification-id="${ask}"] .chip.sent`)).toHaveText("Use the quieter plan.");
+    await expect(askCard(page, "Which plan should we use?").getByTestId("sent")).toHaveText("Use the quieter plan.");
   });
   await journey.stage("Reply with a declared option", async () => {
     const choice = hub.supervisorSays(PELICAN, "Choose the **next step**.", { kind: "ask", options: ["Keep editing", "Send for review"] });
-    const question = page.locator(`.obj[data-notification-id="${choice}"]`);
+    const question = askCard(page, "Choose the next step.");
     await expect(question.getByRole("button", { name: "Send for review", exact: true })).toBeVisible();
     const sent = hub.nextSend();
     await question.getByRole("button", { name: "Send for review", exact: true }).click();
@@ -145,7 +157,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
       await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
       await page.emulateMedia(media);
       expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
-      await expect(question.locator(".chip.sent")).toHaveText("Send for review");
+      await expect(question.getByTestId("sent")).toHaveText("Send for review");
       await page.screenshot({ path: testInfo.outputPath(`a11y-${name}.png`) });
     }
   });
@@ -164,36 +176,38 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
   } });
   await journey.stage("Long names and missing task details stay within the rail", async () => {
     await page.setViewportSize({ width: 1280, height: 800 }); await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    await expect(page.locator("#status-view")).toBeVisible();
-    await expect(page.locator(".status-agent")).toHaveCount(1);
-    expect(await page.locator("#status-view").evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await conversationRow(page, "cas-src").click();
+    await expect(statusView(page)).toBeVisible();
+    await expect(statusAgents(page)).toHaveCount(1);
+    expect(await statusView(page).evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    // The ask needs the session's socket, which can open after the rail draws.
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     hub.supervisorSays(PELICAN, "Choose a route with a readable question.\n\n" + "More detail about this decision. ".repeat(60), { kind: "ask", options: [] });
-    await expect(page.locator(".pinned-expand")).toBeVisible();
+    await expect(pinnedExpand(page)).toBeVisible();
     // cas-053c (cas-d043): hovering the bar keeps its amber fill in both
     // schemes; the generic hover wash put its text at 1.17:1 in dark.
     for (const scheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme: scheme });
       await page.mouse.move(0, 0);
-      const rest = await page.locator(".pinned-expand").evaluate((node) => getComputedStyle(node).backgroundColor);
-      await page.locator(".pinned-expand").hover();
-      await expect.poll(() => page.locator(".pinned-expand").evaluate((node) => getComputedStyle(node).backgroundColor), `${scheme}: the hovered bar keeps its fill`).toBe(rest);
+      const rest = await pinnedExpand(page).evaluate((node) => getComputedStyle(node).backgroundColor);
+      await pinnedExpand(page).hover();
+      await expect.poll(() => pinnedExpand(page).evaluate((node) => getComputedStyle(node).backgroundColor), `${scheme}: the hovered bar keeps its fill`).toBe(rest);
     }
     await page.mouse.move(0, 0);
     await page.emulateMedia({ colorScheme: "light" });
-    await expect(page.getByRole("log").locator("button.chip")).toHaveCount(0);
+    await expect(askCards(page).getByRole("button")).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 440 });
     await page.getByRole("textbox", { name: "Your message" }).focus();
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeInViewport();
-    expect(await page.locator(".pinned-bar").evaluate(el => el.getBoundingClientRect().height)).toBeLessThanOrEqual(48);
+    expect(await pinnedAsk(page).getByTestId("pinned-bar").evaluate(el => el.getBoundingClientRect().height)).toBeLessThanOrEqual(48);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
   await journey.stage("An empty session shows no borrowed workers", async () => {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /empty-world/ }).and(page.locator(".conversation-row")).click();
-    await expect(page.locator(".status-agent")).toHaveCount(0);
-    await expect(page.locator("#status-view")).not.toContainText(name);
-    await expect(page.locator(".pinned-ask")).toBeHidden();
+    await conversationRow(page, "empty-world").click();
+    await expect(statusAgents(page)).toHaveCount(0);
+    await expect(statusView(page)).not.toContainText(name);
+    await expect(pinnedAsk(page)).toBeHidden();
     await expect(page.getByRole("textbox", { name: "Your message" })).toHaveAttribute("placeholder", /empty-world/);
   });
 });

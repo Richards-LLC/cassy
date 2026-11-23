@@ -202,7 +202,7 @@ pub(crate) fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Opti
         tasks.retain(|task| task.id != train.id);
         tasks.push(train);
     }
-    let unwatched = match find_unwatched(cas_dir, &tasks) {
+    let unwatched = match find_unwatched(cas_dir, &tasks, now) {
         Ok(unwatched) => unwatched,
         Err(error) => { tracing::warn!(%error, "delivery wake coverage unavailable"); return None; }
     };
@@ -395,9 +395,16 @@ pub(crate) fn apply(cas_dir: &Path, session: &str, now: DateTime<Utc>, observati
     }
 }
 
-fn find_unwatched(cas_dir: &Path, actionable: &[cas_types::Task]) -> anyhow::Result<Vec<(String, String, cas_types::Agent)>> {
+/// A park commits before it arms its completion wakes: the arming probes Git
+/// and the CI workflow, which takes about half a second under load. A delivery
+/// that changed this recently may still be inside its own park (GH #2332), so
+/// the check waits it out; an unarmed delivery is reported once the grace ends.
+const ARMING_GRACE: chrono::Duration = chrono::Duration::seconds(60);
+
+fn find_unwatched(cas_dir: &Path, actionable: &[cas_types::Task], now: DateTime<Utc>) -> anyhow::Result<Vec<(String, String, cas_types::Agent)>> {
     let mut unwatched = Vec::new();
-    for task in actionable.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge) {
+    for task in actionable.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge
+        && now - task.updated_at >= ARMING_GRACE) {
         let Some(sha) = task.deliverables.factory_branch_anchor.as_deref()
             .filter(|sha| crate::factory_delivery_wake::full_sha(sha)) else { continue };
         let Some(supervisor) = crate::factory_delivery_wake::owner(cas_dir, &task, "")? else { continue };
@@ -530,6 +537,10 @@ mod tests {
         crate::factory_delivery_wake::arm_event(&root, &other, &task.id, "ci_completed", &serde_json::json!({"sha": sha, "workflow":"CI"}), false).unwrap();
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         let now = chrono::Utc::now();
+        // Inside the delivery's own arming grace nothing is reported yet.
+        super::sweep(&root, SESSION, now);
+        assert!(queue.peek_all(20).unwrap().is_empty());
+        let now = now + super::ARMING_GRACE;
         super::sweep(&root, SESSION, now);
         let rows = queue.peek_all(20).unwrap();
         assert_eq!(rows.len(), 1);

@@ -102,7 +102,7 @@ export class ComposerUploads {
     if (!field) return;
     let strip = this.root?.querySelector<HTMLElement>(".composer-uploads");
     if (!strip) {
-      strip = document.createElement("div"); strip.className = "composer-uploads";
+      strip = document.createElement("div"); strip.className = "composer-uploads"; strip.dataset.testid = "composer-uploads";
       field.before(strip);
     }
     strip.replaceChildren();
@@ -111,7 +111,7 @@ export class ComposerUploads {
     strip.append(list);
     for (const entry of this.files) {
       const chip = document.createElement("div"); chip.className = "composer-file";
-      if (entry.thumbnail) { const image = document.createElement("img"); image.src = entry.thumbnail; image.alt = ""; chip.append(image); }
+      if (entry.thumbnail) { const image = document.createElement("img"); image.src = entry.thumbnail; image.alt = ""; image.dataset.testid = "composer-file-thumbnail"; chip.append(image); }
       const label = document.createElement("span"); label.textContent = entry.size ? `${entry.name} · ${Math.ceil(entry.size / 1024)} KiB` : entry.name;
       chip.append(label);
 
@@ -124,7 +124,7 @@ export class ComposerUploads {
     }
     const status = document.createElement("p"); status.setAttribute("role", "status");
     status.textContent = this.error || (this.sending ? this.progressText() : this.files.length ? "Files stay here through reconnects. Send before closing this page." : "");
-    if (this.error) status.className = "upload-error";
+    if (this.error) { status.className = "upload-error"; status.dataset.testid = "upload-error"; }
     strip.append(status);
     if (this.sending && this.progress) {
       const progress = document.createElement("progress");

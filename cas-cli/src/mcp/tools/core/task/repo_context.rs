@@ -1076,7 +1076,7 @@ pub(crate) fn resolve_repo_context(
     // The caller's checkout is direct repository evidence. Resolve it before
     // unrelated host roots can exhaust the scan budget or stall on storage.
     // Explicit bindings above remain authoritative, including stale refusals.
-    let local = candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET));
+    let local = candidate_probe::probe_own(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET));
     if let Ok(Some(local)) = &local
         && local.identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)
@@ -1565,6 +1565,31 @@ mod tests {
                 !stale.exists(),
                 "the stale registry entry must remain nonexistent"
             );
+        });
+    }
+
+    /// GH #1941 / #2178: one close's probe of its own checkout timed out under
+    /// batch load, and the cached timeout refused every close from that
+    /// healthy checkout for the next 30 seconds (G-38). The caller's own
+    /// checkout is re-read, never answered from an earlier failure.
+    #[test]
+    fn own_checkout_is_reread_after_an_earlier_probe_failed_gh1941() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let project = home.join("gabber-studio");
+            std::fs::create_dir_all(project.join(".cas")).unwrap();
+            git(&project, &["init", "-q", "-b", "develop"]);
+            std::fs::write(project.join(".cas/config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+            std::fs::write(project.join("base"), "base").unwrap();
+            git(&project, &["add", "base"]);
+            git(&project, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "base"]);
+            let target = WorkTarget { repo_selector: "project:gabber-studio".into(), target_branch: "develop".into() };
+            let cas_root = project.join(".cas");
+            for earlier in [Err(BoundedRepoError::TimedOut), Ok(None)] {
+                candidate_probe::record_finished(&cas_root, earlier);
+                let resolved = resolve_repo_context(&cas_root, &target);
+                assert_eq!(resolved.map(|context| context.repo_root), Ok(canonical(project.clone())));
+            }
         });
     }
 

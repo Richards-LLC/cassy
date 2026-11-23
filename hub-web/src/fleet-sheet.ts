@@ -7,6 +7,7 @@ export function presentFleetSheet(container: HTMLElement, dismiss: () => void): 
   const document = container.ownerDocument;
   const sheet = document.createElement("dialog");
   sheet.className = "fleet-action-sheet";
+  sheet.dataset.testid = "fleet-action-sheet";
   sheet.classList.toggle("fleet-action-sheet--picker", content.classList.contains("fleet-ops-picker"));
   // cas-68d0 F01: a panel named by its visible heading lends that heading to
   // the dialog and drops its own name, so the name is announced once.

@@ -169,10 +169,10 @@ export class ProjectNavigation {
       if (!visible.length) continue;
       let card = this.cards.get(key);
       if (!card) {
-        const node = document.createElement("section"); node.className = "conversation-group project-card"; node.setAttribute("role", "group");
+        const node = document.createElement("section"); node.className = "conversation-group project-card"; node.dataset.testid = "project-card"; node.setAttribute("role", "group");
         // The spoken group name and visual header share the same facts. Keep
         // the complete machine names in the spoken heading when chips wrap.
-        const heading = document.createElement("p"); heading.className = "conversation-group-head sr-only"; heading.setAttribute("aria-hidden", "true");
+        const heading = document.createElement("p"); heading.className = "conversation-group-head sr-only"; heading.dataset.testid = "conversation-group-head"; heading.setAttribute("aria-hidden", "true");
         const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "project-card-toggle";
         const header = document.createElement("div"); header.className = "project-card-head";
         const chips = document.createElement("div"); chips.className = "project-machine-chips";
@@ -190,7 +190,7 @@ export class ProjectNavigation {
       card.node.setAttribute("aria-label", label);
       if (card.heading.textContent !== label) card.heading.textContent = label;
       const identity = members[0]!.project?.trim();
-      const markup = `<strong class="project-card-name"${identity && identity !== name ? ` title="${escapeHtml(identity)}"` : ""}>${escapeHtml(name)}</strong><span class="sr-only"> ${visible.length} ${visible.length === 1 ? "conversation" : "conversations"}</span><span class="project-card-chevron" aria-hidden="true">⌄</span>`;
+      const markup = `<strong class="project-card-name" data-testid="project-card-name"${identity && identity !== name ? ` title="${escapeHtml(identity)}"` : ""}>${escapeHtml(name)}</strong><span class="sr-only"> ${visible.length} ${visible.length === 1 ? "conversation" : "conversations"}</span><span class="project-card-chevron" aria-hidden="true">⌄</span>`;
       if (card.toggle.innerHTML !== markup) card.toggle.innerHTML = markup;
       card.body.hidden = this.collapsed.has(key) && !options.searchActive;
       card.toggle.setAttribute("aria-expanded", String(!card.body.hidden));

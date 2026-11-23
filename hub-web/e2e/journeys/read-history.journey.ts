@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import type { Page } from "@playwright/test";
 import { test, expect, journeyPart } from "./journey";
 import type { DoubleOptions } from "./hub-double";
 import { journeyDay } from "./clock";
@@ -8,6 +9,19 @@ import { openConversation, showConversationList } from "./responsive-goals";
 const you = (id: number, text: string, at: string) => ({ notification_id: id, target: PELICAN, text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Daniel", at });
 const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
 const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "application/pdf", size_bytes: 88_064, sha256: "9f".repeat(32) });
+
+// Located by role, name or test id (cas-9fcc). A list row is named
+// "<project> on <machine>, …"; a file card is a link named after its file.
+const conversationRow = (page: Page, project: string) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: new RegExp(`^${project} on `) });
+const connection = (page: Page) => page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
+const threadOf = (page: Page) => page.getByTestId("conversation-thread");
+const fileCardName = (name: string) => new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, `);
+const fileCard = (page: Page, name: string) => page.getByRole("log").getByRole("link", { name: fileCardName(name) });
+const fileNote = (page: Page, name: string) => fileCard(page, name).getByTestId("fnote");
+const historyEnd = (page: Page) => page.getByTestId("history-end");
+/** An inline supervisor page: the figure holding the page's file card and its frame. */
+const visualPage = (page: Page, name: string) => page.getByRole("log").getByRole("figure")
+  .filter({ has: page.getByRole("link", { name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, `) }) });
 
 test("HUB-J4 inspect images in a turn without leaving the conversation", journeyPart, async ({ page, journey }, testInfo) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
@@ -21,7 +35,7 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
   hub.supervisorSays(PELICAN, "Compare these screenshots.", { attachments: images });
   hub.supervisorSays(PELICAN, "This image belongs to another turn.", { attachments: [{ ...images[0], artifact_id: "gallery-other", name: "Other turn.png" }] });
   const first = page.getByRole("log").getByRole("link", { name: /^First screenshot.png/ });
-  await expect(first.locator("img")).toBeVisible();
+  await expect(first.getByRole("img", { name: "First screenshot.png", exact: true })).toBeVisible();
   const captures = testInfo.outputPath("image-viewer"); mkdirSync(captures, { recursive: true });
   await journey.stage("Read the image cards in the conversation", async () => {
     for (const width of [390, 1440]) for (const colorScheme of ["light", "dark"] as const) {
@@ -37,7 +51,7 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
       await first.click();
       await expect(first).toBeVisible();
       // The note follows the chunk import's async rejection; wait for that state.
-      await expect.soft(first.locator(".preview-note")).toHaveCount(1);
+      await expect.soft(first.getByRole("status", { name: "Preview status", exact: true, includeHidden: true })).toHaveCount(1);
     }
     for (const colorScheme of ["light", "dark"] as const) {
       await page.setViewportSize({ width: 390, height: 844 }); await page.emulateMedia({ colorScheme });
@@ -46,17 +60,21 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     await page.unroute(chunk);
     // Reload restores the selected turn; its first image is the readiness boundary.
     await page.reload();
-    await expect(first.locator("img")).toBeVisible();
+    await expect(first.getByRole("img", { name: "First screenshot.png", exact: true })).toBeVisible();
   });
   const dialog = page.getByRole("dialog", { name: "Image viewer" });
+  const canvas = dialog.getByRole("region", { name: "Image inspection", exact: true });
+  /** The viewer's image: named by its alt text, the file name, once one is shown. */
+  const viewerImage = canvas.getByRole("img");
+  const zoom = dialog.getByRole("status", { name: "Image zoom", exact: true });
   await journey.stage("Expand an image and keep keyboard focus inside", async () => {
     await first.focus(); await first.press("Enter");
     await expect(dialog).toBeVisible();
     await expect(page.locator("body")).toHaveCSS("margin", "0px");
-    await expect(dialog.locator(".image-viewer-canvas")).toHaveCSS("display", "grid");
+    await expect(canvas).toHaveCSS("display", "grid");
     await expect(dialog.getByRole("button", { name: "Close image viewer" })).toBeFocused();
     await expect(dialog).toContainText(new RegExp("(?=[\\s\\S]*1)(?=[\\s\\S]*3)"));
-    await expect(dialog.locator("img")).toHaveAttribute("alt", "First screenshot.png");
+    await expect(viewerImage).toHaveAttribute("alt", "First screenshot.png");
     await expect(dialog).toHaveAttribute("data-state", "ready");
     await page.keyboard.press("Shift+Tab");
     await expect(dialog.getByRole("button", { name: "Fit image" })).toBeFocused();
@@ -83,31 +101,30 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
   await journey.stage("Zoom and pan with keyboard, mouse and touch", async () => {
     // At 1440 the 640 px fixture still fits at 1.5×, so it has nothing to pan.
     await page.setViewportSize({ width: 390, height: 844 });
-    const canvas = dialog.locator(".image-viewer-canvas");
     await page.keyboard.press("+");
-    await expect(dialog.locator("output")).toHaveText("1.5×");
+    await expect(zoom).toHaveText("1.5×");
     await page.keyboard.press("Shift+ArrowRight");
-    expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toContain("translate(0px, 0px)");
+    expect(await viewerImage.evaluate(image => image.style.transform)).not.toContain("translate(0px, 0px)");
     await canvas.hover(); await page.mouse.wheel(0, -200);
-    await expect(dialog.locator("output")).not.toHaveText("1.5×");
-    const beforeDrag = await dialog.locator("img").evaluate(image => image.style.transform);
+    await expect(zoom).not.toHaveText("1.5×");
+    const beforeDrag = await viewerImage.evaluate(image => image.style.transform);
     const box = (await canvas.boundingBox())!;
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2); await page.mouse.up();
-    expect(await dialog.locator("img").evaluate(image => image.style.transform)).not.toBe(beforeDrag);
-    const beforePinch = await dialog.locator("output").textContent();
+    expect(await viewerImage.evaluate(image => image.style.transform)).not.toBe(beforeDrag);
+    const beforePinch = await zoom.textContent();
     await canvas.evaluate(canvas => {
       const box = canvas.getBoundingClientRect();
       const fire = (type: string, id: number, x: number) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "touch", pointerId: id, clientX: box.left + x, clientY: box.top + box.height / 2 }));
       fire("pointerdown", 1, 70); fire("pointerdown", 2, 170); fire("pointermove", 2, 210); fire("pointerup", 1, 70); fire("pointerup", 2, 210);
     });
-    await expect(dialog.locator("output")).not.toHaveText(beforePinch!);
+    await expect(zoom).not.toHaveText(beforePinch!);
     await dialog.getByRole("button", { name: "Fit image" }).click();
-    await expect.poll(() => dialog.locator("img").evaluate(image => image.style.transform)).toMatch(/scale\(1\)/);
+    await expect.poll(() => viewerImage.evaluate(image => image.style.transform)).toMatch(/scale\(1\)/);
   });
   await journey.stage("Compare the turn's images and name a load failure", async () => {
     await page.keyboard.press("ArrowRight");
-    await expect(dialog.locator("h2")).toHaveText("Second screenshot.png");
+    await expect(dialog.getByRole("heading", { level: 2 })).toHaveText("Second screenshot.png");
     await expect(dialog).toHaveAttribute("data-state", "ready");
     await dialog.getByRole("button", { name: "Next image" }).click();
     await expect(dialog.getByRole("status", { name: "Image load" })).toBeVisible();
@@ -124,7 +141,7 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     await expect(dialog.getByRole("button", { name: "Next image" })).toBeDisabled();
     await page.keyboard.press("ArrowLeft");
     await expect(dialog).toHaveAttribute("data-state", "ready");
-    const reading = page.locator(".conversation-reading.thread");
+    const reading = threadOf(page);
     const scroll = await reading.evaluate(node => node.scrollTop);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0); await expect(first).toBeFocused();
@@ -135,8 +152,8 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
 test("HUB-J4 prose tables keep words readable and render inline markdown", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-  await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await conversationRow(page, "cas-src").click();
+  await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, [
     "| Tab | State |", "| --- | --- |",
@@ -234,20 +251,22 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
   const path = `src/${"a-long-path-segment/".repeat(8)}report.ts`;
   const markdown = `| Item | Note | Result |\r\n| --- | --- | --- |\r\n| \`a\\|b\` | said "ready", now | **pass** |\r\n| \`${path}\` | inspect [receipt](https://example.org/receipt) | 1 flake |`;
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-  await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await conversationRow(page, "cas-src").click();
+  await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, `# Evidence ready to reuse\n\n${markdown}\n\n~~~txt\n| literal | source |\n| --- | --- |\n~~~`);
   const log = page.getByRole("log");
   const table = log.getByRole("table", { name: "Evidence", exact: true }).filter({ has: page.getByRole("columnheader", { name: "Item", exact: true }) });
-  const sheet = table.locator("xpath=../..");
+  // The evidence sheet: the table with its Copy buttons and copy status.
+  const sheet = log.getByTestId("evi").filter({ has: page.getByRole("columnheader", { name: "Item", exact: true }) });
   await journey.stage("Read a native table with escaped pipes and copy its two formats", async () => {
     await expect(table).toHaveCount(1);
     await expect(table.getByRole("columnheader")).toHaveText(["Item", "Note", "Result"]);
     await expect(table.getByRole("cell").first()).toHaveText("a|b");
-    await expect(log.locator(".code-frame code")).toHaveText("| literal | source |\n| --- | --- |");
-    await expect(table.locator(".pass")).toHaveText("pass");
-    await expect(table.locator(".flake")).toHaveText("1 flake");
+    await expect(log.getByTestId("code-frame").getByRole("code")).toHaveText("| literal | source |\n| --- | --- |");
+    // Toned evidence cells carry their tone as a test id.
+    await expect(table.getByTestId("pass")).toHaveText("pass");
+    await expect(table.getByTestId("flake")).toHaveText("1 flake");
     const copy = sheet.getByRole("button", { name: "Copy CSV", exact: true });
     await copy.focus(); await page.keyboard.press("Enter");
     await expect(sheet.getByRole("status")).toBeVisible();
@@ -283,7 +302,7 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
     const source = "| Formula | Value |\n| --- | --- |\n| =cmd | @x |\n| +1 | -1 |";
     hub.supervisorSays(PELICAN, source);
     const formulas = log.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Formula", exact: true }) });
-    const controls = formulas.locator("xpath=../..");
+    const controls = log.getByTestId("evi").filter({ has: page.getByRole("columnheader", { name: "Formula", exact: true }) });
     await expect(formulas.getByRole("cell")).toHaveText(["=cmd", "@x", "+1", "-1"]);
     await controls.getByRole("button", { name: "Copy CSV", exact: true }).click();
     await expect(controls.getByRole("status")).toBeVisible();
@@ -315,8 +334,8 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
 test("HUB-J4 a short status shows its callout and bold, not their markers", journeyPart, async ({ page, journey }, testInfo) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-  await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await conversationRow(page, "cas-src").click();
+  await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, "> [!WARNING]\n> **Blocked:** the queue is red on two Commander journeys.", { kind: "status" });
   hub.supervisorSays(PELICAN, "**Merged.** Gate 11 of 14 is green and the release branch is ready for its next pass.", { kind: "status" });
@@ -327,16 +346,18 @@ test("HUB-J4 a short status shows its callout and bold, not their markers", jour
       await page.emulateMedia({ colorScheme });
       const callout = log.getByRole("complementary", { name: "Warning", exact: true });
       await expect(callout).toContainText("Blocked: the queue is red");
-      await expect(callout.locator("strong").last()).toHaveText("Blocked:");
-      const line = log.locator(".coalesce");
-      await expect(line.locator("strong")).toHaveText("Merged.");
+      // The callout's own label is bold too; the body's bold run is the one under test.
+      await expect(callout.getByRole("strong").filter({ hasText: "Blocked:" })).toHaveText("Blocked:");
+      const line = log.getByTestId("coalesce");
+      await expect(line.getByRole("strong")).toHaveText("Merged.");
       await expect(log).not.toContainText("**");
       await expect(log).not.toContainText("[!WARNING]");
       // Bold joins its sentence: one reading line, not a stacked box per run.
-      const [bold, box] = await Promise.all([line.locator("strong").boundingBox(), line.boundingBox()]);
+      const [bold, box] = await Promise.all([line.getByRole("strong").boundingBox(), line.boundingBox()]);
       expect(box!.height).toBeLessThan(3 * 24 + 20);
       expect(bold!.y - box!.y).toBeLessThan(16);
-      await log.locator(".turn").filter({ has: page.getByRole("complementary", { name: "Warning", exact: true }) }).screenshot({ path: testInfo.outputPath(`status-callout-${width}-${colorScheme}.png`) });
+      // A turn is a group named for its speaker and time.
+      await log.getByRole("group").filter({ has: page.getByRole("complementary", { name: "Warning", exact: true }) }).screenshot({ path: testInfo.outputPath(`status-callout-${width}-${colorScheme}.png`) });
       await line.screenshot({ path: testInfo.outputPath(`status-bold-${width}-${colorScheme}.png`) });
     });
   }
@@ -345,8 +366,8 @@ test("HUB-J4 a short status shows its callout and bold, not their markers", jour
 test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-  await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await conversationRow(page, "cas-src").click();
+  await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, [
     "# Release is ready", "## Evidence", "### Checks", "The reviewed build passed.",
@@ -355,7 +376,7 @@ test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", 
     "> [!CAUTION]", "> <script>unsafe()</script> is literal; [unsafe](javascript:run) stays text.", "",
     "Ordinary prose continues here.",
   ].join("\n"));
-  const bubble = page.getByRole("log").locator(".bub").filter({ hasText: "Release is ready" });
+  const bubble = page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: "Release is ready" });
   await expect(bubble).toBeVisible();
   const modes = [
     { name: "light", colorScheme: "light", forcedColors: "none", reducedMotion: "no-preference", contrast: "no-preference" },
@@ -388,8 +409,9 @@ test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", 
       expect.soft(await bubble.getByRole("complementary", { name: "Caution", exact: true }).count()).toBe(1);
       expect.soft(await bubble.locator("script, button, [role=alert], [role=status], .obj, .ask, .blocker").count()).toBe(0);
       expect.soft(await bubble.getByRole("link").count()).toBe(1);
-      expect.soft(await bubble.locator("code").allTextContents()).toEqual(["rollback"]);
-      expect.soft(await bubble.locator(":scope > p").last().textContent()).toBe("Ordinary prose continues here.");
+      expect.soft(await bubble.getByRole("code").allTextContents()).toEqual(["rollback"]);
+      // The prose after the callouts is the bubble's last paragraph.
+      expect.soft(await bubble.getByRole("paragraph").last().textContent()).toBe("Ordinary prose continues here.");
       const layout = await bubble.evaluate(node => {
         const headings = [...node.querySelectorAll<HTMLElement>(".markdown-heading")].map(h => parseFloat(getComputedStyle(h).fontSize));
         const caveats = [...node.querySelectorAll<HTMLElement>(".markdown-callout")].map(c => ({
@@ -433,7 +455,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
 
   await journey.stage("Open the conversation and see the recent turns", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await expect(log.getByText("Yes. The gate is green on the release branch.")).toBeVisible();
     await expect(log.getByText("Is the release ready to cut?")).toBeVisible();
     // cas-acb4b: the latest exchange is on screen at once, without Jump to latest.
@@ -516,13 +538,13 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
       // cas-2093 (F12): on the last page the thread scrolls up just enough
       // to state the end of history at the top; the page the reader asked
       // for reads down from it to where they were.
-      await expect(page.locator(".history-end")).toBeInViewport();
+      await expect(historyEnd(page)).toBeInViewport();
       expect(await y(), "the reader's turn is below the page they loaded, not above it").toBeGreaterThan(before.y);
       return;
     }
     await expect.poll(async () => Math.abs((await y()) - before.y), { message: `"${before.key}" stays where the reader left it (px from ${before.y})` }).toBeLessThanOrEqual(3);
     // The older turns are above, off screen until the reader scrolls up.
-    expect(await page.locator(".conversation-reading.thread").evaluate((thread) => thread.scrollTop)).toBeGreaterThan(0);
+    expect(await threadOf(page).evaluate((thread) => thread.scrollTop)).toBeGreaterThan(0);
   };
 
   await journey.stage("Load earlier turns", async () => {
@@ -531,7 +553,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // The pointer now rests on the thread: its surface stays the cream canvas,
     // not brightened to white by the main-action button hover (journey F11).
     await log.hover();
-    await expect(page.locator("#conversation-stage .conversation-thread-slot")).toHaveCSS("filter", "none");
+    await expect(page.getByTestId("conversation-stage").getByTestId("conversation-thread-slot")).toHaveCSS("filter", "none");
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 20 });
   });
 
@@ -539,13 +561,214 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // A second page, from further back: the place holds again.
     await loadEarlierKeepsPlace("Drafted: three lanes, one gate.", true);
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
-    await expect(page.locator(".history-end")).toBeVisible();
+    await expect(historyEnd(page)).toBeVisible();
     await expect(page.getByRole("button", { name: "Load earlier" })).toBeHidden();
     // cas-71af (1584 QA F01): the pressed button hides on the last page, and
     // focus lands on the line that took its place, not the page body.
-    await expect(page.locator(".history-end")).toBeFocused();
+    await expect(historyEnd(page)).toBeFocused();
     // cas-2093 (F12): the end of history is stated on screen, not left above the fold.
-    await expect(page.locator(".history-end")).toBeInViewport();
+    await expect(historyEnd(page)).toBeInViewport();
+  });
+});
+
+test("HUB-J4 open reports and recover their notices without moving the reader", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub(historyWorld());
+  const log = page.getByRole("log");
+  const thread = threadOf(page);
+  const header = connection(page);
+  const REPORT_CARD = "Release report card.pdf", LOCAL = "Draft notes.pdf", CLOUD_DOWN = "Gate log.pdf", OFFLINE = "Bench results.pdf";
+  const requests = (id: string) => hub.artifactRequests.filter((request) => request === id).length;
+  /** A PDF card's inline preview has settled as unavailable, so its own request is counted (cas-0997 fixture). */
+  const previewFailed = (name: string) => expect(page.getByRole("log").getByTestId("rich-attachment").filter({ has: page.getByRole("link", { name: fileCardName(name) }) }).getByTestId("rich-media")).toHaveAttribute("data-preview-state", "failed");
+  await journey.open();
+  await conversationRow(page, "cas-src").click();
+  await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
+  // Reach the real history boundary before reconnecting. The reattach's newest
+  // page still advertises older turns; it must not reset the reader's boundary.
+  for (const arrived of ["Scheduled for 09:00 with three workers.", "Drafted: three lanes, one gate."]) {
+    await page.getByRole("button", { name: "Load earlier" }).click();
+    await expect(log.getByText(arrived)).toBeAttached();
+  }
+  await expect(page.getByTestId("history-end")).toBeVisible();
+  /** Top of the first thread item on screen: the line the reader is on. */
+  const reading = () => thread.evaluate((element) => {
+    const top = element.getBoundingClientRect().top;
+    const node = [...element.querySelectorAll<HTMLElement>("[data-key]")].find((item) => item.getBoundingClientRect().height > 0 && item.getBoundingClientRect().bottom > top)!;
+    return { key: node.dataset.key!, y: Math.round(node.getBoundingClientRect().top) };
+  });
+  /**
+   * Where the reader rests once the thread is still. Opening a card, a status
+   * redraw or a queued tail pin can still be moving the thread when a single
+   * read is taken, and a moving sample made the reconnect check fail by the
+   * distance still to travel (194 px, cas-9fcc). Two equal reads across a poll
+   * interval mean nothing is moving it.
+   */
+  const settledReading = async () => {
+    let last: { key: string; y: number } | undefined;
+    await expect.poll(async () => {
+      const now = await reading();
+      const still = last !== undefined && now.key === last.key && now.y === last.y;
+      last = now;
+      return still;
+    }, { message: "the thread comes to rest" }).toBe(true);
+    return last!;
+  };
+  const anchorY = (key: string) => thread.evaluate((element, key) => {
+    const node = [...element.querySelectorAll<HTMLElement>("[data-key]")].find((item) => item.dataset.key === key);
+    return node ? Math.round(node.getBoundingClientRect().top) : NaN;
+  }, key);
+  /** The reader's turn stays where it was (within 3 px) across what follows. */
+  const holds = async (anchor: { key: string; y: number }, what: string) => {
+    await expect.poll(async () => Math.abs(await anchorY(anchor.key) - anchor.y),
+      { message: `"${anchor.key}" stays where the reader left it ${what}` }).toBeLessThanOrEqual(3);
+  };
+  // Opening a file can leave the thread at its tail. Park the reader above it
+  // before asserting that their top line holds.
+  const parkReader = async () => {
+    await thread.hover();
+    await page.mouse.wheel(0, -await thread.evaluate((element) => element.clientHeight / 2));
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    await expect.poll(() => thread.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeGreaterThan(80);
+    return settledReading();
+  };
+
+  await journey.stage("Open a report the supervisor sent", async () => {
+    // cassy#910: the report card opens its hosted copy through a short-lived
+    // signed link the machine asks Cloud for, in a new tab.
+    await page.context().route("https://store.test/**", (route) => route.fulfill({ contentType: "text/html", body: "<h1>Release report card</h1>" }));
+    const report = fileCard(page, REPORT_CARD);
+    await report.scrollIntoViewIfNeeded();
+    await previewFailed(REPORT_CARD);
+    const reportRequests = requests("art-report");
+    const opened = page.waitForEvent("popup");
+    await report.click();
+    const tab = await opened;
+    await tab.waitForURL(/^https:\/\/store\.test\/view\/art-report\?sig=journey$/);
+    await expect(tab.getByRole("heading", { name: "Release report card" })).toBeVisible();
+    await tab.close();
+    expect(requests("art-report")).toBe(reportRequests + 1);
+    expect(page.url()).not.toContain("#artifact:");
+
+    // Journey F6: every failure is said on the card that was pressed, not in
+    // a toast, and no tab is left open.
+    const toast = page.getByRole("status", { name: "Notice" });
+    const local = fileCard(page, LOCAL);
+    await local.scrollIntoViewIfNeeded();
+    await previewFailed(LOCAL);
+    const localRequests = requests("art-local-draft");
+    await local.click();
+    await expect(fileNote(page, LOCAL)).toBeVisible();
+    expect(requests("art-local-draft")).toBe(localRequests + 1);
+    // Known now: opening it again opens no tab at all.
+    let popups = 0;
+    const countPopup = () => { popups += 1; };
+    page.on("popup", countPopup);
+    await local.click();
+    await expect.poll(() => requests("art-local-draft")).toBe(localRequests + 2);
+    await expect(fileNote(page, LOCAL)).toBeVisible();
+    expect(popups, "no tab for a file known to be only on the machine").toBe(0);
+    page.off("popup", countPopup);
+
+    // cas-e503: Cloud failing says what to do, and a connected machine that
+    // sends nothing is not called unreachable while the header says Live.
+    await fileCard(page, CLOUD_DOWN).click();
+    await expect(fileNote(page, CLOUD_DOWN)).toBeVisible();
+    await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
+    await fileCard(page, OFFLINE).click();
+    await expect(fileNote(page, OFFLINE)).toBeVisible();
+    await expect(toast.filter({ hasText: /\S/ }), "no failure is said in a toast").toHaveCount(0);
+    expect(page.context().pages()).toHaveLength(1);
+
+    // cas-c808 QA F01: a note about reaching the machine does not outlive the
+    // outage; a note about the file itself stays. cas-2093 (F3): the reader
+    // is on the file cards when the connection drops.
+    const beforeDrop = await parkReader();
+    const beforeNote = await fileNote(page, OFFLINE).textContent();
+    // cas-c945 QA F01: what a screen reader would hear. Each change of text
+    // is attributed to its nearest live region (role status/alert/log or
+    // aria-live, an aria-live="off" ancestor silencing it).
+    await page.evaluate(() => {
+      const w = window as unknown as { __heard: Array<{ words: string; source: "banner" | "attachment" | "other" }> };
+      w.__heard = [];
+      const region = (node: Node): Element | null => {
+        for (let element = node instanceof Element ? node : node.parentElement; element; element = element.parentElement) {
+          const live = element.getAttribute("aria-live");
+          if (live === "off") return null;
+          if (live || ["status", "alert", "log"].includes(element.getAttribute("role") ?? "")) return element;
+        }
+        return null;
+      };
+      new MutationObserver((records) => {
+        const last = new Map<Element, string>();
+        for (const record of records) {
+          for (const node of record.type === "characterData" ? [record.target] : [...record.addedNodes]) {
+            const speaker = region(node);
+            const words = node.textContent?.trim() ?? "";
+            if (!speaker || !words || last.get(speaker) === words) continue;
+            last.set(speaker, words);
+            const element = node instanceof Element ? node : node.parentElement;
+            const source = element?.closest("[data-testid=fnote]") ? "attachment" : element?.closest("[data-testid=terminal-disconnected-banner]") ? "banner" : "other";
+            w.__heard.push({ words, source });
+          }
+        }
+      }).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+    await holds(beforeDrop, "when the connection drops");
+    // Journey F28: the card that said the machine "is connected" says what
+    // the header and banner say, without another click and without a second
+    // announcement of the outage.
+    await expect(fileNote(page, OFFLINE)).not.toHaveText(beforeNote!);
+    await expect(fileNote(page, OFFLINE)).toContainText("Atlas · Linux");
+    const reconnecting = await fileNote(page, OFFLINE).textContent();
+    await expect(fileNote(page, OFFLINE)).not.toHaveAttribute("role", "status");
+    await expect(fileCard(page, OFFLINE)).toHaveAccessibleName(/Atlas · Linux/);
+    // The page clock runs the app's next second and a half of timers at once,
+    // so a late repeat is heard however loaded the host (cas-c4b2).
+    await page.clock.runFor(1_500);
+    const heard = await page.evaluate(() => (window as unknown as { __heard: Array<{ words: string; source: string }> }).__heard);
+    expect(heard.filter((entry) => entry.source === "banner").map((entry) => entry.words), "the banner speaks once").toEqual([expect.stringContaining("Atlas · Linux")]);
+    expect(heard.filter((entry) => entry.source === "attachment"), "a file note never announces the outage again").toEqual([]);
+    await expect(fileNote(page, OFFLINE)).toHaveAttribute("aria-live", "off");
+    await fileCard(page, OFFLINE).click();
+    await expect(fileNote(page, OFFLINE)).toHaveText(reconnecting!);
+    // Opening the card can return to the tail; park above it again before
+    // checking a mid-thread reader's position across the reconnect.
+    const beforeReconnect = await parkReader();
+    const firstPages = hub.historyRequests.filter((request) => request.before === undefined).length;
+    hub.release(PELICAN);
+    await expect(header).toHaveAttribute("data-phase", "live", { timeout: 30_000 });
+    // The reattach asks for the newest page again; it neither moves the reader
+    // nor brings "Load earlier" back once the start was reached (cas-2093).
+    await expect.poll(() => hub.historyRequests.filter((request) => request.before === undefined).length).toBeGreaterThan(firstPages);
+    await holds(beforeReconnect, "across the reconnect");
+    await expect(page.getByRole("button", { name: "Load earlier" })).toBeHidden();
+    await expect(page.getByTestId("history-end")).toBeAttached();
+    await expect(fileNote(page, OFFLINE)).toHaveCount(0);
+    await expect(fileNote(page, CLOUD_DOWN)).toHaveCount(0);
+    await expect(fileNote(page, LOCAL)).toBeVisible();
+    expect(page.context().pages()).toHaveLength(1);
+  });
+
+  await journey.stage("Follow the latest turn while the file note wraps at a drop", async () => {
+    await fileCard(page, OFFLINE).click();
+    const note = fileNote(page, OFFLINE);
+    await expect(note).toBeVisible();
+    const beforeNote = await note.textContent();
+    // The composer intentionally resumes following.
+    await page.getByRole("textbox", { name: "Your message" }).focus();
+    const tailGap = () => thread.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    await expect.poll(tailGap).toBeLessThanOrEqual(1);
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+    await expect(note).not.toHaveText(beforeNote!);
+    await expect.poll(tailGap).toBeLessThanOrEqual(1);
+    hub.release(PELICAN);
+    await expect(header).toHaveAttribute("data-phase", "live", { timeout: 30_000 });
+    await expect.poll(tailGap).toBeLessThanOrEqual(1);
   });
 });
 
@@ -578,12 +801,12 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
     }).observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["data-phase"] });
   });
   const log = page.getByRole("log");
-  const header = page.locator("#conversation-connection");
+  const header = connection(page);
   const loadEarlier = page.getByRole("button", { name: "Load earlier" });
 
   await journey.stage("Read mid-history, then move on to the composer", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
     await loadEarlier.scrollIntoViewIfNeeded();
     await loadEarlier.click();
@@ -608,7 +831,7 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
     await page.keyboard.press("Enter");
     await expect(log.getByText("Drafted: three lanes, one gate.")).toBeAttached();
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
-    await expect(page.locator(".history-end")).toBeFocused();
+    await expect(historyEnd(page)).toBeFocused();
   });
 });
 
@@ -650,7 +873,7 @@ for (const [name, viewport, rest] of [
       }).observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["data-phase"] });
     });
     const log = page.getByRole("log");
-    const header = page.locator("#conversation-connection");
+    const header = connection(page);
     const loadEarlier = page.getByRole("button", { name: "Load earlier" });
     /** How much of the focused control the thread shows: its box inside the thread's scroll box. */
     const shownInThread = () => loadEarlier.evaluate((button) => {
@@ -661,7 +884,7 @@ for (const [name, viewport, rest] of [
 
     await journey.stage(`Read an earlier page mid-history, then move on to the composer (${name})`, async () => {
       await journey.open();
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+      await conversationRow(page, "cas-src").click();
       await expect(log.getByText("Recent turn 11:")).toBeVisible();
       await loadEarlier.scrollIntoViewIfNeeded();
       await loadEarlier.click();
@@ -669,7 +892,7 @@ for (const [name, viewport, rest] of [
       await expect(loadEarlier).toBeEnabled();
       if (rest === "composer") await page.getByRole("textbox", { name: "Your message" }).focus();
       // A header control outside the thread: the thread keeps the earlier page.
-      else await page.locator("#conversation-raw-output").focus();
+      else await page.getByRole("button", { name: "Raw output", exact: true }).focus();
     });
 
     await journey.stage(`The reader tabs to Load earlier as the machine comes back, and sees it (${name})`, async () => {
@@ -693,7 +916,7 @@ for (const [name, viewport, rest] of [
       await page.keyboard.press("Enter");
       await expect(log.getByText("The oldest entry, reached by keyboard.")).toBeAttached();
       expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
-      await expect(page.locator(".history-end")).toBeFocused();
+      await expect(historyEnd(page)).toBeFocused();
     });
   });
 }
@@ -741,7 +964,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     await tab.route("https://foreign.example/**", (route) => route.fulfill({ contentType: "text/html", body: `<iframe title="reframed" src="${new URL(route.request().url()).searchParams.get("src")}"></iframe>` }));
     await tab.addInitScript(() => { (window as unknown as { heard: unknown[] }).heard = []; addEventListener("message", (event) => (window as unknown as { heard: unknown[] }).heard.push(event.data)); });
     await journey.open();
-    await tab.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(tab.locator(".conversation-row")).click();
+    await conversationRow(tab, "cas-src").click();
     const log = tab.getByRole("log");
     await expect(log.getByText("Here it is, and the page the scanner flagged.")).toBeVisible();
     // cas-b255: HOSTILE attempts to write exactly this key. Host arrivals,
@@ -756,7 +979,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       // Page tickets are lazy: bring the persistent page card into view before
       // asking for the iframe it creates. A shorter conversation viewport may
       // leave the first card outside the observer's preload margin.
-      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
+      await visualPage(tab, "Gate report.html").scrollIntoViewIfNeeded();
       const report = log.getByTitle("Gate report.html, a page from the supervisor");
       await report.scrollIntoViewIfNeeded();
       await expect(report).toHaveAttribute("sandbox", "");
@@ -769,7 +992,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       expect(hub.pageRequests.every((path) => path.startsWith("/v1/pages/ticket-"))).toBe(true);
       expect([...hub.pageTickets.values()].map((held) => held.origin)).toEqual(expect.arrayContaining([new URL(tab.url()).origin]));
       // No agent markup ever enters Commander's own document.
-      await expect(tab.locator("#app h1", { hasText: "Gate report" })).toHaveCount(0);
+      await expect(tab.getByRole("heading", { level: 1, name: "Gate report", includeHidden: true })).toHaveCount(0);
       await expect(tab.locator("iframe[srcdoc]")).toHaveCount(0);
     });
 
@@ -791,7 +1014,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
       await openConversation(tab, "cas-src");
       // Re-entry recreates lazy page cards; scroll the card before its iframe exists.
-      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
+      await visualPage(tab, "Gate report.html").scrollIntoViewIfNeeded();
       await log.getByTitle("Gate report.html, a page from the supervisor").scrollIntoViewIfNeeded();
       expect(await tab.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches), "the device preference stays light").toBe(false);
       await expect(inside.locator("body")).toHaveCSS("background-color", "rgb(21, 23, 29)");
@@ -811,11 +1034,11 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       // the browser's own opaque backdrop, so it stays legible.
       await tab.emulateMedia({ colorScheme: "dark" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
-      await log.locator('figure.visual-page[data-artifact-id="art-report"]').scrollIntoViewIfNeeded();
-      const card = log.locator('a.sheet[data-artifact-id="art-report"]');
-      const frame = log.locator('.visual-page[data-artifact-id="art-report"] .visual-frame');
+      await visualPage(tab, "Gate report.html").scrollIntoViewIfNeeded();
+      const card = fileCard(tab, "Gate report.html");
+      const frame = visualPage(tab, "Gate report.html").getByTestId("visual-frame");
       await expect(frame).toHaveCSS("background-color", await card.evaluate((node) => getComputedStyle(node).backgroundColor));
-      await expect(frame.locator("iframe")).toHaveCSS("color-scheme", "dark");
+      await expect(frame.getByTitle("Gate report.html, a page from the supervisor", { exact: true })).toHaveCSS("color-scheme", "dark");
       const inside = tab.frameLocator('iframe[title="Gate report.html, a page from the supervisor"]');
       await expect(inside.locator("body")).toHaveCSS("background-color", "rgb(21, 23, 29)");
       // A page with no dark styles keeps a light backdrop under its dark text.
@@ -832,7 +1055,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       const hostile = tab.frameLocator('iframe[title="Flagged page.html, a page from the supervisor"]');
       await expect(hostile.getByRole("heading", { name: "Hostile page" })).toBeVisible();
       await expect(hostile.locator("body")).not.toHaveAttribute("data-ran", "1");
-      for (const id of ["#js", "#top", "#pop", "#submit"]) await hostile.locator(id).click();
+      for (const control of [hostile.getByRole("link", { name: "Run", exact: true }), hostile.getByRole("link", { name: "Re-pair this machine", exact: true }), hostile.getByRole("link", { name: "Open a window", exact: true }), hostile.getByRole("button", { name: "Submit", exact: true })]) await control.click();
       await expect(hostile.getByRole("heading", { name: "Hostile page" }), "the meta refresh and every click left the page where it was").toBeVisible();
       expect(tab.url()).toContain("/commander/");
       expect(tab.context().pages()).toHaveLength(tabs);
@@ -845,18 +1068,18 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       const src = await log.getByTitle("Gate report.html, a page from the supervisor").getAttribute("src");
       const requests = hub.pageRequests.length;
       await tab.evaluate((url) => { const frame = document.createElement("iframe"); frame.title = "foreign host"; frame.src = url; document.body.append(frame); }, `https://foreign.example/host?src=${encodeURIComponent(src!)}`);
-      const nested = await tab.frameLocator('iframe[title="foreign host"]').locator('iframe[title="reframed"]').elementHandle();
+      const nested = await tab.frameLocator('iframe[title="foreign host"]').getByTitle("reframed", { exact: true }).elementHandle();
       const reframed = (await nested!.contentFrame())!;
       await expect.poll(() => hub.pageRequests.length, { message: "the machine served the page; the browser refused to show it" }).toBeGreaterThan(requests);
       await reframed.waitForLoadState("load");
       // The browser shows its own refusal page in the frame, never the report.
       expect(await reframed.getByRole("heading", { name: "Gate report" }).count(), "frame-ancestors names only the minting Commander origin").toBe(0);
-      await tab.locator('iframe[title="foreign host"]').evaluate((frame) => frame.remove());
+      await tab.getByTitle("foreign host", { exact: true }).evaluate((frame) => frame.remove());
     });
 
     await journey.stage(`Open the page in its own tab, still sandboxed (${name})`, async () => {
       const opened = tab.waitForEvent("popup");
-      await log.locator('a.sheet[data-artifact-id="art-report"]').click();
+      await fileCard(tab, "Gate report.html").click();
       const popup = await opened;
       await popup.waitForURL(/^https:\/\/atlas\.test\/v1\/pages\/ticket-\d+-x+\/art-report$/);
       await expect(popup.getByRole("heading", { name: "Gate report" })).toBeVisible();
@@ -866,7 +1089,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       // keeps the hostile page scriptless, in place and silent. (A link the
       // operator clicks there navigates that tab only, by design.)
       const hostileOpened = tab.waitForEvent("popup");
-      await log.locator('a.sheet[data-artifact-id="art-hostile"]').click();
+      await fileCard(tab, "Flagged page.html").click();
       const hostileTab = await hostileOpened;
       await expect(hostileTab.getByRole("heading", { name: "Hostile page" })).toBeVisible();
       await hostileTab.waitForLoadState("load");

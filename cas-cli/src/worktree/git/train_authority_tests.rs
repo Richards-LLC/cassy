@@ -853,8 +853,25 @@ fn train_authority_abort_reaccept_cas_6456() {
         let path = ".github/workflows/release.yml";
         let downstream = ".github/workflows/install-path-proof.yml";
         std::fs::create_dir_all(fixture.left.join(".github/workflows")).unwrap();
-        std::fs::write(fixture.left.join(path), "name: Release\non: push\njobs: {}\n").unwrap();
-        std::fs::write(fixture.left.join(downstream), "name: Install proof\non: workflow_call\njobs: {}\n").unwrap();
+        std::fs::write(fixture.left.join(path), format!(r#"name: Release
+on: push
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
+  install-proof:
+    needs: release
+    uses: ./{downstream}
+"#)).unwrap();
+        std::fs::write(fixture.left.join(downstream), r#"name: Install proof
+on: workflow_call
+jobs:
+  verify-install:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo install proof
+"#).unwrap();
         command(&fixture.left, &["add", path, downstream], None).unwrap();
         let source = fixture.candidate(&fixture.left, "reserved-source");
         assert!(first.publish(&GitOperations::new(fixture.left.clone()), &fixture.actor, &source).unwrap().is_published());
@@ -864,7 +881,7 @@ fn train_authority_abort_reaccept_cas_6456() {
             actions: vec![ExternalAction::ArmPr, ExternalAction::PublishTag, ExternalAction::CreateRelease],
             workflows: [path, downstream].into_iter().map(|path| WorkflowScope { path: path.into(), revision: command(&fixture.left,
                 &["rev-parse", &format!("{source}:{path}")], None).unwrap(),
-                jobs: vec![if path == downstream { "install-proof".into() } else { "release".into() }] }).collect(),
+                jobs: vec![if path == downstream { "install-proof / verify-install".into() } else { "release".into() }] }).collect(),
         };
         let operation = uuid::Uuid::new_v4().to_string();
         let reserved = first.reserve_external(&fixture.left, &fixture.actor, &operation, &scope).unwrap();
@@ -1015,10 +1032,10 @@ fn train_authority_abort_reaccept_cas_6456() {
         }
         model.borrow_mut().insert("actions/runs/44/attempts/1/jobs?per_page=100&page=1".into(), json!({"total_count":2,"jobs":[
             {"id":101,"run_id":44,"run_attempt":1,"head_sha":source,"name":"release","status":"completed","conclusion":"success","completed_at":"2026-11-23T09:00:00Z"},
-            {"id":102,"run_id":44,"run_attempt":1,"head_sha":source,"name":"install-proof","status":"in_progress","conclusion":null,"completed_at":null}]}));
+            {"id":102,"run_id":44,"run_attempt":1,"head_sha":source,"name":"install-proof / verify-install","status":"in_progress","conclusion":null,"completed_at":null}]}));
         assert!(provider.verify_publication_run(releasing.external_operation(&operation).unwrap(), 44, 1).is_err());
         model.borrow_mut().get_mut("actions/runs/44/attempts/1/jobs?per_page=100&page=1").unwrap()["jobs"][1] =
-            json!({"id":102,"run_id":44,"run_attempt":1,"head_sha":source,"name":"install-proof","status":"completed","conclusion":"success","completed_at":"2026-11-23T09:01:00Z"});
+            json!({"id":102,"run_id":44,"run_attempt":1,"head_sha":source,"name":"install-proof / verify-install","status":"completed","conclusion":"success","completed_at":"2026-11-23T09:01:00Z"});
         model.borrow_mut().insert(format!("release/{}", scope.tag), json!({"data":{"repository":{
             "nameWithOwner":"test/fixture","release":{"id":"release-id","tagName":scope.tag,"isDraft":false,"tagCommit":{"oid":source}},
             "ref":{"target":{"oid":object,"target":{"oid":source}}}}}}));

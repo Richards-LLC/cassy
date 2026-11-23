@@ -170,6 +170,13 @@ pub(crate) async fn reconcile_contained(root: &Path, session: &str) -> Result<()
         }
         let Ok(target) = delivery_target(root, &task) else { continue };
         let Some(landed) = contained_tip(project, anchor, &target) else { continue };
+        // GH #2310: only the train's owner may close its deliveries (G-113). Any
+        // other supervisor's attempt is refused, and its notice quoted the refusal.
+        if crate::cloud::peer_mailbox::train_parks::owner_train(root, &task).ok().flatten()
+            .is_some_and(|train| crate::factory_session_scope::require_train_owner(root, &train, &supervisor).is_err())
+        {
+            continue;
+        }
         let approved = close_ops::close_cycle_verdict(
             root,
             cas_store::get_latest_verification_dispatch(root, &task.id)?.as_ref(),

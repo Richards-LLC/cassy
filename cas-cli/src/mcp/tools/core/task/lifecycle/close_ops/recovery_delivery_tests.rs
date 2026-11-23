@@ -3480,3 +3480,26 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
         }
     }
 }
+
+/// GH #2310: the train belongs to a supervisor on another machine. G-113 refuses
+/// this supervisor's close, so the reconcile pass neither attempts it nor sends
+/// the post-merge recovery notice that quoted that refusal.
+#[tokio::test]
+async fn reconcile_leaves_a_peer_owned_trains_delivery_to_its_owner_gh2310() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, _supervisor, tasks) = parked_for(&mut env, "develop").await;
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let mut train = Task::new("cas-train-2310".into(), "Peer-owned train".into());
+    train.task_type = cas_types::TaskType::Epic;
+    train.epic_verification_owner = Some("peer-supervisor-id".into());
+    tasks.add(&train).unwrap();
+    tasks.add_dependency(&cas_types::Dependency::new(
+        TASK.into(), train.id.clone(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    merge_into(repo, "develop", BRANCH, "Merge pull request #43 from factory/recovered-worker");
+    crate::factory_delivery_wake::reconcile_contained(&root, "reconcile-fixture").await.unwrap();
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    assert!(tasks.get(TASK).unwrap().deliverables.green_merge_commit.is_none());
+    assert!(crate::store::open_supervisor_queue_store(&root).unwrap().peek("supervisor-session", 10).unwrap().is_empty());
+}

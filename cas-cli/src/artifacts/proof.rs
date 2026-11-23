@@ -730,8 +730,11 @@ pub(crate) fn publish_routed_evidence(
     let mut files = Vec::new();
     for (name, path) in paths {
         let leaf = path.file_name().and_then(|leaf| leaf.to_str()).unwrap_or_default();
-        // An uncited file nobody has published is listed, never read or hashed.
-        if !declared(&name) && !published.iter().any(|record| record.name == leaf) {
+        // An uncited, non-empty file nobody has published is listed, never read
+        // or hashed. An empty file costs nothing and stays in the manifest
+        // (cas-591f: every file is restorable, large trees stay bounded).
+        let empty = std::fs::metadata(&path).is_ok_and(|meta| meta.len() == 0);
+        if !empty && !declared(&name) && !published.iter().any(|record| record.name == leaf) {
             skipped.push(format!("{name} (uncited; not published)"));
             continue;
         }

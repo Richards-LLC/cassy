@@ -1261,6 +1261,7 @@
     "skills/cas-playwright-tests/SKILL.md": [
       "318c652847fea5598286e6b6b72f14acf023b0b9f96c51369d324d18dab0c0cb",
       "3d395b2fda5b2a530c0b55eebb296dabc36c90a2d7882f673aff9110f759d404",
+      "be67ba8f441fb70a529df97196ba8e2793c2dd0bcb03e058127a2b261a34f45d",
       "f6c7b4dac44cac075de05f6651052d76a0ddd8a97052873e12b45bd9cf1cdace"
     ],
     "skills/cas-playwright-tests/agents/openai.yaml": [
@@ -1281,6 +1282,13 @@
       "527a5e5a292cce26dd06f949a3a5f238a9ccc84f00a72250cfcc28895348db8c",
       "79a37680d28c0f5484462e76740ac04615230d0f1123ca7bf5ee73c20b5fc33f",
       "a6c88d043fc5af29fdb3a07cd14ee866a520f2a5e62995c71b1095b7fcb80254"
+    ],
+    "skills/cas-playwright-tests/references/staleness-scan.md": [
+      "57d2885453e00fb5d73b3771b08cdc49f42a4c8d2c13bda12931753246bf2385",
+      "6d6bec3e47848340a31b2245d885aea36602fbfb0d76b6531091a079d88dc3d7"
+    ],
+    "skills/cas-playwright-tests/scripts/staleness-scan.py": [
+      "260e9a19c699dfa298fd5b425205381e50356703b90c49acbbd5b5fed7db843b"
     ],
     "skills/cas-qa-craft/SKILL.md": [
       "019600c3f25b2b5ded69bcfdf4a3eb645316b908988f4d985c9ece602dd718a0",

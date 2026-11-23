@@ -529,17 +529,19 @@ fn evidence_summary(report: &EvidenceReport) -> String {
 const PUBLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 const PUBLISH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// cas-fd1c (GH #2155, #2203, #2212): the paths a LEDGER.md's rows cite,
-/// plus the ledger itself; `None` without a ledger. One evidence cell may
-/// list several paths (`a.log; eval/summary.json`), and a cited directory
-/// covers the files beneath it.
+/// cas-fd1c (GH #2155, #2203, #2212): the task-relative paths a LEDGER.md's
+/// rows cite, plus the ledger itself; `None` without a ledger. Each evidence
+/// cell is one path, resolved exactly as the ledger check does
+/// ([`crate::qa_ledger::evidence_cell_path`]): relative, absolute inside the
+/// directory, or another machine's artifacts path. A cited directory covers the
+/// files beneath it.
 fn ledger_citations(dir: &Path) -> Option<std::collections::BTreeSet<String>> {
     let body = std::fs::read_to_string(dir.join("LEDGER.md")).ok()?;
+    let root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mut names: std::collections::BTreeSet<String> = crate::qa_ledger::parse(&body, 0).rows.into_iter()
-        .flat_map(|row| row.evidence_path.split([';', ',']).map(|entry| {
-            entry.trim().trim_matches('`').trim_start_matches("./").trim_end_matches('/').to_string()
-        }).collect::<Vec<_>>())
-        .filter(|entry| !entry.is_empty())
+        .filter_map(|row| crate::qa_ledger::evidence_cell_path(&root, &row.evidence_path))
+        .filter_map(|cited| cited.strip_prefix(&root).ok()?.to_str().map(|name| name.replace(std::path::MAIN_SEPARATOR, "/")))
+        .filter(|name| !name.is_empty())
         .collect();
     names.insert("LEDGER.md".into());
     Some(names)
@@ -727,12 +729,17 @@ pub(crate) fn publish_routed_evidence(
     let mut skipped = Vec::new();
     let mut files = Vec::new();
     for (name, path) in paths {
+        let leaf = path.file_name().and_then(|leaf| leaf.to_str()).unwrap_or_default();
+        // An uncited file nobody has published is listed, never read or hashed.
+        if !declared(&name) && !published.iter().any(|record| record.name == leaf) {
+            skipped.push(format!("{name} (uncited; not published)"));
+            continue;
+        }
         let (sha256, size) = digest_file(&path).map_err(|error| fail(error.to_string()))?;
         if size == 0 {
             files.push(SyncedFile { name, sha256, artifact_id: None });
             continue;
         }
-        let leaf = path.file_name().and_then(|leaf| leaf.to_str()).unwrap_or_default();
         let reused = published.iter().find(|record| {
             record.name == leaf && record.sha256 == sha256 && validate(record, &task.id).is_ok()
         });
@@ -1339,13 +1346,23 @@ mod tests {
             task.notes = format!("BUILD_ROUTE: {}", serde_json::json!({
                 "key": "route-1", "source_machine_id": "prowl-fixture", "sender_agent_id": "sup",
                 "recipient_agent_id": "worker", "recipient": "worker", "free_slots": 1, "load_per_cpu": null}));
-            let parking = PeerReviewer::new(&server.uri(), task);
+            let mut parking = PeerReviewer::new(&server.uri(), task);
             env.set("CAS_ROOT", &parking.root);
             for (name, bytes) in &evidence {
                 let file = parking.evidence_dir().join(name);
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
                 std::fs::write(file, bytes).unwrap();
             }
+            // GH #2203: a close that cites artifact ids and named evidence in
+            // prose, beside a `--cas-root` command, reads no checkout file. The
+            // citation scan admits only target/, the evidence directory and
+            // artifacts paths, and skips directories.
+            for name in ["Cargo.toml", "README.md", "Dockerfile", "schema.sql", ".prettierrc"] {
+                std::fs::write(parking.repo.join(name), "checkout file\n").unwrap();
+            }
+            parking.task.deliverables.parked_close_reason = Some(format!(
+                "PASS: art-0123abcd green.log Cargo.toml; cas factory worker-check --cas-root {}/.cas -- nextest run -p cas --lib",
+                parking.repo.display()));
             tokio::task::spawn_blocking(move || {
                 let started = std::time::Instant::now();
                 publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
@@ -1361,6 +1378,9 @@ mod tests {
                 assert_eq!(names, ["LEDGER.md", "green.log"]);
                 assert!(task.notes.contains("brand-default-develop-light-desktop.png"), "{}", task.notes);
                 assert!(task.notes.contains("decided-before-source/apps/backend/.env.graphiti"), "{}", task.notes);
+                for checkout in ["Cargo.toml", "Dockerfile", "schema.sql", ".prettierrc"] {
+                    assert!(!task.notes.contains(checkout), "{checkout} swept: {}", task.notes);
+                }
             }).await.unwrap();
             let requests = server.received_requests().await.unwrap();
             let begins: Vec<serde_json::Value> = requests.iter()
@@ -1441,21 +1461,32 @@ mod tests {
     /// (`proof/`) and top-level logs in its task evidence directory. The merge
     /// owner, holding only the synced task notes, restores each at the path the
     /// ledger cites; an artifact it cannot fetch never blocks the dispatch.
-    /// cas-fd1c (GH #2212): the ledger cell lists several paths and cites the
-    /// capture directory, an uncited terminal-qa receipt still travels, and
-    /// uncited raw captures stay unpublished.
+    /// cas-fd1c (GH #2212): a no-code close whose ledger cites nested captures
+    /// the way the ledger gate accepts (one path per cell: relative, absolute
+    /// inside the directory, or another machine's artifacts path) publishes and
+    /// restores them; an uncited terminal-qa receipt still travels, uncited raw
+    /// captures stay unpublished, and a retried close reuses what is already
+    /// published.
     #[tokio::test(flavor = "multi_thread")]
     async fn ordinary_park_evidence_reaches_the_merge_owner_at_cited_paths_gh2079() {
         use wiremock::matchers::body_partial_json;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let server = MockServer::start().await;
-        let ledger = "schema: 2\ncovers: cas-2079-fixture\n\n\
+        let mut task = cas_types::Task::new("cas-2079-fixture".into(), "parked elsewhere".into());
+        task.execution_note = Some("no-code".into());
+        let parking = PeerReviewer::new(&server.uri(), task);
+        let absolute = parking.evidence_dir().join("proof/shot.png");
+        let foreign = "/Users/other/.cas/artifacts/cassy-0123456789ab/cas-2079-fixture/proof/second.png";
+        let row = |id: &str, cited: &str| format!(
+            "| {id} | home | ok [source: a.rs:1] | visible: ok | PASS | fixture | {cited} | - |\n");
+        let ledger = format!("schema: 2\ncovers: cas-2079-fixture\n\
+            cells=3; PASS=3; FAIL=0; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=3\n\n\
             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
-            | --- | --- | --- | --- | --- | --- | --- | --- |\n\
-            | M01 | home | ok [source: a.rs:1] | visible: ok | PASS | fixture | web-green.log; proof | - |\n";
-        let evidence: [(&str, &[u8]); 4] = [("proof/shot.png", b"\x89PNG capture"),
-            ("web-green.log", b"web: PASS\n"), ("LEDGER.md", ledger.as_bytes()),
-            ("terminal-qa/status/report.md", b"terminal-qa: PASS\n")];
+            | --- | --- | --- | --- | --- | --- | --- | --- |\n{}{}{}",
+            row("M01", "web-green.log"), row("M02", &absolute.display().to_string()), row("M03", foreign));
+        let evidence: [(&str, &[u8]); 5] = [("proof/shot.png", b"\x89PNG capture"),
+            ("proof/second.png", b"\x89PNG second"), ("web-green.log", b"web: PASS\n"),
+            ("LEDGER.md", ledger.as_bytes()), ("terminal-qa/status/report.md", b"terminal-qa: PASS\n")];
         let raw = "raw/requests/0001.json";
         for (index, (name, bytes)) in evidence.iter().enumerate() {
             let leaf = Path::new(name).file_name().unwrap().to_str().unwrap();
@@ -1479,15 +1510,18 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
                 .mount(&server).await;
         }
-        let task = cas_types::Task::new("cas-2079-fixture".into(), "parked elsewhere".into());
-        let parking = PeerReviewer::new(&server.uri(), task);
         env.set("CAS_ROOT", &parking.root);
         for (name, bytes) in evidence.iter().chain([&(raw, &b"{\"model\":\"raw\"}"[..])]) {
             let file = parking.evidence_dir().join(name);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, bytes).unwrap();
         }
+        // The fixture ledger is one the gate itself accepts.
+        let checked = crate::qa_ledger::check(&parking.evidence_dir().join("LEDGER.md"), 0);
+        assert!(checked.ok, "{:?}", checked.diagnostics);
         let (parked, parking_dir) = tokio::task::spawn_blocking(move || {
+            publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
+            // A retried close reuses the published copies: no second upload.
             publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
             let parked = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
             (parked, parking.evidence_dir())

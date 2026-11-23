@@ -746,7 +746,9 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
                     raise RuntimeError(f"head rerun failed without a test result: {status}")
             preparation = time.monotonic()
             try:
-                subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=remaining())
+                # A cancelled replay can leave the base worktree missing but locked;
+                # only a double force clears that registration.
+                subprocess.run(["git", "worktree", "remove", "--force", "--force", str(work)], cwd=root, capture_output=True, timeout=remaining())
                 subprocess.check_call(["git", "worktree", "add", "--detach", str(work), base], cwd=root, timeout=remaining())
                 subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"], cwd=work, timeout=remaining())
             finally:
@@ -803,7 +805,7 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
             print(f"Lane impact: unresolved base attribution: {error}", file=sys.stderr)
         finally:
             try:
-                subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=15)
+                subprocess.run(["git", "worktree", "remove", "--force", "--force", str(work)], cwd=root, capture_output=True, timeout=15)
             except (OSError, subprocess.SubprocessError) as error:
                 result["cleanup_error"] = str(error)
             if temporary:

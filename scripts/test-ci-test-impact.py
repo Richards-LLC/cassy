@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -507,6 +508,11 @@ path="tests/builtin_archive_portability_test.rs"
         # deterministic delivery failure. Replay the original archive/filter/
         # partition before any base build; do not replace it with failed names.
         env["DETERMINISTIC"] = "1"
+        # A cancelled earlier replay left the base worktree missing but locked.
+        stale = Path(os.environ.get("RUNNER_TEMP") or self.root / "target") / "lane-impact-base"
+        self.git("worktree", "add", "-q", "--detach", str(stale), "HEAD")
+        self.git("worktree", "lock", str(stale))
+        shutil.rmtree(stale)
         self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0)
         attribution = json.loads(state.with_name("ring-attribution.json").read_text())
         self.assertEqual([f["test"] for f in attribution["caused"]], ["beta_test::breaks"])

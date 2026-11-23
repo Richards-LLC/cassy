@@ -19,3 +19,7 @@
   scan matched each process's resolved working directory against the
   unresolved `.cas/worktrees` path. A project reached through a symlink
   reported no orphans. The scan now resolves those roots first.
+- **Lane base attribution survives a cancelled run** — A cancelled lane
+  run could leave its base worktree registered as missing but locked, and
+  every later attribution on that runner failed to create it. The cleanup
+  before each replay now clears a locked registration.

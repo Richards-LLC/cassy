@@ -12,18 +12,25 @@ pub(crate) enum Scope {
     Crate(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Proof {
     pub runner: String,
     pub scope: Scope,
     #[serde(default)]
     pub reason: String,
+    /// Playwright specs this run executed, each with the repository-relative
+    /// config it ran under (GH #2146). A helper's `Related` proof names every
+    /// importing spec; a spec's own `File` proof names itself.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub configs: BTreeMap<String, String>,
 }
 
 pub(super) fn valid(proof: &Proof) -> bool {
     let relative = |path: &str| !Path::new(path).is_absolute()
         && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)));
     matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
+        && (proof.configs.is_empty() || proof.runner == "playwright")
+        && proof.configs.iter().all(|(spec, config)| !spec.is_empty() && relative(spec) && !config.is_empty() && relative(config))
         && match &proof.scope {
             Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
@@ -60,9 +67,19 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
 pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope]) -> Vec<Scope> {
     // Records already carry an ancestor's run only when no proof input changed
     // since it (cas-3080), so a documentation-only descendant keeps it.
-    scopes.iter().filter(|scope| !passing.records().iter().any(|(_, _, test)|
-        test.widened.as_ref().is_some_and(|proof| &proof.scope == *scope)))
-        .cloned().collect()
+    let recorded = |wanted: &Scope| passing.records().iter()
+        .filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| &proof.scope == wanted);
+    // GH #2146: a Playwright helper holds no tests. Every spec importing it
+    // must have run, each under its recorded config, whether through the
+    // helper's own run or through that spec's own run.
+    let ran = |spec: &str| passing.records().iter().filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof|
+        proof.runner == "playwright" && proof.configs.contains_key(spec)
+            && (proof.scope == Scope::File(spec.into()) || matches!(&proof.scope, Scope::Related(_))));
+    scopes.iter().filter(|scope| {
+        let Scope::Related(helper) = scope else { return !recorded(scope) };
+        let consumers = javascript::playwright_importers(passing.repo, helper);
+        if consumers.is_empty() { !recorded(scope) } else { !consumers.iter().all(|spec| ran(spec)) }
+    }).cloned().collect()
 }
 
 pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &[Scope]) -> Vec<String> {

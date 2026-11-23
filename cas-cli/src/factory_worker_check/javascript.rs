@@ -1453,10 +1453,23 @@ fn execute_tests(
     for test in tests {
         by_file.entry(&test.path).or_default().push(test);
     }
+    // GH #2146: a Playwright helper holds no tests; each spec importing it
+    // runs under the config that owns that spec.
+    let consumers = match widened {
+        Some((super::widened::Scope::Related(helper), _, _)) if runner == "playwright" => {
+            let specs = playwright_importers(repo, helper);
+            if specs.is_empty() { bail!(crate::gates::tag("G-61", format!("no Playwright spec imports {helper}"))); }
+            eprintln!("Running {helper} through its importing specs: {}", specs.join(" "));
+            specs
+        }
+        _ => Vec::new(),
+    };
     if let Some((scope, file, _)) = widened {
         super::widened::invalidate(cas_root, repo, head, scope)?;
-        by_file.insert(file, Vec::new());
+        if consumers.is_empty() { by_file.insert(file, Vec::new()); }
+        for spec in &consumers { by_file.insert(spec, Vec::new()); }
     }
+    let mut configs = BTreeMap::new();
     let mut count = 0;
     let mut attribution_notes = Vec::new();
     // GH #2172: a Playwright run writes its reports under the task's artifact
@@ -1477,9 +1490,16 @@ fn execute_tests(
             let config = self::runner_config(&package, runner);
             (package, config)
         } else { runner_root(repo, path, runner)? };
-        let config: Vec<std::ffi::OsString> = runner_config
-            .map(Path::to_path_buf)
-            .or(discovered)
+        let discovered = if consumers.is_empty() || runner_config.is_some() { discovered } else {
+            Some(playwright_owner(repo, path, &package, &environment, high, reports.path())?)
+        };
+        let used = runner_config.map(Path::to_path_buf).or(discovered);
+        if runner == "playwright" && matches!(widened, Some((super::widened::Scope::File(_) | super::widened::Scope::Related(_), _, _)))
+            && let Some(config) = used.as_deref().and_then(|config| config.strip_prefix(repo).ok()).and_then(Path::to_str)
+        {
+            configs.insert(path.to_string(), config.to_string());
+        }
+        let config: Vec<std::ffi::OsString> = used
             .into_iter()
             .flat_map(|config| ["--config".into(), config.into_os_string()])
             .collect();
@@ -1524,16 +1544,6 @@ fn execute_tests(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        // GH #2146: a helper runs through the specs importing it.
-        let importers = match widened {
-            Some((super::widened::Scope::Related(helper), _, _)) if runner == "playwright" => {
-                let specs = playwright_importers(repo, helper);
-                if specs.is_empty() { bail!(crate::gates::tag("G-61", format!("no Playwright spec imports {helper}"))); }
-                eprintln!("Running {helper} through its importing specs: {}", specs.join(" "));
-                specs
-            }
-            _ => Vec::new(),
-        };
         let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
@@ -1616,9 +1626,7 @@ fn execute_tests(
                         "--findRelatedTests"
                     } else { "--runTestsByPath" });
                 }
-                if runner == "playwright" && !importers.is_empty() {
-                    command.args(importers.iter().map(|spec| regex::escape(&repo.join(spec).to_string_lossy())));
-                } else if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
+                if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
@@ -1638,7 +1646,8 @@ fn execute_tests(
                 attribution_notes.push(note);
                 inherited
             };
-            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
+            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited,
+                if consumers.is_empty() { &[] } else { std::slice::from_ref(&path) })?
         } else { verify_repeats(runner, repo, &selected, run)? };
     }
     Ok(())
@@ -1675,7 +1684,7 @@ fn execute_tests(
         elapsed_ms: start.elapsed().as_millis(),
     };
     if let Some((scope, _, cause)) = widened {
-        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")) }, count as u64)?;
+        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")), configs }, count as u64)?;
         println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
@@ -1890,6 +1899,60 @@ fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<b
     Ok(status.success())
 }
 
+/// GH #2146: the Playwright config that lists `spec`. Configs beside the
+/// spec's nearest default, `playwright.responsive.config.ts` among them, each
+/// own different specs; Playwright's own `--list` decides, nearest directory
+/// first and a directory's default before its siblings.
+fn playwright_owner(
+    repo: &Path, spec: &str, package: &Path, environment: &[(&str, &str)], high: u64, scratch: &Path,
+) -> Result<PathBuf> {
+    let executable = runner_path(repo, package, "playwright")?;
+    let mut directory = repo.join(spec);
+    while directory.pop() && directory.starts_with(repo) {
+        let mut configs: Vec<PathBuf> = runner_config(&directory, "playwright").into_iter().collect();
+        let mut extra: Vec<PathBuf> = std::fs::read_dir(&directory).into_iter().flatten().flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.contains("playwright") && name.contains(".config.") && !PLAYWRIGHT_CONFIGS.contains(&name.as_str())
+            })
+            .map(|entry| entry.path()).collect();
+        extra.sort();
+        configs.extend(extra);
+        for config in configs {
+            let report = scratch.join("owner.json");
+            let _ = std::fs::remove_file(&report);
+            let mut command = Command::new(&executable);
+            command.envs(environment.iter().copied()).current_dir(&directory).env("CI", "1")
+                .arg("test").arg("--config").arg(&config).args(["--list", "--reporter=json"])
+                .arg(regex::escape(&repo.join(spec).to_string_lossy()))
+                .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
+            if !run_scoped_javascript(command, high, &scratch.join("owner-scope"))? { continue; }
+            let Ok(listed) = std::fs::read(&report).map_err(anyhow::Error::from)
+                .and_then(|bytes| Ok(serde_json::from_slice::<Value>(&bytes)?)) else { continue };
+            let root = listed.get("config").and_then(|config| config.get("rootDir")).and_then(Value::as_str)
+                .map(Path::new).unwrap_or(repo);
+            let mut files = BTreeSet::new();
+            listed_files(repo, root, listed.get("suites").unwrap_or(&Value::Null), &mut files);
+            if files.contains(spec) { return Ok(config); }
+        }
+        if directory == repo { break; }
+    }
+    bail!(crate::gates::tag("G-61", format!("no Playwright config lists {spec}")))
+}
+
+fn listed_files(repo: &Path, root: &Path, suites: &Value, files: &mut BTreeSet<String>) {
+    for suite in suites.as_array().into_iter().flatten() {
+        for spec in suite.get("specs").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(file) = spec.get("file").and_then(Value::as_str)
+                && let Ok(file) = report_path(repo, &root.join(file).to_string_lossy())
+            {
+                files.insert(file);
+            }
+        }
+        listed_files(repo, root, suite.get("suites").unwrap_or(&Value::Null), files);
+    }
+}
+
 fn verify_repeats(
     runner: &str,
     repo: &Path,
@@ -1923,12 +1986,14 @@ fn validate_report(
     tests: &[Identity],
     repeats: usize,
 ) -> Result<usize> {
-    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new())
+    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new(), &[])
 }
 
+/// `files` are the spec files a widened run must have executed, and the only
+/// ones it may have: a missing or unrelated file is not proof (GH #2146).
 fn validate_report_with_inherited(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
-    inherited: &BTreeSet<(Identity, String)>,
+    inherited: &BTreeSet<(Identity, String)>, files: &[&str],
 ) -> Result<usize> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
     if runner == "playwright" {
@@ -2033,6 +2098,14 @@ fn validate_report_with_inherited(
         bail!("{runner} ran tests outside the changed selection");
     }
     if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
+    for file in files {
+        if !results.keys().any(|ran| ran.path == *file) {
+            bail!(crate::gates::tag("G-61", format!("{runner} executed no test of the required spec {file}")));
+        }
+    }
+    if let Some(ran) = results.keys().find(|ran| !files.is_empty() && !files.contains(&ran.path.as_str())) {
+        bail!(crate::gates::tag("G-61", format!("{runner} ran {} outside the required specs", ran.path)));
+    }
     Ok(results.len())
 }
 
@@ -2394,8 +2467,10 @@ mod tests {
         };
         git(&["init", "--quiet"]);
         let files = [
+            (".gitignore", "node_modules/\n"),
             ("package.json", "{}"),
             ("playwright.config.ts", "export default {};"),
+            ("playwright.responsive.config.ts", "export default {};"),
             ("vitest.config.ts", "export default {};"),
             ("e2e/journeys/world.ts", "export const world = 1;"),
             ("e2e/journeys/journey.ts", "import { test } from \"@playwright/test\";\nimport { world } from \"./world\";\nexport { test, world };"),
@@ -2403,6 +2478,7 @@ mod tests {
             ("e2e/journeys/orphan.ts", "import { expect } from \"@playwright/test\";\nexport const unused = 1;"),
             ("e2e/journeys/pair-link.journey.ts", "import { test } from \"./journey\";\nimport { goals } from \"./responsive-goals.js\";\nimport { shared } from \"../../src/shared\";\ntest(\"pairs\", goals);"),
             ("e2e/journeys/read-history.journey.ts", "import { test } from \"./journey\";\ntest(\"reads\", () => {});"),
+            ("e2e/journeys/summary.journey.ts", "import { test } from \"./journey\";\nimport { goals } from \"./responsive-goals\";\ntest(\"sums\", goals);"),
             ("src/shared.ts", "export const shared = 1;"),
             ("src/shared.test.ts", "import { test } from 'vitest';\nimport { shared } from './shared';\nimport { unused } from '../e2e/journeys/orphan';\ntest('shared', () => {});"),
             ("e2e/journeys/hub-double.ts", "import type { Page } from \"@playwright/test\";\nimport { runtime } from \"./hub-double-runtime\";\nexport const double = (page: Page) => runtime;"),
@@ -2421,12 +2497,71 @@ mod tests {
         let (tests, scopes) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &[helper.into()], None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [Scope::Related(helper.into())]);
-        assert_eq!(playwright_importers(repo.path(), helper), ["e2e/journeys/pair-link.journey.ts"]);
-        assert_eq!(playwright_importers(repo.path(), "e2e/journeys/world.ts"),
-            ["e2e/journeys/pair-link.journey.ts", "e2e/journeys/read-history.journey.ts"]);
+        let (pair, history, summary) = ("e2e/journeys/pair-link.journey.ts", "e2e/journeys/read-history.journey.ts", "e2e/journeys/summary.journey.ts");
+        assert_eq!(playwright_importers(repo.path(), helper), [pair, summary]);
+        assert_eq!(playwright_importers(repo.path(), "e2e/journeys/world.ts"), [pair, history, summary]);
         let command = widened::commands(Path::new("/cas"), repo.path(), &[helper.into()], &scopes);
         assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
-        assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new() }));
+        assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new(), configs: Default::default() }));
+
+        // Park's receipt matcher (receipt_scope.rs reads it): the helper is
+        // covered only when every importing spec ran under the config that
+        // owns it. The stand-in Playwright lists a spec only under its owner:
+        // pair-link under the responsive config, the others under the default.
+        let head = String::from_utf8(Command::new("git").current_dir(repo.path()).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+        let scratch = tempfile::tempdir().unwrap();
+        let omit = scratch.path().join("omit");
+        let playwright = repo.path().join("node_modules/.bin/playwright");
+        std::fs::create_dir_all(playwright.parent().unwrap()).unwrap();
+        std::fs::write(&playwright, format!(r#"#!/usr/bin/env python3
+import json, os, re, sys
+from pathlib import Path
+a = sys.argv[1:]
+config = Path(a[a.index('--config') + 1]).name
+owned = {{'playwright.config.ts': ['summary.journey.ts', 'read-history.journey.ts'], 'playwright.responsive.config.ts': ['pair-link.journey.ts']}}[config]
+spec = os.path.relpath(re.sub(r'\\(.)', r'\1', a[-1]), os.getcwd())
+listing = '--list' in a
+shown = spec if Path(spec).name in owned else None
+if shown and not listing and os.path.exists({omit:?}) and Path(spec).name == 'summary.journey.ts':
+    shown = 'e2e/journeys/read-history.journey.ts'
+tests = [] if listing else [{{'projectId': 'journeys', 'expectedStatus': 'passed', 'results': [{{'status': 'passed', 'retry': 0}}]}}]
+suites = [{{'title': Path(shown).name, 'column': 0, 'specs': [{{'file': shown, 'title': 'case', 'tests': tests}}], 'suites': []}}] if shown else []
+Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_FILE']).write_text(json.dumps({{'config': {{'rootDir': os.getcwd()}}, 'errors': [], 'suites': suites}}))
+raise SystemExit(0 if shown else 1)
+"#, omit = omit.display().to_string())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let missing = |cas: &Path| widened::missing(&super::super::PassingTests::new(cas, repo.path(), &head), &scopes);
+        let run = |cas: &Path, scope: &Scope, file: &str, config: Option<&Path>|
+            execute_tests(cas, repo.path(), &head, "playwright", config, &[], Some((scope, file, "fixture")), &[]);
+        let responsive = repo.path().join("playwright.responsive.config.ts");
+        // Specs run one by one: an omitted consumer or an unrelated spec leaves the helper uncovered.
+        let by_spec = tempfile::tempdir().unwrap();
+        assert_eq!(missing(by_spec.path()), scopes);
+        run(by_spec.path(), &Scope::File(pair.into()), pair, Some(&responsive)).unwrap();
+        assert_eq!(missing(by_spec.path()), scopes, "summary.journey.ts has not run");
+        run(by_spec.path(), &Scope::File(history.into()), history, None).unwrap();
+        assert_eq!(missing(by_spec.path()), scopes, "an unrelated spec is no proof");
+        run(by_spec.path(), &Scope::File(summary.into()), summary, None).unwrap();
+        assert!(missing(by_spec.path()).is_empty(), "every importing spec ran");
+        // The helper's own run finds each owning config and records it.
+        let through_helper = tempfile::tempdir().unwrap();
+        run(through_helper.path(), &scopes[0], helper, None).unwrap();
+        assert!(missing(through_helper.path()).is_empty());
+        let passing = super::super::PassingTests::new(through_helper.path(), repo.path(), &head);
+        let proof = passing.records().iter().find_map(|(_, _, test)| test.widened.clone()).unwrap();
+        assert_eq!(proof.configs, BTreeMap::from([
+            (pair.to_string(), "playwright.responsive.config.ts".to_string()),
+            (summary.to_string(), "playwright.config.ts".to_string()),
+        ]));
+        // A run that executes some other spec in place of a consumer is no proof.
+        std::fs::write(&omit, "").unwrap();
+        let partial = tempfile::tempdir().unwrap();
+        let error = run(partial.path(), &scopes[0], helper, None).unwrap_err();
+        assert!(format!("{error:#}").contains("[G-61]"), "{error:#}");
+        assert_eq!(missing(partial.path()), scopes);
         assert_eq!(widened::scope(repo.path(), "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
         let runtime = "e2e/journeys/hub-double-runtime.ts";
         let scopes = [widened::scope(repo.path(), runtime)];

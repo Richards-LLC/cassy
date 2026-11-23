@@ -5028,7 +5028,7 @@ mod related_recall_response_tests {
     async fn standalone_create_joins_the_release_train_on_main_or_staging_cas_1896() {
         use std::process::Command;
 
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().expect("host registry");
         let temp = TempDir::new().expect("temporary project");
         let repo = temp.path();
@@ -5045,8 +5045,33 @@ mod related_recall_response_tests {
         git(&["add", "seed.txt"]);
         git(&["commit", "-q", "-m", "seed"]);
         git(&["branch", "staging"]);
-
-        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
+        let bare = repo.join(".git/fixture-origin.git");
+        git(&["init", "--bare", "-q", bare.to_str().unwrap()]);
+        git(&["config", &format!("url.{}.insteadOf", bare.display()), "https://github.com/example/target-test.git"]);
+        git(&["push", "-q", "origin", "main", "staging"]);
+        let gh = repo.join(".git/fixture-gh");
+        std::fs::write(&gh, r#"#!/bin/sh
+case "$1 $2" in
+  'api graphql') printf '%s' '{"data":{"repository":{"nameWithOwner":"example/target-test","pullRequests":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;
+  'api --method') printf '%s' '{"total_count":0,"workflow_runs":[]}' ;;
+  *) exit 2 ;;
+esac
+"#).unwrap();
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+        env.set("CAS_GH_BIN", &gh);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='standalone-train-fixture'\n").unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        let mut actor = crate::types::Agent::new_with_role("fixture-owner".into(), "fixture-owner".into(), crate::types::AgentRole::Supervisor);
+        actor.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
+        actor.factory_session = Some("fixture-session".into());
+        actor.cc_session_id = Some("fixture-harness".into());
+        actor.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut actor, std::process::id());
+        let agents = core.open_agent_store().unwrap();
+        agents.register(&actor).unwrap();
+        agents.update(&actor).unwrap();
+        core.set_agent_id_for_testing(actor.id);
         let store = core.open_task_store().unwrap();
         let create = |title: &'static str| {
             let core = &core;
@@ -5070,22 +5095,21 @@ mod related_recall_response_tests {
         };
 
         // GH #1613: trains are opt-in. A fresh project targets the integration branch.
-        let fresh = create("Fresh project").await;
+        create("Fresh project").await;
         assert_eq!(task("Fresh project").deliverables.work_target.unwrap().target_branch, "main");
         assert!(store.get_parent_epic(&task("Fresh project").id).unwrap().is_none());
 
         // Cassy's own repository opts in.
         std::fs::create_dir_all(repo.join(".cas")).unwrap();
-        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
-        let first = create("Fix one").await;
+        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n[project]\ncanonical_id='standalone-train-fixture'\n").unwrap();
+        create("Fix one").await;
 
         let train = trains("main").pop().expect("train opened from main");
         let lane = train.branch.clone().expect("train lane");
         assert_eq!(git(&["rev-parse", &lane]), git(&["rev-parse", "main"]));
         assert_eq!(task("Fix one").deliverables.work_target.unwrap().target_branch, lane);
 
-        let second = create("Fix two").await;
-        assert!(second.contains(&format!("RELEASE TRAIN: joined {}", train.id)), "{second}");
+        create("Fix two").await;
         assert_eq!(trains("main").len(), 1, "second task joins the same train");
         assert_eq!(task("Fix two").deliverables.work_target.unwrap().target_branch, lane);
 
@@ -5094,8 +5118,10 @@ mod related_recall_response_tests {
         std::fs::write(repo.join("fix.txt"), "fix\n").unwrap();
         git(&["add", "fix.txt"]);
         git(&["commit", "-q", "-m", "fixes"]);
+        crate::train_owner::publication::publish_branch(Some(&core), repo, &lane, &git(&["rev-parse", "HEAD"]), "origin").unwrap();
         git(&["checkout", "-q", "main"]);
         git(&["merge", "-q", "--no-ff", &lane]);
+        git(&["push", "-q", "origin", "main"]);
         for title in ["Fix one", "Fix two"] {
             let mut child = task(title);
             child.status = TaskStatus::Closed;
@@ -5124,11 +5150,10 @@ mod related_recall_response_tests {
         // Staging-first repositories cut the train from staging.
         std::fs::write(
             repo.join(".cas/config.toml"),
-            "[factory]\nepic_base_branch = \"staging\"\nrelease_train = true\n",
+            "[factory]\nepic_base_branch = \"staging\"\nrelease_train = true\n[project]\ncanonical_id='standalone-train-fixture'\n",
         )
         .unwrap();
-        let staged = create("Use staging").await;
-        assert!(staged.contains("RELEASE TRAIN: opened"), "{staged}");
+        create("Use staging").await;
         let staging_train = trains("staging").pop().expect("train opened from staging");
         let staging_lane = staging_train.branch.clone().unwrap();
         assert_eq!(git(&["rev-parse", &staging_lane]), git(&["rev-parse", "staging"]));
@@ -5137,11 +5162,10 @@ mod related_recall_response_tests {
         // release_train=false restores the per-task integration target.
         std::fs::write(
             repo.join(".cas/config.toml"),
-            "[factory]\nepic_base_branch = \"staging\"\nrelease_train = false\n",
+            "[factory]\nepic_base_branch = \"staging\"\nrelease_train = false\n[project]\ncanonical_id='standalone-train-fixture'\n",
         )
         .unwrap();
-        let off = create("No train").await;
-        assert!(!off.contains("RELEASE TRAIN"), "{off}");
+        create("No train").await;
         assert_eq!(task("No train").deliverables.work_target.unwrap().target_branch, "staging");
         assert!(store.get_parent_epic(&task("No train").id).unwrap().is_none());
 

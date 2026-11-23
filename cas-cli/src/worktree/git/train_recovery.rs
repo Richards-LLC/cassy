@@ -54,7 +54,10 @@ impl Snapshot {
             );
         }
         let reference = reference(train)?;
-        if super::fencing(repo, target)?.is_some() {
+        // Explicit initialization must inspect origin directly: the new task
+        // already records enrollment before its first expected-absent push.
+        // Ordinary publisher discovery separately refuses missing authority.
+        if Self::all(repo)?.iter().any(|snapshot| snapshot.record.target == target) {
             return Err("TRAIN_TRANSFER_CONFLICT: target already has an enrolled authority".into());
         }
         let target_ref = format!("refs/heads/{target}");

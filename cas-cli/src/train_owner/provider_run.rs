@@ -46,6 +46,7 @@ impl<P: Provider> GitHubChecks<P> {
         let scope = &operation.scope;
         if snapshot.record.phase != Phase::Draining || operation.generation != snapshot.record.generation
             || !scope.repository.eq_ignore_ascii_case(&self.slug)
+            || !operation.accepted.contains(&ExternalAction::ArmPr)
             || operation.started != [ExternalAction::ArmPr] || !operation.claims.is_empty()
             || operation.tag_object.is_some() || operation.terminal.is_some()
         { return Err(pending("request completion is unknown or a release continuation exists")); }

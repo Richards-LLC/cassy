@@ -681,6 +681,11 @@ fn train_transfer_operator_recovery_requires_h41_and_exact_scope_cas_6456() {
     use crate::config::operator_policy::InvocationContext;
     use crate::train_owner::recovery::{Action, Request};
     use cas_mcp::types::{TrainOwnerTransferAction as TransferAction, TrainOwnerTransferRequest};
+    for operation in ["disarm-pr", "reconcile-unpublished"] {
+        assert!(<crate::cli::Cli as clap::Parser>::try_parse_from([
+            "cas", "factory", "train", "publication", operation, "--train", "cas-6456", "--operation", "operation",
+        ]).is_ok());
+    }
     // Exercise the actual CLI grammar; there is no operator identity/override argument.
     for operation in ["force", "adopt-target"] {
         let mut args = vec!["cas", "factory", "train", "owner-transfer", "cas-6456", operation,

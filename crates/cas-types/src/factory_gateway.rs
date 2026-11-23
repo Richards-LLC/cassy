@@ -23,3 +23,23 @@ impl FactoryGatewayConfig {
         self == &Self::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An untouched config saves nothing, so projects that never opt in
+    /// keep byte-identical config files.
+    #[test]
+    fn default_gateway_config_serializes_to_nothing() {
+        #[derive(Serialize)]
+        struct Factory {
+            #[serde(skip_serializing_if = "FactoryGatewayConfig::is_default")]
+            gateway: FactoryGatewayConfig,
+        }
+        let off = serde_json::to_string(&Factory { gateway: FactoryGatewayConfig::default() }).unwrap();
+        assert_eq!(off, "{}");
+        let on = FactoryGatewayConfig { enabled: true, ..Default::default() };
+        assert!(!on.is_default());
+    }
+}

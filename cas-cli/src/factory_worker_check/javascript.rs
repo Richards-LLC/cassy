@@ -486,11 +486,15 @@ fn source_tests(path: &str, source: &str, lines: &[(usize, usize)]) -> Result<Ve
         .collect())
 }
 
-/// How many runtime rows each changed `it.each` test expands to, read from its
-/// literal table in the source, independent of any run (cas-c1df). A test
-/// whose table is not a plain array literal, or that sits under a templated
+/// The runtime test names an `it.each` test expands to, with how many rows
+/// share each name.
+type Expansion = BTreeMap<String, usize>;
+
+/// The names each changed `it.each` test expands to under Vitest, read from its
+/// literal table in the source, independent of any run (cas-c1df). A test whose
+/// table or title cannot be expanded exactly, or that sits under a templated
 /// suite, has no entry.
-fn source_rows(path: &str, source: &str) -> Result<BTreeMap<Identity, usize>> {
+fn source_rows(path: &str, source: &str) -> Result<BTreeMap<Identity, Expansion>> {
     Ok(parsed_tests(path, source, &[(1, usize::MAX)], false)?
         .into_iter()
         .filter_map(|(identity, _, rows)| Some((identity, rows?)))
@@ -502,7 +506,7 @@ fn parsed_tests(
     source: &str,
     lines: &[(usize, usize)],
     strict: bool,
-) -> Result<Vec<(Identity, String, Option<usize>)>> {
+) -> Result<Vec<(Identity, String, Option<Expansion>)>> {
     let tree = source_tree(path, source)?;
     let mut aliases = BTreeMap::new();
     imported_aliases(tree.root_node(), source, &mut aliases);
@@ -942,7 +946,7 @@ fn walk(
     force: bool,
     strict: bool,
     aliases: &BTreeMap<String, String>,
-    tests: &mut Vec<(Identity, String, Option<usize>)>,
+    tests: &mut Vec<(Identity, String, Option<Expansion>)>,
 ) -> Result<()> {
     if strict
         && node.kind() == "call_expression"
@@ -1079,7 +1083,11 @@ fn walk(
                     );
                 }
                 let mut names = suites.to_vec();
-                names.push(name.expect("resolved title"));
+                let own_title = name.expect("resolved title");
+                let expansion = (each && !inherited_template)
+                    .then(|| expand_table(node, source, &own_title, &suites.iter().map(|suite| format!("{suite} ")).collect::<String>()))
+                    .flatten();
+                names.push(own_title);
                 tests.push((
                     Identity {
                         path: path.to_string(),
@@ -1087,7 +1095,7 @@ fn walk(
                         parameterized: templated,
                     },
                     text(node, source).to_string(),
-                    (each && !inherited_template).then(|| table_rows(node)).flatten(),
+                    expansion,
                 ));
             }
             // Test bodies cannot declare additional runnable tests.
@@ -1104,18 +1112,22 @@ fn walk(
     Ok(())
 }
 
-/// The row count of `it.each([...])(title, fn)`'s table when it is a plain
-/// array literal: one row per element. A spread, a hole, a variable or a
-/// tagged template gives `None`.
-fn table_rows(call: Node<'_>) -> Option<usize> {
-    let each = call.child_by_field_name("function")?;
-    let arguments = each.child_by_field_name("arguments")?;
+/// The names `it.each([...])(title, fn)` registers under Vitest 4, one per row,
+/// when its table is an array literal of plain values and its title is static,
+/// takes `%s` / `%#` / `%$` arguments from literal rows, or takes `$key` values
+/// from literal object rows. `prefix` is the enclosing suites' names, each
+/// followed by a space. Anything whose exact Vitest rendering is not known
+/// (other `%` directives, nested keys, long or quoted strings, objects, a
+/// variable or spread table) gives `None`.
+fn expand_table(call: Node<'_>, source: &str, title: &str, prefix: &str) -> Option<Expansion> {
+    let arguments = call.child_by_field_name("function")?.child_by_field_name("arguments")?;
     let table = arguments.named_child(0).filter(|_| arguments.named_child_count() == 1)?;
     if table.kind() != "array" {
         return None;
     }
+    let mut rows = Vec::new();
     let mut cursor = table.walk();
-    let (mut rows, mut previous_comma) = (0, true);
+    let mut previous_comma = true;
     for child in table.children(&mut cursor) {
         match child.kind() {
             "[" | "]" | "comment" => {}
@@ -1123,12 +1135,183 @@ fn table_rows(call: Node<'_>) -> Option<usize> {
             "," => previous_comma = true,
             "spread_element" => return None,
             _ => {
-                rows += 1;
+                rows.push(child);
                 previous_comma = false;
             }
         }
     }
-    Some(rows)
+    let properties = dollar_keys(title);
+    let mut names = Expansion::new();
+    for (index, row) in rows.iter().enumerate() {
+        let name = match (title.contains('%'), properties.is_empty()) {
+            (false, true) => title.to_string(),
+            (true, true) => percent_title(title, index, *row, source)?,
+            (false, false) => dollar_title(title, *row, source)?,
+            (true, false) => return None,
+        };
+        *names.entry(format!("{prefix}{name}")).or_default() += 1;
+    }
+    Some(names)
+}
+
+/// The `$key` placeholders Vitest substitutes (`\$([$\w.]+)`), in order.
+fn dollar_keys(title: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut chars = title.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        if ch != '$' {
+            continue;
+        }
+        let mut end = at + 1;
+        while let Some(&(next, ch)) = chars.peek() {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.') {
+                end = next + ch.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if end > at + 1 {
+            keys.push(title[at + 1..end].to_string());
+        }
+    }
+    keys
+}
+
+/// `%s` arguments come from a row array, or are the row itself; a missing one
+/// renders as `undefined`. `%#` is the row index and `%$` that plus one.
+fn percent_title(title: &str, index: usize, row: Node<'_>, source: &str) -> Option<String> {
+    let mut args = Vec::new();
+    if row.kind() == "array" {
+        let mut cursor = row.walk();
+        let mut previous_comma = true;
+        for child in row.children(&mut cursor) {
+            match child.kind() {
+                "[" | "]" | "comment" => {}
+                "," if previous_comma => return None,
+                "," => previous_comma = true,
+                _ => {
+                    args.push(child);
+                    previous_comma = false;
+                }
+            }
+        }
+    } else {
+        args.push(row);
+    }
+    let mut args = args.into_iter();
+    let mut name = String::new();
+    let mut chars = title.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            name.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            's' => name.push_str(&match args.next() {
+                Some(arg) => plain_literal(arg, source)?,
+                None => "undefined".into(),
+            }),
+            '#' => name.push_str(&index.to_string()),
+            '$' => name.push_str(&(index + 1).to_string()),
+            _ => return None,
+        }
+    }
+    Some(name)
+}
+
+/// Each `$key` is the row object's value as Vitest displays it (strings in
+/// single quotes, `0` as `+0`, a missing key as `undefined`).
+fn dollar_title(title: &str, row: Node<'_>, source: &str) -> Option<String> {
+    if row.kind() != "object" {
+        return None;
+    }
+    let mut values = BTreeMap::new();
+    let mut cursor = row.walk();
+    for pair in row.named_children(&mut cursor) {
+        match pair.kind() {
+            "comment" => {}
+            "pair" => {
+                let key = pair.child_by_field_name("key")?;
+                let key = match key.kind() {
+                    "property_identifier" => text(key, source).to_string(),
+                    "string" => title(key, source)?,
+                    _ => return None,
+                };
+                values.insert(key, quoted_literal(pair.child_by_field_name("value")?, source)?);
+            }
+            _ => return None,
+        }
+    }
+    let mut name = String::new();
+    let mut rest = title;
+    while let Some(at) = rest.find('$') {
+        name.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        let end = tail
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')))
+            .unwrap_or(tail.len());
+        let key = &tail[..end];
+        if key.is_empty() {
+            name.push('$');
+        } else if key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            name.push_str(values.get(key).map_or("undefined", String::as_str));
+        } else {
+            return None;
+        }
+        rest = &tail[end..];
+    }
+    name.push_str(rest);
+    Some(name)
+}
+
+/// A literal Vitest prints under `%s`: strings raw, numbers, `true`, `false`,
+/// `null`, `undefined`. A `$` in a string would be re-read as a placeholder.
+fn plain_literal(node: Node<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "string" => title(node, source).filter(|value| !value.contains('$')),
+        _ => scalar_literal(node, source),
+    }
+}
+
+/// A literal Vitest prints for `$key`: `plain_literal` except strings are
+/// single-quoted (short, plain ones only) and `0` prints as `+0`.
+fn quoted_literal(node: Node<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "string" => title(node, source)
+            .filter(|value| {
+                value.len() <= 30
+                    && value.chars().all(|ch| ch.is_ascii_alphanumeric() || " _.,:;!?()+=#@*/-".contains(ch))
+            })
+            .map(|value| format!("'{value}'")),
+        _ => scalar_literal(node, source).map(|value| if value == "0" { "+0".into() } else { value }),
+    }
+}
+
+fn scalar_literal(node: Node<'_>, source: &str) -> Option<String> {
+    let literal = text(node, source);
+    match node.kind() {
+        "true" | "false" | "null" | "undefined" => Some(literal.to_string()),
+        "number" => plain_number(literal),
+        "unary_expression" if literal.starts_with('-') => {
+            let number = plain_number(literal[1..].trim())?;
+            (number != "0").then(|| format!("-{number}"))
+        }
+        _ => None,
+    }
+}
+
+/// A decimal literal whose JavaScript string form is its own text.
+fn plain_number(literal: &str) -> Option<String> {
+    let (whole, fraction) = literal.split_once('.').unwrap_or((literal, ""));
+    let plain = whole.chars().all(|ch| ch.is_ascii_digit())
+        && (whole == "0" || !whole.starts_with('0'))
+        && !whole.is_empty()
+        && whole.len() <= 15
+        && fraction.len() <= 15
+        && fraction.chars().all(|ch| ch.is_ascii_digit())
+        && (fraction.is_empty() && !literal.contains('.') || fraction.ends_with(|ch| ch != '0'));
+    plain.then(|| literal.to_string())
 }
 
 fn tree_root(mut node: Node<'_>) -> Node<'_> {
@@ -1665,7 +1848,7 @@ fn execute_tests(
                 attribution_notes.push(note);
                 inherited
             };
-            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
+            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited, None)?
         } else { verify_repeats(runner, repo, &selected, &expected_rows, run)? };
     }
     Ok(())
@@ -1921,44 +2104,23 @@ fn verify_repeats(
     runner: &str,
     repo: &Path,
     tests: &[Identity],
-    expected_rows: &BTreeMap<Identity, usize>,
+    expected: &BTreeMap<Identity, Expansion>,
     mut run: impl FnMut(usize) -> Result<(bool, Value)>,
 ) -> Result<usize> {
     let mut count = 0;
-    // cas-c1df: rows of one table may share a runtime name, so a template's
-    // pass count says nothing about how many rows it expands to. `expected_rows`
-    // counts them in the source, so every iteration is held to it; and the first
-    // iteration fixes which rows the changed tests ran, which every later
-    // iteration must repeat.
-    let mut first_rows = None;
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
-        let (found, rows) = validate_report_rows(
+        count = validate_report_with_inherited(
             runner,
             repo,
             &report,
             tests,
             if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
             &BTreeSet::new(),
-            expected_rows,
+            // cas-c1df: Vitest's expanded row names are derived from the
+            // source tables and every iteration must produce exactly them.
+            (runner == "vitest").then_some(expected),
         )?;
-        count = found;
-        match &first_rows {
-            None => first_rows = Some(rows),
-            Some(first) if *first != rows => {
-                let changed = first
-                    .keys()
-                    .chain(rows.keys())
-                    .find(|row| first.get(*row) != rows.get(*row))
-                    .map(|row| format!("{} :: {}", row.path, row.name))
-                    .unwrap_or_default();
-                bail!(
-                    "{runner} stability iteration {} ran different rows than iteration 1: {changed}",
-                    iteration + 1
-                );
-            }
-            Some(_) => {}
-        }
         if !success {
             bail!(
                 "{runner} stability failed at iteration {}; no retry",
@@ -1976,23 +2138,16 @@ fn validate_report(
     tests: &[Identity],
     repeats: usize,
 ) -> Result<usize> {
-    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new())
+    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new(), None)
 }
 
+/// `expected` holds the names each changed `it.each` test expands to, read
+/// from its source table. With it, every template must have an entry and the
+/// rows the templates selected must be exactly those names and multiplicities.
 fn validate_report_with_inherited(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
-    inherited: &BTreeSet<(Identity, String)>,
+    inherited: &BTreeSet<(Identity, String)>, expected: Option<&BTreeMap<Identity, Expansion>>,
 ) -> Result<usize> {
-    validate_report_rows(runner, repo, report, tests, repeats, inherited, &BTreeMap::new())
-        .map(|(count, _)| count)
-}
-
-/// [`validate_report_with_inherited`], also returning how many passing results
-/// each runtime row a changed test selected produced (cas-c1df).
-fn validate_report_rows(
-    runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
-    inherited: &BTreeSet<(Identity, String)>, expected_rows: &BTreeMap<Identity, usize>,
-) -> Result<(usize, BTreeMap<Identity, usize>)> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
     if runner == "playwright" {
         let root = report
@@ -2105,12 +2260,8 @@ fn validate_report_rows(
         }
     }
     // A template identity is proved when every row it selected passed. Distinct
-    // rows may share one runtime name (GH #2138, #2225); each passed, so the
-    // name holds at least one passing result per repeat. The source table says
-    // how many rows there must be, so a template with a counted table needs
-    // exactly that many passing results (cas-c1df). A runtime row that another
-    // changed test also selects cannot be attributed to one table, so it is
-    // left to the iteration-to-iteration comparison in `verify_repeats`.
+    // rows may share one runtime name (GH #2138, #2225), so how many rows there
+    // must be comes from the source table, not from the run (cas-c1df).
     for test in tests {
         let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
         if rows.peek().is_none() || rows.any(|(_, count)| *count < repeats) {
@@ -2120,19 +2271,33 @@ fn validate_report_rows(
                 test.name
             );
         }
-        let Some(want) = expected_rows.get(test) else { continue };
-        let mut found = 0;
-        let mut shared = false;
-        for (ran, count) in results.iter().filter(|(ran, _)| test.selects(ran)) {
-            found += count;
-            shared |= tests.iter().any(|other| other != test && other.selects(ran));
+    }
+    if let Some(expected) = expected {
+        let mut want: BTreeMap<Identity, usize> = BTreeMap::new();
+        for test in tests.iter().filter(|test| test.parameterized) {
+            let Some(names) = expected.get(test) else {
+                bail!(
+                    "{runner} stability cannot derive the expanded rows of {} :: {} from its source table; prove the whole spec file instead of a changed-test selection",
+                    test.path,
+                    test.name
+                );
+            };
+            for (name, rows) in names {
+                *want.entry(Identity::exact(test.path.clone(), name.clone())).or_default() += rows * repeats;
+            }
         }
-        if !shared && found != want * repeats {
+        let have: BTreeMap<Identity, usize> = results
+            .iter()
+            .filter(|(ran, _)| tests.iter().any(|test| test.parameterized && test.selects(ran)))
+            .map(|(ran, count)| (ran.clone(), *count))
+            .collect();
+        if let Some(row) = want.keys().chain(have.keys()).find(|row| want.get(*row) != have.get(*row)) {
             bail!(
-                "{runner} stability expects {want} rows from the source table, saw {}: {} :: {}",
-                found / repeats,
-                test.path,
-                test.name
+                "{runner} stability expects {} passing results from the source table, saw {}: {} :: {}",
+                want.get(row).copied().unwrap_or(0),
+                have.get(row).copied().unwrap_or(0),
+                row.path,
+                row.name
             );
         }
     }
@@ -2140,12 +2305,7 @@ fn validate_report_rows(
         bail!("{runner} ran tests outside the changed selection");
     }
     if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
-    let rows = results
-        .iter()
-        .filter(|(ran, _)| tests.iter().any(|test| test.selects(ran)))
-        .map(|(ran, count)| (ran.clone(), *count))
-        .collect();
-    Ok((results.len(), rows))
+    Ok(results.len())
 }
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
@@ -3123,32 +3283,46 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let mut missing = report.clone();
         missing["testResults"][0]["assertionResults"].as_array_mut().unwrap().truncate(5);
         assert!(validate_report("vitest", Path::new("/project"), &missing, &templates, 1).is_err());
-        // The source tables say how many rows each template has (2, 3 and 2),
-        // whatever any run reports.
+        // The source tables name the rows each template expands to, whatever any
+        // run reports: Vitest 4.0.18's own names for this source.
         let expected = source_rows("a.test.ts", source).unwrap();
-        assert_eq!(expected.len(), 3);
-        assert_eq!(expected.values().sum::<usize>(), 7);
-        // Only a plain array literal is counted: a variable, a spread, or a
-        // table under a templated suite is left to the first-iteration check.
-        let uncounted = "const table = [1, 2];\nit.each(table)('row %i', () => {});\nit.each([...table, 3])('more %i', () => {});\ndescribe.each(['a'])('suite %s', () => {\n  it.each([1, 2])('inner %i', () => {});\n});";
-        assert!(source_rows("a.test.ts", uncounted).unwrap().is_empty());
+        let derived: BTreeMap<_, _> = expected.values().flatten().map(|(name, rows)| (name.as_str(), *rows)).collect();
+        assert_eq!(derived, BTreeMap::from([
+            ("creator hands post chat AIDA to the writer", 1), ("creator hands post chat Funnel Drop to the writer", 2),
+            ("creator keeps input intact", 2), ("creator menu (compact=false)", 1), ("creator menu (compact=true)", 1),
+        ]));
         let repo = Path::new("/project");
-        verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, report.clone())))
-            .expect("five complete iterations are accepted");
+        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, |iteration| {
+            Ok((true, bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
+        });
+        iterate(&report, None).expect("five complete iterations are accepted");
         // One of two rows sharing a name is gone while its sibling still passes
-        // ("keeps input intact"). Missing from every iteration, the source
-        // table still counts it.
+        // ("keeps input intact"): refused in every iteration, and when every
+        // iteration lacks it.
         let mut one_duplicate = report.clone();
         one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
         assert_eq!(one_duplicate["testResults"][0]["assertionResults"].as_array().unwrap().len(), 6);
         assert!(verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, one_duplicate.clone()))).is_err());
-        // A table the source cannot count is held to the first iteration's rows.
-        let iterations = |lost: usize| verify_repeats("vitest", repo, &templates, &BTreeMap::new(), |iteration| {
-            Ok((true, if iteration == lost { one_duplicate.clone() } else { report.clone() }))
-        });
         for lost in 0..5 {
-            assert!(iterations(lost).is_err(), "iteration {lost} lost one duplicate row");
+            assert!(iterate(&report, Some((lost, &one_duplicate))).is_err(), "iteration {lost} lost one duplicate row");
         }
+        // The same number of rows, one of them the wrong one: the second
+        // "keeps input intact" ran as a second "menu (compact=true)".
+        let mut swapped = report.clone();
+        swapped["testResults"][0]["assertionResults"][6]["fullName"] = json!("creator menu (compact=true)");
+        assert_eq!(swapped["testResults"][0]["assertionResults"].as_array().unwrap().len(), 7);
+        assert!(iterate(&report, Some((3, &swapped))).is_err());
+        // A table the source cannot expand (a variable) is refused rather than
+        // trusted to what a run happened to report; the same report is accepted
+        // when no expectation is demanded.
+        let variable = "const table = [1, 2];\nit.each(table)('row %i', () => {});";
+        let variable_templates = source_tests("a.test.ts", variable, &[(2, 2)]).unwrap();
+        let variable_report = json!({"success": true, "testResults": [{"name": "/project/a.test.ts", "status": "passed",
+            "assertionResults": [{"fullName": "row 1", "status": "passed"}, {"fullName": "row 2", "status": "passed"}]}]});
+        let variable_expected = source_rows("a.test.ts", variable).unwrap();
+        assert!(variable_expected.is_empty());
+        validate_report("vitest", repo, &variable_report, &variable_templates, 1).unwrap();
+        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, |_| Ok((true, variable_report.clone()))).is_err());
     }
 
     #[test]

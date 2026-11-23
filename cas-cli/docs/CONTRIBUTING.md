@@ -2984,7 +2984,8 @@ five-pass stability run when it executed every test the config lists in the spec
 omitted consumer, an unrelated spec or a run that executed another spec is no proof. A spec counts only when it loads
 `@playwright/test` at runtime and imports no other runner; `import type` does
 not. A helper no spec imports, or a unit test also imports, keeps its previous
-proof (GH #2146).
+proof (GH #2146). A helper that only `node:test` files import, such as a CI
+guard's workflow reader, uses `node --test <helper file>` the same way (GH #2200).
 That wider set runs once and records a separate widened receipt at the tested
 commit. Park consumes it without executing tests; identified changed tests still
 owe five consecutive passes. Caller Jest name filters cannot narrow this proof.

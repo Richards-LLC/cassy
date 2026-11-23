@@ -1791,8 +1791,12 @@ fn enqueue_worker_attention_relay_inner(
     } else {
         String::new()
     };
+    // cas-58aa (GH #2201): the recipient drain retires a task-scoped relay
+    // once its task is terminal, but it can only read the task from the tag.
+    let task_attr = task_id.filter(|id| !id.is_empty())
+        .map(|id| format!(" task_id=\"{id}\"")).unwrap_or_default();
     let mut body = format!(
-        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
+        "<worker-attention kind=\"{kind}\" worker=\"{worker}\"{task_attr} notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
     );
     // cas-207e: ready tasks or merges waiting on an actionable-idle
     // supervisor are a blocker, not routine: idle workers burn wall clock.
@@ -2408,6 +2412,39 @@ mod worker_attention_tests {
         assert_eq!(operator.len(), 1, "{rows:?}");
         assert!(operator[0].prompt.contains("cas-ready") && operator[0].prompt.contains("calm-owl"), "{}", operator[0].prompt);
         assert!(rows.iter().any(|row| row.target != "operator"), "the supervisor is still woken: {rows:?}");
+    }
+
+    /// cas-58aa (GH #2201): a task-scoped delivery recovery relay reached the
+    /// supervisor 13 minutes after the supervisor closed that task. The drain
+    /// must see the relay's task and retire it once the task is terminal.
+    #[test]
+    fn cas_58aa_task_scoped_attention_relay_expires_when_its_task_closed() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-2201")]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "relay-2201");
+        let mut worker = Agent::new_with_role("worker-id".into(), "calm-owl".into(), AgentRole::Worker);
+        worker.factory_session = Some("relay-2201".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-2201".into(), "merged delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        tasks.add(&task).unwrap();
+        let key = "delivery-pr-merged:cas-2201:654:abc123";
+        assert!(matches!(
+            enqueue_worker_attention_relay_detail_with_key(&cas_dir, "worker_delivery_stalled", "calm-owl",
+                Some("cas-2201"), None, |_| "PR #654 merged; supervisor recovery".into(), key, Some(key)),
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let relay = queue.peek_all(10).unwrap().into_iter().find(|row| row.target == "supervisor").unwrap();
+        let surfaced = queue.surface_for_recipient_within_budget(
+            "supervisor", Some("relay-2201"), cas_store::HookDrain::Unseen, 10, 100_000).unwrap().rows;
+        assert!(surfaced.iter().all(|row| row.id != relay.id), "closed task's relay surfaced: {surfaced:?}");
+        assert_eq!(queue.message_delivery_report(relay.id).unwrap().unwrap().pending_reason,
+            Some(cas_store::PendingReason::SupersededStale));
     }
 
     #[test]

@@ -1049,6 +1049,15 @@ fn live_supervisor(agent: &crate::types::Agent) -> bool {
         .is_live()
 }
 
+/// Whether `id` is a registered supervisor that is still live. An unreadable
+/// registry counts as live, so callers hold rather than release authority.
+pub(crate) fn supervisor_is_live(root: &Path, id: &str) -> bool {
+    match crate::store::open_agent_store(root) {
+        Ok(store) => store.get(id).is_ok_and(|agent| live_supervisor(&agent)),
+        Err(_) => true,
+    }
+}
+
 /// Reuse the mailbox's machine/session/retirement checks for owner restart.
 /// A matching name or a dead heartbeat alone never transfers authority.
 pub(crate) fn owns_recipient(root: &Path, actor: &crate::types::Agent, recipient: &str) -> bool {

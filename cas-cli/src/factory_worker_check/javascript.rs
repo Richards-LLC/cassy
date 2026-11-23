@@ -256,9 +256,18 @@ fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: 
 
 /// Repository paths of the JSON files a source imports by relative literal.
 fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
+    Ok(relative_literals(path, source)?.into_iter()
+        .filter(|resolved| resolved.extension().is_some_and(|extension| extension == "json"))
+        .filter_map(|resolved| resolved.to_str().map(str::to_owned))
+        .collect())
+}
+
+/// Repository paths that a source's relative string literals name, resolved
+/// from the source's own directory (`'./scenarios.json'`, `'../prisma/migrations'`).
+fn relative_literals(path: &str, source: &str) -> Result<Vec<PathBuf>> {
     let directory = Path::new(path).parent().unwrap_or(Path::new(""));
-    let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s]+\.json)["'`]"#)?;
-    Ok(literal.captures_iter(source).filter_map(|capture| {
+    let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s$]+)["'`]"#)?;
+    Ok(literal.captures_iter(source).map(|capture| {
         let mut resolved = PathBuf::new();
         for part in directory.join(&capture[1]).components() {
             match part {
@@ -267,7 +276,7 @@ fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
                 other => resolved.push(other),
             }
         }
-        resolved.to_str().map(str::to_owned)
+        resolved
     }).collect())
 }
 
@@ -292,6 +301,34 @@ pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec
         }
     }
     Ok(specs)
+}
+
+/// GH #2224, #2266: for each changed `input` under `package`, the test files
+/// at `head` that read it through a relative literal: the input itself (a JSON
+/// catalogue), a module import without its extension (a fixture), or a
+/// directory holding it inside the package (Prisma migrations). An input read
+/// any other way has no covering spec here and maps to an empty list.
+pub(super) fn covering_specs(repo: &Path, head: &str, package: &str, inputs: &[&str]) -> Result<BTreeMap<String, Vec<String>>> {
+    let listed = super::git(repo, &["ls-tree", "-r", "--name-only", head, "--", if package.is_empty() { "." } else { package }])?;
+    let mut covering: BTreeMap<String, Vec<String>> = inputs.iter().map(|input| ((*input).to_owned(), Vec::new())).collect();
+    for spec in listed.lines().filter(|path| javascript(path) && test_match(path, runner_hint(repo, path))) {
+        let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
+        let literals = relative_literals(spec, &source)?;
+        for input in inputs {
+            let input_path = Path::new(input);
+            let reads = |resolved: &Path| {
+                let inside = resolved.starts_with(package) && resolved != Path::new(package) && !Path::new(spec).starts_with(resolved);
+                resolved == input_path
+                    || (javascript(input) && (input_path.with_extension("") == resolved
+                        || input_path.parent() == Some(resolved) && input_path.file_stem().is_some_and(|stem| stem == "index")))
+                    || (inside && input_path.starts_with(resolved))
+            };
+            if literals.iter().any(|resolved| reads(resolved)) {
+                covering.entry((*input).to_owned()).or_default().push(spec.to_owned());
+            }
+        }
+    }
+    Ok(covering)
 }
 
 fn show(repo: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
@@ -2747,6 +2784,53 @@ mod tests {
             super::super::widened::scope(repo.path(), spec),
             super::super::widened::Scope::File(spec.into())
         );
+    }
+
+    /// GH #2329: C-37 makes a lane that changes hub-web/src commit the rebuilt
+    /// hub-web/dist, and park then demanded a widened Related() receipt for each
+    /// changed bundle, which runs no tests and can never earn one. A generated
+    /// bundle owes nothing; the source's own spec keeps its proof.
+    #[test]
+    fn generated_hub_web_bundles_owe_no_proof_gh2329() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let spec = "hub-web/src/panel.test.ts";
+        // A bundle the classifier cannot read, as a minified chunk can be.
+        let bundles = ["hub-web/dist/app.js", "hub-web/dist/chunk-accounts-panel-ABC123.js"];
+        let write = |path: &str, body: &str| {
+            let full = repo.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        };
+        write("hub-web/package.json", "{}");
+        write("hub-web/vitest.config.ts", "export default {};\n");
+        write(spec, "import { it } from 'vitest';\nit('renders the panel', () => {});\n");
+        for bundle in bundles {
+            write(bundle, "var a = ;\n");
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        write(spec, "import { it } from 'vitest';\nit('renders the panel', () => { expect(1).toBe(1); });\n");
+        for bundle in bundles {
+            write(bundle, "var a = ; var b = 2;\n");
+        }
+        git(&["commit", "--quiet", "-am", "head"]);
+        let paths = [spec, bundles[0], bundles[1]].map(str::to_owned);
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.iter().any(|test| test.path == spec && test.name == "renders the panel"), "{tests:?}");
+        assert!(widened.iter().all(|scope| !format!("{scope:?}").contains("hub-web/dist")), "{widened:?}");
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid

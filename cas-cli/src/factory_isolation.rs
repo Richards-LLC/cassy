@@ -167,6 +167,181 @@ pub fn registered_factory_names(cas_root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// cas-dc08 (N1 at spawn, design v3 row 23): why `name` cannot become a new
+/// worker, else `None`. Registration refuses an overlap with this machine's
+/// workers; `branches` (the names under `factory/` in local and origin refs)
+/// carry names from every machine. `is_task` says whether an id is a known
+/// task. A new name is refused when:
+/// - it extends, or is extended by, a registered worker name with `-`;
+/// - a branch `factory/<m>` exists and the name extends `m` (a: `m` already
+///   owns that namespace);
+/// - `factory/<name>` does not exist but `factory/<name>-<s>` does and `s`
+///   does not start with a known task id (b: someone else's branch the new
+///   name would own by syntax).
+pub fn worker_name_overlap(
+    name: &str,
+    workers: &[String],
+    branches: &std::collections::HashSet<String>,
+    is_task: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    use cas_store::factory_name_extends as extends;
+    let name = name.trim();
+    let refusal = |what: String| {
+        format!(
+            "WORKER_NAME_OVERLAPS: '{name}' would share the branch namespace of {what}. \
+             Choose a name that does not extend, and is not extended by, another worker \
+             name or factory branch with a hyphen, or omit the name to get a generated one."
+        )
+    };
+    let hyphen_prefixes = |value: &str| -> Vec<String> {
+        value.match_indices('-').map(|(at, _)| value[..at].to_string()).collect()
+    };
+    if let Some(other) = workers.iter().map(|other| other.trim())
+        .find(|other| extends(name, other) || extends(other, name))
+    {
+        return Some(refusal(format!("registered worker '{other}'")));
+    }
+    if let Some(owner) = hyphen_prefixes(name).into_iter().find(|owner| branches.contains(owner)) {
+        return Some(refusal(format!("branch factory/{owner}")));
+    }
+    if branches.contains(name) {
+        return None;
+    }
+    let starts_with_task = |rest: &str| {
+        hyphen_prefixes(rest).iter().map(String::as_str).chain([rest])
+            .any(|id| is_task_id_like(id) && is_task(id))
+    };
+    branches.iter()
+        .filter(|branch| extends(branch, name) && !starts_with_task(&branch[name.len() + 1..]))
+        .min()
+        .map(|branch| refusal(format!("branch factory/{branch}")))
+}
+
+/// N1 naming inputs, read once (cas-dc08): this machine's worker names, the
+/// `factory/*` branches in local and origin refs (name to full ref; never the
+/// network) and the task ids those branch names carry that the task store
+/// knows. Everything is read in [`WorkerNameRegistry::load`]; the checks hold
+/// no store, so they are safe to run anywhere.
+#[derive(Default)]
+pub struct WorkerNameRegistry {
+    pub workers: Vec<String>,
+    pub refs: std::collections::HashMap<String, String>,
+    branches: std::collections::HashSet<String>,
+    known_tasks: std::collections::HashSet<String>,
+}
+
+/// Only a task the store says it does not have is absent; any other failure
+/// leaves membership unknown, which must not read as "no such task".
+fn task_exists<T>(lookup: cas_store::Result<T>) -> Result<bool, String> {
+    match lookup {
+        Ok(_) => Ok(true),
+        Err(cas_store::StoreError::TaskNotFound(_)) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Every task-id-shaped piece of `branch` that the overlap rule can ask about:
+/// each hyphen-delimited stretch that starts after a hyphen and either ends at
+/// a hyphen or at the end of the name.
+fn task_id_candidates(branch: &str, into: &mut std::collections::HashSet<String>) {
+    for (at, _) in branch.match_indices('-') {
+        let rest = &branch[at + 1..];
+        let ends = rest.match_indices('-').map(|(end, _)| end).chain([rest.len()]);
+        into.extend(ends.map(|end| &rest[..end]).filter(|id| is_task_id_like(id)).map(str::to_string));
+    }
+}
+
+impl WorkerNameRegistry {
+    pub fn load(cas_root: &Path, repo: &Path) -> Result<Self, String> {
+        use std::process::Command;
+        use std::time::Duration;
+        let mut command = Command::new("git");
+        command.current_dir(repo).args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/factory/",
+            "refs/remotes/origin/factory/",
+        ]);
+        let budget = Duration::from_secs(5);
+        let output = crate::bounded_process::run_command(
+            &mut command,
+            crate::bounded_process::Deadline::after(budget),
+            budget,
+        )
+        .map_err(|error| format!("could not inspect worker branch names in {}: {error:?}", repo.display()))?;
+        // A project that is not a repository (a `--no-worktrees` fleet) has no
+        // factory branches; any other Git failure leaves the names unchecked.
+        let not_a_repository = !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("not a git repository");
+        if !output.status.success() && !not_a_repository {
+            return Err(format!(
+                "could not inspect worker branch names in {}: {}",
+                repo.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let refs: std::collections::HashMap<String, String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|reference| {
+                reference
+                    .strip_prefix("refs/heads/factory/")
+                    .or_else(|| reference.strip_prefix("refs/remotes/origin/factory/"))
+                    .map(|name| (name.to_string(), reference.to_string()))
+            })
+            .collect();
+        let agents = crate::store::open_agent_store(cas_root)
+            .and_then(|store| store.list(None).map_err(Into::into))
+            .map_err(|error| error.to_string())?;
+        // Known task membership is resolved here, once, so the overlap checks
+        // that run on the daemon loop never touch the store.
+        let mut candidates = std::collections::HashSet::new();
+        refs.keys().for_each(|branch| task_id_candidates(branch, &mut candidates));
+        let tasks = crate::store::open_task_store(cas_root)
+            .map_err(|error| format!("could not open the task store in {}: {error}", cas_root.display()))?;
+        let mut known_tasks = std::collections::HashSet::new();
+        for id in candidates {
+            if task_exists(tasks.get(&id)).map_err(|error| format!("could not look up task {id}: {error}"))? {
+                known_tasks.insert(id);
+            }
+        }
+        Ok(Self {
+            workers: agents.into_iter()
+                .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+                .map(|agent| agent.name)
+                .collect(),
+            branches: refs.keys().cloned().collect(),
+            refs,
+            known_tasks,
+        })
+    }
+
+    /// [`worker_name_overlap`] against this registry.
+    pub fn overlap(&self, name: &str) -> Option<String> {
+        worker_name_overlap(name, &self.workers, &self.branches, &|id| self.is_task(id))
+    }
+
+    /// [`worker_name_audit`] of this registry's workers.
+    pub fn audit(&self) -> Vec<String> {
+        worker_name_audit(&self.workers, &self.branches, &|id| self.is_task(id))
+    }
+
+    fn is_task(&self, id: &str) -> bool {
+        self.known_tasks.contains(id)
+    }
+}
+
+/// cas-dc08 (design v3 row 26): registered worker names that break N1, for
+/// `cas doctor`. Each pair is reported once. Report only.
+pub fn worker_name_audit(
+    workers: &[String],
+    branches: &std::collections::HashSet<String>,
+    is_task: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    workers.iter().enumerate()
+        .filter_map(|(at, name)| worker_name_overlap(name, &workers[at + 1..], branches, is_task))
+        .collect()
+}
+
 /// The registry of the checkout at `path`, never an ambient `CAS_ROOT`.
 fn registered_factory_names_at(path: &Path) -> Vec<String> {
     crate::store::find_cas_root_ignoring_env(path)
@@ -562,6 +737,15 @@ pub fn render_worker_binding(
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// cas-dc08: only a task the store reports missing is absent; any other
+    /// lookup failure stops the registry load instead of reading as absent.
+    #[test]
+    fn only_a_missing_task_is_absent_from_the_registry_cas_dc08() {
+        assert_eq!(task_exists(Ok(())), Ok(true));
+        assert_eq!(task_exists::<()>(Err(cas_store::StoreError::TaskNotFound("cas-gone".into()))), Ok(false));
+        assert!(task_exists::<()>(Err(cas_store::StoreError::NotInitialized)).is_err());
+    }
 
     fn init_repo(dir: &Path) {
         for args in [

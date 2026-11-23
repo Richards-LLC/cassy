@@ -12477,12 +12477,11 @@ impl CasCore {
                 // cas-7efe: single close-time resolver, not a bare "main".
                 if !integrated_delivery {
                     // gate[G-81 park integrity]: Merge reality check (zero commits, never pushed)
-                    match check_factory_branch_merge_reality_with_delivery_mode(
+                    match check_close_merge_reality(
                         &close_project_root,
+                        &task,
                         assignee,
                         &resolved_parent_branch,
-                        task.delivery_mode,
-                        Some(&task.id),
                     ) {
                         MergeRealityOutcome::Proceed => {}
                         MergeRealityOutcome::Refuse(msg) => {
@@ -17645,7 +17644,14 @@ pub(crate) fn resolve_close_delivery_branch(
             return Ok(delivery.branch);
         }
     }
-    if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
+    // cas-db91 (GH #1698): a lane bound by rebind (e.g. `-r2`) before its
+    // first commit is still this task's lane. The per-task name may hold the
+    // earlier build; never fall back to it while the recorded start exists.
+    if let Some(delivery) = task_attribution::validated_started_delivery(repo_path, task)?
+        && (!delivery.commits.is_empty()
+            || task.deliverables.factory_branch_start.as_ref()
+                .is_some_and(|start| start.branch != format!("factory/{assignee}")))
+    {
         return Ok(delivery.branch);
     }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
@@ -19702,39 +19708,41 @@ pub(crate) fn check_factory_branch_merge_reality(
 ) -> MergeRealityOutcome {
     check_factory_branch_merge_reality_with_delivery_mode(
         repo_path,
-        assignee,
+        &format!("factory/{assignee}"),
         parent_branch,
         cas_types::DeliveryMode::PushBranch,
         None,
     )
 }
 
-/// `task_id` names the task in the emitted retry command; `None` renders a
-/// `<task-id>` placeholder.
+/// cas-db91 (GH #1698): G-81 judges the lane every other close probe resolves,
+/// so a lane bound by rebind (e.g. `-r2`) is measured, not the earlier build.
+pub(crate) fn check_close_merge_reality(
+    repo_path: &std::path::Path,
+    task: &Task,
+    assignee: &str,
+    parent_branch: &str,
+) -> MergeRealityOutcome {
+    let measured = close_measured_factory_branch(repo_path, task, assignee);
+    check_factory_branch_merge_reality_with_delivery_mode(
+        repo_path,
+        measured.strip_prefix("origin/").unwrap_or(&measured),
+        parent_branch,
+        task.delivery_mode,
+        Some(&task.id),
+    )
+}
+
+/// `factory_branch` is the lane the close resolved for this task (the caller
+/// strips `origin/`); `task_id` names the task in the emitted retry command,
+/// and `None` renders a `<task-id>` placeholder.
 pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     repo_path: &std::path::Path,
-    assignee: &str,
+    factory_branch: &str,
     parent_branch: &str,
     delivery_mode: cas_types::DeliveryMode,
     task_id: Option<&str>,
 ) -> MergeRealityOutcome {
-    // cas-8606: a per-task delivery lives on `factory/<assignee>-<task>`, not
-    // on the worker's base branch. Measuring `factory/<assignee>` refused
-    // every merged, verified per-task delivery whose worker never pushed its
-    // base branch (it sits at the epic tip with no commits of its own).
-    // `worker_task_branch_ref` answers `origin/<branch>` when only the pushed
-    // copy remains; that is a published delivery, so the local-ref check
-    // below lets it through.
-    let factory_branch = task_id
-        .and_then(|task_id| worker_task_branch_ref(repo_path, assignee, task_id))
-        .map(|branch| {
-            branch
-                .strip_prefix("origin/")
-                .map(str::to_string)
-                .unwrap_or(branch)
-        })
-        .unwrap_or_else(|| format!("factory/{assignee}"));
-
     // Branch absent locally → push+merge+prune path; treat as merged.
     if !git_ref_exists(repo_path, &factory_branch) {
         return MergeRealityOutcome::Proceed;
@@ -48939,7 +48947,7 @@ mod merge_reality_tests {
         git(special.path(), &["branch", "-m", "factory/test-worker", "factory/test{a,b}!e"]);
         git(special.path(), &["branch", "epic/quote"]);
         let special_outcome = check_factory_branch_merge_reality_with_delivery_mode(
-            special.path(), "test{a,b}!e", "epic/quote",
+            special.path(), "factory/test{a,b}!e", "epic/quote",
             cas_types::DeliveryMode::PushBranch, Some("cas-dc1b"));
         let MergeRealityOutcome::Refuse(special_message) = special_outcome else {
             panic!("expected real merge-reality refusal");
@@ -48950,7 +48958,7 @@ mod merge_reality_tests {
         git(dir.path(), &["branch", "epic/wave-a"]);
         let outcome = check_factory_branch_merge_reality_with_delivery_mode(
             dir.path(),
-            "test-worker",
+            "factory/test-worker",
             "epic/wave-a",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-dc1b"),
@@ -49025,7 +49033,7 @@ mod merge_reality_tests {
 
         let own = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker-cas-8606",
             "main",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-8606"),
@@ -49039,7 +49047,7 @@ mod merge_reality_tests {
         git(p, &["branch", "-D", "factory/test-worker-cas-8606"]);
         let pruned = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker-cas-8606",
             "main",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-8606"),
@@ -49050,7 +49058,7 @@ mod merge_reality_tests {
         // branch, so the cas-762e wrong-branch guard keeps its bite.
         let base = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker",
             "main",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-other"),
@@ -49153,7 +49161,7 @@ mod merge_reality_tests {
 
         let outcome = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker",
             "main",
             cas_types::DeliveryMode::LocalMerge,
             None,

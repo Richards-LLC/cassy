@@ -327,39 +327,41 @@ pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&s
     freeze_with_promotion(root, train_id, actor, None, reason, false).map(|(detail, _)| detail)
 }
 
-/// GH #1826: the live supervisor that freezes a train is its release owner.
-/// It takes over a recorded owner that is departed, stale or on another
-/// machine, such as the peer that handed the train over. A live owner of
-/// another factory session on this machine keeps the train. Returns the
-/// audit sentence when ownership moved.
+/// Freezing an existing train never transfers a recorded owner. Initial
+/// ordinary-epic promotion retains its existing owner-assignment behavior.
 fn take_ownership(root: &Path, task: &mut Task, taker: &cas_types::Agent) -> Result<Option<String>> {
     let owner = task.epic_verification_owner.clone();
+    if is_release_train(task) || task.labels.iter().any(|label| label == crate::train_owner::ENROLLED) {
+        if let Some(owner) = owner.as_deref() {
+            ensure!(crate::cloud::peer_mailbox::owns_recipient(root, taker, owner),
+                crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: freeze cannot take over another train owner"));
+            crate::factory_session_scope::require_train_owner(root, task, taker)
+                .map_err(anyhow::Error::msg)?;
+            return Ok(None);
+        }
+        ensure!(!task.labels.iter().any(|label| label == crate::train_owner::ENROLLED),
+            crate::gates::tag("G-113", "TRAIN_OWNER_TRANSFER_REQUIRED: enrolled owner projection is missing"));
+    }
     if owner.as_deref().is_some_and(|owner| owner == taker.id || owner == taker.name) {
         return Ok(None);
     }
-    let machine = cas_types::Agent::get_or_generate_machine_id();
-    let agents = crate::store::open_agent_store(root)?.list(None)?;
-    let kept = owner.as_deref().is_some_and(|owner| {
-        agents.iter().any(|agent| {
-            (agent.id == owner || agent.name == owner)
-                && crate::supervisor_notices::is_live(agent)
-                && agent.factory_session != taker.factory_session
-                && agent.machine_id.as_deref().is_none_or(|id| id == machine)
-        })
-    });
-    if kept {
-        return Ok(None);
+    // Preserve ordinary-epic promotion semantics outside the transfer protocol.
+    if let Some(owner) = owner.as_deref() {
+        let machine = cas_types::Agent::get_or_generate_machine_id();
+        let agents = crate::store::open_agent_store(root)?.list(None)?;
+        if agents.iter().any(|agent| (agent.id == owner || agent.name == owner)
+            && crate::supervisor_notices::is_live(agent)
+            && agent.factory_session != taker.factory_session
+            && agent.machine_id.as_deref().is_none_or(|id| id == machine)) {
+            return Ok(None);
+        }
     }
     task.epic_verification_owner = Some(taker.id.clone());
-    Ok(Some(format!(
-        "supervisor {} ({}) took over release ownership of {} from {}",
-        taker.name,
-        taker.id,
-        task.id,
-        owner.as_deref().unwrap_or("no recorded owner")
-    )))
+    Ok(Some(format!("supervisor {} ({}) assigned release ownership of {} from {}",
+        taker.name, taker.id, task.id, owner.as_deref().unwrap_or("no recorded owner"))))
 }
 
+// gate-audit[promote]: selector Explicit ordinary-epic promotion; take_ownership still checks every enrolled train owner and this flag cannot reassign it.
 fn freeze_with_promotion(
     root: &Path,
     train_id: &str,
@@ -596,6 +598,9 @@ mod tests {
         git(repo, &["add", "work.txt"]);
         git(repo, &["commit", "-qm", "work"]);
         git(repo, &["checkout", "-q", "main"]);
+        let origin = repo.join(".git/fixture-origin.git");
+        git(repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
         let root = repo.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"freeze-test\"\n").unwrap();
@@ -675,7 +680,7 @@ mod tests {
         store.update(&epic).unwrap();
         let remote = TempDir::new().unwrap();
         git(remote.path(), &["init", "-q", "--bare"]);
-        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(repo, &["remote", "set-url", "origin", remote.path().to_str().unwrap()]);
         std::fs::create_dir_all(repo.join("scripts")).unwrap();
         std::fs::write(repo.join("scripts/release.sh"), "release fixture\n").unwrap();
         git(repo, &["add", "scripts/release.sh"]);
@@ -1016,10 +1021,10 @@ mod tests {
         assert_eq!(lift_decision(&store.get("cas-tr").unwrap())["operator_freeze"], true);
     }
 
-    /// GH #1826: freezing takes over a departed or peer-machine owner, but a
-    /// live owner of another factory session on this machine keeps its train.
+    /// A live, peer-machine, stale or unavailable owner always requires
+    /// explicit transfer before another supervisor may freeze its train.
     #[tokio::test]
-    async fn freeze_leaves_a_live_owner_of_another_session_its_train_gh_1826() {
+    async fn freeze_requires_explicit_owner_transfer_cas_6456() {
         use rmcp::handler::server::wrapper::Parameters;
         let _env = TestEnvGuard::temp_home();
         let (_temp, root) = fixture();
@@ -1030,10 +1035,35 @@ mod tests {
         train.epic_verification_owner = Some("sup-id".into());
         store.update(&train).unwrap();
         let request = serde_json::json!({"action": "train_freeze", "id": "cas-tr", "reason": "release-freeze: other session"});
-        other.factory(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
-        let train = store.get("cas-tr").unwrap();
-        assert!(freeze_of(&train).is_some());
-        assert_eq!(train.epic_verification_owner.as_deref(), Some("sup-id"));
+        // The generic task-update path must also refuse before mutating the
+        // owner or removing the train label in the same request.
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
+        let error = other.inner.cas_task_update(Parameters(serde_json::from_value(serde_json::json!({
+            "id": "cas-tr", "epic_verification_owner": "other-sup", "labels": "ordinary"
+        })).unwrap())).await.unwrap_err();
+        assert_eq!(error.message.split(':').next(), Some("TRAIN_OWNER_TRANSFER_REQUIRED"));
+        assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for state in ["live", "peer-machine", "stale", "shutdown"] {
+            let mut owner = agents.get("sup-id").unwrap();
+            match state {
+                "peer-machine" => owner.machine_id = Some("another-machine".into()),
+                "stale" => owner.last_heartbeat = Utc::now() - chrono::Duration::days(1),
+                "shutdown" => owner.status = cas_types::AgentStatus::Shutdown,
+                _ => {},
+            }
+            agents.update(&owner).unwrap();
+            for decision in [None, Some("promote")] {
+                let mut attempt = request.clone();
+                if let Some(decision) = decision { attempt["decision"] = decision.into(); }
+                let error = other.factory(Parameters(serde_json::from_value(attempt).unwrap())).await.unwrap_err();
+                assert_eq!(error.message.split(':').next(), Some("TRAIN_OWNER_TRANSFER_REQUIRED"), "{state}: {error}");
+                assert_eq!(crate::gates::codes_in(&error.message), vec!["G-113"]);
+                let train = store.get("cas-tr").unwrap();
+                assert!(freeze_of(&train).is_none());
+                assert_eq!(train.epic_verification_owner.as_deref(), Some("sup-id"));
+            }
+        }
     }
 
     /// The operator's Commander lift clears the same gate.

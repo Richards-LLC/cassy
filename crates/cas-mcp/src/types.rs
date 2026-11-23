@@ -1361,6 +1361,7 @@ pub(crate) mod deser;
 mod ops_secondary;
 
 pub use crate::types::ops_secondary::{
+    TrainOwnerTransferAction, TrainOwnerTransferRequest,
     ArtifactRequest, CoordinationRequest, ExecuteRequest, FactoryRequest, KnowledgeRequest,
     SearchContextRequest, SystemRequest, TeamRequest, VerificationRequest,
 };

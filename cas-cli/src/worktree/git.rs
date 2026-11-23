@@ -13,6 +13,7 @@ use crate::types::GitContext;
 pub(crate) mod branch_ops;
 mod epic_branch;
 mod rescue;
+pub(crate) mod train_authority;
 
 pub use branch_ops::{TargetPushOutcome, TargetReconcile};
 pub use rescue::RescuedWork;

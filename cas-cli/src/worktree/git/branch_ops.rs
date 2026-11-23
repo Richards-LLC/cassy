@@ -820,6 +820,7 @@ impl GitOperations {
     /// Pushes the specified branch to the 'origin' remote. If the branch doesn't exist
     /// on origin yet, it will be created. Uses -u to set up tracking.
     pub fn push_branch(&self, branch: &str) -> Result<()> {
+        super::train_authority::refuse_unfenced(&self.repo_root, branch).map_err(GitError::CommandFailed)?;
         let output = Command::new("git")
             .args(["push", "-u", "origin", branch])
             .current_dir(&self.repo_root)
@@ -1066,11 +1067,13 @@ impl GitOperations {
 
     /// A target refresh must update its exact origin ref even when the
     /// repository's configured fetch refspec only tracks another branch.
+    /// The same read mirrors origin's train authority refs (pruned), so the
+    /// entry's publication fence needs no second origin read (cas-6456).
     fn fetch_merge_target_bounded(&self, target: &str, timeout: Duration) -> Result<String> {
         let remote = format!("refs/remotes/origin/{target}");
         let mut command = Command::new("git");
-        command.args(["fetch", "--no-write-fetch-head", "origin",
-            &format!("+refs/heads/{target}:{remote}")])
+        command.args(["fetch", "--prune", "--no-write-fetch-head", "origin",
+            &format!("+refs/heads/{target}:{remote}"), super::train_authority::OBSERVED_REFSPEC])
             .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(&self.repo_root);
         let output = Self::run_command_bounded(command, timeout)?;
@@ -1116,10 +1119,19 @@ impl GitOperations {
         branch: &str,
         head: &str,
         reconcile_peer: bool,
+        fence: Option<(&super::train_authority::Snapshot, &super::train_authority::Identity)>,
+        fence_observed: bool,
     ) -> TargetPushOutcome {
         let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
         if !self.has_origin_remote() {
             return TargetPushOutcome::NoRemote;
+        }
+        // An enrolled train advances target and authority in one atomic push.
+        // A peer that moved either is a conflict to re-admit, never to merge.
+        if let Some((authority, actor)) = fence {
+            return authority.publish_as(self, actor, head, true).unwrap_or_else(|reason| TargetPushOutcome::NotPushed {
+                sha: Some(head.into()), remote_sha: self.resolve_commit(&format!("origin/{branch}")), reason,
+            });
         }
         let remote_ref = format!("origin/{branch}");
         let expected = match self.resolve_commit(&remote_ref) {
@@ -1139,7 +1151,7 @@ impl GitOperations {
                     reason: "the merge does not contain the observed origin tip".into(),
                 };
             }
-            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, PUSH_TIMEOUT)
+            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, None, fence_observed, PUSH_TIMEOUT)
         };
         let first = publish(head, &expected);
         if !reconcile_peer || !matches!(first, TargetPushOutcome::NonFastForward { .. }) {
@@ -1253,16 +1265,19 @@ impl GitOperations {
         head: &str,
         timeout: Duration,
     ) -> TargetPushOutcome {
-        self.publish_pinned_source_with_lease(branch, head, None, false, timeout)
+        self.publish_pinned_source_with_lease(branch, head, None, false, None, false, timeout)
     }
 
     // gate-audit[proven_merge]: selector Internal publication provenance selects merge validation with G-160 versus ordinary source pre-push checks; no caller override is accepted.
-    fn publish_pinned_source_with_lease(
+    // gate-audit[fence_observed]: selector Chooses where the unfenced-target check reads the train fence (the caller's just-fetched mirror or origin); both refuse a fenced target with G-113.
+    pub(super) fn publish_pinned_source_with_lease(
         &self,
         branch: &str,
         head: &str,
         expected: Option<&str>,
         proven_merge: bool,
+        authority: Option<&super::train_authority::AtomicUpdate>,
+        fence_observed: bool,
         timeout: Duration,
     ) -> TargetPushOutcome {
         let remote_ref = format!("origin/{branch}");
@@ -1272,6 +1287,20 @@ impl GitOperations {
                 reason: "pinned source does not resolve".into(),
             };
         };
+        // `fence_observed`: the caller's fetch under this target lock mirrored
+        // origin's authority refs, so the fence is read locally (cas-6456).
+        let unfenced = || if fence_observed {
+            super::train_authority::refuse_observed_unfenced(&self.repo_root, branch)
+        } else {
+            super::train_authority::refuse_unfenced(&self.repo_root, branch)
+        };
+        if authority.is_none()
+            && let Err(reason) = unfenced()
+        {
+            return TargetPushOutcome::NotPushed {
+                sha: Some(local_sha), remote_sha: self.resolve_commit(&remote_ref), reason,
+            };
+        }
         // GH #1386: pre-push hooks read the working tree, not the refspec.
         // Validate a clean checkout of exactly the commit we will publish;
         // unrelated supervisor files/dependencies must not affect the hook.
@@ -1318,6 +1347,10 @@ impl GitOperations {
             }
         }
         cmd.arg("push");
+        if let Some(authority) = authority {
+            cmd.arg("--atomic")
+                .arg(format!("--force-with-lease={}:{}", authority.reference, authority.expected));
+        }
         if let Some(expected) = expected {
             cmd.arg(format!("--force-with-lease=refs/heads/{branch}:{expected}"));
         }
@@ -1327,7 +1360,11 @@ impl GitOperations {
             // moves while a hook runs; fully qualify the destination so
             // push.default / configured refspecs cannot choose another ref.
             &format!("{local_sha}:refs/heads/{branch}"),
-        ])
+        ]);
+        if let Some(authority) = authority {
+            cmd.arg(format!("{}:{}", authority.next, authority.reference));
+        }
+        cmd
         // Never block on an interactive credential prompt (mirrors fetch).
         .env("GIT_TERMINAL_PROMPT", "0")
         .env_remove("CAS_PROVEN_MERGE_HEAD")
@@ -1338,6 +1375,24 @@ impl GitOperations {
         if proven_merge && let Some(base) = expected {
             cmd.env("CAS_PROVEN_MERGE_HEAD", &local_sha)
                 .env("CAS_PROVEN_MERGE_BASE", base);
+        }
+
+        if authority.is_some() {
+            // Probe receive-pack atomic support without mutating either ref.
+            // Use the same clean checkout, remote, environment and hook policy.
+            let mut probe = Command::new(cmd.get_program());
+            probe.args(cmd.get_args()).arg("--dry-run").current_dir(checkout.path());
+            for (key, value) in cmd.get_envs() {
+                if let Some(value) = value { probe.env(key, value); }
+                else { probe.env_remove(key); }
+            }
+            match Self::run_command_bounded(probe, timeout.saturating_sub(started.elapsed())) {
+                Ok(output) if output.status.success() => {}
+                _ => return TargetPushOutcome::NotPushed {
+                    sha: Some(local_sha), remote_sha: expected.map(str::to_string),
+                    reason: "TRAIN_TRANSFER_FENCE_UNAVAILABLE: atomic receive-pack probe refused".into(),
+                },
+            }
         }
 
         match Self::run_command_bounded(cmd, timeout.saturating_sub(started.elapsed())) {

@@ -92,8 +92,15 @@ fn sync_one(
         return Ok(false);
     }
     let remote = git.resolve_commit(&format!("origin/{lane}")).is_some();
+    let fence = crate::train_owner::local_owner_fence(cas_dir, &repo, lane).map_err(anyhow::Error::msg)?;
     let mut push = |new_tip: &str, _old: &str| -> crate::worktree::git::Result<String> {
-        if remote {
+        if let Some((authority, actor)) = &fence {
+            let outcome = authority.publish(&GitOperations::new(repo.clone()), actor, new_tip)
+                .map_err(GitError::CommandFailed)?;
+            if !outcome.is_published() {
+                return Err(GitError::CommandFailed(format!("fenced train publication refused: {outcome:?}")));
+            }
+        } else if remote {
             let output = std::process::Command::new("git")
                 .arg("-C").arg(&repo)
                 .args(["push", "-q", "origin", &format!("{new_tip}:refs/heads/{lane}")])

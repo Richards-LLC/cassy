@@ -175,11 +175,12 @@ fn write_queue(path: &Path, queue: &Queue) -> Result<()> {
 
 /// GH #2316: the queue's recorded supervisor holds it only while that session
 /// is live. The caller is already the current train owner, so an ended prior
-/// owner's generation is adopted rather than held forever.
-fn held_by_prior_owner(root: &Path, actor: &cas_types::Agent, queue: &Queue, generation: &str) -> bool {
+/// owner's generation is adopted rather than held forever. cas-6456: an
+/// unstamped queue continues only while no explicit owner record exists.
+fn held_by_prior_owner(root: &Path, actor: &cas_types::Agent, queue: &Queue, epic: &cas_types::Task, generation: &str) -> Result<bool> {
     let continues = crate::cloud::peer_mailbox::owns_recipient(root, actor, &queue.supervisor)
-        && (queue.owner_generation.is_empty() || queue.owner_generation == generation);
-    !continues && crate::cloud::peer_mailbox::supervisor_is_live(root, &queue.supervisor)
+        && crate::train_owner::generation_matches(root, epic, &queue.owner_generation, generation).map_err(anyhow::Error::msg)?;
+    Ok(!continues && crate::cloud::peer_mailbox::supervisor_is_live(root, &queue.supervisor))
 }
 
 /// Checked before preparing a candidate and again under the normal target
@@ -218,7 +219,7 @@ pub(crate) fn admit(
         let actor = core.resolve_live_supervisor_authority()
             .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-113", format!("train owner authority unavailable: {error:?}"))))?;
         let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
-        ensure!(!held_by_prior_owner(root, &actor, &queue, &generation),
+        ensure!(!held_by_prior_owner(root, &actor, &queue, &epic, &generation)?,
             crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
         ensure!(
             permit == Some(queue.id.as_str())
@@ -352,7 +353,7 @@ impl CasCore {
         let path = path(&self.cas_root, &repo, &target)?;
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
-            ensure!(!held_by_prior_owner(&self.cas_root, &actor, &queue, &generation),
+            ensure!(!held_by_prior_owner(&self.cas_root, &actor, &queue, &epic, &generation)?,
                 crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
             if queue.reclaim_advancement() { save(&path, &mut queue)?; }
             queue.supervisor = actor.id.clone();
@@ -702,9 +703,10 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         let tasks = core
             .open_task_store()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let generation = crate::factory_session_scope::require_train_owner(root, &tasks.get(&queue.train)?, &actor)
+        let epic = tasks.get(&queue.train)?;
+        let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor)
             .map_err(anyhow::Error::msg)?;
-        ensure!(queue.owner_generation.is_empty() || queue.owner_generation == generation,
+        ensure!(crate::train_owner::generation_matches(root, &epic, &queue.owner_generation, &generation).map_err(anyhow::Error::msg)?,
             crate::gates::tag("G-113", "train merge owner generation changed"));
         loop {
             let Some(current) = driver.current()? else { break };
@@ -1786,8 +1788,8 @@ mod tests {
         let reads = fixture.root.join("origin-reads.log");
         let counter = fixture.root.join("count-upload-pack");
         std::fs::write(&counter, format!(
-            "#!/bin/sh\ntr '\\0' ' ' < /proc/$(cut -d' ' -f4 /proc/$PPID/stat)/cmdline >> '{}'\necho >> '{}'\nexec git upload-pack \"$@\"\n",
-            reads.display(), reads.display(),
+            "#!/bin/sh\nprintf '%s | %s\\n' \"$(ps -o args= -p $PPID)\" \"$(ps -o args= -p \"$(ps -o ppid= -p $PPID | tr -d ' ')\")\" >> '{}'\nexec git upload-pack \"$@\"\n",
+            reads.display(),
         )).unwrap();
         std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         git(fixture._repo.path(), &["config", "remote.origin.uploadpack", counter.to_str().unwrap()]);
@@ -1809,5 +1811,47 @@ mod tests {
             assert_eq!(reads.lines().filter(|line| *line == source).count(), 1, "source publication reads:\n{reads}");
         }
         assert_eq!(reads.lines().count(), fixture.ids.len() * 2, "one source proof and one shared target/close fetch per entry:\n{reads}");
+    }
+
+    /// cas-6456: the one origin read is per entry, after the merge lock.
+    /// A train-owner transfer that lands on origin between two entries
+    /// fences the second, so the prior owner cannot publish it.
+    #[tokio::test]
+    async fn transfer_between_entries_fences_the_next_entry_cas_6456() {
+        let fixture = Fixture::build(false);
+        fixture.start().await;
+        let origin = fixture.root.join("origin.git");
+        // The successor's accepted authority record, staged on origin.
+        let staging = tempfile::tempdir().unwrap();
+        git(staging.path(), &["init", "-qb", "authority"]);
+        git(staging.path(), &["config", "user.name", "Cassy test"]);
+        git(staging.path(), &["config", "user.email", "test@example.invalid"]);
+        let target_sha = git(fixture._repo.path(), &["rev-parse", "epic/train"]);
+        commit(staging.path(), "authority.json", &serde_json::json!({
+            "protocol": 1, "project": "fixture", "train": "cas-train", "target": "epic/train",
+            "identity": {"owner": "successor", "incarnation": "successor-process"},
+            "epoch": 2, "generation": "successor-generation", "phase": "active",
+            "target_sha": target_sha, "operation": "transfer-accept", "transfer": null,
+        }).to_string());
+        git(staging.path(), &["push", "-q", origin.to_str().unwrap(), "authority:refs/hold/authority"]);
+        // The transfer lands just before the second entry's origin read.
+        let reads = fixture.root.join("origin-reads.log");
+        let reader = fixture.root.join("transfer-on-second-read");
+        std::fs::write(&reader, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$(ps -o args= -p $PPID)\" >> '{reads}'\n\
+             [ \"$(grep -c 'git fetch' '{reads}')\" = 2 ] && git --git-dir='{origin}' update-ref refs/cas/train-owner/cas-train refs/hold/authority\n\
+             exec git upload-pack \"$@\"\n",
+            reads = reads.display(), origin = origin.display(),
+        )).unwrap();
+        std::fs::set_permissions(&reader, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", reader.to_str().unwrap()]);
+
+        let _ = resume_pending(&fixture.root, "queue-session").await;
+
+        git(fixture._repo.path(), &["--git-dir", origin.to_str().unwrap(), "rev-parse", "refs/cas/train-owner/cas-train"]);
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        let landed = git(&origin, &["rev-parse", "refs/heads/epic/train"]);
+        assert!(operations.is_ancestor(&fixture.shas[0], &landed), "the first entry publishes before the transfer");
+        assert!(!operations.is_ancestor(&fixture.shas[1], &landed), "the prior owner published past the transfer");
     }
 }

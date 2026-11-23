@@ -156,6 +156,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "worktree_cleanup",
     "worktree_merge",
     "train_merge",
+    "train_owner_transfer",
     "train_freeze",
     "worktree_status",
     // Loops and queues

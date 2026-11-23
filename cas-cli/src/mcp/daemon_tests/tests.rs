@@ -732,7 +732,7 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     tasks.add(&epic).unwrap();
     let host = crate::factory_session_scope::WorkerHost {
         train: epic.id.clone(), owner: "remote-owner-id".into(),
-        generation: crate::factory_session_scope::train_owner_generation(&epic).unwrap(),
+        generation: crate::factory_session_scope::train_owner_generation(&root, &epic).unwrap(),
         name: "remote-owner".into(), session: "remote-owner-session".into(), machine: "remote-machine".into(),
     };
     let mut metadata = crate::ui::factory::create_metadata(&host.session, 0, &host.name,

@@ -62,7 +62,7 @@ impl Park {
         Ok(parked(task)?.as_ref() == Some(self) && self.task == task.id && self.epoch > 0
             && crate::cloud::resolve_canonical_id(root).as_deref() == Some(self.project.as_str())
             && train.epic_verification_owner.as_deref() == Some(self.owner.as_str())
-            && crate::factory_session_scope::train_owner_generation(&train)? == self.generation
+            && crate::factory_session_scope::train_owner_generation(root, &train)? == self.generation
             && tasks.get_parent_epic(&task.id).map_err(|e| e.to_string())?.is_some_and(|parent| parent.id == self.train)
             && task.assignee.as_deref().is_some_and(|id| id == self.name || id == self.worker)
             && task.deliverables.work_target.as_ref().is_some_and(|work| work.target_branch == self.target))
@@ -99,6 +99,9 @@ pub(crate) fn ingest(root: &Path, recipient: &Agent, message: &ClaimedPeerMessag
             if directory.claimed(&park.project, &park.task) {
                 return Err("TRAIN_PARK_CLAIM_ACTIVE: worker claim is still active; admission will retry after release".into());
             }
+            let train = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
+                .get(&park.train).map_err(|e| e.to_string())?;
+            crate::factory_session_scope::require_train_owner(root, &train, recipient)?;
             crate::artifacts::proof::materialize_peer_evidence(root, &task)?;
             let path = park.path(root)?;
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -175,6 +178,7 @@ pub(crate) fn authorize(root: &Path, task: &Task, actor: &Agent) -> Result<(), S
 }
 
 pub(crate) fn require_admitted(root: &Path, task: &Task) -> Result<(), String> {
+    if let Some(train) = owner_train(root, task)? { crate::train_owner::require_active(root, &train)?; }
     if let Some(park) = parked(task)? {
         if !admitted(root, task, &park.branch, &park.tip) {
             return Err(crate::gates::tag("G-113", "Remote delivery is not a current admitted owner park"));
@@ -192,6 +196,8 @@ pub(crate) fn publish_ready(root: &Path, task: &Task, worker: &Agent) -> Result<
         return Err("Worker registration belongs to a different owner generation".into());
     }
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let train = tasks.get(&host.train).map_err(|e| e.to_string())?;
+    crate::train_owner::require_active(root, &train)?;
     let task = tasks.get(&task.id).map_err(|e| e.to_string())?;
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     if task.status != crate::types::TaskStatus::AwaitingMerge || agents.get_lease(&task.id).map_err(|e| e.to_string())?.is_some() {

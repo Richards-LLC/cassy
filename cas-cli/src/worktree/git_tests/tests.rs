@@ -1656,7 +1656,7 @@ fn publish_branch_to_origin_pushes_a_locally_merged_target() {
             .args(["update-ref", "refs/heads/epic/proven", &integration_base])
             .current_dir(&origin_path).output().unwrap();
         assert!(created.status.success());
-        assert_eq!(git.publish_merge_candidate("epic/proven", &merge_sha, false),
+        assert_eq!(git.publish_merge_candidate("epic/proven", &merge_sha, false, None, false),
                    TargetPushOutcome::Pushed { sha: merge_sha.clone() });
         assert_eq!(std::fs::read_to_string(marker).unwrap(),
                    format!("{merge_sha}\n{integration_base}\n"));

@@ -1463,6 +1463,12 @@ fn refresh_epic_base_from_parent(
 
     // This path is selected only after a verified origin fetch. A failed
     // push retains the safe local fast-forward for the worker checkout.
+    let short = refname.strip_prefix("refs/heads/").unwrap_or(&refname);
+    if let Err(refusal) = crate::worktree::git::train_authority::refuse_unfenced(repo_root, short) {
+        return Ok(Some(format!(
+            "EPIC BASE FAST-FORWARDED (UNPUBLISHED): epic base '{epic_branch}' advanced locally to its recorded parent '{parent_branch}'; {refusal}. The worker worktree will be cut from the refreshed local tip."
+        )));
+    }
     let mut command = std::process::Command::new("git");
     command
         .args(["push", "origin", &format!("{refname}:{refname}")])

@@ -1055,6 +1055,37 @@ pub struct TaskCloseRefusal {
     pub input_digest: String,
 }
 
+/// Local cache of a fetched train authority record. This is never publication
+/// authority: consumers must still read and lease the remote Git record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrainOwnerProjection {
+    pub train: String,
+    pub project: String,
+    pub target: String,
+    pub authority: String,
+    pub owner: String,
+    pub incarnation: String,
+    pub epoch: u64,
+    pub generation: String,
+    pub phase: String,
+}
+
+impl TrainOwnerProjection {
+    pub fn validate(&self) -> Result<(), String> {
+        if [&self.train, &self.project, &self.target, &self.owner, &self.incarnation, &self.generation]
+            .iter().any(|field| field.trim().is_empty())
+            || self.epoch == 0
+            || !matches!(self.phase.as_str(), "active" | "draining" | "quiesced" | "recovery_held")
+            || !matches!(self.authority.len(), 40 | 64)
+            || !self.authority.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("TRAIN_OWNER_SYNC_CONFLICT: invalid authority projection".into());
+        }
+        Ok(())
+    }
+}
+
 const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "phase",
     "receipts",
@@ -1069,6 +1100,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "close_refusal",
     "class_audit",
     "failing_tests",
+    "train_owner",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -1088,6 +1120,9 @@ pub fn merge_task_execution_state_patch(current: &Value, patch: &Value) -> Resul
         .ok_or_else(|| "stored execution state must be a JSON object".to_string())?;
 
     for (field, value) in patch_object {
+        if field == "train_owner" {
+            return Err("TRAIN_OWNER_TRANSFER_REQUIRED: only verified authority projection may write train_owner".into());
+        }
         if !TASK_EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
             return Err(format!(
                 "unknown execution state field '{field}'; allowed fields: {}",
@@ -1141,6 +1176,9 @@ pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
 
 fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(), String> {
     match field {
+        "train_owner" => serde_json::from_value::<TrainOwnerProjection>(value.clone())
+            .map_err(|error| format!("TRAIN_OWNER_SYNC_CONFLICT: {error}"))?
+            .validate(),
         "phase" | "next_step" | "blocker_ask" | "class_audit" => validate_state_string(field, value),
         "files_touched" | "decisions" | "failing_tests" => validate_state_string_array(field, value),
         "receipts" => {

@@ -251,7 +251,15 @@ pub(crate) async fn drop_children(
             }
         })?
         .context("the revert produced no commit")?;
-    if git(&root, &["remote", "get-url", "origin"]).is_ok() {
+    if let Some((authority, actor)) =
+        crate::train_owner::publication_fence(core, &root, &train).map_err(anyhow::Error::msg)?
+    {
+        let outcome = authority.publish(&crate::worktree::GitOperations::new(root.clone()), &actor, &tip)
+            .map_err(anyhow::Error::msg)?;
+        if !outcome.is_published() {
+            bail!("reverts up to {tip} are on local {train} but the fenced publication refused: {outcome:?}");
+        }
+    } else if git(&root, &["remote", "get-url", "origin"]).is_ok() {
         git(&root, &["push", "-q", "origin", &format!("{tip}:refs/heads/{train}")])
             .with_context(|| format!("reverts up to {tip} are on local {train} but were not pushed"))?;
     }

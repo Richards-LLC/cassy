@@ -618,7 +618,7 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     hash.update(serde_json::to_vec(&referenced_parent_artifacts(root, task)?)
         .map_err(|error| error.to_string())?);
     if let Some(train) = crate::cloud::peer_mailbox::train_parks::owner_train(root,task)? {
-        hash.update(crate::factory_session_scope::train_owner_generation(&train)?.as_bytes());
+        hash.update(crate::factory_session_scope::train_owner_generation(root, &train)?.as_bytes());
     }
     crate::cloud::peer_mailbox::train_parks::require_admitted(root,task)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;

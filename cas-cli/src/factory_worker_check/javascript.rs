@@ -3039,6 +3039,53 @@ raise SystemExit(0 if shown else 1)
         assert!(playwright_importers(&repo, "src/shared.ts").is_empty());
     }
 
+    /// GH #2329: C-37 makes a lane that changes hub-web/src commit the rebuilt
+    /// hub-web/dist, and park then demanded a widened Related() receipt for each
+    /// changed bundle, which runs no tests and can never earn one. A generated
+    /// bundle owes nothing; the source's own spec keeps its proof.
+    #[test]
+    fn generated_hub_web_bundles_owe_no_proof_gh2329() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let spec = "hub-web/src/panel.test.ts";
+        // A bundle the classifier cannot read, as a minified chunk can be.
+        let bundles = ["hub-web/dist/app.js", "hub-web/dist/chunk-accounts-panel-ABC123.js"];
+        let write = |path: &str, body: &str| {
+            let full = repo.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        };
+        write("hub-web/package.json", "{}");
+        write("hub-web/vitest.config.ts", "export default {};\n");
+        write(spec, "import { it } from 'vitest';\nit('renders the panel', () => {});\n");
+        for bundle in bundles {
+            write(bundle, "var a = ;\n");
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        write(spec, "import { it } from 'vitest';\nit('renders the panel', () => { expect(1).toBe(1); });\n");
+        for bundle in bundles {
+            write(bundle, "var a = ; var b = 2;\n");
+        }
+        git(&["commit", "--quiet", "-am", "head"]);
+        let paths = [spec, bundles[0], bundles[1]].map(str::to_owned);
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.iter().any(|test| test.path == spec && test.name == "renders the panel"), "{tests:?}");
+        assert!(widened.iter().all(|scope| !format!("{scope:?}").contains("hub-web/dist")), "{widened:?}");
+    }
+
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
     /// apps/backend/jest.config.js and its ts-jest transform.
     #[test]

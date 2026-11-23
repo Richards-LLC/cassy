@@ -222,7 +222,11 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
     let mut tests = BTreeSet::new();
     let mut widened = BTreeSet::new();
     let mut discovery = rust::Discovery::default();
-    for path in paths.iter().filter(|path| path.ends_with(".rs") || super::javascript::javascript(path)) {
+    // GH #2329: a generated bundle (hub-web/dist, which the C-37 drift gate makes
+    // a lane commit beside its source) runs no tests and owes no proof; the
+    // source it was built from keeps its own.
+    for path in paths.iter().filter(|path| (path.ends_with(".rs") || super::javascript::javascript(path))
+        && !super::append_only_or_generated(path)) {
         match required_with_discovery(repo, head, target, std::slice::from_ref(path), ranges, &mut discovery) {
             Ok(selected) => tests.extend(selected),
             Err(error) => {

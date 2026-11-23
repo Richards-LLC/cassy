@@ -10,6 +10,8 @@ use crate::ui::factory::daemon::FactoryDaemon;
 use crate::ui::factory::supervisor_commands::{SupervisorCommand as Command, SupervisorCommandKey as Key, SupervisorCommandPhase as Phase, SupervisorCommandReceipt as Receipt};
 
 type Owner = (String, String);
+/// What a Codex reload costs; Commander shows it before the operator confirms.
+pub(crate) const CODEX_RELOAD_CONSEQUENCE: &str = "Codex reloads Cassy by restarting its supervisor on the installed build, with a fresh context; workers keep running.";
 /// Receipts held at once. Only a burst inside the replay window can reach it.
 const RECEIPT_CAP: usize = 256;
 /// A finished receipt answers replays of its reference for this long after its
@@ -62,7 +64,7 @@ struct Record {
     // Keep the pre-command history when chooser navigation replaces `before`.
     before_command: String,
     write: Box<dyn Fn() -> Option<Result<(), String>> + Send>,
-    hook: Option<tokio::task::JoinHandle<Option<String>>>,
+    hook: Option<tokio::task::JoinHandle<Option<(Phase, String)>>>,
     last_key: Option<Key>,
     /// Pane output stream position when the command was typed.
     output_from: u64,
@@ -123,10 +125,25 @@ fn registered_cassy_server(root: &std::path::Path, session: &str, supervisor: &s
     matching.next().is_none().then_some(server)
 }
 
-fn reload_observation(root: &std::path::Path, session: &str, supervisor: &str, before: u32) -> Option<String> {
+/// The durable on-screen result: what this live MCP process loaded, and when.
+pub(crate) fn loaded_badge(server: &crate::factory_binary_skew::ServerVersion) -> Option<String> {
+    let version = server.version.as_deref()?;
+    let at = crate::factory_binary_skew::process_started_at(server.pid)?;
+    Some(format!("cassy {version} · loaded {}", crate::cli::release_report::eastern_time(at)))
+}
+
+/// A replacement process proves a reconnect; only the installed build proves a reload.
+fn reload_observation(root: &std::path::Path, session: &str, supervisor: &str, before: u32) -> Option<(Phase, String)> {
     let server = registered_cassy_server(root, session, supervisor)?;
     if server.pid == before { return None; }
-    Some(format!("Cassy reloaded: PID {}, version {} (previous PID {before}).", server.pid, server.version?))
+    let running = server.version.clone()?;
+    let installed = crate::factory_binary_skew::installed_version();
+    if installed.as_deref() != Some(running.as_str()) {
+        return Some((Phase::Unconfirmed, format!("Cassy reconnected but runs {running}, not the installed {}. Check which cas is first on PATH, then Reload Cassy again.",
+            installed.as_deref().unwrap_or("version (unavailable)"))));
+    }
+    let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {running}"));
+    Some((Phase::Observed, format!("Cassy reloaded: {badge} (PID {}, previous PID {before}).", server.pid)))
 }
 
 impl FactoryDaemon {
@@ -188,22 +205,31 @@ impl FactoryDaemon {
     /// whose registration already records this session's end and retires its row.
     pub(super) fn take_supervisor_restart_request(&mut self) {
         let Some(request) = crate::factory_daemon_health::take_supervisor_restart(self.app.cas_dir(), &self.session_name, Utc::now()) else { return };
-        if self.supervisor_commands.restart.is_some() { return; }
-        let name = self.app.supervisor_name().to_string();
-        if let Err(error) = self.app.mux.preflight_supervisor_restart(self.app.worker_names()) {
-            let detail = format!("Supervisor restart refused; this session keeps running: {error}");
-            tracing::warn!(requester = %request.requester, "{detail}");
+        if let Err(detail) = self.begin_supervisor_restart(&request.requester) {
+            let name = self.app.supervisor_name().to_string();
             let (root, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
             super::store_worker::submit_write("supervisor restart refusal", move || {
                 let queue = crate::store::open_prompt_queue_store(&root).map_err(|error| error.to_string())?;
                 queue.enqueue_with_session("daemon", &name, &detail, &session).map(|_| ()).map_err(|error| error.to_string())
             });
-            return;
         }
-        let Some(pane) = self.app.mux.get_mut(&name).filter(|pane| !pane.has_exited()) else { return };
-        tracing::info!(requester = %request.requester, "Supervisor restart requested; replacing its pane");
+    }
+
+    /// End the supervisor's pane so [`Self::advance_supervisor_restart`]
+    /// replaces it. `Ok(false)`: no live pane to replace.
+    fn begin_supervisor_restart(&mut self, requester: &str) -> Result<bool, String> {
+        if self.supervisor_commands.restart.is_some() { return Ok(true); }
+        if let Err(error) = self.app.mux.preflight_supervisor_restart(self.app.worker_names()) {
+            let detail = format!("Supervisor restart refused; this session keeps running: {error}");
+            tracing::warn!(%requester, "{detail}");
+            return Err(detail);
+        }
+        let name = self.app.supervisor_name().to_string();
+        let Some(pane) = self.app.mux.get_mut(&name).filter(|pane| !pane.has_exited()) else { return Ok(false) };
+        tracing::info!(%requester, "Supervisor restart requested; replacing its pane");
         pane.kill_tree_force();
         self.supervisor_commands.restart = Some(PendingRestart { killed_at: Instant::now(), exited: false });
+        Ok(true)
     }
 
     /// Whether this supervisor exit belongs to a requested restart. An exit that
@@ -235,6 +261,8 @@ impl FactoryDaemon {
                 self.pane_buffers.remove(&name);
                 self.forget_probe_pane(&name);
                 for record in self.supervisor_commands.records.values_mut() {
+                    // A Codex reload is this restart; the replacement's MCP process proves it.
+                    if record.receipt.command == Command::ReloadCassy && record.receipt.phase == Phase::Submitted { continue; }
                     if matches!(record.receipt.phase, Phase::Queued | Phase::Submitted) || record.receipt.interactive {
                         let queued = record.receipt.phase == Phase::Queued;
                         record.receipt.phase = if queued { Phase::Refused } else { Phase::Unconfirmed };
@@ -526,7 +554,10 @@ impl FactoryDaemon {
         let idle = self.supervisor_commands.readiness.take()
             .and_then(|job| futures_util::FutureExt::now_or_never(job)).and_then(Result::ok).flatten();
         let Some(pane) = self.app.mux.supervisor() else { return };
-        let Some(text) = self.supervisor_commands.records[&owner].receipt.command.mapping(pane.harness()) else { return };
+        let command = self.supervisor_commands.records[&owner].receipt.command;
+        let restart = command == Command::ReloadCassy && pane.harness() == cas_mux::SupervisorCli::Codex;
+        let text = command.mapping(pane.harness());
+        if text.is_none() && !restart { return; }
         if idle != Some(true) || pane.has_exited() || !pane.ready_for_injection()
             || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !command_prompt(&screen(pane), true) { return; }
         let before = screen(pane);
@@ -547,6 +578,25 @@ impl FactoryDaemon {
             },
             Err(error) => { tracing::warn!(%error, "command claim deferred"); return; },
         }
+        if restart {
+            let restarted = self.begin_supervisor_restart("Commander Reload Cassy");
+            let record = self.supervisor_commands.records.get_mut(&owner).expect("queued command remains owned");
+            record.at = Utc::now(); record.started = Instant::now();
+            match restarted {
+                Ok(true) => {
+                    record.receipt.phase = Phase::Submitted;
+                    record.receipt.detail = "Restarting the Codex supervisor on the installed build; workers keep running.".into();
+                }
+                Ok(false) => {
+                    record.receipt.phase = Phase::Refused;
+                    record.receipt.detail = "Reload Cassy was not sent: the supervisor has ended.".into();
+                }
+                Err(detail) => { record.receipt.phase = Phase::Refused; record.receipt.detail = detail; }
+            }
+            if let Err(error) = self.persist_supervisor_commands() { tracing::warn!(%error, "command receipt update deferred"); }
+            return;
+        }
+        let Some(text) = text else { return };
         let write = pane.inject_prompt_tracked(text);
         let record = self.supervisor_commands.records.get_mut(&owner).expect("queued command remains owned");
         match write {
@@ -600,20 +650,60 @@ impl FactoryDaemon {
     /// Hold an admitted command until the native turn ends; nothing is typed yet.
     fn queue_command(&mut self, owner: Owner, command: Command, reload_before: Option<u32>) -> anyhow::Result<DaemonMessage> {
         let name = serde_json::to_value(command).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-        let receipt = Receipt { device_id: owner.0.clone(), client_ref: owner.1.clone(), command, phase: Phase::Queued,
-            detail: format!("/{name} is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet."), output: String::new(), interactive: false };
+        self.record_command(owner, command, reload_before, Phase::Queued,
+            format!("/{name} is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet."))
+    }
+    /// Reserve a receipt that types nothing now: queued work, or an outcome
+    /// already known at admission.
+    fn record_command(&mut self, owner: Owner, command: Command, reload_before: Option<u32>, phase: Phase, detail: String) -> anyhow::Result<DaemonMessage> {
+        let queued = phase == Phase::Queued;
+        let receipt = Receipt { device_id: owner.0.clone(), client_ref: owner.1.clone(), command, phase, detail, output: String::new(), interactive: false };
         let record = Record { receipt, started: Instant::now(), at: Utc::now(), before: String::new(), before_command: String::new(), write: Box::new(|| None), hook: None, last_key: None, output_from: 0, reload_before, birth: Birth::current() };
         anyhow::ensure!(durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &record.saved()?, durable::Write::Reserve)?, "Command reference is already recorded; read its receipt before retrying.");
         self.supervisor_commands.records.insert(owner.clone(), record);
-        self.supervisor_commands.readiness_polled = None;
-        self.advance_queued_command();
+        if queued {
+            self.supervisor_commands.readiness_polled = None;
+            self.advance_queued_command();
+        }
         Ok(DaemonMessage::SupervisorCommandReceipt { receipt: self.supervisor_commands.records[&owner].receipt.clone() })
+    }
+    /// Reload Cassy (cas-8c4f). A live MCP process already on the installed
+    /// build needs nothing. Otherwise the reload waits for a quiet moment,
+    /// never a running turn. Claude reconnects natively; Codex 0.166 has no
+    /// MCP reconnect (`/mcp [verbose | login <name>]`), so its supervisor
+    /// restarts on the installed build while workers keep running. The
+    /// MCP front cannot do it: it refuses any swap whose tool schemas changed
+    /// (front.rs `incompatibility`), which nearly every release does.
+    async fn admit_reload(&mut self, owner: Owner, confirmed: bool) -> anyhow::Result<DaemonMessage> {
+        use cas_mux::SupervisorCli::{Claude, Codex};
+        let cli = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?.harness();
+        anyhow::ensure!(matches!(cli, Claude | Codex),
+            "Reload Cassy is unavailable for {}. It requires Claude Code or Codex.", format!("{cli:?}").to_lowercase());
+        anyhow::ensure!(cli == Claude || confirmed, "{CODEX_RELOAD_CONSEQUENCE} Confirm to continue.");
+        let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
+        let (server, installed) = tokio::task::spawn_blocking(move || {
+            if cli == Claude { verify_claude_reload_version(&root, &session, &supervisor)?; }
+            Ok::<_, anyhow::Error>((registered_cassy_server(&root, &session, &supervisor), crate::factory_binary_skew::installed_version()))
+        }).await??;
+        let server = server.ok_or_else(|| anyhow::anyhow!("Reload Cassy was not sent: the supervisor's live Cassy MCP PID and version are unavailable."))?;
+        if installed.is_some() && server.version == installed {
+            let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {}", installed.unwrap_or_default()));
+            return self.record_command(owner, Command::ReloadCassy, None, Phase::Observed, format!("Already current: {badge}. Nothing was sent."));
+        }
+        self.record_command(owner, Command::ReloadCassy, Some(server.pid), Phase::Queued,
+            "Waiting for a quiet moment: Cassy reloads when the supervisor's turn ends. Nothing has been sent yet.".into())
     }
     pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
         self.restore_supervisor_commands()?;
         let result = self.dispatch_supervisor_command_inner(request, client_ref, attribution).await;
-        self.persist_supervisor_commands()?;
+        // The live receipt is in memory; a contended copy is rewritten on the
+        // next persist and never turns an outcome into a failure (cas-8c4f).
+        match self.persist_supervisor_commands() {
+            Err(error) if super::delivery::lost_store_to_contention(&error) =>
+                tracing::warn!(error = %format!("{error:#}"), "command receipt persist deferred by store contention"),
+            persisted => persisted?,
+        }
         result
     }
     async fn dispatch_supervisor_command_inner(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
@@ -633,7 +723,7 @@ impl FactoryDaemon {
                 if record.receipt.phase == Phase::Submitted && record.started.elapsed() > Duration::from_secs(90) {
                     record.receipt.phase = Phase::Unconfirmed;
                     record.receipt.detail = if record.receipt.command == Command::ReloadCassy {
-                        "Cassy reload is unconfirmed: no replacement live MCP PID and version were recorded. Check Claude's /mcp panel before retrying."
+                        "Cassy reload timed out: no replacement live MCP process on the installed build was recorded. Check the supervisor pane, then Reload Cassy again."
                     } else { "The harness outcome was not observed. Check Raw output before sending another command." }.into();
                 }
             }
@@ -657,20 +747,10 @@ impl FactoryDaemon {
                 anyhow::ensure!(command.mapping(pane.harness()).is_some(), "This harness does not support that command.");
                 return self.queue_command(owner, *command, None);
             }
-            let reload_before = if *command == Command::ReloadCassy {
-                let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
-                anyhow::ensure!(command.mapping(pane.harness()).is_some(),
-                    "Reload Cassy is unavailable for {}. It requires Claude Code.", format!("{:?}", pane.harness()).to_lowercase());
-                let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
-                Some(tokio::task::spawn_blocking(move || {
-                    verify_claude_reload_version(&root, &session, &supervisor)?;
-                    Ok::<_, anyhow::Error>(registered_cassy_server(&root, &session, &supervisor))
-                }).await??
-                    .ok_or_else(|| anyhow::anyhow!("Reload Cassy was not sent: the supervisor's live Cassy MCP PID and version are unavailable. Check Claude's /mcp panel."))?.pid)
-            } else { None };
+            if *command == Command::ReloadCassy { return self.admit_reload(owner, *confirmed).await; }
             match tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await
                 .map_err(|_| anyhow::anyhow!("The supervisor is busy: its output did not settle within 3 seconds. Wait until its turn ends."))? {
-                Err(error) if error.is::<TurnOpen>() => return self.queue_command(owner, *command, reload_before),
+                Err(error) if error.is::<TurnOpen>() => return self.queue_command(owner, *command, None),
                 ready => ready?,
             }
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
@@ -679,10 +759,10 @@ impl FactoryDaemon {
             let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            let saved = serde_json::to_value(SavedRecord { receipt: receipt.clone(), at: Utc::now(), before: before.clone(), before_command: before.clone(), reload_before, birth: Birth::current() })?;
+            let saved = serde_json::to_value(SavedRecord { receipt: receipt.clone(), at: Utc::now(), before: before.clone(), before_command: before.clone(), reload_before: None, birth: Birth::current() })?;
             anyhow::ensure!(durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &saved, durable::Write::Reserve)?, "Command reference is already recorded; read its receipt before retrying.");
             let write = pane.inject_prompt_tracked(text)?;
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before, birth: Birth::current() });
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before: None, birth: Birth::current() });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         anyhow::ensure!(self.supervisor_commands.records.contains_key(&owner), "The original command receipt is unavailable. Do not resend an uncertain command.");
@@ -782,10 +862,10 @@ impl FactoryDaemon {
                 record.receipt.interactive = interactive;
                 record.receipt.output = super::work_events::redact(&current).chars().take(8 * 1024).collect();
             } else if record.hook.as_ref().is_some_and(|job| job.is_finished()) {
-                if let Some(Ok(Some(detail))) = record.hook.take().map(|job| futures_util::FutureExt::now_or_never(job)).flatten() {
-                    record.receipt.phase = Phase::Observed;
+                if let Some(Ok(Some((phase, detail)))) = record.hook.take().map(|job| futures_util::FutureExt::now_or_never(job)).flatten() {
+                    record.receipt.phase = phase;
                     record.receipt.detail = detail;
-                    if record.receipt.command == Command::ReloadCassy {
+                    if record.receipt.command == Command::ReloadCassy && record.receipt.phase == Phase::Observed {
                         crate::quality_ledger::intervention(self.app.cas_dir(), cas_store::InterventionKind::McpReconnect,
                             format!("commander_mcp|{}|{}", record.receipt.device_id, record.receipt.client_ref),
                             None, Some(&record.receipt.device_id), None);
@@ -798,16 +878,17 @@ impl FactoryDaemon {
                 let reload_before = record.reload_before;
                 let cli = pane.harness();
                 record.hook = Some(tokio::task::spawn_blocking(move || {
-                    if command == Command::ReloadCassy { reload_before.and_then(|pid| reload_observation(&root, &session, &supervisor, pid)) }
-                    else if command == Command::Finish { finish_observation(&root, &session, &supervisor, cli, after, "finish") }
+                    if command == Command::ReloadCassy { return reload_before.and_then(|pid| reload_observation(&root, &session, &supervisor, pid)); }
+                    let detail = if command == Command::Finish { finish_observation(&root, &session, &supervisor, cli, after, "finish") }
                     else if command == Command::Standby { finish_observation(&root, &session, &supervisor, cli, after, "standby") }
-                    else { hook_observation(&root, &session, &supervisor, command, after) }
+                    else { hook_observation(&root, &session, &supervisor, command, after) };
+                    detail.map(|detail| (Phase::Observed, detail))
                 }));
             }
             if record.receipt.phase == Phase::Submitted && record.started.elapsed() > Duration::from_secs(90) {
                 record.receipt.phase = Phase::Unconfirmed;
                 record.receipt.detail = if record.receipt.command == Command::ReloadCassy {
-                    "Cassy reload is unconfirmed: no replacement live MCP PID and version were recorded. Check Claude's /mcp panel before retrying."
+                    "Cassy reload timed out: no replacement live MCP process on the installed build was recorded. Check the supervisor pane, then Reload Cassy again."
                 } else { "The harness outcome was not observed. Check Raw output before sending another command." }.into();
             }
         }

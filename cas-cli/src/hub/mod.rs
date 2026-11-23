@@ -508,6 +508,9 @@ pub struct HubSession {
     /// The live supervisor's fingerprinted MCP daemon epoch, not the hub binary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_version: Option<String>,
+    /// When that MCP process started, so its build has been loaded since then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_loaded_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Installed CLI on this machine; may be newer than a connected MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_version: Option<String>,
@@ -772,6 +775,9 @@ impl LocalSessionReadModel {
                     // Different observations are unknown, never an arbitrary version.
                     projected.mcp_version = matches.first().and_then(|server| server.version.clone())
                         .filter(|version| matches.iter().all(|server| server.version.as_ref() == Some(version)));
+                    projected.mcp_loaded_at = projected.mcp_version.as_ref().and(matches.as_slice().first())
+                        .filter(|_| matches.len() == 1)
+                        .and_then(|server| crate::factory_binary_skew::process_started_at(server.pid));
                 }
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
@@ -808,6 +814,7 @@ impl LocalSessionReadModel {
             rows.push(HubSession {
                 name: receipt.metadata.name,
                 mcp_version: None,
+                mcp_loaded_at: None,
                 installed_version: None,
                 harness: identity.harness,
                 model: identity.model,
@@ -962,6 +969,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
     HubSession {
         name: session.name.clone(),
         mcp_version: None,
+        mcp_loaded_at: None,
         installed_version: None,
         harness,
         model,
@@ -1252,6 +1260,7 @@ pub fn fixture_session(name: &str) -> HubSession {
     HubSession {
         name: name.to_owned(),
         mcp_version: None,
+        mcp_loaded_at: None,
         installed_version: None,
         harness: None,
         model: None,

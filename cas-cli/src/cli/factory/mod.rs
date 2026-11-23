@@ -3641,17 +3641,17 @@ mod tests {
             ..cas_mux::WorkerSpec::builtin_default()
         };
         let launch = |spec_names: &[&str]| {
-            let mut generated = vec!["quick-otter-12".to_string(); spec_names.len()];
+            let mut generated: Vec<String> = (1..=spec_names.len()).map(|at| format!("quick-otter-{at}")).collect();
             let specs: Vec<_> = spec_names.iter().map(|name| spec(name)).collect();
             apply_worker_spec_names(&mut generated, &specs, "lead")?;
             let mut names = crate::factory_isolation::WorkerNameRegistry::load(&root, repo).map_err(anyhow::Error::msg)?;
             refuse_overlapping_worker_names(&mut names, &generated)
         };
-        launch(&["brave-owl-88", "mild-fox-1"]).expect("clear names launch");
+        launch(&["brave-owl-88", "keen-fox-1"]).expect("clear names launch");
         for (taken, why) in [
             (&["swift-hawk-3"][..], "registered worker swift"),
             (&["calm-lark-3"][..], "branch factory/calm-lark"),
-            (&["mild-fox-1", "mild-fox-1-x"][..], "the first name of this launch"),
+            (&["keen-fox-1", "keen-fox-1-x"][..], "the first name of this launch"),
         ] {
             let error = launch(taken).expect_err(why).to_string();
             assert!(error.contains("WORKER_NAME_OVERLAPS"), "{why}: {error}");

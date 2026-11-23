@@ -1698,6 +1698,15 @@ fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path
         && serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|report| lists(&report))
 }
 
+/// Whether the vitest that runs for `path` can transform a `.vue` file: its
+/// config names the Vue plugin, or Nuxt's test config that brings it. With no
+/// config or no plugin `vitest related <file>.vue` crashes (GH #2352).
+pub(crate) fn vitest_loads_vue(repo: &Path, path: &str) -> bool {
+    runner_root(repo, path, "vitest").ok().and_then(|(_, config)| config)
+        .and_then(|config| std::fs::read_to_string(config).ok())
+        .is_some_and(|config| ["plugin-vue", "@nuxt/test-utils", "unplugin-vue"].iter().any(|plugin| config.contains(plugin)))
+}
+
 /// The repository-relative non-default Playwright config that lists `path`,
 /// when its directory's default config does not (GH #2195).
 pub(crate) fn playwright_owner(repo: &Path, path: &str) -> Option<PathBuf> {
@@ -1984,7 +1993,9 @@ fn execute_tests(
             .collect::<Vec<_>>()
             .join("|");
         let pattern = if runner == "playwright" {
-            format!("(?:^|\\s)(?:{pattern})$")
+            // GH #2349: Playwright greps the title path followed by the test's
+            // tags (`title @tag`), so a tagged test needs the tag suffix too.
+            format!("(?:^|\\s)(?:{pattern})(?:\\s@\\S+)*$")
         } else {
             format!("^(?:{pattern})$")
         };
@@ -3348,7 +3359,8 @@ process.exit(ok ? 0 : 1);
     /// `**/*<suffix>` testMatch (default `.spec.ts`) and the positional pattern
     /// name ("No tests found" otherwise), with each spec's own title and line; a
     /// file may hold several `test('title'` lines, `--grep` keeps the matching
-    /// ones, and the report goes to PLAYWRIGHT_JSON_OUTPUT_FILE when that is set.
+    /// ones (it matches the title path followed by the `{ tag: [...] }` tags),
+    /// and the report goes to PLAYWRIGHT_JSON_OUTPUT_FILE when that is set.
     const STAND_IN_PLAYWRIGHT: &str = r#"#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
@@ -3356,8 +3368,11 @@ const config = path.resolve(at('--config')), settings = require(config), root = 
 const last = a[a.length - 1], pattern = last.startsWith('--') ? /(?:)/ : new RegExp(last), repeats = listing ? 1 : Number(at('--repeat-each')), grep = a.includes('--grep') ? new RegExp(at('--grep')) : null;
 const testMatch = settings.testMatch ?? '**/*.@(spec|test).?(c|m)[jt]s?(x)', suffix = settings.testMatch ? testMatch.replace('**/*', '') : '.spec.ts';
 const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith(suffix)).map((f) => path.join(root, f)) : [];
+// A `test('title', { tag: ['@a'] }, ...)` line; Playwright greps the title path, then the tags, joined by spaces.
 const specsOf = (file) => fs.readFileSync(file, 'utf8').split('\n').flatMap((text, index) => {
-  const title = text.match(/^test\('([^']*)'/); return title && (!grep || grep.test(title[1])) ? [{ title: title[1], line: index + 1 }] : []; });
+  const found = text.match(/^test\('([^']*)'(?:, \{ tag: \[([^\]]*)\] \})?/);
+  const tags = found && found[2] ? found[2].split(',').map((tag) => tag.trim().replace(/['"]/g, '')) : [];
+  return found && (!grep || grep.test(['', '', path.relative(root, file), found[1], ...tags].join(' '))) ? [{ title: found[1], line: index + 1, tags }] : []; });
 const listed = files.filter((file) => pattern.test(file) && specsOf(file).length), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
 const metadata = listing || !listed.length ? {} : { actualWorkers: Math.min(workers, listed.length * repeats) };
 const project = { outputDir, repeatEach: repeats, retries: 0, metadata, id: '', name: '', testDir: root, testIgnore: [], testMatch: [testMatch], timeout: 30000 };
@@ -3366,6 +3381,9 @@ const startTime = new Date().toISOString(), result = { workerIndex: 0, parallelI
 const test = { timeout: 30000, annotations: [], expectedStatus: 'passed', projectId: '', projectName: '',
   results: listing ? [] : [result], status: listing ? 'skipped' : 'expected' };
 const specCount = listed.reduce((sum, file) => sum + specsOf(file).length, 0);
+// With a `.record-runs` marker beside the config, each executed test's title is appended once per repeat to `.ran`.
+if (!listing && fs.existsSync(path.join(path.dirname(config), '.record-runs')))
+  for (const file of listed) for (const spec of specsOf(file)) fs.appendFileSync(path.join(path.dirname(config), '.ran'), `${spec.title}\n`.repeat(repeats));
 const noTests = 'Error: No tests found.\nMake sure that arguments are regular expressions matching test files.\nYou may need to escape symbols like "$" or "*" and quote the arguments.';
 const report = {
   config: { argv: process.argv, configFile: config, rootDir: root, failOnFlakyTests: false, forbidOnly: false, fullyParallel: false, globalSetup: null,
@@ -3376,7 +3394,7 @@ const report = {
     updateSnapshots: 'default', updateSourceMethod: 'patch', version: '1.65.1', workers, webServer: null },
   suites: listed.map((file, index) => {
     const relative = path.relative(root, file);
-    return { title: relative, file: relative, column: 0, line: 0, specs: specsOf(file).map((spec, n) => ({ title: spec.title, ok: true, tags: [],
+    return { title: relative, file: relative, column: 0, line: 0, specs: specsOf(file).map((spec, n) => ({ title: spec.title, ok: true, tags: spec.tags.map((tag) => tag.slice(1)),
       tests: Array(repeats).fill(test), id: `spec-${index}-${n}`, file: relative, line: spec.line, column: 1 })) };
   }),
   errors: listed.length ? [] : [{ message: noTests, stack: noTests }],
@@ -3464,8 +3482,17 @@ process.exit(listed.length ? 0 : 1);
         write("node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // GH #2349: Playwright greps the title followed by the tags, so a test
+        // declared with the tag option is `title @tag`. One spec holds tests
+        // whose titles share a prefix, tagged or not; each must run alone.
+        write(".gitignore", ".ran\n");
+        write(".record-runs", "");
         let spec = "tests/e2e/sign-in.spec.ts";
-        let source = |body: &str| format!("import {{ test }} from '@playwright/test';\ntest('hermetic sign in', async () => {{ {body} }});\n");
+        let source = |body: &str| format!(
+            "import {{ test }} from '@playwright/test';\n\
+             test('hermetic sign in', {{ tag: ['@staging', '@smoke'] }}, async () => {{ {body} }});\n\
+             test('hermetic sign in extra', async () => {{ {body} }});\n\
+             test('hermetic sign in extra later', {{ tag: ['@staging'] }}, async () => {{ {body} }});\n");
         write(spec, &source("throw 0;"));
         git(&["add", "."]);
         git(&["commit", "--quiet", "-m", "base"]);
@@ -3475,9 +3502,16 @@ process.exit(listed.length ? 0 : 1);
         let head = git(&["rev-parse", "HEAD"]);
 
         let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
-        assert_eq!(tests, [id(spec, "hermetic sign in")]);
+        assert_eq!(tests, [id(spec, "hermetic sign in"), id(spec, "hermetic sign in extra"), id(spec, "hermetic sign in extra later")]);
         let cas_root = tempfile::tempdir().unwrap();
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        // Each target's own run executes that test five times and no neighbour.
+        for target in &tests {
+            let _ = std::fs::remove_file(repo.path().join(".ran"));
+            execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, std::slice::from_ref(target), None, &[]).unwrap();
+            let ran = std::fs::read_to_string(repo.path().join(".ran")).unwrap();
+            assert_eq!(ran.lines().collect::<Vec<_>>(), vec![target.name.as_str(); 5], "{target:?}");
+        }
         // Worker-check discovers the owning config and records five capped passes.
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));

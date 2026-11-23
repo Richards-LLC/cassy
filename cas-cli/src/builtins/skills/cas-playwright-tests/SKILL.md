@@ -9,7 +9,7 @@ metadata:
 
 ## Faith contract
 
-1. Write the title as a user-visible promise. End with assertions proving that exact outcome: rendered state, a persisted record through its consumer, or a delivered message. A click or request alone does not prove the result.
+1. Write the title as a user-visible promise. End with assertions proving that exact outcome: rendered state, a persisted record through its consumer, or a delivered message. A click or request alone does not prove the result; grade a background job on its server status ([async jobs](references/current-api.md#async-jobs)).
 2. Sabotage the guarded behavior through the real consumer: revert the fix, delete the guarded line or return a wrong fixture value. Keep that red run's trace; restore the build and retain green proof. An unrelated timeout is not sabotage evidence.
 3. Make green honest: retries zero, failOnFlakyTests true, no swallowed errors or soft returns. Missing required data fails; declared optional lanes skip visibly with reasons. Check the aggregate required executed count and every unexplained skip using the project's report guard; expected failures execute and unexpected passes fail.
 4. Use seeded data and apply [Test hygiene](../cas-writing-tests/SKILL.md#test-hygiene) item 4 to timing. Banned: networkidle, waitForTimeout, strictness-silencing .first(), swallowed catches and isVisible() branching that avoids required assertions.
@@ -21,14 +21,14 @@ metadata:
 2. Use the project's canonical config/projects and testMatch allowlist, not per-ticket configs. Apply [configuration.md](references/configuration.md) for retries, reports, required coverage, headless operation and targets. Keep the established integration owner; local --only-changed is iteration, not final proof.
 3. Validate resolved frontend and API origins against a reviewed local/staging allowlist before contexts, login, setup or cleanup. Production is forbidden. Gate remote mutations and cleanup separately; forbidOnly merely rejects focused tests.
 4. Choose hermetic or live. Hermetic tests install a context-wide deny-by-default network allowlist before navigation/popups, block bypassing Service Workers and account for WebSockets/other channels. Live tests use reserved QA identities and explicit mutation permission; keep them out of the hermetic PR lane.
-5. Reuse auth state from role setup projects, with a fresh context/page per test. Namespace mutating accounts/data by run, worker and shard; prefer isolation over locks. For Firebase/Nuxt/Quasar, load [nuxt-quasar-firebase.md](references/nuxt-quasar-firebase.md).
+5. Reuse auth state through one storageState project per persona, routed by an `@as-<persona>` title tag ([personas](references/configuration.md#personas-and-gated-lanes)), with a fresh context/page per test. Namespace mutating accounts/data by run, worker and shard; prefer isolation over locks. For Firebase/Nuxt/Quasar, load [nuxt-quasar-firebase.md](references/nuxt-quasar-firebase.md).
 6. Use role/label locators, then a stable test id, scoped to a semantic container. Assert fixture-derived values, state and structure. Load [locators-and-accessibility.md](references/locators-and-accessibility.md) for Quasar teleports, accessibility and the single allowed CSS assertion category.
 7. Load the page fresh at each viewport, capture at that viewport, and verify keyboard/recovery paths. Seed → planner → generator → review is the agent flow; review the final assertion against the title before accepting generated code. Generate official agents/skills in scratch and diff them against this policy.
 8. Run the named affected selection. Classify failures against base and tip using the same seed/runtime/target before calling a regression. Diagnostics belong to `cas-playwright-debug`; measured suite audits belong to `cas-test-audit`.
 
 ## Fast by design
 
-Reuse storageState, not mutable pages. Default to hermetic fixtures, fullyParallel and independent test data; shard independent tests. Put expensive pass evidence in the journey project and live smoke in its separate post-deploy lane. Do not install a second full-suite gate.
+Reuse storageState, not mutable pages. Default to hermetic fixtures, fullyParallel and independent test data; shard independent tests. Put expensive pass evidence in the journey project. Gate spend-bearing and deployed-target tests by tag in config so they run only when an env var opts in ([gated lanes](references/configuration.md#personas-and-gated-lanes)). Do not install a second full-suite gate.
 
 Load [current-api.md](references/current-api.md) for within(), descriptions, ARIA JSON/AI refs, locks, reporters and CLI details. Locks coordinate a single run; independent invocations need unique resources or external coordination.
 

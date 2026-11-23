@@ -108,10 +108,14 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
     const { hub, clock, header, held } = await connected(page, false);
     hub.upstreamLost(PELICAN, { refusalDelayMs: 1_500 });
     await sendNow(page, "First on legacy");
-    await sendNow(page, "Second before the refusal");
     // The refusal delay starts when the hub reads the send; advance only once
-    // it has, or a slow socket starts the delay after time has moved (cas-9fcc).
+    // it has, or a slow socket starts the delay after time has moved. Until the
+    // first send's submission settles, Send ignores another click (main.ts
+    // pendingSubmissions), so the second goes after the hub's read and still
+    // before the delayed refusal (cas-9fcc).
     await expect.poll(() => hub.upstreamRefusals.length).toBe(1);
+    await sendNow(page, "Second before the refusal");
+    await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("");
     // A deliberate negative window: the wire refusal must NOT arrive early.
     await clock.advance(1_499);
     await expect(held).toHaveCount(0);

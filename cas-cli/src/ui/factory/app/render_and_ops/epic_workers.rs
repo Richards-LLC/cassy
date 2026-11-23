@@ -6782,6 +6782,40 @@ mod spawn_base_tests {
             worker_path.join("parent-advance.txt").exists(),
             "the worker must be cut from the refreshed local tip after a push rejection"
         );
+
+        // Enrolled trains have a different contract: a refused publication
+        // cannot move the local base or provision a worker from that move.
+        use crate::worktree::git::train_authority::{Identity, Snapshot, TransferChecks};
+        struct Settled;
+        impl TransferChecks for Settled {
+            fn external_clear(&self, _: &Snapshot) -> Result<serde_json::Value, String> {
+                Ok(serde_json::json!({"fixture": "settled"}))
+            }
+            fn publishers_stopped(&self, _: &Snapshot) -> Result<serde_json::Value, String> {
+                Ok(serde_json::json!({"fixture": "fenced"}))
+            }
+        }
+        std::fs::remove_file(&reject_hook).unwrap();
+        let git = super::spawn_readiness_tests::git;
+        git(&repo, &["update-ref", "refs/heads/epic/behind", &remote_epic_tip, &parent_tip]);
+        let checkout = tmp.path().join("epic-checkout");
+        git(&repo, &["worktree", "add", checkout.to_str().unwrap(), "epic/behind"]);
+        let authority = Snapshot::enroll(
+            &repo, "legacy-spawn-test", "cas-spawn6456", "epic/behind",
+            &Identity { owner: "owner".into(), incarnation: "owner-process".into() },
+            &remote_epic_tip, Some(&remote_epic_tip), &Settled,
+        ).unwrap();
+        let before = git(&repo, &["status", "--porcelain"]);
+        let refusal = super::spawn_readiness_tests::prepare_existing_task(
+            &repo, &repo.join(".cas"), "cas-legacy-child",
+        ).err().expect("an enrolled target must hold spawn before local advancement");
+        assert_eq!(crate::gates::codes_in(&refusal.to_string()), vec!["G-113"]);
+        assert_eq!(head_sha(&repo, "epic/behind"), remote_epic_tip);
+        assert_eq!(head_sha(&checkout, "HEAD"), remote_epic_tip);
+        assert!(!checkout.join("parent-advance.txt").exists());
+        assert_eq!(git(&repo, &["status", "--porcelain"]), before);
+        assert_eq!(head_sha(&origin, "epic/behind"), remote_epic_tip);
+        assert_eq!(Snapshot::read(&repo, "cas-spawn6456").unwrap().tip, authority.tip);
     }
 
     /// GH #434 / spawn request 1191: a task-level WorkTarget can name an

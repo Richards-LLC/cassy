@@ -389,6 +389,16 @@ Paths, shell commands and arbitrary filesystem reads are not accepted.
 
 ## Coordination messages and reminders
 
+Worker `target=supervisor` routing and its diagnostics use the same registry
+snapshot and heartbeat liveness policy. A registered but unavailable owner
+does not fall through to another supervisor. Multiple live pane names are
+ambiguous; same-name restart rows retain successor ordering. Session metadata
+cannot select a supervisor stamped to another factory session.
+An unresolved message returns `rule_id=worker_supervisor_unresolved`, a
+`reason` (`owner_unavailable`, `ambiguous_owner`, `no_session_owner` or
+`no_factory_session`) and supervisor rows with status, session, heartbeat and
+`live`. Restore the owner or repair the binding before retrying.
+
 An authenticated worker sends `coordination action=message target=supervisor
 kind=respawn task_id=<task> summary="Context checkpoint" message="<return contract>"`
 after committing/pushing and writing `HANDOFF.md` in its task artifact directory.
@@ -1113,6 +1123,13 @@ For example, `issues.repo = "example/downstream"` alone still files Cassy bugs
 in `Richards-LLC/cassy`, agreeing with `cas config get issues.components.cassy`.
 The checkout's inferred origin is never a Cassy filing target.
 
+Matching an open task also requires component ownership. A matching GitHub
+remote work target qualifies; otherwise the task must belong to the current
+project and that project must be Cassy's source or explicitly use the selected
+component tracker. A different explicit work target is excluded. A product
+task containing the refusal cannot suppress the component report. Matching
+component issues or tasks still receive the new evidence instead of duplicates.
+
 Legacy opt-out: a raw, explicitly blank or whitespace-only
 `[issues.components] cassy` value in config.toml permits a nonblank stored
 `issues.repo` fallback. If the project override is also blank or absent, the
@@ -1594,6 +1611,13 @@ After approving a worker's fresh delivery branch, a live registered supervisor
 can run `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"`.
 Use the caller harness's normal tool prefix. The task must be unparked and keep
 its assignee and declared target; use `request_changes` first for a parked delivery.
+After an approved `proof_scope_fix` retarget, retained branch/anchor history does
+not prevent recovery while Blocked. The worker can prepare a clean
+`factory/<worker>-<task>-r2` branch at the corrected target with its delivery;
+the supervisor rebinds it, then the worker resumes, pushes the fresh branch and
+parks normally. Blocked commit capture before a successful first park is also
+recoverable. Pending review, merge authority and an unretired prior park still
+refuse rebinding; neither history nor active proof may be overwritten.
 The assigned worker must have the existing replacement branch checked out cleanly
 in its registered repository. Canonical worker branches, the worker's per-task
 branch, and that per-task branch with a recovery suffix are supported. Cassy
@@ -2173,6 +2197,17 @@ history. Omitting `adopt_branch` keeps the existing assignment-only transfer
 behavior.
 
 ### Ordered worker task queues
+
+`factory action=spawn_workers task_id=<id> branch=origin/develop` checks the
+requested branch against the task's effective persisted target before queueing.
+For `task_ids`, it checks the first task, which controls the initial spawn base.
+`develop`, `origin/develop`, `refs/heads/develop` and
+`refs/remotes/origin/develop` name the same target. A disagreement returns
+`spawn_target_mismatch` with the task, requested branch and effective target;
+it changes neither the task nor the spawn queue. Persist the intended correction
+with `task action=update id=<id> target_branch=develop`, then retry. A
+`spawn_brief` supplies instructions but cannot retarget a task. Omitting
+`branch` keeps target selection under the task's existing authority.
 
 Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
 Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
@@ -2918,8 +2953,10 @@ If a broader Rust selection fails, prior valid stability can survive for owned
 tests with a positive passing result in every attempted run. Failed or unrun
 tests lose that evidence, and changed inputs still require fresh proof. This
 restores stability only; the failed selection receives no passing crate receipt.
-Stability uses the same receipt carry-forward as crate proof: documentation or
-changelog commits preserve it when no test/build inputs change. Target merges
+Stability and widened receipts use the same receipt carry-forward as crate
+proof: documentation, changelog or `docs/qa/bug-families/` fragment commits
+preserve them when no test/build inputs change. A bug-family YAML counts as an
+input only when a Rust source names it, not by its extension. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
 even when its name is unchanged or its product change is already on the target.
 For widened Playwright proof, a failing journey is replayed at the merge base

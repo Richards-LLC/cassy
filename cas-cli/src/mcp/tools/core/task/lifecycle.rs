@@ -2665,6 +2665,15 @@ impl CasCore {
         let task_store = self.open_task_store()?;
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
+            // GH #1695: a close saved with its active verification dispatch
+            // resumes on the verdict without the worker; it is not WIP.
+            let handed_off = |id: &str| task_store.get(id).is_ok_and(|task| {
+                task.pending_verification
+                    && task.deliverables.no_delivery_close_intent.as_ref().is_some_and(|intent|
+                        cas_store::get_latest_verification_dispatch(&self.cas_root, id).ok().flatten()
+                            .is_some_and(|dispatch| dispatch.id == intent.dispatch_id && matches!(dispatch.state,
+                                cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)))
+            });
             let mut active = task_store.list(Some(TaskStatus::InProgress))
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
                 .into_iter().filter(|task| task.id != req.id
@@ -2675,6 +2684,7 @@ impl CasCore {
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
                 .into_iter().filter(|lease| lease.task_id != req.id)
                 .map(|lease| lease.task_id));
+            active.retain(|id| !handed_off(id));
             active.sort();
             active.dedup();
             // gate[G-08 start]: Single active WIP per worker
@@ -2774,6 +2784,7 @@ impl CasCore {
             && matches!(
                 crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
                 crate::factory_isolation::WorkerBinding::Sibling { .. }
+                    | crate::factory_isolation::WorkerBinding::Unowned
             )
         {
             let own = crate::factory_isolation::worker_task_branch(&worker.name, &task.id);
@@ -4082,6 +4093,12 @@ impl CasCore {
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
         let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
+        // cas-96a7: the predicted QA impact is reference context, not a
+        // start-only instruction (bisected: brief starts overflowed from train
+        // merge 818665b8ec, which added it here; 9abfce90a2 was green). It is saved and shown, but in a brief start
+        // it is clipped with the other context instead of pushing the close
+        // checks past the response budget.
+        let predicted_impact = format!("\n\n{}", qa_impact::predicted(self, &task));
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),
@@ -4103,7 +4120,7 @@ impl CasCore {
         ) && current != start.branch {
             source_readback.push_str(&format!(
                 "WARNING: checkout branch {current} differs from recorded source branch {}.\n\
-                 Recovery: ask the supervisor to use {prefix}task action=rebind_branch id={}; repeated start does not rebind.\n",
+                 Keep working on {current}: commit and push your delivery, then ask the supervisor to use {prefix}task action=rebind_branch id={} (a rebind needs that pushed task commit); repeated start does not rebind.\n",
                 start.branch, task.id,
                 prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
             ));
@@ -4151,7 +4168,7 @@ impl CasCore {
             let durable_recall = self.related_recall_context(
                 &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
             ).unwrap_or_default();
-            let context = format!("{peer_notes}{advisory}{durable_recall}{cited_issues}");
+            let context = format!("{peer_notes}{advisory}{predicted_impact}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
@@ -4213,7 +4230,8 @@ impl CasCore {
                     .map(|line| format!("Cited issue: {line}"))
                     .unwrap_or_default();
             let optional = format!(
-                "\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                "\n{}\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                clipping.excerpt(predicted_impact.trim_start(), 600),
                 clipping.excerpt(&related_context, 120),
                 task_scope(&task, &mut clipping),
                 task_show_notes(&task.notes, &task.id, &mut clipping),
@@ -4258,7 +4276,7 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
@@ -4277,6 +4295,7 @@ impl CasCore {
             sibling_notes_info.unwrap_or_default(),
             self.workflow_guidance(),
             start_guidance,
+            predicted_impact,
             push_note,
         )))
     }

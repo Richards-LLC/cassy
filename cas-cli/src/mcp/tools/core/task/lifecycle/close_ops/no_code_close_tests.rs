@@ -1997,6 +1997,60 @@ async fn no_code_qa_on_foreign_task_branch_closes_on_portable_proof_gh1177() {
     }
 }
 
+/// GH #2247: a supplemental read-only wait must resume without replacing the
+/// exact proof already submitted for the no-code delivery.
+#[tokio::test]
+async fn blocked_supplemental_work_resumes_without_invalidating_proof_gh2247() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    let id = "cas-bd3d";
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.priority = cas_types::Priority(0);
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PROOF.into());
+    f.put(&task);
+    claim(&f, id);
+    call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"Read-only delivery submitted for review",
+    })).await;
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
+        .unwrap().expect("close must submit an exact verification boundary");
+    let delivery = cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap();
+    let before = f.task(id);
+    call(&f.worker, serde_json::json!({"action":"update", "id":id, "status":"blocked"})).await;
+    assert_eq!(f.task(id).status, TaskStatus::Blocked);
+
+    // An operational resume must not reopen or change the reviewed scope.
+    for update in [
+        serde_json::json!({"action":"update", "id":id, "status":"open"}),
+        serde_json::json!({"action":"update", "id":id, "status":"blocked", "title":"New scope"}),
+    ] {
+        let error = f.worker.task(Parameters(serde_json::from_value(update).unwrap())).await.unwrap_err();
+        assert!(error.message.contains("[G-29]"), "{error:?}");
+        assert_eq!(f.task(id).status, TaskStatus::Blocked);
+    }
+    // After the supervisor approves supplemental work, start resumes it
+    // directly; findings stay in notes rather than replacing the proof.
+    call(&f.supervisor, serde_json::json!({
+        "action":"notes", "id":id, "note_type":"decision",
+        "notes":"Supplemental read-only fixture approved within the existing scope",
+    })).await;
+    call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    let resumed = f.task(id);
+    assert_eq!(resumed.status, TaskStatus::InProgress);
+    assert_eq!(resumed.external_ref, before.external_ref);
+    assert_eq!(resumed.title, before.title);
+    assert_eq!(serde_json::to_value(resumed.deliverables).unwrap(),
+        serde_json::to_value(before.deliverables).unwrap());
+    assert_eq!(serde_json::to_value(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()).unwrap(),
+        serde_json::to_value(Some(dispatch)).unwrap());
+    assert_eq!(serde_json::to_value(cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap()).unwrap(),
+        serde_json::to_value(delivery).unwrap());
+}
+
 #[tokio::test]
 async fn no_code_qa_evidence_on_foreign_task_branch_measures_no_code_paths_gh1177() {
     let mut env = TestEnvGuard::temp_home();
@@ -2430,6 +2484,68 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
         let shown = call(&f.worker, serde_json::json!({"action":"show", "id":id, "full":full})).await;
         assert!(shown.contains(&format!("Recorded source branch: {LANE}")), "{shown}");
         assert!(shown.contains(&format!("Parked branch: {replacement}")), "{shown}");
+    }
+}
+
+/// cas-dae4 (GH #1579): a replacement spawned at the base after its
+/// predecessor retired must reach a bound lane without a supervisor override.
+/// An untouched predecessor lane (the handoff lives in the artifacts dir) binds
+/// at start. A predecessor lane with commits is kept (cas-57df never discards a
+/// pending delivery); the replacement starts, delivers, and the supervisor's
+/// rebind then succeeds instead of refusing for want of a delivery.
+#[tokio::test]
+async fn replacement_reaches_a_bound_lane_without_override_cas_dae4() {
+    for predecessor in ["untouched", "committed"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let id = "cas-1579";
+        let base = git(repo, &["rev-parse", "main"]);
+        git(repo, &["branch", "factory/old-worker", "main"]);
+        if predecessor == "committed" {
+            git(repo, &["checkout", "-q", "factory/old-worker"]);
+            std::fs::write(repo.join("HANDOFF.md"), "context checkpoint\n").unwrap();
+            git(repo, &["add", "HANDOFF.md"]);
+            git(repo, &["commit", "-q", "-m", "chore(cas-1579): handoff"]);
+            git(repo, &["checkout", "-q", "main"]);
+        }
+        let old_tip = git(repo, &["rev-parse", "factory/old-worker"]);
+        git(repo, &["push", "-q", "origin", "factory/old-worker"]);
+        let replacement = format!("{LANE}-{id}");
+        git(&worker_path, &["checkout", "-q", "-b", &replacement, "main"]);
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: "old-worker".into(),
+            branch: "factory/old-worker".into(),
+            base_sha: base,
+        });
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{predecessor}: {started}");
+        let bound = |f: &Fixture| f.task(id).deliverables.factory_branch_start.map(|start| start.branch);
+        if predecessor == "untouched" {
+            assert_eq!(bound(&f).as_deref(), Some(replacement.as_str()), "{started}");
+        } else {
+            assert_eq!(bound(&f).as_deref(), Some("factory/old-worker"), "{started}");
+            std::fs::write(worker_path.join("fix.rs"), "pub fn fix() {}\n").unwrap();
+            git(&worker_path, &["add", "fix.rs"]);
+            git(&worker_path, &["commit", "-q", "-m", "fix(cas-1579): replacement delivery"]);
+            git(&worker_path, &["push", "-q", "origin", &replacement]);
+            let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"rebind_branch", "id":id, "branch":replacement,
+                "reason":"Bind the replacement after its first delivery",
+            })).unwrap())).await;
+            assert!(rebound.is_ok(), "{rebound:?}");
+            assert_eq!(bound(&f).as_deref(), Some(replacement.as_str()));
+        }
+        assert_eq!(git(repo, &["rev-parse", "factory/old-worker"]), old_tip, "{predecessor}: the old lane is kept");
     }
 }
 
@@ -4165,4 +4281,77 @@ async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
             .filter(|lease| lease.agent_id == "nocode-worker-session")
             .all(|lease| lease.task_id == id));
     }
+}
+
+/// GH #1695: a supervisor reopens an already-landed task for revalidation.
+/// The new cycle delivers nothing, so no_delivery is the honest close, and the
+/// handed-off verification must not hold the worker's next queued start.
+#[tokio::test(flavor = "multi_thread")]
+async fn revalidated_landed_task_closes_without_delivery_and_frees_queue_gh1695() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for agent_id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(agent_id).unwrap();
+        agent.factory_session = Some("queue-session".into());
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+    }
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+
+    // The first cycle's delivery landed on the target and the task closed.
+    let id = "cas-1695a";
+    let lane = format!("{LANE}-{id}");
+    git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+    std::fs::write(checkout.join("landed.rs"), "pub fn landed() {}\n").unwrap();
+    git(&checkout, &["add", "landed.rs"]);
+    git(&checkout, &["commit", "-q", "-m", "fix(cas-1695a): landed fix"]);
+    let landed = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let mut task = assigned(id, TaskType::Bug, "main");
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    task.deliverables.factory_branch_anchor = Some(landed.clone());
+    task.deliverables.parked_branch = Some(lane.clone());
+    task.deliverables.green_merge_commit = Some(landed.clone());
+    f.put(&task);
+    let mut next = assigned("cas-1695b", TaskType::Task, "main");
+    next.status = TaskStatus::Open;
+    next.assignee = None;
+    next.execution_note = Some("no-code".into());
+    next.external_ref = Some(PROOF.into());
+    f.put(&next);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let reopened = call(&f.supervisor, serde_json::json!({
+        "action":"reopen", "id":id, "reason":"Revalidate on the current tree",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Open, "{reopened}");
+    env.set("CAS_AGENT_ROLE", "worker");
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+    queue_control(&f, Some(vec![&next.id])).await;
+    let close = serde_json::json!({
+        "action":"close", "id":id, "no_delivery":true,
+        "reason":"Revalidated: the landed fix passes on the current tree",
+    });
+
+    // Until the retained tip is on the target, it is still a delivery.
+    let refused = call(&f.worker, close.clone()).await;
+    assert!(refused.contains("G-47"), "{refused}");
+    git(repo, &["merge", "-q", "--ff-only", &lane]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let closed = call(&f.worker, close).await;
+    assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some(), "{closed}");
+    let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":next.id,
+    })).unwrap())).await;
+    assert!(result.is_ok(), "{closed}\n---\n{result:?}");
+    assert_eq!(f.task(&next.id).status, TaskStatus::InProgress);
 }

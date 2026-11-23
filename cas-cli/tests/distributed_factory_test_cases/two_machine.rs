@@ -309,7 +309,8 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
         register(
             &beta,
             &format!("bw{n}"),
-            &format!("beta-worker-{n}"),
+            // cas-rule: rule-196 scope: "Operator decision via verified Commander, 11:11 AM ET Nov 21 2026, on worker branch-identity design v3 (art-4ce8b3ba) section 11 (rule B): no arbitrary worker branch suffixes. Recorded on cas-ea31 notes 2026-11-21 16:11Z. The hyphen-extension name rule is the supervisor's implementation of the same exclusivity (11:31 PM ET revision)."
+            &format!("gamma-worker-{n}"),
             AgentRole::Worker,
             "b",
             "cas-f9c7",

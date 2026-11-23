@@ -1260,7 +1260,8 @@
     ],
     "skills/cas-playwright-tests/SKILL.md": [
       "318c652847fea5598286e6b6b72f14acf023b0b9f96c51369d324d18dab0c0cb",
-      "3d395b2fda5b2a530c0b55eebb296dabc36c90a2d7882f673aff9110f759d404"
+      "3d395b2fda5b2a530c0b55eebb296dabc36c90a2d7882f673aff9110f759d404",
+      "f6c7b4dac44cac075de05f6651052d76a0ddd8a97052873e12b45bd9cf1cdace"
     ],
     "skills/cas-playwright-tests/agents/openai.yaml": [
       "8619a54e8c098122a7f3881394f84ca89b684366e848233a29ad18b6ec363935"

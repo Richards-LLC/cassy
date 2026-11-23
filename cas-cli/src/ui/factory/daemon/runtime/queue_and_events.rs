@@ -3256,7 +3256,13 @@ pub(crate) fn run_queue_select(
         );
         selection.facts.insert(row.id, facts);
     }
-    if request.operator_replies || !selection.rows.is_empty() {
+    // cas-1d2a: `operator_replies` is true on every pass while Commander is
+    // connected, so this second writer hop (two uncached store opens, each
+    // running its schema init, to adopt notices) ran on every pass even with
+    // nothing to read or adopt. Look first, on the select lane.
+    if (request.operator_replies && operator_work_pending(request, queue.as_ref()))
+        || !selection.rows.is_empty()
+    {
         let cas_dir = request.cas_dir.clone();
         let (session, supervisor) = (session.to_string(), request.supervisor_name.clone());
         let (operator_replies, adopt, deferred) = (
@@ -3305,6 +3311,33 @@ pub(crate) fn run_queue_select(
         let _ = cas_factory::notify_daemon(&request.cas_dir);
     }
     Ok(selection)
+}
+
+/// Whether the operator half of a selection has a reply to read or a notice to
+/// adopt (cas-1d2a). Reads only. An error counts as pending, so the writer hop
+/// then does what it always did.
+fn operator_work_pending(
+    request: &super::prompt_queue_jobs::QueueSelectRequest,
+    queue: &dyn cas_store::PromptQueueStore,
+) -> bool {
+    let deferred = &request.deferred_operator_replies;
+    let replies = queue.peek_operator_replies(
+        &request.session_name,
+        10usize.saturating_add(deferred.len()),
+    );
+    if replies.map_or(true, |rows| rows.iter().any(|row| !deferred.contains(&row.id))) {
+        return true;
+    }
+    request.adopt_operator_notices
+        && super::prompt_queue_jobs::job_thread_store("supervisor_queue", &request.cas_dir, |dir| {
+            Ok(crate::store::open_supervisor_queue_store(dir)?)
+        })
+        .and_then(|notices| {
+            notices
+                .list_pending_prompt_outbox("operator", "supervisor_notice", 1)
+                .map_err(anyhow::Error::from)
+        })
+        .map_or(true, |pending| !pending.is_empty())
 }
 
 /// cas-20ac: collapse task-free duplicate worker deaths. Runs on the writer.
@@ -8636,9 +8669,14 @@ impl FactoryDaemon {
                 // alongside so message_status stays truthful about *why* a
                 // row is still pending.
                 let pane_known = self.app.mux.get(&pane_target).is_some();
+                // GH #1731 §1: between recycle shutdown and relaunch the name
+                // is off the roster and has no pane, but its successor is
+                // coming. The shutdown gate already keeps this mail; so must
+                // a failed inject.
                 let target_is_current =
                     self.app.worker_names().contains(&pane_target.to_string())
-                        || pane_target == self.app.supervisor_name();
+                        || pane_target == self.app.supervisor_name()
+                        || self.pending_worker_replacements().contains(&pane_target);
                 match super::delivery::classify_queued_delivery(
                     false,
                     pane_known,

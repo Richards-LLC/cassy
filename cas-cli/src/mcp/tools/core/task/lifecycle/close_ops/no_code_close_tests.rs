@@ -2445,6 +2445,108 @@ async fn retarget_empty_branch_rebind_then_start_gh1673() {
     }
 }
 
+/// GH #2157: reject a divergent base migration before the worker resets its
+/// old lane, then execute the supported recovery and park its scoped delivery.
+#[tokio::test]
+async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
+    let mut env = TestEnvGuard::temp_home();
+    for obstruction in ["open", "clean", "dirty", "foreign"] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let fork = git(repo, &["rev-parse", "main"]);
+        std::fs::write(repo.join("old.md"), "old integration history\n").unwrap();
+        git(repo, &["add", "old.md"]);
+        git(repo, &["commit", "-qm", "old integration"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-9122";
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        if obstruction == "open" {
+            call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "status":"open"})).await;
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+            assert!(f.task(id).deliverables.factory_branch_start.is_some());
+        }
+        if obstruction == "dirty" {
+            std::fs::write(checkout.join("local.txt"), "unsaved work\n").unwrap();
+        } else if obstruction == "foreign" {
+            std::fs::write(checkout.join("foreign.txt"), "another task\n").unwrap();
+            git(&checkout, &["add", "foreign.txt"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-dead): foreign work"]);
+        }
+        let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "develop", &fork]);
+        std::fs::write(repo.join("new.md"), "new integration history\n").unwrap();
+        git(repo, &["add", "new.md"]);
+        git(repo, &["commit", "-qm", "new integration"]);
+        git(repo, &["push", "-q", "origin", "develop"]);
+        let target_tip = git(repo, &["rev-parse", "HEAD"]);
+        let before = f.task(id);
+        let result = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"update", "id":id, "target_branch":"develop",
+            "reason":"Supervisor authorizes resetting the clean lane onto develop",
+        })).unwrap())).await;
+        let recovery = if obstruction == "foreign" {
+            // Nonempty retargets keep the old boundary and rely on explicit
+            // rebind attribution; a metadata edit must not erase that work.
+            result.unwrap();
+            assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
+            serde_json::json!({
+                "branch":format!("{lane}-retarget"), "base":"origin/develop",
+                "rebind":{"action":"rebind_branch", "id":id, "branch":format!("{lane}-retarget"),
+                    "reason":"Approve replacement without discarding foreign delivery"},
+            })
+        } else {
+            assert!(result.is_err(), "divergent target must not leave a stale start: {result:?}");
+            let error = result.unwrap_err();
+            assert_eq!(error.data.as_ref().unwrap()["rule_id"], "unparked_target_base_migration");
+            assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
+                serde_json::to_value(&before.deliverables).unwrap());
+            error.data.as_ref().unwrap()["recovery"].clone()
+        };
+        if let Some(start) = recovery.get("start") {
+            call(&f.worker, start.clone()).await;
+            assert_eq!(f.task(id).status, TaskStatus::InProgress);
+        }
+        if let Some(target_update) = recovery.get("target_update") {
+            call(&f.supervisor, target_update.clone()).await;
+        }
+        let replacement = recovery["branch"].as_str().unwrap();
+        git(&checkout, &["checkout", "-q", "-b", replacement, recovery["base"].as_str().unwrap()]);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(recovery["rebind"].clone()).unwrap())).await;
+        if matches!(obstruction, "dirty" | "foreign") {
+            assert!(rebound.is_err(), "{obstruction}: {rebound:?}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
+            if obstruction == "dirty" {
+                assert_eq!(std::fs::read(checkout.join("local.txt")).unwrap(), b"unsaved work\n");
+            }
+        } else {
+            rebound.unwrap();
+            call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            let start = f.task(id).deliverables.factory_branch_start.unwrap();
+            assert_eq!(start.base_sha, target_tip);
+            assert_eq!(start.work_target.target_branch, "develop");
+            std::fs::write(checkout.join("README.md"), "Scoped documentation delivery\n").unwrap();
+            git(&checkout, &["add", "README.md"]);
+            git(&checkout, &["commit", "-qm", "docs(cas-9122): scoped delivery"]);
+            git(&checkout, &["push", "-q", "origin", replacement]);
+            let closed = call(&f.worker, serde_json::json!({
+                "action":"close", "id":id, "reason":"Scoped documentation verified",
+            })).await;
+            assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{closed}");
+        }
+        assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "old lane must be retained");
+    }
+}
+
 /// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
@@ -3507,6 +3609,174 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert_eq!(f.task("cas-8488c").status, TaskStatus::Open);
         }
     }
+}
+
+/// cas-22c6 (GH #2286): strong-cheetah-31 at 12:06 PM ET. A detached proof run
+/// was reading the worker's checkout when its park advanced the queue, and the
+/// auto-start switched that checkout to the next task's branch mid-run. The
+/// auto-start and a direct start both wait, with a code, until the run ends,
+/// and then the queued start proceeds.
+#[tokio::test]
+async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let config = f.cas_dir().join("config.toml");
+    let mut body = std::fs::read_to_string(&config).unwrap();
+    body.push_str("[orchestration.auto_prompt]\nenabled=false\n");
+    std::fs::write(&config, body).unwrap();
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("queue-session".into());
+        agent.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        if agent.role == AgentRole::Worker {
+            agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        }
+        agents.update(&agent).unwrap();
+    }
+    git(&checkout, &["reset", "--hard", "main"]);
+    std::fs::write(checkout.join("feature.txt"), "task A\n").unwrap();
+    // The real producer, committed so the checkout itself stays clean.
+    let sources = crate::test_paths::crate_root().join("../scripts");
+    std::fs::create_dir_all(checkout.join("scripts")).unwrap();
+    for script in ["journey-eval.sh", "worker-run.sh"] {
+        std::fs::copy(sources.join(script), checkout.join("scripts").join(script)).unwrap();
+    }
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "-qm", "feat(cas-22c6a): task A"]);
+    git(&checkout, &["push", "-q", "--force", "origin", LANE]);
+    let delivered = git(&checkout, &["rev-parse", "HEAD"]);
+    let first = assigned("cas-22c6a", TaskType::Task, "main");
+    f.put(&first);
+    claim(&f, &first.id);
+    // Preassigned to the worker, as an auto-start that got as far as its
+    // assignment leaves it.
+    let mut next = assigned("cas-22c6b", TaskType::Task, "main");
+    next.status = TaskStatus::Open;
+    f.put(&next);
+    let queued = call(&f.supervisor, serde_json::json!({
+        "action":"update", "id":next.id, "assignee":WORKER, "task_ids":[next.id],
+    })).await;
+    assert!(!queued.contains("REJECTED"), "{queued}");
+    // The journey run, held at its plan step while it reads the worker's checkout.
+    let journey = JourneyEval::start(&f.cas_dir(), &checkout);
+    let parked = call(&f.worker, serde_json::json!({"action":"close", "id":first.id, "reason":"Delivered"})).await;
+    assert_eq!(f.task(&first.id).status, TaskStatus::AwaitingMerge, "{parked}");
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(&next.id).status, TaskStatus::Open, "started under a running proof");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "the checkout moved mid-run");
+    let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
+        .unwrap().get("queue-session", WORKER).unwrap();
+    assert!(queue.notes.iter().any(|note| crate::gates::codes_in(note).contains(&"G-165")), "{:?}", queue.notes);
+    // A direct start of the deferred successor takes the same admission.
+    let direct = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":next.id,
+    })).unwrap())).await.unwrap_err();
+    assert!(crate::gates::codes_in(&direct.message).contains(&"G-165"), "{direct:?}");
+    assert_eq!(f.task(&next.id).status, TaskStatus::Open);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "a direct start moved the checkout mid-run");
+    journey.finish();
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(&next.id).status, TaskStatus::InProgress, "the start proceeds once the run ends");
+}
+
+const JOURNEY_CLI_ARGS: &str = "CAS_22C6_CLI_ARGS";
+
+/// `scripts/journey-eval.sh` run from a worker checkout, with `cas` served by
+/// this test binary's real CLI and its plan step held until [`Self::finish`].
+struct JourneyEval {
+    child: std::process::Child,
+    release: PathBuf,
+}
+
+impl JourneyEval {
+    fn start(cas_dir: &Path, checkout: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().unwrap().keep();
+        let shims = work.join("bin");
+        std::fs::create_dir_all(&shims).unwrap();
+        let python = String::from_utf8(std::process::Command::new("sh").args(["-c", "command -v python3"])
+            .output().unwrap().stdout).unwrap().trim().to_owned();
+        // Everything but the plan (held) and the browser tooling is real Python.
+        // The held plan prints journey-receipt.py's full plan contract for the
+        // checkout's real HEAD: an affected scope with no journeys selected.
+        let shim_python = format!(r#"#!/bin/sh
+case "$1" in
+  */journey-receipt.py)
+    if [ "$2" = plan ]; then
+      : > "$J_WORK/started"
+      while [ ! -e "$J_WORK/release" ]; do sleep 0.05; done
+      head="$(git -C "$4" rev-parse HEAD)"
+      printf '{{"schema":1,"repo":"%s","artifacts":"%s","task_id":null,"base_sha":"%s","head_sha":"%s","scope":"affected","selection_ids":[],"journeys":[],"workers":1,"grep":null}}\n' \
+        "$4" "$J_WORK/artifacts" "$head" "$head"
+    fi
+    exit 0;;
+  */journey_dist.py) exit 0;;
+  -) case "$2" in */package.json) echo 'playwright fixture'; exit 0;; esac;;
+esac
+exec {python} "$@"
+"#);
+        // Only the run id line; libtest's own banner is not CLI output.
+        let shim_cas = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$J_WORK/args.$$\"\n\
+             {JOURNEY_CLI_ARGS}=\"$J_WORK/args.$$\" \"$J_TEST_EXE\" --exact \"$J_TEST_NAME\" --nocapture --test-threads=1 \
+             | grep -E '^[0-9a-f]{{32}}$' || :\n"
+        );
+        for (name, body) in [("python3", shim_python), ("cas", shim_cas)] {
+            std::fs::write(shims.join(name), body).unwrap();
+            std::fs::set_permissions(shims.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let name = module_path!().split_once("::").unwrap().1.to_owned() + "::journey_eval_cas_cli_child_cas_22c6";
+        let child = std::process::Command::new("bash")
+            .arg(checkout.join("scripts/journey-eval.sh"))
+            .arg(work.join("artifacts"))
+            .current_dir(checkout)
+            .env("PATH", format!("{}:{}", shims.display(), std::env::var("PATH").unwrap_or_default()))
+            .env("CAS_ROOT", cas_dir)
+            .env("CAS_BIN", shims.join("cas"))
+            .env("J_WORK", &work)
+            .env("J_TEST_EXE", std::env::current_exe().unwrap())
+            .env("J_TEST_NAME", name)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !work.join("started").exists() {
+            assert!(std::time::Instant::now() < deadline, "journey-eval never reached its plan step");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Self { child, release: work.join("release") }
+    }
+
+    fn finish(mut self) {
+        std::fs::write(&self.release, "").unwrap();
+        assert!(self.child.wait().unwrap().success(), "journey-eval failed");
+    }
+}
+
+impl Drop for JourneyEval {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.release, "");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The `cas` CLI behind [`JourneyEval`]'s shim; idle in an ordinary run.
+#[test]
+fn journey_eval_cas_cli_child_cas_22c6() {
+    let Some(args) = std::env::var_os(JOURNEY_CLI_ARGS) else { return };
+    use clap::Parser;
+    let args = std::fs::read_to_string(args).unwrap();
+    let cli = crate::cli::Cli::try_parse_from(std::iter::once("cas").chain(args.lines())).unwrap();
+    let Some(crate::cli::Commands::Factory(command)) = &cli.command else { panic!("factory command") };
+    let root = std::env::var_os("CAS_ROOT").map(PathBuf::from);
+    let result = crate::cli::factory::execute(command, &cli, root.as_deref());
+    if let Err(error) = &result {
+        eprintln!("{error:#}");
+    }
+    std::process::exit(i32::from(result.is_err()));
 }
 
 fn queue_control_fixture(env: &mut TestEnvGuard) -> Fixture {

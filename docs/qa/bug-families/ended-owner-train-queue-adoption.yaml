@@ -1,9 +1,0 @@
-title: An ended supervisor's held train-merge queue no longer blocks the current train owner
-statement: >-
-  After a train changes owner, the current live owner's train_merge adopts a
-  queue whose recorded supervisor has ended, settling merged entries and
-  continuing. A live prior supervisor still holds the queue, and a caller who
-  is not the current train owner is still refused.
-tasks: [cas-b2b0]
-journeys: [FACTORY-MERGE]
-invariants: []

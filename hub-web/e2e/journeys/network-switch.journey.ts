@@ -76,18 +76,23 @@ async function accepted(page: Page, hub: HubDouble, text: string): Promise<void>
   expect((await next).text).toBe(text);
 }
 
-// `cpuSlowdown` > 1 slows the page's own scripting while the two Sends are made,
-// so the second click lands while the first submission is still being held.
-async function legacyRefusalHoldsBothSends(page: Page, journey: { stage(name: string, body: () => Promise<void>): Promise<void> }, cpuSlowdown: number): Promise<void> {
+// `slowCatalog` holds the catalog read the first Send waits on while its flush
+// is in flight, so the second click lands while that submission is unfinished.
+async function legacyRefusalHoldsBothSends(page: Page, journey: { stage(name: string, body: () => Promise<void>): Promise<void> }, slowCatalog: boolean): Promise<void> {
   await journey.stage("On a legacy socket, a second message sent before the refusal arrives waits too", async () => {
     const { hub, clock, header, held } = await connected(page, false);
     hub.upstreamLost(PELICAN, { refusalDelayMs: 1_500 });
-    const cpu = await page.context().newCDPSession(page);
-    const throttle = (rate: number) => cpu.send("Emulation.setCPUThrottlingRate", { rate });
-    if (cpuSlowdown > 1) await throttle(cpuSlowdown);
+    let readCatalog!: () => void;
+    const catalogHeld = new Promise<void>(resolve => { readCatalog = resolve; });
+    if (slowCatalog) {
+      await page.context().route("https://*.test/v1/sessions", async route => {
+        if (route.request().method() === "GET") await catalogHeld;
+        await route.fallback();
+      });
+    }
     await sendNow(page, "First on legacy");
     await sendNow(page, "Second before the refusal");
-    if (cpuSlowdown > 1) await throttle(1);
+    readCatalog();
     // A deliberate negative window: the wire refusal must NOT arrive early.
     await clock.advance(1_499);
     await expect(held).toHaveCount(0);
@@ -117,13 +122,13 @@ async function legacyRefusalHoldsBothSends(page: Page, journey: { stage(name: st
 }
 
 test("HUB-J12 network switch: delayed legacy refusal holds both sends in order", journeyPart, async ({ page, journey }) => {
-  await legacyRefusalHoldsBothSends(page, journey, 1);
+  await legacyRefusalHoldsBothSends(page, journey, false);
 });
 
-// GH #2321: the original immediate second Send, with the page too slow to have
-// finished holding the first, was dropped and left in the composer.
+// GH #2321: the original immediate second Send, made while the first was still
+// flushing, was dropped and left in the composer.
 test("HUB-J12 network switch: a second send during a slow first send is held too", journeyPart, async ({ page, journey }) => {
-  await legacyRefusalHoldsBothSends(page, journey, 20);
+  await legacyRefusalHoldsBothSends(page, journey, true);
 });
 
 test("HUB-J12 network switch: half-open machine waits for four failed heartbeats then flushes once", journeyPart, async ({ page, journey }) => {

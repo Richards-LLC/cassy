@@ -72,11 +72,13 @@ pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scop
     }).collect()
 }
 
-/// A widened scope is proven by its own exact-tip pass or, for a package,
-/// by an exact-tip whole-file pass of every spec that covers its inputs.
+/// A widened scope is proven by its own pass or, for a package, by a
+/// whole-file pass of every spec that covers its inputs.
 pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &BTreeMap<Scope, Vec<String>>) -> Vec<Scope> {
-    let proven = |scope: &Scope| passing.records().iter().any(|(head, _, test)|
-        head == passing.head && test.widened.as_ref().is_some_and(|proof| &proof.scope == scope));
+    // Records already carry an ancestor's run only when no proof input changed
+    // since it (cas-3080), so a documentation-only descendant keeps it.
+    let proven = |scope: &Scope| passing.records().iter().any(|(_, _, test)|
+        test.widened.as_ref().is_some_and(|proof| &proof.scope == scope));
     scopes.iter().filter(|scope| !proven(scope) && !covering.get(*scope)
         .is_some_and(|specs| specs.iter().all(|spec| proven(&Scope::File(spec.clone())))))
         .cloned().collect()
@@ -129,14 +131,16 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, proof: Proof, cou
     Ok(())
 }
 
-pub(super) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope) -> Result<()> {
+pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope) -> Result<()> {
     let directory = receipt_path(cas_root, &repo.canonicalize()?, head);
     let Some(directory) = directory.parent().filter(|directory| directory.is_dir()) else { return Ok(()) };
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() { continue; }
         let Ok(receipt) = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path())?) else { continue; };
-        if receipt.head == head && receipt.repo == repo.canonicalize()?
+        // A failed rerun also withdraws the ancestor run it would carry.
+        if receipt.repo == repo.canonicalize()?
+            && (receipt.head == head || receipt_head_is_ancestor(&receipt.repo, &receipt.head, head))
             && receipt.test.and_then(|test| test.widened).is_some_and(|proof| &proof.scope == scope)
         { std::fs::remove_file(entry.path())?; }
     }

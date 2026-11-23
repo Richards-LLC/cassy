@@ -6,5 +6,5 @@
   skill ships a dependency-free scan. It resolves each spec's routes, API
   paths, test ids, classes and `data-*` selectors against the current sources
   (Nuxt pages, static/Vite roots, NestJS and axum routes, or a route list). It
-  grades each spec CURRENT, UNSURE, STALE or DEAD with a file:line receipt,
+  grades each spec CURRENT, UNSURE, UNCHECKED, STALE or DEAD with a file:line receipt,
   and suggests a kind and an action for each spec.

@@ -4,7 +4,7 @@
 Read-only and dependency-free. For every spec (and the relative helpers it
 imports) it extracts navigated routes, API paths, test ids, locator classes and
 data-* attributes, resolves each against the current sources, and grades the
-spec CURRENT / UNSURE / STALE / DEAD with a file:line receipt per dependency.
+spec CURRENT / UNSURE / UNCHECKED / STALE / DEAD with a file:line receipt per dependency.
 No browser, no target, no model spend. Grades are a starting point: read each
 non-CURRENT spec and settle the verdict by citing the current source line.
 
@@ -51,18 +51,33 @@ def lines_of(path):
 
 
 def compile_pattern(route):
-    """Turn a framework route into an anchored regex over a normalized path."""
-    out = []
+    """Turn a framework route into segments: ('rest',), ('optional', regex) or ('one', regex)."""
+    segments = []
     for part in [p for p in route.strip().split('/') if p]:
         if re.fullmatch(r'\*\*|\*\w*|\{\*\w*\}|\[\.\.\.\w+\]', part):
-            out.append(r'(?:/.*)?')
+            segments.append(('rest', None))
         elif re.fullmatch(r'\[\[\w+\]\]', part):
-            out.append(r'(?:/[^/]+)?')
+            segments.append(('optional', re.compile('[^/]+')))
         else:
-            seg = re.escape(part)
-            seg = re.sub(r':\w+|\\\{\w+\\\}|\\\[\w+\\\]', '[^/]+', seg)
-            out.append('/' + seg.replace(re.escape(HOLE), '[^/]+'))
-    return re.compile('^' + (''.join(out) or '/?') + '/?$')
+            seg = re.sub(r':\w+|\\\{\w+\\\}|\\\[\w+\\\]', '[^/]+', re.escape(part))
+            segments.append(('one', re.compile(seg)))
+    return segments
+
+
+def segment_match(parts, segments, prefix):
+    """Match path segments exactly; with prefix=True the last part may be the start of a segment."""
+    if not parts:
+        return prefix or all(kind != 'one' for kind, _ in segments)
+    if not segments:
+        return False
+    kind, regex = segments[0]
+    head, last = parts[0], len(parts) == 1
+    if kind == 'rest':
+        return True
+    if head == HOLE or regex.fullmatch(head) or (prefix and last and (regex.pattern == '[^/]+' or regex.pattern.startswith(re.escape(head)))):
+        if segment_match(parts[1:], segments[1:], prefix):
+            return True
+    return kind == 'optional' and segment_match(parts, segments[1:], prefix)
 
 
 def route_nuxt(root, path):
@@ -139,6 +154,9 @@ API_ADAPTERS = {'nestjs': api_nestjs, 'axum': api_axum, 'list': any_list}
 
 
 def load_patterns(root, specs, adapters):
+    """None when the index was omitted (its dependencies stay unchecked); a list, possibly empty, otherwise."""
+    if not specs:
+        return None
     table = []
     for spec in specs:
         name, _, path = spec.partition(':')
@@ -162,16 +180,15 @@ def normalize(value):
 
 
 def resolve_path(value, table):
-    probe = value.replace(HOLE, 'x')
-    for suffix in ('', 'x', '/x', 'x/x', '/x/x'):  # a literal prefix completed by one or two segments
-        for regex, route, where in table:
-            if regex.match(probe + suffix):
-                return 'ok', where
-    if value.endswith('/') or HOLE in value:  # a prefix used with startsWith or a templated tail
-        stem = value.split(HOLE)[0]
-        for _, route, where in table:
-            if route.startswith(stem):
-                return 'ok', where
+    """An exact path must match one route. Only a declared prefix (a glob or template tail, or a
+    startsWith argument, all ending in a hole) may match the start of a route."""
+    prefix = value.endswith(HOLE)
+    stem = value[:-1] if prefix else value
+    parts = [p for p in stem.split('/') if p] + ([''] if prefix and stem.endswith('/') else [])
+    parts = [p for p in parts if p or prefix]
+    for segments, route, where in table:
+        if segment_match(parts, segments, prefix):
+            return 'ok', where
     return 'missing', None
 
 
@@ -252,11 +269,12 @@ def extract(path, root, api_prefix):
             navigated.add(value)
             if not re.match(r'(about|data|blob|javascript):', value):
                 route = normalize(value)
-                if not api_prefix.match(route):
-                    deps.append(('route', route, where))
+                deps.append(('api' if api_prefix.match(route) else 'route', route, where))
         for match in LITERAL.finditer(line):
             value = normalize(match.group(2)) if match.group(2) else ''
             if match.group(2) not in navigated and api_prefix.match(value):
+                if re.search(r'\.startsWith\(\s*$', line[:match.start()]) and not value.endswith(HOLE):
+                    value += HOLE  # a startsWith argument declares a prefix
                 deps.append(('api', value, where))
         for match in list(TEST_ID_CALL.finditer(line)) + list(TEST_ID_ATTR.finditer(line)):
             value = INTERPOLATION.sub(HOLE, match.group(match.lastindex))
@@ -280,7 +298,7 @@ def kind_of(path, text):
     return 'one-off'
 
 
-ACTION = {'CURRENT': 'keep', 'UNSURE': 'keep after grepping the setter', 'STALE': 'rewrite', 'DEAD': 'delete or rewrite'}
+ACTION = {'UNCHECKED': 'rerun with the missing index', 'CURRENT': 'keep', 'UNSURE': 'keep after grepping the setter', 'STALE': 'rewrite', 'DEAD': 'delete or rewrite'}
 
 
 def scan(args):
@@ -294,7 +312,7 @@ def scan(args):
     app_dirs = [(root / d).resolve() for d in args.sources]
     closures = {spec: follow(spec, root, app_dirs) for spec in specs}
     skip = {p for files in closures.values() for p in files}
-    sources = Sources(root, args.sources, skip)
+    sources = Sources(root, args.sources, skip) if args.sources else None
     cache, rows, findings = {}, [], defaultdict(set)
     for spec in specs:
         counts, deps = defaultdict(int), []
@@ -302,10 +320,11 @@ def scan(args):
             for kind, value, where in extract(file, root, api_prefix):
                 key = (kind, value)
                 if key not in cache:
+                    table = routes if kind == 'route' else apis
                     if kind in ('route', 'api'):
-                        cache[key] = resolve_path(value, routes if kind == 'route' else apis) if (routes if kind == 'route' else apis) else ('unchecked', None)
+                        cache[key] = ('unchecked', None) if table is None else resolve_path(value, table)
                     else:
-                        cache[key] = resolve_token(kind, value, sources) if sources.files else ('unchecked', None)
+                        cache[key] = ('unchecked', None) if sources is None else resolve_token(kind, value, sources)
                 verdict, receipt = cache[key]
                 counts[verdict] += 1
                 deps.append({'kind': kind, 'value': value.replace(HOLE, '${}'), 'verdict': verdict, 'spec_line': where, 'source_line': receipt})
@@ -315,6 +334,8 @@ def scan(args):
             grade = 'DEAD'
         elif counts['missing']:
             grade = 'STALE'
+        elif counts['unchecked']:
+            grade = 'UNCHECKED'
         elif counts['unsure']:
             grade = 'UNSURE'
         else:
@@ -325,16 +346,19 @@ def scan(args):
     found = [{'kind': k, 'value': v, 'verdict': verdict, 'where': where, 'candidate': candidate or None, 'specs': sorted(s)}
              for (k, v, verdict, where, candidate), s in sorted(findings.items(), key=lambda item: (item[0][2], item[0][3]))]
     return {'root': str(root), 'specs': rows, 'findings': found,
-            'totals': {g: sum(r['grade'] == g for r in rows) for g in ('CURRENT', 'UNSURE', 'STALE', 'DEAD')}}
+            'totals': {g: sum(r['grade'] == g for r in rows) for g in ('CURRENT', 'UNSURE', 'UNCHECKED', 'STALE', 'DEAD')}}
 
 
 def markdown(report):
-    out = ['| Spec | Grade | Kind (suggested) | Action (suggested) | Resolved | Missing | Unsure |', '| --- | --- | --- | --- | ---: | ---: | ---: |']
+    out = ['| Spec | Grade | Kind (suggested) | Action (suggested) | Resolved | Missing | Unsure | Unchecked |',
+           '| --- | --- | --- | --- | ---: | ---: | ---: | ---: |']
     for row in report['specs']:
-        out.append(f"| {row['spec']} | {row['grade']} | {row['kind']} | {row['action']} | {row['ok']} | {row['missing']} | {row['unsure']} |")
-    out += ['', '| Dependency | Kind | Verdict | Referenced at | Candidate source | Specs |', '| --- | --- | --- | --- | --- | ---: |']
-    for f in report['findings']:
-        out.append(f"| `{f['value']}` | {f['kind']} | {f['verdict']} | {f['where']} | {f['candidate'] or '-'} | {len(f['specs'])} |")
+        out.append(f"| {row['spec']} | {row['grade']} | {row['kind']} | {row['action']} | {row['ok']} | {row['missing']} | {row['unsure']} | {row['unchecked']} |")
+    out += ['', '| Spec | Dependency | Kind | Verdict | Referenced at | Source receipt |', '| --- | --- | --- | --- | --- | --- |']
+    for row in report['specs']:
+        for d in row['dependencies']:
+            value = d['value'].replace('|', '\\|')
+            out.append(f"| {row['spec']} | `{value}` | {d['kind']} | {d['verdict']} | {d['spec_line']} | {d['source_line'] or '-'} |")
     totals = report['totals']
     out += ['', f"{len(report['specs'])} specs: " + ', '.join(f'{totals[g]} {g}' for g in totals)]
     return '\n'.join(out)

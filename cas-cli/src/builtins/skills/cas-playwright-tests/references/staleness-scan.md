@@ -10,7 +10,7 @@ Before you run, rewrite or trust a large suite, check every spec against the cur
 ## Run it
 
 ```bash
-python3 <skill-dir>/scripts/staleness-scan.py --root <project> \
+python3 -I <skill-dir>/scripts/staleness-scan.py --root <project> \
   --specs 'e2e/**/*.spec.ts' \
   --routes nuxt:web/pages --api nestjs:api/src --api-prefix '^/api/' \
   --sources web > <task-artifacts>/staleness.md
@@ -18,12 +18,12 @@ python3 <skill-dir>/scripts/staleness-scan.py --root <project> \
 
 The scan reads each spec and the relative helpers it imports. It does not read app sources that a spec imports. From those files it extracts four kinds of dependency:
 
-- routes passed to `goto`, `toHaveURL` and `waitForURL`
+- routes passed to `goto`, `toHaveURL` and `waitForURL` (one that matches `--api-prefix` counts as an API path)
 - string literals that match `--api-prefix`
 - test ids from `getByTestId` and `data-testid`
 - classes and `data-*` attributes in `locator()` selectors
 
-It resolves each dependency against the current sources. A root catch-all (an SPA fallback, a CORS preflight or a Nuxt `[...slug]` page) is ignored, because it would match every path. Test and e2e files are never treated as app sources. Add `--json` to get every dependency with its spec line and source line.
+It resolves each dependency against the current sources. An exact path must match one route; only a glob or template tail (`/v1/**`, `` `/v1/${id}` ``) or a `startsWith` argument may match the start of a route. A root catch-all (an SPA fallback, a CORS preflight or a Nuxt `[...slug]` page) is ignored, because it would match every path. Test and e2e files are never treated as app sources. The default Markdown output lists every dependency with its spec line and its source receipt; `--json` emits the same data. Omitting `--routes`, `--api` or `--sources` leaves those dependencies unchecked; an index that is given but empty reports them missing.
 
 ## Grades
 
@@ -31,6 +31,7 @@ It resolves each dependency against the current sources. A root catch-all (an SP
 | --- | --- | --- |
 | CURRENT | Every dependency resolves to a cited source line | keep |
 | UNSURE | Nothing is missing, but a test id or `data-*` attribute is only built at runtime | grep the setter, then grade |
+| UNCHECKED | Nothing is missing, but an index was omitted | rerun with the missing index |
 | STALE | At least one dependency is missing | rewrite |
 | DEAD | Dependencies are missing and none resolve | delete, or rewrite from the current app |
 
@@ -56,7 +57,7 @@ To support another framework, add a function to `ROUTE_ADAPTERS` or `API_ADAPTER
 Run from a Cassy checkout. It takes about a second and needs no browser:
 
 ```bash
-python3 cas-cli/src/builtins/skills/cas-playwright-tests/scripts/staleness-scan.py --root . \
+python3 -I cas-cli/src/builtins/skills/cas-playwright-tests/scripts/staleness-scan.py --root . \
   --specs 'hub-web/e2e/**/*.spec.ts' --specs 'hub-web/e2e/**/*.journey.ts' \
   --routes static:hub-web --api axum:cas-cli/src/hub --api-prefix '^/v\d+/' --sources hub-web/src
 ```
@@ -69,7 +70,7 @@ On November 23, 2026 the scan graded 50 specs: 47 CURRENT, 3 UNSURE, 0 STALE and
 ## Worked example: a Vite app on a Rust hub
 
 ```bash
-python3 <skill-dir>/scripts/staleness-scan.py --root . \
+python3 -I <skill-dir>/scripts/staleness-scan.py --root . \
   --specs 'web/e2e/**/*.journey.ts' \
   --routes static:web --api axum:server/src --api-prefix '^/v\d+/' --sources web/src
 ```

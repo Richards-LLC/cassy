@@ -10,18 +10,22 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'cas-cli/src/builtins/skills/cas-playwright-tests/scripts/staleness-scan.py'
 
 
-def scan(files, *args):
+def run(root, *args):
+    result = subprocess.run(['python3', '-I', str(SCRIPT), '--root', str(root), *args], text=True, capture_output=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return result.stdout
+
+
+def scan(files, *args, markdown=False):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         for name, source in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(source)
-        result = subprocess.run(['python3', str(SCRIPT), '--root', str(root), '--json', *args], text=True, capture_output=True)
-        if result.returncode:
-            raise AssertionError(result.stderr)
-        report = json.loads(result.stdout)
-        return {row['spec']: row for row in report['specs']}
+        rows = {row['spec']: row for row in json.loads(run(root, '--json', *args))['specs']}
+        return (rows, run(root, *args)) if markdown else rows
 
 
 class StalenessScan(unittest.TestCase):
@@ -34,11 +38,13 @@ class StalenessScan(unittest.TestCase):
             'api/items.controller.ts': "@Controller('items')\nclass Items {\n  @Get(':id')\n  one() {}\n}",
             'e2e/current.spec.ts': 'await page.goto("/p/a/i/7");\nawait request.get(`${API}/api/v1/items/${id}`);\n'
                                    'await expect(page.getByTestId("item-card")).toBeVisible();',
-            'e2e/stale.spec.ts': 'await page.goto("/");\nawait expect(page.locator(".reply-pending")).toHaveCount(0);',
-            'e2e/dead.spec.ts': 'await page.goto("/legacy/board");\nawait request.get("/api/v0/board");',
+            'e2e/stale.spec.ts': 'await page.goto("/");\nawait expect(page.locator(".reply-pending")).toHaveCount(0);\n'
+                                 'await request.get("/api/v1/items");',
+            'e2e/dead.spec.ts': 'await page.goto("/legacy/board");\nawait page.goto("/api/v0/board");',
             'e2e/unsure.spec.ts': 'await page.goto("/");\nawait page.locator("[data-popover-open]").click();',
         }, '--specs', 'e2e/*.spec.ts', '--routes', 'nuxt:web/pages', '--api', 'nestjs:api',
-           '--api-prefix', r'^/api/', '--sources', 'web')
+           '--api-prefix', r'^/api/', '--sources', 'web', markdown=True)
+        rows, table = rows
         self.assertEqual({spec: row['grade'] for spec, row in rows.items()}, {
             'e2e/current.spec.ts': 'CURRENT', 'e2e/stale.spec.ts': 'STALE',
             'e2e/dead.spec.ts': 'DEAD', 'e2e/unsure.spec.ts': 'UNSURE'})
@@ -46,7 +52,10 @@ class StalenessScan(unittest.TestCase):
         self.assertEqual(receipts, {'route': 'web/pages/p/[slug]/i/[itemId].vue:1',
                                     'api': 'api/items.controller.ts:3', 'testid': 'web/pages/p/[slug]/i/[itemId].vue:1'})
         missing = {(d['kind'], d['value'], d['spec_line']) for d in rows['e2e/stale.spec.ts']['dependencies'] if d['verdict'] == 'missing'}
-        self.assertEqual(missing, {('class', 'reply-pending', 'e2e/stale.spec.ts:2')})
+        self.assertEqual(missing, {('class', 'reply-pending', 'e2e/stale.spec.ts:2'), ('api', '/api/v1/items', 'e2e/stale.spec.ts:3')})
+        dead = {(d['kind'], d['value'], d['verdict']) for d in rows['e2e/dead.spec.ts']['dependencies']}
+        self.assertEqual(dead, {('route', '/legacy/board', 'missing'), ('api', '/api/v0/board', 'missing')})
+        self.assertIn('| api/items.controller.ts:3 |', table)  # the default table carries resolved receipts
 
     def test_axum_spa_suite_follows_helpers_and_flags_runtime_test_ids(self):
         rows = scan({
@@ -68,6 +77,14 @@ class StalenessScan(unittest.TestCase):
             ('route', '/'): ('ok', 'app/index.html:1'),
             ('testid', 'syntax-keyword'): ('unsure', 'app/src/syntax.ts:1'),
         })
+
+    def test_an_omitted_index_never_grades_current_and_an_empty_one_reports_missing(self):
+        files = {'app/index.html': '<div></div>', 'app/empty/.keep': '',
+                 'app/e2e/a.spec.ts': 'await page.goto("/");\nawait page.getByTestId("card");'}
+        omitted = scan(files, '--specs', 'app/e2e/*.spec.ts', '--routes', 'static:app')['app/e2e/a.spec.ts']
+        self.assertEqual((omitted['grade'], omitted['ok'], omitted['unchecked']), ('UNCHECKED', 1, 1))
+        empty = scan(files, '--specs', 'app/e2e/*.spec.ts', '--routes', 'static:app', '--sources', 'app/empty')['app/e2e/a.spec.ts']
+        self.assertEqual((empty['grade'], empty['missing']), ('STALE', 1))
 
 
 if __name__ == '__main__':

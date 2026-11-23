@@ -1188,7 +1188,7 @@ fn checkout_ref_for_spawn_base_observed(
 enum EpicBasePublication {
     /// `authority_refs`: the verifying origin read listed train authority refs.
     Published { authority_refs: bool },
-    Unpublished,
+    Unpublished { authority_refs: bool },
     Unverified,
 }
 
@@ -1370,7 +1370,7 @@ fn refresh_epic_base_from_parent(
         if parent_is_ancestor.success() {
             return Ok(None);
         }
-        if let EpicBasePublication::Unpublished = publication {
+        if let EpicBasePublication::Unpublished { .. } = publication {
             // Delivery inventory is needed only to authorize a diverged reset.
             // Aligned lanes must not depend on a whole-backlog read succeeding.
             if no_task_deliveries()? {
@@ -1391,6 +1391,16 @@ fn refresh_epic_base_from_parent(
                 git.reconcile_commit_cause(parent_ref, epic_branch),
             ));
         }
+    }
+
+    // A verified namespace without authority refs needs no second origin
+    // read. Otherwise refuse enrolled or unknown publication before moving
+    // the local base: a refused spawn must retain its published checkout.
+    if !matches!(publication,
+        EpicBasePublication::Published { authority_refs: false }
+        | EpicBasePublication::Unpublished { authority_refs: false })
+    {
+        crate::worktree::git::train_authority::refuse_unfenced(repo_root, epic_branch)?;
     }
 
     // A ref update is invisible to any checkout that has this branch out:
@@ -1472,24 +1482,14 @@ fn refresh_epic_base_from_parent(
             "EPIC BASE RESET (UNPUBLISHED, {label}): '{epic_branch}' ({epic_sha}) reset to recorded parent '{parent_ref}' ({parent_sha}); {reason}. Previous tip retained at '{recovery}'. Publication is handled separately before worker checkout."
         )));
     }
-    let EpicBasePublication::Published { authority_refs } = publication else {
+    let EpicBasePublication::Published { .. } = publication else {
         return Ok(Some(format!(
             "EPIC BASE FAST-FORWARDED (LOCAL): epic base '{epic_branch}' ({epic_sha}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({parent_sha}); publication is handled separately; the refreshed local tip will be used."
         )));
     };
 
-    // This path is selected only after a verified origin fetch. A failed
-    // push retains the safe local fast-forward for the worker checkout.
-    // That read listed origin's train authority refs; with none, no train
-    // fences this branch and the fence needs no second origin read.
-    let short = refname.strip_prefix("refs/heads/").unwrap_or(&refname);
-    if authority_refs
-        && let Err(refusal) = crate::worktree::git::train_authority::refuse_unfenced(repo_root, short)
-    {
-        return Ok(Some(format!(
-            "EPIC BASE FAST-FORWARDED (UNPUBLISHED): epic base '{epic_branch}' advanced locally to its recorded parent '{parent_branch}'; {refusal}. The worker worktree will be cut from the refreshed local tip."
-        )));
-    }
+    // This path is selected only after a verified origin fetch and the train
+    // fence above. Ordinary epics retain their local refresh if push fails.
     let mut command = std::process::Command::new("git");
     command
         .args(["push", "origin", &format!("{refname}:{refname}")])
@@ -2721,6 +2721,14 @@ impl WorkerSpawnContext {
                     );
                 }
                 if managed_epic {
+                    if let Some(epic) = &recorded_epic
+                        && epic.labels.iter().any(|label| label == crate::train_owner::ENROLLED)
+                    {
+                        // The projection also holds a missing origin/authority;
+                        // the Git namespace alone cannot prove unenrollment.
+                        crate::train_owner::require_active(&self.cas_dir, epic)
+                            .map_err(anyhow::Error::msg)?;
+                    }
                     // Adopted self-target lanes and legacy target-less epics have
                     // no recorded parent to refresh. Publish their local tip as
                     // it is, even if it is an ancestor of the configured trunk.
@@ -2782,7 +2790,7 @@ impl WorkerSpawnContext {
                                 let publication = if existing_remote {
                                     EpicBasePublication::Published { authority_refs: observation.authority_refs }
                                 } else if matches!(observation.remote, Ok(None) | Ok(Some(false))) && !observation.previous_remote {
-                                    EpicBasePublication::Unpublished
+                                    EpicBasePublication::Unpublished { authority_refs: observation.authority_refs }
                                 } else {
                                     EpicBasePublication::Unverified
                                 };

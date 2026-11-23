@@ -1,0 +1,3 @@
+### Fixed — Park evidence publication scope
+
+- **Uncited nested files are no longer uploaded at close** — A park publishes only declared evidence: top-level files, LEDGER.md and the paths its rows cite (a cell may list several paths, and a cited directory covers its files), files the close reason cites, and the `qa/` bundle and `terminal-qa/` receipt trees that Cassy's verifier reads, so a routed peer reviewer still receives them. A nested file nothing cites, such as a source snapshot or raw captures already bundled, is listed in the evidence report without an upload or a per-file published-artifact note. Previously published copies are still reused, and a cited missing file still refuses the park (GH #2155, #2203, #2212).

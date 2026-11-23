@@ -2788,28 +2788,39 @@ mod tests {
 
     /// cas-a9eb: 111 parked deliveries, nearly all train lanes that never get a
     /// PR, were each looked up on every 60 s poll and tripped GitHub's secondary
-    /// limit. Over ten polls each costs one read, not ten; a PR opening between
-    /// polls is read on the next poll, and its merge on the one after.
+    /// limit. A poll now asks GitHub once for all of them, however many there
+    /// are and whatever a cache holds; a PR opening between polls is seen on the
+    /// next poll, and its merge on the one after.
     #[test]
-    fn parked_deliveries_without_a_pr_cost_one_read_not_one_a_poll_cas_a9eb() {
+    fn parked_deliveries_cost_one_pr_read_a_poll_however_many_cas_a9eb() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_TEST_GH_BUDGET", "1");
         let dir = env.home().join("gh");
         std::fs::create_dir_all(&dir).unwrap();
         let gh = dir.join("gh");
-        crate::test_paths::warm_stub(&gh, &format!(
-            "#!/bin/sh\necho \"$1 $2\" >> '{d}/calls.log'\ncase \"$1 $2\" in\n'pr list') f='{d}'/$(echo \"$8\" | tr / _).json; if [ -f \"$f\" ]; then cat \"$f\"; else echo '[]'; fi ;;\n'api graphql') cat '{d}/listing.json' ;;\n*) exit 97 ;;\nesac\n",
-            d = dir.display(),
-        ));
-        let write = |name: &str, body: String| std::fs::write(dir.join(name), body).unwrap();
-        let listing = |branches: &[&str]| serde_json::json!({"data": {"repository": {"pullRequests": {"nodes": branches.iter()
-            .map(|branch| serde_json::json!({"number": 9, "headRefName": branch, "headRefOid": "tip",
-                "isInMergeQueue": false, "updatedAt": "2026-11-23T00:00:00Z"})).collect::<Vec<_>>()}}}}).to_string();
+        // GitHub for this test: every read of PRs is one logged call; a batched
+        // query answers each `h<i>=<branch>` variable as `pr<i>` from
+        // `<branch with / as _>.json` (no PRs when absent).
+        crate::test_paths::warm_stub(&gh, &r#"#!/bin/sh
+echo "$1 $2" >> 'DIR/calls.log'
+case "$1 $2" in
+'pr list') echo '[]' ;;
+'api graphql')
+  out=''; sep=''
+  for a in "$@"; do case "$a" in h[0-9]*=*)
+    i=${a%%=*}; i=${i#h}; f="DIR/$(echo "${a#*=}" | tr / _).json"; nodes='[]'; [ -f "$f" ] && nodes=$(cat "$f")
+    out="$out$sep\"pr$i\":{\"nodes\":$nodes}"; sep=,;; esac; done
+  printf '{"data":{"repository":{%s}}}' "$out" ;;
+*) exit 97 ;;
+esac
+"#.replace("DIR", &dir.display().to_string()));
         let pull = |branch: &str, state: &str| serde_json::json!([{"number": 9, "headRefName": branch, "headRefOid": "tip",
             "state": state, "mergedAt": (state == "MERGED").then_some("2026-11-23T01:00:00Z"),
             "mergeCommit": (state == "MERGED").then(|| serde_json::json!({"oid": "merge-tip"}))}]).to_string();
-        let count = |what: &str| std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().filter(|line| *line == what).count());
-        let deliveries: Vec<AwaitingMergeDelivery> = (0..30).map(|n| AwaitingMergeDelivery {
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().count());
+        const PARKED: usize = 111;
+        const POLLS: usize = 10;
+        let deliveries: Vec<AwaitingMergeDelivery> = (0..PARKED).map(|n| AwaitingMergeDelivery {
             task_id: format!("cas-{n}"), worker: format!("w{n}"), branch: format!("factory/w{n}-cas-{n}"),
             branch_tip: None, pr_number: None,
         }).collect();
@@ -2817,30 +2828,19 @@ mod tests {
             repo: "org/repo".to_string(), cwd: dir.clone(), gh_binary: gh.clone(),
             completed: Default::default(), recent: Default::default(),
         }, &deliveries).unwrap();
-        // The next poll's open-PR listing, a minute later.
-        let next_minute = || crate::gh_budget::invalidate("merge-queue-org/repo");
 
-        write("listing.json", listing(&[]));
-        for _ in 0..10 {
+        for _ in 0..POLLS {
             assert!(poll().is_empty());
         }
-        assert_eq!((count("pr list"), count("api graphql")), (30, 1), "one read per delivery, one listing, over ten polls");
+        assert_eq!(calls(), POLLS, "one PR read a poll for {PARKED} parked deliveries");
 
         let lane = deliveries[7].branch.clone();
-        write("listing.json", listing(&[&lane]));
-        write(&format!("{}.json", lane.replace('/', "_")), pull(&lane, "OPEN"));
-        next_minute();
+        std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "OPEN")).unwrap();
         let seen = poll();
         assert_eq!(seen.iter().map(|o| (o.task_id.as_str(), o.pr_number, o.merge_commit.as_deref())).collect::<Vec<_>>(), [("cas-7", 9, None)]);
-        assert_eq!(count("pr list"), 31, "only the delivery the listing names is read again");
-
-        write("listing.json", listing(&[]));
-        write(&format!("{}.json", lane.replace('/', "_")), pull(&lane, "MERGED"));
-        next_minute();
+        std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "MERGED")).unwrap();
         assert_eq!(poll().iter().map(|o| o.merge_commit.as_deref()).collect::<Vec<_>>(), [Some("merge-tip")]);
-        assert_eq!(count("pr list"), 32, "an open PR's cached answer is stale at once, so its merge is seen on the next poll");
-        poll();
-        assert_eq!(count("pr list"), 32, "a merged PR's answer is shared");
+        assert_eq!(calls(), POLLS + 2, "a PR's opening and its merge are each seen on the next poll, still one read");
     }
 
     #[test]

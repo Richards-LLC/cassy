@@ -4397,6 +4397,7 @@ impl FactoryDaemon {
             drop(store_free_input);
 
             self.advance_queued_command();
+            self.refresh_supervisor_cassy_badge();
 
             let summary_metadata = format!(
                 "session={} role=supervisor task={}",

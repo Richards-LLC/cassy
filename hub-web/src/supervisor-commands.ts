@@ -13,14 +13,18 @@ const commands: { id: SupervisorCommand; label: string; effect: string; confirm?
   { id: "compact", label: "Compact", effect: "Summarize the supervisor's context" },
   { id: "usage", label: "Usage", effect: "Read usage from the supervisor's harness" },
   { id: "model", label: "Model", effect: "Open the harness's model chooser" },
-  { id: "mcp", label: "Reload Cassy", effect: "Reconnect Claude's Cassy server and read its new process and version" },
+  { id: "mcp", label: "Reload Cassy", effect: "Load the installed Cassy build and show the version it loaded" },
   { id: "clear", label: "Clear", effect: "Start a fresh conversation context", confirm: "Clear this supervisor's conversation context? Existing messages remain in Commander." },
   { id: "finish", label: "Finish", effect: "Run the supervisor's Finish skill", confirm: "Run Finish? The supervisor will wrap up its work and may end this session." },
   { id: "standby", label: "Standby", effect: "Finish, stop the workers and go quiet", confirm: "Go on standby? The supervisor will finish its wrap-up, stop its workers and go quiet. Resume brings them back." },
   { id: "exit", label: "Exit", effect: "End the supervisor's harness", confirm: "Exit this supervisor? Its harness will end. Check its handoff before leaving." },
 ];
+/** Codex has no MCP reconnect, so its Reload Cassy restarts the supervisor (cas-8c4f). */
+export const CODEX_RELOAD_CONFIRM = "Reload Cassy? Codex reloads by restarting its supervisor on the installed build, with a fresh context. Workers keep running.";
+
 export function commandsForHarness(harness: string | undefined): typeof commands {
-  return harness === "claude" ? commands : harness === "codex" ? commands.filter(command => command.id !== "mcp") : [];
+  return harness === "claude" ? commands
+    : harness === "codex" ? commands.map(command => command.id === "mcp" ? { ...command, confirm: CODEX_RELOAD_CONFIRM } : command) : [];
 }
 interface Options {
   harness(): string | undefined;
@@ -129,7 +133,7 @@ export class SlashCommands {
     if (unavailable) { this.notice(unavailable); return; }
     const shown = commandsForHarness(this.options.harness()).filter(command => command.id.startsWith(query));
     if (!shown.length) this.notice(query === "mcp"
-      ? `Reload Cassy is unavailable for ${this.options.harness() ?? "unknown"}. It requires Claude Code.`
+      ? `Reload Cassy is unavailable for ${this.options.harness() ?? "unknown"}. It requires Claude Code or Codex.`
       : "No supported command. Choose a listed command without arguments.");
     for (const command of shown) {
       const button = document.createElement("button"); button.type = "button"; button.dataset.supervisorCommand = command.id;
@@ -148,7 +152,8 @@ export class SlashCommands {
     if (!command) return false;
     this.escaped = false; this.open = true; this.sync();
     if (this.pending || this.options.unavailable()) return true;
-    if (this.input.value.trimEnd() === token && commandsForHarness(this.options.harness()).includes(command)) this.choose(command);
+    const supported = commandsForHarness(this.options.harness()).find(item => item.id === command.id);
+    if (this.input.value.trimEnd() === token && supported) this.choose(supported);
     return true;
   }
   private notice(text: string): void {
@@ -197,6 +202,13 @@ export class SlashCommands {
 
 /** A timed-out Usage may still cover the native prompt. The daemon rechecks
  * the view before sending Escape; recovery never resends the command. */
+/** Reload Cassy's wait (cas-8c4f): three soft dots that breathe in turn; still under reduced motion. */
+export function reloadWaitNode(doc: Document): HTMLElement {
+  const wait = doc.createElement("span"); wait.className = "reload-wait"; wait.setAttribute("aria-hidden", "true");
+  for (let dot = 0; dot < 3; dot += 1) wait.append(doc.createElement("i"));
+  return wait;
+}
+
 function canCloseUnconfirmedUsage(receipt: CommandReceipt): boolean {
   return receipt.command === "usage" && receipt.phase === "unconfirmed";
 }
@@ -207,6 +219,7 @@ export function commandReceiptNode(receipt: CommandReceipt, step?: (key: Command
   const title = document.createElement("strong"); title.textContent = `/${receipt.command} · ${{ queued: "Queued", submitted: "Requested", observed: "Observed", refused: "Not sent", unconfirmed: "Unconfirmed", cancelled: "Cancelled" }[receipt.phase]}`;
   const detail = document.createElement("p"); detail.textContent = receipt.detail;
   row.append(title, detail);
+  if (receipt.command === "mcp" && (receipt.phase === "queued" || receipt.phase === "submitted")) title.prepend(reloadWaitNode(row.ownerDocument));
   if (receipt.output) {
     const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "Harness output";
     const output = document.createElement("pre"); output.textContent = receipt.output;

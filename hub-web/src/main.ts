@@ -16,7 +16,7 @@ import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
-import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
+import { cassyLoadedBadge, LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { pendingSessionLabel, reconcileCatalog, sessionReachable, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
@@ -227,8 +227,9 @@ function runPendingReload(machineId: string, session: string): void {
   }
   if (conversationConnection(machineId, session)?.phase !== "live") return;
   pendingReload = undefined;
-  if (current.harness !== "claude") { toast("Reload Cassy requires Claude Code."); renderConversationList(); return; }
-  void supervisorCommandSession(machineId, session).run("mcp", false)
+  if (current.harness !== "claude" && current.harness !== "codex") { toast("Reload Cassy requires Claude Code or Codex."); renderConversationList(); return; }
+  // The row's Restart and reload button is the Codex confirmation (cas-8c4f).
+  void supervisorCommandSession(machineId, session).run("mcp", current.harness === "codex")
     .then(() => countUsage("supervisor.command"))
     .catch(error => { toast(String(error)); renderConversationList(); });
 }
@@ -2621,6 +2622,7 @@ function skipToConversation(): void {
 function syncConversationActions(): void {
   retireStaleToast();
   syncControlHolder();
+  syncCassyBadge();
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-raw-output"), document.querySelector<HTMLElement>("#conversation-raw-output-reason"), rawOutputUnavailableReason());
   const showWork = document.querySelector<HTMLButtonElement>("#conversation-show-work");
@@ -2654,6 +2656,26 @@ function toggleShowWork(): void {
  * header says which ("· Studio iPad in control"), so Interrupt taking it over,
  * or being refused, is never the first the operator hears of it.
  */
+/**
+ * cas-8c4f: the open supervisor's durable Reload Cassy result in its header,
+ * "cassy 4.52.0 · loaded 5:44 PM ET", read from the live catalog each sync.
+ */
+function syncCassyBadge(): void {
+  const host = document.querySelector<HTMLElement>(".conversation-identity .conversation-host");
+  if (!host) return;
+  const item = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(session => session.name === selectedSession) : undefined;
+  const text = item && !item.ended && !item.dormant && item.liveness === "live" ? cassyLoadedBadge(item.mcp_version, item.mcp_loaded_at) : undefined;
+  let badge = host.querySelector<HTMLElement>(":scope > #conversation-cassy");
+  if (!text) { if (badge) { badge.remove(); scheduleConversationLayout(); } return; }
+  if (badge?.dataset.badge === text) return;
+  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "conversation-cassy"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
+  badge.dataset.badge = text;
+  const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
+  const label = document.createElement("span"); label.className = "conversation-cassy-label"; label.textContent = text;
+  badge.replaceChildren(separator, label);
+  scheduleConversationLayout();
+}
+
 function syncControlHolder(): void {
   const host = document.querySelector<HTMLElement>(".conversation-identity .conversation-host");
   if (!host) return;
@@ -5028,6 +5050,7 @@ function returnToConversationRow(openedKey: string | undefined): void {
 
 function renderConversationList(): void {
   renderMachineRegister();
+  syncCassyBadge();
   const container = document.querySelector<HTMLElement>("#conversation-list");
   if (!container) return;
   const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {

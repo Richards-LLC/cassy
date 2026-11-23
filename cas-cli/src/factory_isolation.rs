@@ -230,6 +230,16 @@ pub struct WorkerNameRegistry {
     known_tasks: std::collections::HashSet<String>,
 }
 
+/// Only a task the store says it does not have is absent; any other failure
+/// leaves membership unknown, which must not read as "no such task".
+fn task_exists<T>(lookup: cas_store::Result<T>) -> Result<bool, String> {
+    match lookup {
+        Ok(_) => Ok(true),
+        Err(cas_store::StoreError::TaskNotFound(_)) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Every task-id-shaped piece of `branch` that the overlap rule can ask about:
 /// each hyphen-delimited stretch that starts after a hyphen and either ends at
 /// a hyphen or at the end of the name.
@@ -286,9 +296,14 @@ impl WorkerNameRegistry {
         // that run on the daemon loop never touch the store.
         let mut candidates = std::collections::HashSet::new();
         refs.keys().for_each(|branch| task_id_candidates(branch, &mut candidates));
-        let known_tasks: std::collections::HashSet<String> = crate::store::open_task_store(cas_root)
-            .map(|tasks| candidates.into_iter().filter(|id| tasks.get(id).is_ok()).collect())
-            .unwrap_or_default();
+        let tasks = crate::store::open_task_store(cas_root)
+            .map_err(|error| format!("could not open the task store in {}: {error}", cas_root.display()))?;
+        let mut known_tasks = std::collections::HashSet::new();
+        for id in candidates {
+            if task_exists(tasks.get(&id)).map_err(|error| format!("could not look up task {id}: {error}"))? {
+                known_tasks.insert(id);
+            }
+        }
         Ok(Self {
             workers: agents.into_iter()
                 .filter(|agent| agent.role == cas_types::AgentRole::Worker)
@@ -722,6 +737,15 @@ pub fn render_worker_binding(
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// cas-dc08: only a task the store reports missing is absent; any other
+    /// lookup failure stops the registry load instead of reading as absent.
+    #[test]
+    fn only_a_missing_task_is_absent_from_the_registry_cas_dc08() {
+        assert_eq!(task_exists(Ok(())), Ok(true));
+        assert_eq!(task_exists::<()>(Err(cas_store::StoreError::TaskNotFound("cas-gone".into()))), Ok(false));
+        assert!(task_exists::<()>(Err(cas_store::StoreError::NotInitialized)).is_err());
+    }
 
     fn init_repo(dir: &Path) {
         for args in [

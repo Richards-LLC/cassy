@@ -398,6 +398,23 @@ fn apply_worker_spec_names(
     Ok(())
 }
 
+/// cas-dc08 (N1): generated initial worker names skip the supervisor's name
+/// and any that would share a registered worker's or a factory branch's
+/// namespace.
+fn generate_worker_names(
+    minions: bool,
+    count: usize,
+    supervisor: &str,
+    names: &crate::factory_isolation::WorkerNameRegistry,
+) -> Vec<String> {
+    let reject = |name: &str| name == supervisor || names.overlap(name).is_some();
+    if minions {
+        crate::orchestration::names::generate_minion_unique(count, &reject)
+    } else {
+        generate_unique(count, &reject)
+    }
+}
+
 /// cas-dc08 (N1): every final initial worker name, after `--worker-spec`
 /// names replace generated ones, stays clear of registered workers, factory
 /// branches and the names launched beside it.
@@ -1806,17 +1823,12 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     // registered worker's or a factory branch's namespace.
     let mut names = crate::factory_isolation::WorkerNameRegistry::load(&preflight.cas_root, &project_root)
         .map_err(|error| anyhow::anyhow!("cannot launch: {error}"))?;
-    let reject = |name: &str| names.overlap(name).is_some();
-    let (supervisor_name, mut worker_names) = if is_minions {
-        use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
-        let sup = generate_minion_supervisor();
-        let workers = generate_minion_unique(args.workers as usize, &reject);
-        (sup, workers)
+    let supervisor_name = if is_minions {
+        crate::orchestration::names::generate_minion_supervisor()
     } else {
-        let sup = crate::orchestration::names::generate();
-        let workers = generate_unique(args.workers as usize, &reject);
-        (sup, workers)
+        crate::orchestration::names::generate()
     };
+    let mut worker_names = generate_worker_names(is_minions, args.workers as usize, &supervisor_name, &names);
 
     let supervisor_name = worker_host.as_ref().map(|host| host.name.clone()).unwrap_or(supervisor_name);
     let orphans_killed = lifecycle::cleanup_orphaned_daemons();
@@ -3616,6 +3628,15 @@ mod tests {
             apply_worker_spec_names(&mut names, &[named(Some("lead"))], "lead").is_err(),
             "a worker may not take the supervisor's name"
         );
+    }
+
+    /// cas-dc08: generated initial worker names never take the supervisor's
+    /// name. Every minion name is asked for, so an unchecked draw would.
+    #[test]
+    fn generated_worker_names_exclude_the_supervisor_name_cas_dc08() {
+        let names = generate_worker_names(true, 20, "kevin", &crate::factory_isolation::WorkerNameRegistry::default());
+        assert_eq!(names.len(), 20, "{names:?}");
+        assert!(!names.iter().any(|name| name == "kevin"), "{names:?}");
     }
 
     /// cas-dc08 (N1): a name a `--worker-spec` entry gives an initial worker

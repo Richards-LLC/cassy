@@ -565,17 +565,7 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
         let readable = root
             .as_ref()
             .ok()
-            .and_then(|root| {
-                let resolve = |cited: &str| {
-                    crate::qa_evidence::resolve_bundle_file(root, "ledger capture", cited).ok()
-                };
-                resolve(&row.evidence_path).or_else(|| {
-                    // cas-ddc4: a ledger written on another machine cites its
-                    // captures by that machine's absolute path.
-                    foreign_capture(root, &row.evidence_path)
-                        .and_then(|local| resolve(local.to_str()?))
-                })
-            })
+            .and_then(|root| evidence_cell_path(root, &row.evidence_path))
             .is_some_and(|p| p.is_file() && std::fs::File::open(p).is_ok());
         if !readable {
             failures.push((row.line, row.id.clone()));
@@ -594,6 +584,22 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
     report.diagnostics.sort_by_key(|d| d.line);
     report.ok = report.diagnostics.is_empty();
     report
+}
+
+/// Where a row's evidence cell points inside `ledger_dir` (canonical): one
+/// path, relative to the ledger directory, absolute but inside it, or another
+/// machine's artifacts path (cas-ddc4). `None` when it names nothing that
+/// exists inside the directory. The ledger check and the park publisher
+/// (cas-fd1c) both read the cell this way.
+pub fn evidence_cell_path(ledger_dir: &Path, cell: &str) -> Option<std::path::PathBuf> {
+    let resolve = |cited: &str| {
+        crate::qa_evidence::resolve_bundle_file(ledger_dir, "ledger capture", cited).ok()
+    };
+    resolve(cell).or_else(|| {
+        // cas-ddc4: a ledger written on another machine cites its captures by
+        // that machine's absolute path.
+        foreign_capture(ledger_dir, cell).and_then(|local| resolve(local.to_str()?))
+    })
 }
 
 /// Where a capture cited by another machine's absolute artifacts path sits in

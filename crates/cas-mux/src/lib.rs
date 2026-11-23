@@ -40,6 +40,7 @@ mod render;
 mod spec;
 pub mod submit_gate;
 pub mod worker_resources;
+pub mod worker_sandbox;
 
 pub use backend::{
     Backend, SupervisorLaunchConfig, WORKER_GITHUB_READ_TOKEN_ENV, WorkerLaunchConfig,

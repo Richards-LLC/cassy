@@ -1514,11 +1514,13 @@ raise SystemExit(1 if failed else 0)
             "apps/backend/test/fixtures/patterns.ts"].map(String::from).to_vec();
         let task = Task::new("cas-5afc".into(), "covering spec proof".into());
         let (_, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
-        assert_eq!(scopes, [widened::Scope::Package("apps/backend".into())]);
+        let package = widened::Scope::Package("apps/backend".into());
+        // GH #2221: the changed catalogue also owes its importing spec a whole-file run.
+        assert_eq!(scopes, [widened::Scope::File(specs[0].into()), package.clone()]);
         let covering = widened::covering(&repo, &head, &paths, &scopes);
-        assert_eq!(covering.get(&scopes[0]).map(Vec::as_slice), Some(&specs.map(String::from)[..]));
-        // Every prescribed command targets exactly the covering specs.
-        let commands = widened::commands(root.path(), &repo, &paths, &scopes, &covering);
+        assert_eq!(covering.get(&package).map(Vec::as_slice), Some(&specs.map(String::from)[..]));
+        // Every prescribed package command targets exactly the covering specs.
+        let commands = widened::commands(root.path(), &repo, &paths, &[package], &covering);
         assert!(!commands.is_empty());
         for command in &commands {
             let (_, args) = command.split_once(" -- ").unwrap();

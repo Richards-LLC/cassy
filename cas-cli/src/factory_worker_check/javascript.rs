@@ -191,11 +191,15 @@ pub(crate) fn changed_tests(
                 })
                 .collect();
         }
-        // GH #2221: tests generated from a changed JSON catalogue have no
-        // changed source line, so only a whole-spec run proves them.
-        let tip = String::from_utf8(show(repo, head, path)?.unwrap_or_default())?;
-        if let Some(data) = changed_data_import(repo, base, head, path, &tip)? {
-            bail!("{path} generates tests from changed {data}; a static selection would omit them");
+        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
+        let old = show(repo, base, path)?
+            .map(String::from_utf8)
+            .transpose()?
+            .unwrap_or_default();
+        // GH #2221: tests generated from a changed or newly selected JSON
+        // catalogue have no changed test line, so only a whole-spec run proves them.
+        if let Some(data) = changed_data_import(repo, base, head, path, &source, &old)? {
+            bail!("{path} generates tests from {data}, which the delivery changed or newly selected; a static selection would omit them");
         }
         // A restored file has no delivered test change. Do not require
         // runtime identities for callbacks merely present in its final tree.
@@ -207,11 +211,6 @@ pub(crate) fn changed_tests(
         if path.ends_with(".vue") {
             bail!("Vue component {path} requires related-test proof");
         }
-        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
-        let old = show(repo, base, path)?
-            .map(String::from_utf8)
-            .transpose()?
-            .unwrap_or_default();
         let test_file = self::test_file(path);
         let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
             Ok(all) => all,
@@ -242,15 +241,24 @@ pub(crate) fn changed_tests(
     Ok(selected.into_iter().collect())
 }
 
-/// The changed JSON file this test source imports by relative path, if any.
-fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str) -> Result<Option<String>> {
-    let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
-    if changed.trim().is_empty() {
-        return Ok(None);
+/// The catalogue that changes this source's generated tests, if any: a JSON
+/// file it imports by relative path that the delivery changed, or a JSON
+/// import the delivery added, removed or switched.
+fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str, old: &str) -> Result<Option<String>> {
+    let imported = json_imports(path, source)?;
+    if let Some(switched) = imported.symmetric_difference(&json_imports(path, old)?).next() {
+        return Ok(Some(switched.clone()));
     }
-    let changed: BTreeSet<&str> = changed.lines().collect();
+    let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
+    Ok(changed.lines().find(|data| imported.contains(*data)).map(str::to_owned))
+}
+
+/// Repository paths of the JSON files a source imports by relative literal.
+fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
     Ok(relative_literals(path, source)?.into_iter()
-        .find_map(|resolved| resolved.to_str().filter(|found| changed.contains(found)).map(str::to_owned)))
+        .filter(|resolved| resolved.extension().is_some_and(|extension| extension == "json"))
+        .filter_map(|resolved| resolved.to_str().map(str::to_owned))
+        .collect())
 }
 
 /// Repository paths that a source's relative string literals name, resolved
@@ -269,6 +277,29 @@ fn relative_literals(path: &str, source: &str) -> Result<Vec<PathBuf>> {
         }
         resolved
     }).collect())
+}
+
+/// GH #2221: the test files at `head` that import the changed catalogue
+/// `data` by relative path. Its generated tests have no changed source line.
+pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec<String>> {
+    let Some(name) = Path::new(data).file_name().and_then(|name| name.to_str()) else { return Ok(Vec::new()) };
+    let output = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0").current_dir(repo)
+        .args(["grep", "-l", "-F", "-e", name, head]).output()?;
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        bail!("git grep {name} {head} failed");
+    }
+    let prefix = format!("{head}:");
+    let mut specs = Vec::new();
+    for spec in String::from_utf8(output.stdout)?.lines().filter_map(|line| line.strip_prefix(&prefix)) {
+        if !javascript(spec) || !test_match(spec, runner_hint(repo, spec)) {
+            continue;
+        }
+        let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
+        if json_imports(spec, &source)?.contains(data) {
+            specs.push(spec.to_owned());
+        }
+    }
+    Ok(specs)
 }
 
 /// GH #2224, #2266: the test files under `package` at `head` that read one of
@@ -2946,12 +2977,12 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         );
     }
 
-    /// GH #1977, #2000, #1971: park asks only for tests the task's own
-    /// commits changed in the delivered tree.
-    /// GH #2221: a catalogue-driven spec whose JSON changed refuses static
-    /// selection, so the caller widens to the whole spec instead of omitting cases.
+    /// GH #2221: a spec generating tests from a JSON catalogue owes whole-spec
+    /// proof when the catalogue alone changes, when its import switches to
+    /// another existing catalogue, or when both spec and catalogue change.
     #[test]
     fn changed_json_catalogue_refuses_static_selection_of_its_spec() {
+        use super::super::widened::Scope;
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let output = Command::new("git").current_dir(repo.path())
@@ -2962,28 +2993,43 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
         let spec = "src/__scenarios__/acceptance.spec.ts";
+        let catalogue = "src/__scenarios__/scenarios.json";
         let write = |path: &str, body: &str| {
             std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
             std::fs::write(repo.path().join(path), body).unwrap();
         };
-        let source = |metadata: &str| format!("import cases from './scenarios.json';\n\
+        let source = |data: &str, metadata: &str| format!("import cases from './{data}';\n\
             it('the baseline lists only real scenario tests', () => {{ {metadata} }});\n\
             for (const [channel, listed] of cases) {{ const test = listed ? it.failing : it; test(channel, async () => {{}}); }}\n");
+        let commit = |message: &str| {
+            git(&["add", "."]);
+            git(&["commit", "--quiet", "-m", message]);
+            git(&["rev-parse", "HEAD"])
+        };
         git(&["init", "--quiet", "-b", "main"]);
-        write("src/__scenarios__/scenarios.json", "[[\"sms\", false]]");
-        write(spec, &source(""));
-        git(&["add", "."]);
-        git(&["commit", "--quiet", "-m", "base"]);
-        let base = git(&["rev-parse", "HEAD"]);
-        write("src/__scenarios__/scenarios.json", "[[\"sms\", false], [\"email\", true]]");
-        write(spec, &source("expect(1).toBe(1);"));
-        git(&["commit", "--quiet", "-am", "harness and catalogue"]);
-        let head = git(&["rev-parse", "HEAD"]);
-        let error = changed_tests(repo.path(), &base, &head, &[spec.into()], None).unwrap_err();
-        assert!(format!("{error:#}").contains("src/__scenarios__/scenarios.json"), "{error:#}");
-        assert_eq!(super::super::widened::scope(repo.path(), spec), super::super::widened::Scope::File(spec.into()));
+        write(catalogue, "[[\"sms\", false]]");
+        write("src/__scenarios__/legacy.json", "[[\"fax\", true]]");
+        write(spec, &source("scenarios.json", ""));
+        let base = commit("base");
+
+        write(catalogue, "[[\"sms\", false], [\"email\", true]]");
+        let catalogue_only = commit("catalogue only");
+        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into()], None).unwrap();
+        assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into())]));
+
+        write(spec, &source("legacy.json", "expect(1).toBe(1);"));
+        let switched = commit("switch catalogue");
+        assert!(changed_tests(repo.path(), &catalogue_only, &switched, &[spec.into()], None).is_err());
+
+        write(catalogue, "[[\"sms\", true]]");
+        write(spec, &source("scenarios.json", "expect(2).toBe(2);"));
+        let both = commit("harness and catalogue");
+        assert!(changed_tests(repo.path(), &base, &both, &[spec.into()], None).is_err());
+        assert_eq!(super::super::widened::scope(repo.path(), spec), Scope::File(spec.into()));
     }
 
+    /// GH #1977, #2000, #1971: park asks only for tests the task's own
+    /// commits changed in the delivered tree.
     #[test]
     fn park_requires_only_tests_the_delivery_changed_at_its_tip() {
         let repo = tempfile::tempdir().unwrap();

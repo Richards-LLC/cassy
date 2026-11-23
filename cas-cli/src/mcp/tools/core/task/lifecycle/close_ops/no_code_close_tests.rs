@@ -590,8 +590,9 @@ async fn no_code_park_reuses_published_bundle_and_skips_nested_raw_files_gh2212(
     let manifest: serde_json::Value = task.notes.lines().find_map(|line| {
         serde_json::from_str(line.strip_prefix("EVIDENCE_SYNC: ")?).ok()
     }).expect("portable paths recorded for the peer");
-    let files: Vec<&str> = manifest["files"].as_array().unwrap().iter()
+    let mut files: Vec<&str> = manifest["files"].as_array().unwrap().iter()
         .map(|file| file["name"].as_str().unwrap()).collect();
+    files.sort();
     assert_eq!(files, ["captures.log", "private-map.json", "summary.md"]);
 }
 

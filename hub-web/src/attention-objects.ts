@@ -60,7 +60,7 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
     // and says why instead of showing an answer.
     object.dataset.answered = "false";
     object.dataset.retired = retired;
-    const note = document.createElement("p"); note.className = "ask-retired"; note.textContent = RETIRED_LINES[retired];
+    const note = document.createElement("p"); note.className = "ask-retired"; note.dataset.testid = "ask-retired"; note.textContent = RETIRED_LINES[retired];
     foot.append(note);
   }
   if (answer) {
@@ -68,7 +68,7 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
     // Handled, it quiets to the supervisor's colour (journey F12): only what
     // still waits keeps the attention treatment.
     object.dataset.answered = "true";
-    const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.state = answer.state;
+    const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.testid = "sent"; sent.dataset.state = answer.state;
     sent.append(tick(document), document.createTextNode(sentMessageLabel(answer.text)));
     sent.setAttribute("aria-label", `You replied: ${sentMessageLabel(answer.text)}`);
     foot.append(sent);
@@ -99,7 +99,7 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
   const waiting = isWaiting(reply, context);
   object.dataset.waiting = String(waiting);
   if (waiting) {
-    const hint = document.createElement("p"); hint.className = "blk-hint"; hint.textContent = BLOCKER_HINT;
+    const hint = document.createElement("p"); hint.className = "blk-hint"; hint.dataset.testid = "blk-hint"; hint.textContent = BLOCKER_HINT;
     body.append(hint);
   } else if (context.history?.answered(reply.notification_id)) {
     // cas-71af (aac8 QA F01): a blocker the operator replied to is handled.
@@ -119,7 +119,7 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
     // It quiets like a handled blocker (it no longer waits), without a tick.
     object.dataset.acknowledged = "true";
     object.setAttribute("aria-label", `Blocker from ${context.supervisor}, you've written since`);
-    const later = document.createElement("p"); later.className = "blk-handled blk-later";
+    const later = document.createElement("p"); later.className = "blk-handled blk-later"; later.dataset.testid = "blk-later";
     later.textContent = "You've written since this";
     body.append(later);
   }
@@ -187,7 +187,7 @@ export function renderSecretObject(reply: OperatorReply, context: TurnRenderCont
   const label = document.createElement("span"); label.textContent = "Asking for a secret: ";
   const code = document.createElement("code"); code.className = "secret-name"; code.textContent = name;
   title.append(label, code);
-  const scope = document.createElement("p"); scope.className = "secret-scope";
+  const scope = document.createElement("p"); scope.className = "secret-scope"; scope.dataset.testid = "secret-scope";
   scope.textContent = `Saved only on ${context.machine ?? "the session's machine"}, as a private file (mode 600) that ${context.supervisor} can read. It never appears in chat or history.`;
   body.append(title, ...context.body(), scope);
   const foot = document.createElement("div"); foot.className = "obj-foot";
@@ -196,14 +196,14 @@ export function renderSecretObject(reply: OperatorReply, context: TurnRenderCont
   const retired = outcome ? undefined : context.history?.retirement(reply.notification_id);
   if (outcome) {
     object.dataset.answered = "true";
-    const sent = document.createElement("span"); sent.className = "chip sent";
+    const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.testid = "sent";
     if (answer) sent.dataset.state = answer.state;
     sent.append(tick(document), document.createTextNode(outcome));
     foot.append(sent);
   } else if (retired && retired !== "dismissed") {
     object.dataset.answered = "false";
     object.dataset.retired = retired;
-    const note = document.createElement("p"); note.className = "ask-retired"; note.textContent = RETIRED_LINES[retired];
+    const note = document.createElement("p"); note.className = "ask-retired"; note.dataset.testid = "ask-retired"; note.textContent = RETIRED_LINES[retired];
     foot.append(note);
   } else {
     object.dataset.answered = "false";
@@ -242,7 +242,7 @@ export function renderSecretObject(reply: OperatorReply, context: TurnRenderCont
         const text = "decline" in answerWith ? "Declined" : `Saved to ${saved.path ?? "the machine"}${deletes ? ` · deleted ${deletes}` : ""}`;
         secretOutcomes.set(reply.notification_id, text);
         object.dataset.answered = "true";
-        const sent = document.createElement("span"); sent.className = "chip sent";
+        const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.testid = "sent";
         sent.append(tick(document), document.createTextNode(text));
         foot.replaceChildren(sent);
       } catch (error) {

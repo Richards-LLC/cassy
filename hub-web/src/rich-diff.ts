@@ -13,7 +13,7 @@ export function unifiedDiff(document: Document, source: string): HTMLElement | u
   const hunked = lines.some((line) => HUNK.test(line));
   // Without a hunk or a changed line there is nothing to color: stay plain code.
   if (!hunked && !lines.some((_, index) => ["add", "remove"].includes(hunklessChange(lines, index)))) return undefined;
-  const root = document.createElement("div"); root.className = "rich-diff";
+  const root = document.createElement("div"); root.className = "rich-diff"; root.dataset.testid = "rich-diff";
   const pre = document.createElement("pre"); pre.setAttribute("aria-label", hunked ? "Unified diff" : "Diff");
   const populate = () => {
     if (pre.childNodes.length) return;
@@ -22,7 +22,7 @@ export function unifiedDiff(document: Document, source: string): HTMLElement | u
       const text = document.createElement("code"); text.textContent = `${line}\n`;
       if (!hunked) {
         // No positions were written, so no line-number gutter is drawn.
-        const row = document.createElement("span"); row.className = "diff-line"; row.dataset.change = hunklessChange(lines, index);
+        const row = document.createElement("span"); row.className = "diff-line"; row.dataset.testid = "diff-line"; row.dataset.change = hunklessChange(lines, index);
         row.append(text); pre.append(row);
         continue;
       }
@@ -34,7 +34,7 @@ export function unifiedDiff(document: Document, source: string): HTMLElement | u
         oldRemaining = Number(hunk[2] ?? 1); newRemaining = Number(hunk[4] ?? 1);
       }
       const change = hunk ? "hunk" : header ? "header" : line.startsWith("+") ? "add" : line.startsWith("-") ? "remove" : "context";
-      const row = document.createElement("span"); row.className = "diff-line"; row.dataset.change = change;
+      const row = document.createElement("span"); row.className = "diff-line"; row.dataset.testid = "diff-line"; row.dataset.change = change;
       const numbers = document.createElement("span"); numbers.className = "diff-numbers"; numbers.setAttribute("aria-hidden", "true");
       if (!hunk && !header) {
         numbers.textContent = `${change === "add" ? "" : oldLine++} ${change === "remove" ? "" : newLine++}`;

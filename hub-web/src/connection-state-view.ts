@@ -141,6 +141,7 @@ export function openingLine(document: Document, title: string, delayMs: number):
   const line = document.createElement("p");
   line.className = "conversation-loading";
   line.setAttribute("role", "status");
+  line.setAttribute("aria-label", "Opening conversation");
   line.dataset.title = title;
   const dots = document.createElement("span");
   dots.className = "dots";

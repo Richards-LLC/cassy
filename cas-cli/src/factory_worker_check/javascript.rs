@@ -2524,7 +2524,8 @@ listing = '--list' in a
 shown = spec if Path(spec).name in owned else None
 if shown and not listing and os.path.exists({omit:?}) and Path(spec).name == 'summary.journey.ts':
     shown = 'e2e/journeys/read-history.journey.ts'
-tests = [] if listing else [{{'projectId': 'journeys', 'expectedStatus': 'passed', 'results': [{{'status': 'passed', 'retry': 0}}]}}]
+# Real Playwright always emits one test entry per spec; discovery leaves its results empty.
+tests = [{{'projectId': 'journeys', 'projectName': 'journeys', 'expectedStatus': 'passed', 'annotations': [], 'results': [] if listing else [{{'status': 'passed', 'retry': 0}}]}}]
 suites = [{{'title': Path(shown).name, 'column': 0, 'specs': [{{'file': shown, 'title': 'case', 'tests': tests}}], 'suites': []}}] if shown else []
 Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_FILE']).write_text(json.dumps({{'config': {{'rootDir': os.getcwd()}}, 'errors': [], 'suites': suites}}))
 raise SystemExit(0 if shown else 1)

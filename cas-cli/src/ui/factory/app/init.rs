@@ -31,6 +31,15 @@ fn factory_session_for_mux() -> Option<String> {
     std::env::var("CAS_FACTORY_SESSION").ok()
 }
 
+/// cas-dc08 (N1): fallback names skip registry overlaps and a supplied
+/// supervisor's name.
+fn fallback_reject<'a>(
+    supervisor: Option<&'a str>,
+    registry: Option<&'a crate::factory_isolation::WorkerNameRegistry>,
+) -> impl Fn(&str) -> bool + 'a {
+    move |name| supervisor == Some(name) || registry.is_some_and(|names| names.overlap(name).is_some())
+}
+
 /// cas-dc08 (N1): the daemon's names for a fleet whose launcher supplied
 /// none. Generated names skip any that would share a registered worker's or a
 /// factory branch's namespace, and an unreadable registry stops the launch.
@@ -50,12 +59,13 @@ fn fallback_names(
     } else {
         None
     };
-    let reject = |name: &str| registry.as_ref().is_some_and(|names| names.overlap(name).is_some());
+    let reject = fallback_reject(supervisor_name.as_deref(), registry.as_ref());
     if minions_theme && supervisor_name.is_none() && worker_names.is_empty() {
         use crate::orchestration::names::{generate_minion_supervisor, generate_minion_unique};
         return Ok((generate_minion_supervisor(), generate_minion_unique(workers, &reject)));
     }
     let all_names = generate_unique(workers + 1, &reject);
+    drop(reject);
     let sup = supervisor_name.unwrap_or_else(|| all_names[0].clone());
     let workers = if worker_names.is_empty() {
         all_names[1..].to_vec()
@@ -931,6 +941,10 @@ mod tests {
         let (_, workers) = fallback_names(&root, repo, true, 20, None, Vec::new()).unwrap();
         assert_eq!(workers.len(), 20, "{workers:?}");
         assert!(!workers.iter().any(|name| name == "kevin"), "{workers:?}");
+
+        // A supplied supervisor's name is never generated for a worker.
+        let reject = fallback_reject(Some("lead"), None);
+        assert!(reject("lead") && !reject("quick-otter-12"));
 
         // A store that cannot be read leaves the names unchecked, so it stops
         // the launch; names the launcher supplied read no registry at all.

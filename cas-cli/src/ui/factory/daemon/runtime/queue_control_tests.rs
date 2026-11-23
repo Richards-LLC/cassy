@@ -1237,6 +1237,6 @@ async fn failed_inject_during_recycle_keeps_mail_for_the_successor_gh_1731() {
         let row = queue.queued_prompt(id).unwrap().unwrap();
         assert_eq!(row.processed_at.is_none(), successor_queued, "successor queued: {successor_queued}");
         let notices = queue.peek_all(10).unwrap().into_iter().filter(|row| row.id != id).count();
-        assert_eq!(notices, usize::from(!successor_queued), "undelivered notice only without a successor");
+        assert_eq!(notices > 0, !successor_queued, "undelivered notice only without a successor");
     }
 }

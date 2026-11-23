@@ -1880,7 +1880,9 @@ fn execute_tests(
             .collect::<Vec<_>>()
             .join("|");
         let pattern = if runner == "playwright" {
-            format!("(?:^|\\s)(?:{pattern})$")
+            // GH #2349: Playwright greps the title path followed by the test's
+            // tags (`title @tag`), so a tagged test needs the tag suffix too.
+            format!("(?:^|\\s)(?:{pattern})(?:\\s@\\S+)*$")
         } else {
             format!("^(?:{pattern})$")
         };
@@ -2956,9 +2958,19 @@ const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
 const config = path.resolve(at('--config')), settings = require(config), root = path.join(path.dirname(config), settings.testDir);
 const pattern = new RegExp(a[a.length - 1]), repeats = listing ? 1 : Number(at('--repeat-each'));
+const grep = a.includes('--grep') ? new RegExp(at('--grep')) : null;
+// The first test() of a file: its title, line and `{ tag: [...] }` option.
+const specOf = (file) => {
+  const lines = fs.readFileSync(file, 'utf8').split('\n'), line = lines.findIndex((text) => /^test\(/.test(text));
+  const [, title, tags] = lines[line].match(/^test\('([^']*)'(?:, \{ tag: \[([^\]]*)\] \})?/);
+  return { title, line, tags: tags ? tags.split(',').map((tag) => tag.trim().replace(/['"]/g, '')) : [] };
+};
+// Playwright greps the title path, then the tags, joined by spaces.
+const selected = (file) => !grep || grep.test(['', '', path.relative(root, file), specOf(file).title].join(' ')
+  + specOf(file).tags.map((tag) => ' ' + tag).join(''));
 const testMatch = settings.testMatch ?? '**/*.@(spec|test).?(c|m)[jt]s?(x)', suffix = settings.testMatch ? testMatch.replace('**/*', '') : '.spec.ts';
 const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith(suffix)).map((f) => path.join(root, f)) : [];
-const listed = files.filter((file) => pattern.test(file)), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
+const listed = files.filter((file) => pattern.test(file) && selected(file)), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
 const metadata = listing || !listed.length ? {} : { actualWorkers: Math.min(workers, listed.length * repeats) };
 const project = { outputDir, repeatEach: repeats, retries: 0, metadata, id: '', name: '', testDir: root, testIgnore: [], testMatch: [testMatch], timeout: 30000 };
 const startTime = new Date().toISOString(), result = { workerIndex: 0, parallelIndex: 0, status: 'passed', duration: 1, errors: [],
@@ -2975,8 +2987,8 @@ const report = {
     updateSnapshots: 'default', updateSourceMethod: 'patch', version: '1.65.1', workers, webServer: null },
   suites: listed.map((file, index) => {
     const relative = path.relative(root, file);
-    const lines = fs.readFileSync(file, 'utf8').split('\n'), line = lines.findIndex((text) => /^test\(/.test(text));
-    return { title: relative, file: relative, column: 0, line: 0, specs: [{ title: lines[line].match(/^test\('([^']*)'/)[1], ok: true, tags: [],
+    const { title, line, tags } = specOf(file);
+    return { title: relative, file: relative, column: 0, line: 0, specs: [{ title, ok: true, tags: tags.map((tag) => tag.slice(1)),
       tests: Array(repeats).fill(test), id: `spec-${index}`, file: relative, line: line + 1, column: 1 }] };
   }),
   errors: listed.length ? [] : [{ message: noTests, stack: noTests }],
@@ -3052,18 +3064,26 @@ process.exit(listed.length ? 0 : 1);
         write("node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let spec = "tests/e2e/sign-in.spec.ts";
-        let source = |body: &str| format!("import {{ test }} from '@playwright/test';\ntest('hermetic sign in', async () => {{ {body} }});\n");
-        write(spec, &source("throw 0;"));
+        // GH #2349: Playwright greps the title followed by the tags, so one
+        // spec declares its test with the tag option and one without.
+        let (tagged, untagged) = ("tests/e2e/sign-in.spec.ts", "tests/e2e/sign-out.spec.ts");
+        let source = |title: &str, option: &str, body: &str| format!(
+            "import {{ test }} from '@playwright/test';\ntest('{title}', {option}async () => {{ {body} }});\n");
+        let sources = |body: &str| {
+            write(tagged, &source("hermetic sign in", "{ tag: ['@staging', '@smoke'] }, ", body));
+            write(untagged, &source("hermetic sign out", "", body));
+        };
+        sources("throw 0;");
         git(&["add", "."]);
         git(&["commit", "--quiet", "-m", "base"]);
         let base = git(&["rev-parse", "HEAD"]);
-        write(spec, &source(""));
+        sources("");
         git(&["commit", "--quiet", "-am", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
 
-        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
-        assert_eq!(tests, [id(spec, "hermetic sign in")]);
+        let specs = [tagged.to_string(), untagged.to_string()];
+        let tests = changed_tests(repo.path(), &base, &head, &specs, None).unwrap();
+        assert_eq!(tests, [id(tagged, "hermetic sign in"), id(untagged, "hermetic sign out")]);
         let cas_root = tempfile::tempdir().unwrap();
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
         // Worker-check discovers the owning config and records five capped passes.
@@ -3074,8 +3094,8 @@ process.exit(listed.length ? 0 : 1);
         let config = "playwright.hermetic.config.js";
         let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
         assert_eq!(prescribed.len(), 1);
-        assert!(prescribed[0].contains(&format!("-- playwright --config {config} {spec}`")), "{prescribed:?}");
-        let args: Vec<String> = ["playwright", "--config", config, spec].map(String::from).into();
+        assert!(prescribed[0].contains(&format!("-- playwright --config {config} {tagged} {untagged}`")), "{prescribed:?}");
+        let args: Vec<String> = ["playwright", "--config", config, tagged, untagged].map(String::from).into();
         let explicit = repo.path().join(invocation(&args).unwrap().config.unwrap());
         execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&explicit), &tests, None, &[]).unwrap();
         // An explicit caller config stays authoritative: the default lists no

@@ -2761,6 +2761,63 @@ mod tests {
         assert_eq!(pulls[0].merge_commit.as_ref().unwrap().oid, "merge-tip");
     }
 
+    /// cas-a9eb: 111 parked deliveries, nearly all train lanes that never get a
+    /// PR, were each looked up on every 60 s poll and tripped GitHub's secondary
+    /// limit. Over ten polls each costs one read, not ten; a PR opening between
+    /// polls is read on the next poll, and its merge on the one after.
+    #[test]
+    fn parked_deliveries_without_a_pr_cost_one_read_not_one_a_poll_cas_a9eb() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let dir = env.home().join("gh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gh = dir.join("gh");
+        crate::test_paths::warm_stub(&gh, &format!(
+            "#!/bin/sh\necho \"$1 $2\" >> '{d}/calls.log'\ncase \"$1 $2\" in\n'pr list') f='{d}'/$(echo \"$8\" | tr / _).json; if [ -f \"$f\" ]; then cat \"$f\"; else echo '[]'; fi ;;\n'api graphql') cat '{d}/listing.json' ;;\n*) exit 97 ;;\nesac\n",
+            d = dir.display(),
+        ));
+        let write = |name: &str, body: String| std::fs::write(dir.join(name), body).unwrap();
+        let listing = |branches: &[&str]| serde_json::json!({"data": {"repository": {"pullRequests": {"nodes": branches.iter()
+            .map(|branch| serde_json::json!({"number": 9, "headRefName": branch, "headRefOid": "tip",
+                "isInMergeQueue": false, "updatedAt": "2026-11-23T00:00:00Z"})).collect::<Vec<_>>()}}}}).to_string();
+        let pull = |branch: &str, state: &str| serde_json::json!([{"number": 9, "headRefName": branch, "headRefOid": "tip",
+            "state": state, "mergedAt": (state == "MERGED").then_some("2026-11-23T01:00:00Z"),
+            "mergeCommit": (state == "MERGED").then(|| serde_json::json!({"oid": "merge-tip"}))}]).to_string();
+        let count = |what: &str| std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().filter(|line| *line == what).count());
+        let deliveries: Vec<AwaitingMergeDelivery> = (0..30).map(|n| AwaitingMergeDelivery {
+            task_id: format!("cas-{n}"), worker: format!("w{n}"), branch: format!("factory/w{n}-cas-{n}"),
+            branch_tip: None, pr_number: None,
+        }).collect();
+        let poll = || collect_delivery_pr_observations(&GhCiTransport {
+            repo: "org/repo".to_string(), cwd: dir.clone(), gh_binary: gh.clone(),
+            completed: Default::default(), recent: Default::default(),
+        }, &deliveries).unwrap();
+        // The next poll's open-PR listing, a minute later.
+        let next_minute = || crate::gh_budget::invalidate("merge-queue-org/repo");
+
+        write("listing.json", listing(&[]));
+        for _ in 0..10 {
+            assert!(poll().is_empty());
+        }
+        assert_eq!((count("pr list"), count("api graphql")), (30, 1), "one read per delivery, one listing, over ten polls");
+
+        let lane = deliveries[7].branch.clone();
+        write("listing.json", listing(&[&lane]));
+        write(&format!("{}.json", lane.replace('/', "_")), pull(&lane, "OPEN"));
+        next_minute();
+        let seen = poll();
+        assert_eq!(seen.iter().map(|o| (o.task_id.as_str(), o.pr_number, o.merge_commit.as_deref())).collect::<Vec<_>>(), [("cas-7", 9, None)]);
+        assert_eq!(count("pr list"), 31, "only the delivery the listing names is read again");
+
+        write("listing.json", listing(&[]));
+        write(&format!("{}.json", lane.replace('/', "_")), pull(&lane, "MERGED"));
+        next_minute();
+        assert_eq!(poll().iter().map(|o| o.merge_commit.as_deref()).collect::<Vec<_>>(), [Some("merge-tip")]);
+        assert_eq!(count("pr list"), 32, "an open PR's cached answer is stale at once, so its merge is seen on the next poll");
+        poll();
+        assert_eq!(count("pr list"), 32, "a merged PR's answer is shared");
+    }
+
     #[test]
     fn two_daemons_share_one_merge_queue_listing_per_repo_per_minute_cas_c24e() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

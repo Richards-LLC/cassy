@@ -6,7 +6,7 @@ pub(crate) enum Scope {
     File(String),
     /// The runner's dependency graph, rooted at this source file, rather than a
     /// package pass that may execute thousands of unrelated tests. A Playwright
-    /// helper's graph is the specs importing it (GH #2146).
+    /// or `node:test` helper's graph is the tests importing it (GH #2146, #2200).
     Related(String),
     Package(String),
     Crate(String),
@@ -34,7 +34,7 @@ pub(super) fn valid(proof: &Proof) -> bool {
         && match &proof.scope {
             Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
-            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest" | "playwright") && !path.is_empty() && relative(path),
+            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest" | "playwright" | "node") && !path.is_empty() && relative(path),
             Scope::Package(path) => proof.runner != "nextest" && relative(path),
         }
 }
@@ -43,7 +43,7 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) {
         let runner = javascript::runner_hint(repo, path);
         if javascript::test_match(path, runner) { return Scope::File(path.into()); }
-        if matches!(runner, Some("jest" | "vitest")) || !javascript::playwright_importers(repo, path).is_empty() {
+        if matches!(runner, Some("jest" | "vitest")) || javascript::related_tests(repo, path).is_some() {
             return Scope::Related(path.into());
         }
     }
@@ -109,7 +109,8 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
             && (proof.scope == Scope::File(spec.into()) || matches!(&proof.scope, Scope::Related(_))));
     scopes.iter().filter(|scope| {
         if let Scope::Related(helper) = scope {
-            let consumers = javascript::playwright_importers(passing.repo, helper);
+            let consumers = javascript::related_tests(passing.repo, helper)
+                .filter(|(runner, _)| *runner == "playwright").map(|(_, specs)| specs).unwrap_or_default();
             if !consumers.is_empty() { return !consumers.iter().all(|spec| ran(spec)); }
         }
         // GH #2224, #2266: a package is also proven by whole-file passes of the
@@ -133,8 +134,8 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
             return vec![format!("cas factory worker-check --cas-root {} -- nextest run -p {package} --lib -E 'test({package})'", cas_root.display())];
         }
         if let Scope::Related(path) = scope {
-            let runner = if !javascript::playwright_importers(repo, path).is_empty() {
-                "playwright"
+            let runner = if let Some((runner, _)) = javascript::related_tests(repo, path) {
+                if runner == "node" { "node --test" } else { runner }
             } else if javascript::runner_hint(repo, path) == Some("vitest") {
                 "vitest related --run"
             } else { "jest --findRelatedTests" };

@@ -1489,11 +1489,21 @@ impl CiTransport for GhCiTransport {
         self.merge_queue_listing(true)
     }
 
+    /// One answer per branch for every reader on the machine (cas-a9eb): a
+    /// branch with an open PR is read every poll; one with none, or only
+    /// finished ones, is re-read after [`DELIVERY_PR_IDLE_TTL`], or at once
+    /// when the open-PR listing the poll already holds names it. A train
+    /// lane merged by the supervisor never has a PR, and one read per such
+    /// delivery per poll (111 a minute) tripped GitHub's secondary limit.
     fn delivery_pull_requests(
         &self,
         branch: &str,
     ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
-        self.gh_json(&[
+        let key = format!("delivery-prs {} {branch}", self.repo);
+        if self.merge_queue_listing(false).is_ok_and(|open| open.iter().any(|pr| pr.head_branch == branch)) {
+            crate::gh_budget::invalidate(&key);
+        }
+        let bytes = crate::gh_budget::shared_read_by(&key, delivery_pr_ttl, || self.gh_bytes(&[
             "pr".to_string(),
             "list".to_string(),
             "--repo".to_string(),
@@ -1506,8 +1516,23 @@ impl CiTransport for GhCiTransport {
             "20".to_string(),
             "--json".to_string(),
             "number,headRefName,headRefOid,state,mergedAt,mergeCommit".to_string(),
-        ])
+        ]))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
     }
+}
+
+/// How long a branch with no open PR keeps its shared lookup (cas-a9eb): the
+/// backstop for a PR the open listing never showed (opened and finished
+/// between two polls).
+const DELIVERY_PR_IDLE_TTL: Duration = Duration::from_secs(600);
+
+/// A lookup naming an open PR is stale at once, so its merge is seen on the
+/// next poll; an unreadable one is read again.
+fn delivery_pr_ttl(cached: &[u8]) -> Duration {
+    let open = serde_json::from_slice::<Vec<DeliveryPullRequest>>(cached)
+        .map_or(true, |pulls| pulls.iter().any(|pull| pull.state.eq_ignore_ascii_case("OPEN")));
+    if open { Duration::ZERO } else { DELIVERY_PR_IDLE_TTL }
 }
 
 fn merge_group_pr_number(branch: &str) -> Option<u64> {

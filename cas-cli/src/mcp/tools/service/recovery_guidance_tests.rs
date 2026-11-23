@@ -321,13 +321,14 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
         "{banner}"
     );
     assert!(
-        banner.contains("unpushed=1")
+        banner.contains("on_no_remote=1")
+            && banner.contains("ahead_of_own_remote=1")
             && banner.contains("dirty=1"),
         "{banner}"
     );
     assert!(
         banner.lines().any(|line| line.contains("dirty-only")
-            && line.contains("unpushed=0")
+            && line.contains("on_no_remote=0")
             && line.contains("dirty=1")),
         "{banner}"
     );
@@ -370,7 +371,7 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
     let unproven = status.lines().find(|line| line.starts_with("| cas-ee55 |")).unwrap();
     assert!(unproven.contains("retained local work"), "{status}");
     assert!(
-        status.contains("Retained worker") && status.contains("unpushed=1"),
+        status.contains("Retained worker") && status.contains("on_no_remote=1"),
         "{status}"
     );
     assert_eq!(

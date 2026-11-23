@@ -904,6 +904,9 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
         Commands::Qa(crate::cli::qa::QaCommand::AuthorOverride { .. }) => {
             Some("Overriding the independent QA author rule (`cas qa author-override`)")
         }
+        Commands::Task(crate::cli::task_cmd::TaskCommands::RecoveryDecision { .. }) => {
+            Some("Authorizing recovery of contained historical deliveries (`cas task recovery-decision`)")
+        }
         _ => None,
     }
 }
@@ -1256,6 +1259,7 @@ mod tests {
             "factory hold set --reason review",
             "factory hold lift --reason approved",
             "qa outcome-override cas-phase --reason accepted",
+            "task recovery-decision --scope cas-ep1c --note contained",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),

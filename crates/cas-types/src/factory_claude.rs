@@ -14,6 +14,8 @@ pub struct FactoryClaudeConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub fallback_model: Option<String>,
+    /// OS sandbox for Claude workers' Bash tool on macOS (cas-3751a).
+    pub worker_sandbox: WorkerSandbox,
 }
 
 impl FactoryClaudeConfig {
@@ -62,6 +64,37 @@ impl std::str::FromStr for WorkerMcp {
             "cas_only" => Ok(Self::CasOnly),
             "inherit" => Ok(Self::Inherit),
             _ => Err("factory.claude.worker_mcp must be cas_only or inherit".into()),
+        }
+    }
+}
+
+/// Claude worker OS sandbox mode (capability guards, cas-3751a).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerSandbox {
+    /// The sandbox enforces; the text guards it replaces only log would-deny.
+    #[default]
+    Shadow,
+    /// No sandbox profile; the text guards enforce.
+    Off,
+}
+
+impl WorkerSandbox {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shadow => "shadow",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for WorkerSandbox {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "shadow" => Ok(Self::Shadow),
+            "off" => Ok(Self::Off),
+            _ => Err("factory.claude.worker_sandbox must be shadow or off".into()),
         }
     }
 }

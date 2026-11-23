@@ -8058,7 +8058,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         self.cas_task_close_with_dispositions(params, completion_receipt,
             external_verification_receipt, negative_result, None,
-            inline_external_ref, inline_execution_note).await
+            inline_external_ref, inline_execution_note, None).await
     }
 
     pub async fn cas_task_close_with_dispositions(
@@ -8070,12 +8070,13 @@ impl CasCore {
         evidence_only: Option<EvidenceOnlyCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
+        operator_decision: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let id = req.id.clone();
         let mut close = crate::async_runtime::heap_future(|| {
             self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
                 external_verification_receipt, negative_result, evidence_only,
-                inline_external_ref, inline_execution_note)
+                inline_external_ref, inline_execution_note, operator_decision)
         });
         // This operation is thread-local: scope each poll, never an await
         // that could resume on another executor thread.
@@ -8110,6 +8111,7 @@ impl CasCore {
     // gate-audit[tags_from]: registry_upkeep.rs#finish
     // gate-audit[no_delivery]: selector Chooses the separately measured non-delivery disposition; does not approve a delivered-code bypass.
     // gate-audit[skip_reason]: selector Derived verification disposition; only actual waived gates contribute override codes.
+    // gate-audit[operator_qa_waiver]: bypass G-64 The operator's recorded recovery decision (GH #2270) waives independent QA for its scope's measured non-Tier-2 contained delivery; the waiver is tagged and noted.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
@@ -8119,6 +8121,7 @@ impl CasCore {
         evidence_only: Option<EvidenceOnlyCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
+        operator_decision: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         #[cfg(test)]
         crate::async_runtime::stack_probe::mark("close_body");
@@ -8239,6 +8242,30 @@ impl CasCore {
         ) {
             return Ok(Self::tool_error(message));
         }
+        // gate[G-164 close-after-merge integrity]: Operator recovery decision for a contained historical delivery
+        // GH #2270: the operator's recorded batch decision, not a per-task
+        // override, authorizes this recovery. The containment proof runs later.
+        let operator_recovery = match operator_decision.as_deref() {
+            None => None,
+            Some(id) => {
+                let refusal = |why: String| Self::tool_error(crate::gates::tag("G-164", format!(
+                    "OPERATOR RECOVERY DECISION REJECTED: {why}. The operator records one decision per epic with `cas task recovery-decision --scope <epic-id> --note \"...\"`; a live registered supervisor then closes each contained delivery with operator_decision=<id> commit_receipt=<containment commit> and no supervisor_override."
+                )));
+                if supervisor_override {
+                    return Ok(refusal("operator_decision replaces supervisor_override and cannot be combined with it".into()));
+                }
+                if self.resolve_live_supervisor_authority().is_err() {
+                    return Ok(refusal("only a live registered supervisor may cite an operator recovery decision".into()));
+                }
+                if req.commit_receipt.is_none() {
+                    return Ok(refusal("cite the containment commit with commit_receipt".into()));
+                }
+                match crate::recovery_decision::authorize(&self.cas_root, task_store.as_ref(), &task.id, id) {
+                    Ok(decision) => Some(decision),
+                    Err(why) => return Ok(refusal(why)),
+                }
+            }
+        };
 
 
         // This is a declaration for one attempt, never a sticky methodology
@@ -9035,7 +9062,11 @@ impl CasCore {
                 &lease_history,
                 task_commit_identity.clone(),
             );
-            if supervisor_override {
+            // GH #2270: an operator recovery decision authorizes only a
+            // reviewed drop; the drop proof itself still runs.
+            if supervisor_override || operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-56"))
+                && req.reason.as_deref().is_some_and(|reason| reviewed_delivery_drop_reason(Some(reason)).is_some())
+            {
                 window.supervisor_override_reason = req.reason.clone();
             }
             (Some(window), has_recorded_boundary)
@@ -9785,6 +9816,12 @@ impl CasCore {
             }
         }
 
+        // GH #2270: the operator decision covers only measured non-Tier-2
+        // deliveries; an unmeasurable tier keeps every check.
+        let operator_recovery_below_tier_two = operator_recovery.is_some()
+            && super::review_tier::tier_for_delivery(&task, &close_project_root).is_some_and(|decision| {
+                decision.tier != super::review_tier::VerificationTier::Adversarial
+            });
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             // Renew the explicit review before handing this delivery to merge.
@@ -10146,6 +10183,20 @@ impl CasCore {
                         }
                         // The advanced anchor keeps this machine's fresh receipts.
                         keep_fresh_test_receipts(task_store.as_ref(), &task.id, portable);
+                        // A fully checked same-tip retry confirms the existing
+                        // durable park without writing another anchor or cycle.
+                        // Do not borrow a changed or unreadable task snapshot.
+                        if let Some(parked) = current.as_ref()
+                            && anchor.as_deref().zip(parked.deliverables.factory_branch_anchor.as_deref())
+                                .is_some_and(|(tip, recorded)| tip == recorded)
+                        {
+                            crate::mcp::tools::service::mutation_receipt::task_disposition_committed(
+                                &task.id,
+                                &format!("task `{}` parked awaiting_merge on {} at {}", task.id,
+                                    parked.deliverables.parked_branch.as_deref().unwrap_or("recorded delivery branch"),
+                                    anchor.as_deref().expect("checked unchanged park anchor")),
+                            );
+                        }
                     }
 
                     if let Some(worker) = crate::cloud::peer_mailbox::train_parks::host_worker(&self.cas_root,&task) {
@@ -10243,12 +10294,18 @@ impl CasCore {
             // its reason waives the pass for the delivered commit, exactly as
             // it waives the implementer's evidence gate.
             // cas-5ea7: a passed fast-lane receipt is this delivery's QA walk.
+            // GH #2270: the operator's recovery decision for this epic is the
+            // same waiver for a contained historical delivery (D1: no per-task
+            // review), recorded against the cited commit. Tier 2 keeps its QA,
+            // and a delivery whose tier cannot be measured is treated as Tier 2.
+            let operator_qa_waiver = operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-64"))
+                && operator_recovery_below_tier_two;
             match if fast_lane_receipt_passed { super::qa_dispatch::QaCloseGate::Clear } else { self.independent_qa_close_gate(
                 &task,
                 &close_project_root,
                 &resolved_parent_branch,
                 req.commit_receipt.as_deref(),
-                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+                (supervisor_override || operator_qa_waiver).then(|| req.reason.as_deref().unwrap_or("")),
             ) } {
                 super::qa_dispatch::QaCloseGate::Clear => {}
                 super::qa_dispatch::QaCloseGate::Refuse(refusal) => {
@@ -10366,8 +10423,40 @@ impl CasCore {
                     ..
                 }))
         );
+        // GH #2226/#2244: the prescribed historical override must not loop
+        // merely because a completed reviewer failed before giving a verdict.
+        // Only the exact recorded delivery already on its target can recover;
+        // pending/rejected reviews and unintegrated work retain their authority.
+        let historical_error_recovery = (verification_enabled
+            && matches!(skip_reason, VerificationSkipReason::SupervisorBypass)
+            && close_disposition.requires_delivery_gates()
+            && task.task_type != TaskType::Epic)
+        .then(|| {
+            let actor = self.resolve_live_supervisor_authority().ok()?;
+            let receipt = resolve_task_commit_receipt_sha(&close_project_root, req.commit_receipt.as_deref()?).ok()?;
+            let anchor = resolve_task_commit_receipt_sha(&close_project_root, task.deliverables.factory_branch_anchor.as_deref()?).ok()?;
+            if receipt != anchor || !commit_is_merged_into_parent(&close_project_root, &receipt, &resolved_parent_branch) {
+                return None;
+            }
+            let prior = self.open_verification_store().ok()?.get_latest_for_task(&task.id).ok()??;
+            if prior.status != VerificationStatus::Error { return None; }
+            match cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).ok()? {
+                None if prior.dispatch_id.is_none() => {}
+                Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved
+                    && prior.dispatch_id.as_deref() == Some(dispatch.id.as_str()) => {}
+                _ => return None,
+            }
+            Some((actor.id, receipt, prior))
+        }).flatten();
+        if let Some((actor, receipt, prior)) = &historical_error_recovery {
+            close_notes.record(&mut task, &format!(
+                "Historical integrated-delivery recovery: supervisor {actor} audited {receipt} on {resolved_parent_branch} after Error {} (dispatch {}). Original Error retained; no pre-merge approval created. Reason: {}",
+                prior.id, prior.dispatch_id.as_deref().unwrap_or("legacy"), req.reason.as_deref().unwrap_or_default(),
+            ));
+        }
         // Legacy errors also retain their authority when no typed dispatch exists.
-        let skip_verification = published_delivery.is_some() || skip_reason.is_skip() && exact_dispatch_allows_skip
+        let skip_verification = published_delivery.is_some() || historical_error_recovery.is_some()
+            || skip_reason.is_skip() && exact_dispatch_allows_skip
             && self.open_verification_store().is_ok_and(|store| {
                 store.get_latest_for_task(&req.id).is_ok_and(|latest| latest.is_none_or(|row| {
                     row.dispatch_id.is_some()
@@ -10631,7 +10720,44 @@ impl CasCore {
                     ))));
                 }
 
+                // GH #2270, GH #2244: a historical factory delivery whose commit is
+                // already on its target can never gain a pre-merge verdict. The
+                // operator's recorded decision for its epic, cited with that
+                // containment commit, authorizes the close; the content gate above
+                // has already proven (or reviewed the drop of) its tree effect.
+                // Tier 2 keeps its retained adversarial review. The cited commit
+                // may be the containing merge, so the recorded delivery anchor
+                // itself must also be on the target.
+                let contained_recovery = (operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-70"))
+                    && operator_recovery_below_tier_two && !is_epic
+                    && !in_cassy_merge_close()
+                    && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor|
+                        commit_is_merged_into_parent(&close_project_root, anchor, &resolved_parent_branch))
+                    && self.resolve_live_supervisor_authority().is_ok())
+                .then_some(req.commit_receipt.as_deref())
+                .flatten()
+                .and_then(|receipt| resolve_task_commit_receipt_sha(&close_project_root, receipt).ok())
+                .filter(|sha| commit_is_merged_into_parent(&close_project_root, sha, &resolved_parent_branch));
+
+                if operator_recovery.is_some() && contained_recovery.is_none()
+                    && latest.is_ok()
+                    && !matches!(&latest, Ok(Some(v)) if matches!(v.status,
+                        VerificationStatus::Approved | VerificationStatus::Skipped | VerificationStatus::Rejected))
+                {
+                    return Ok(Self::tool_error(crate::gates::tag("G-164", format!(
+                        "OPERATOR RECOVERY DECISION REJECTED: task {} is not a contained historical delivery the decision can close. It needs a non-Tier-2 factory delivery whose recorded anchor and cited commit_receipt are both on {resolved_parent_branch}.",
+                        task.id
+                    ))));
+                }
                 match latest {
+                    Ok(None) | Ok(Some(_)) if contained_recovery.is_some() => {
+                        close_notes.record(&mut task, &format!(
+                            "DECISION: operator recovery decision {} ({}) closed integrated historical delivery {}, contained in {resolved_parent_branch}; no pre-merge approval existed and none was created.",
+                            operator_recovery.as_ref().map(|decision| decision.id.as_str()).unwrap_or_default(),
+                            operator_recovery.as_ref().map(|decision| decision.scope.as_str()).unwrap_or_default(),
+                            contained_recovery.as_deref().unwrap_or_default()
+                        ));
+                    }
                     Ok(Some(v))
                         if (v.status == VerificationStatus::Approved
                             || v.status == VerificationStatus::Skipped)
@@ -16874,13 +17000,22 @@ fn anchored_delivery_content_gate_unbounded(
                  Restore the missing delivery content on the assigned factory branch, \
                  commit it, and retry close. If the content was intentionally superseded, \
                  a live registered supervisor may close with supervisor_override=true \
-                 reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\". \
+                 (or operator_decision=<id> under an operator recovery decision) and \
+                 reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\"{}. \
                  Each named commit must differ from the anchor, be reachable on the \
                  target, and change dropped paths to their final target state. The \
                  commit may predate the anchor. The resolved commits, paths, and \
                  review are recorded.",
                 paths.join(", "),
                 dropped_line_samples(repo_path, anchor, parent_branch, &paths),
+                // A concrete candidate: the latest target commit that changed
+                // the dropped paths. The supervisor still reviews it.
+                git_stdout_lines(repo_path, &[&["log", "-1", "--format=%H", parent_branch, "--"][..],
+                    &paths.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
+                    .ok().and_then(|lines| lines.into_iter().next())
+                    .filter(|sha| !sha.is_empty() && sha.as_str() != anchor)
+                    .map(|sha| format!(", for example reason=\"reviewed-drop: {sha} -- <why>\""))
+                    .unwrap_or_default(),
             ))))
         }
         DeliveryContentPresence::Unknown { reason } => {
@@ -17718,22 +17853,52 @@ fn checkout_is_clean(worktree: &std::path::Path) -> bool {
 /// no-delivery close ineligible. Retarget safety uses the same evidence gate:
 /// only an otherwise empty source can have its recorded start rebound.
 pub(crate) fn has_recorded_no_delivery_state(task: &Task, receipt: Option<&str>) -> bool {
+    recorded_no_delivery_state(task, receipt, false)
+}
+
+/// `prior_cycle` exempts only the code identity a reopen retained from an
+/// ended delivery cycle; the caller must prove that identity landed.
+fn recorded_no_delivery_state(task: &Task, receipt: Option<&str>, prior_cycle: bool) -> bool {
     let delivery = &task.deliverables;
     task.execution_note.is_some()
         || task.branch.is_some()
         || receipt.is_some()
         || !handoff_prior_holders(&task.notes).is_empty()
-        || has_recorded_code_delivery(task)
-        || delivery.parked_branch.is_some()
+        || (!prior_cycle && (has_recorded_code_delivery(task)
+            || delivery.parked_branch.is_some()
+            || delivery.review_envelope.is_some()
+            || delivery.green_merge_commit.is_some()))
+        || delivery.factory_branch_anchor.is_some()
         || !delivery.handoff_branches.is_empty()
         || delivery.integration_batch.is_some()
         || delivery.delivery_pr_number.is_some()
-        || delivery.review_envelope.is_some()
         || delivery.negative_result.is_some()
         || delivery.evidence_only.is_some()
-        || delivery.green_merge_commit.is_some()
         || delivery.merge_conflicted
         || delivery.declined_factory_branch_anchors.as_ref().is_some_and(|anchors| !anchors.is_empty())
+}
+
+/// GH #1695: a reopen ends the delivery cycle and keeps its commits as
+/// history. A revalidation cycle that delivers nothing may declare
+/// no_delivery only when that retained identity is already on the target.
+/// Returns the retained tips when the task has that shape; landing is
+/// measured by the caller.
+fn prior_cycle_tips(task: &Task) -> Option<Vec<String>> {
+    let delivery = &task.deliverables;
+    if delivery.delivery_cycle == 0 || delivery.factory_branch_start.is_none() {
+        return None;
+    }
+    let mut tips: Vec<String> = delivery.historical_factory_branch_anchors.iter()
+        .chain(&delivery.commit_hash)
+        .chain(&delivery.merge_commit)
+        .chain(&delivery.delivery_pr_merge_commit)
+        .chain(&delivery.green_merge_commit)
+        .map(|tip| tip.trim().to_string())
+        .filter(|tip| !tip.is_empty())
+        .collect();
+    tips.sort_unstable();
+    tips.dedup();
+    (!tips.is_empty()).then_some(tips)
 }
 
 /// Refusals retain the measured commit identities and containing refs, including
@@ -17770,8 +17935,10 @@ fn measure_no_delivery(
     supervisor_source_recovery: bool,
 ) -> Result<String, String> {
     let delivery = &task.deliverables;
-    if has_recorded_no_delivery_state(task, receipt) {
-        return Err("recorded delivery, methodology or handoff evidence exists; use the ordinary close contract.".into());
+    const RECORDED: &str = "recorded delivery, methodology or handoff evidence exists; use the ordinary close contract.";
+    let prior_tips = prior_cycle_tips(task);
+    if recorded_no_delivery_state(task, receipt, prior_tips.is_some()) {
+        return Err(RECORDED.into());
     }
     let window = window.ok_or("task attribution is unavailable")?;
     // A successful inventory distinguishes truly absent refs from failed
@@ -17789,9 +17956,6 @@ fn measure_no_delivery(
         let (name, sha) = line.split_once(' ').ok_or("Git ref inventory is malformed")?;
         refs.insert(name.to_string(), sha.to_string());
     }
-    if !window.identity.known_commits.is_empty() {
-        return Err(no_delivery_commit_refusal(repo, &window.identity.known_commits, &refs));
-    }
     let origin_target = format!("refs/remotes/origin/{target}");
     let target_ref = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
         && refs.contains_key(&origin_target)
@@ -17800,8 +17964,27 @@ fn measure_no_delivery(
     } else {
         target.to_string()
     };
-    let target_sha = resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}"))
-        .ok_or("integration target is unavailable")?;
+    let resolve_target = || resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}"))
+        .ok_or("integration target is unavailable");
+    // The landed prior cycle is the only identity exempt from absence; any
+    // unlanded retained tip keeps the ordinary close contract.
+    let landed = match prior_tips.as_ref() {
+        Some(tips) => {
+            let target_sha = resolve_target()?;
+            if !tips.iter().all(|tip| git_commit_is_ancestor(repo, tip, &target_sha)) {
+                return Err(RECORDED.into());
+            }
+            tips.clone()
+        }
+        None => Vec::new(),
+    };
+    let is_landed = |commit: &str| landed.iter().any(|tip| git_commit_is_ancestor(repo, commit, tip));
+    let unlanded: Vec<String> = window.identity.known_commits.iter()
+        .filter(|commit| !is_landed(commit)).cloned().collect();
+    if !unlanded.is_empty() {
+        return Err(no_delivery_commit_refusal(repo, &unlanded, &refs));
+    }
+    let target_sha = resolve_target()?;
     let source = task.deliverables.factory_branch_start.as_ref();
     let source_identity_mismatch = source.is_some_and(|start|
         task.assignee.as_deref() != Some(start.assignee.as_str())
@@ -17869,6 +18052,31 @@ fn measure_no_delivery(
     for (reference, sha) in &measured {
         if !matches!(known_unmerged_factory_commits(repo, sha, &target_sha), KnownUnmergedCount::KnownZero) {
             return Err(format!("{reference}@{sha} has unmerged work or unreadable history"));
+        }
+        if !landed.is_empty() {
+            // The landed cycle is on every measured tip; only this cycle's
+            // graph, after its start and beyond the landed tips, may be empty.
+            let start = delivery.factory_branch_start.as_ref().ok_or(RECORDED)?;
+            let mut args = vec!["log".to_string(), "--format=%H%x1f%B%x1e".into(),
+                sha.clone(), target_sha.clone(), format!("^{}", start.base_sha)];
+            args.extend(landed.iter().map(|tip| format!("^{tip}")));
+            args.push("--".into());
+            let history = crate::git_evidence::git_text(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())
+                .ok_or("revalidation cycle history is unavailable")?;
+            let mut commits = Vec::new();
+            for record in history.split('\u{1e}').map(str::trim).filter(|record| !record.is_empty()) {
+                let (commit, message) = record.split_once('\u{1f}')
+                    .ok_or("revalidation cycle history is unreadable")?;
+                if message_references_task(message, &task.id)
+                    && !task_attribution::commit_claims_another_task(repo, commit, &window.identity)
+                {
+                    commits.push(commit.to_string());
+                }
+            }
+            if !commits.is_empty() {
+                return Err(no_delivery_commit_refusal(repo, &commits, &refs));
+            }
+            continue;
         }
         if !matches!(task_attribution::branch_task_claims(repo, sha, &window.identity), Some((None, _))) {
             return Err(format!("{reference}@{sha} contains task commits or unreadable ownership"));
@@ -30440,6 +30648,59 @@ mod merge_state_gate_tests {
             "{}",
             stored.notes
         );
+    }
+
+    /// GH #2097: checked evidence-only retries at the same durable tip must
+    /// report COMMITTED while their remaining close work is still held.
+    #[tokio::test]
+    async fn same_tip_repark_wait_answers_committed_cas_b780() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::AwaitingMerge, AnchorChoice::Pushed);
+        git(fixture.dir.path(), &["reset", "-q", "--hard", &fixture.pushed]);
+        let mut task = fixture.store.get(&fixture.task_id).unwrap();
+        task.notes = "Additional review evidence at the unchanged delivery tip".into();
+        fixture.store.update(&task).unwrap();
+        let cycle = task.deliverables.delivery_cycle;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        lifecycle_race_hook::before_queue_handoff(&task.id, move || {
+            let _ = entered_tx.send(());
+            let _ = resume_rx.recv();
+        });
+        let service = fixture.service.clone();
+        let sender = service.clone();
+        let arguments = serde_json::json!({"action":"close", "id":task.id, "reason":"Review evidence updated"});
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let dispatch = tokio::spawn(async move {
+            service.call_with_deadline("task", arguments.as_object(),
+                std::time::Duration::from_secs(55), async move {
+                    let result = sender.task(Parameters(request)).await;
+                    let _ = done_tx.send(());
+                    result
+                }).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+            .await.expect("checked re-park must reach the follow-up barrier").unwrap();
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(56)).await;
+        let answer = dispatch.await.unwrap().unwrap();
+        tokio::time::resume();
+        let _ = resume_tx.send(());
+        done_rx.await.unwrap();
+        fixture.service.tool_work.wait_idle().await;
+
+        assert_eq!(answer.is_error, Some(false));
+        let data = answer.structured_content.unwrap();
+        assert_eq!(data["mutation_outcome"], "COMMITTED");
+        assert_eq!(data["task_id"], task.id);
+        let continuation = data["continuation_id"].as_str().unwrap();
+        let parked = fixture.store.get(&task.id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(fixture.pushed.as_str()));
+        assert_eq!(parked.deliverables.delivery_cycle, cycle);
+        let marker = format!("CLOSE_OUTCOME: continuation={continuation}");
+        assert_eq!(parked.notes.matches(&marker).count(), 1);
+        assert!(!parked.notes.contains("code=continuation_lost"));
     }
 
     /// cas-e571 (the cas-0fc56 incident): a build routed here from another

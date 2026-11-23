@@ -242,6 +242,14 @@ impl CasCore {
             data: None,
         })?;
 
+        // Creation notes are historical snapshots. Present fresh task-bound
+        // metadata independently, including after a queued checkout changes.
+        let current_qa = super::lifecycle::qa_impact::predicted_value(self, &task);
+        let qa_summary = match &current_qa {
+            Ok(impact) => format!("Current QA registry: present={} journeys={}\n",
+                impact["registry"]["present"], impact["journeys"].as_array().map_or(0, Vec::len)),
+            Err(_) => "Current QA impact unavailable; full=true includes the diagnostic.\n".into(),
+        };
         let mut clipping = ReadClipping::default();
         let mut read_status = String::new();
         let mut batch_summary = String::new();
@@ -456,8 +464,12 @@ impl CasCore {
             output.push_str(&format!("\nDescription:\n{}\n", task.description));
         }
 
+        match &current_qa {
+            Ok(impact) => output.push_str(&format!("\nCurrent predicted QA impact:\n{}", super::lifecycle::qa_impact::render(impact))),
+            Err(error) => output.push_str(&format!("\nCurrent predicted QA impact unavailable: {error:#}\n")),
+        }
         if !task.notes.is_empty() {
-            output.push_str(&format!("\nNotes:\n{}\n", task.notes));
+            output.push_str(&format!("\nNotes (saved history, including earlier prediction snapshots):\n{}\n", task.notes));
         }
 
         // cas-7d54: surface web-authored comments (read-only mirror, contract
@@ -805,7 +817,7 @@ impl CasCore {
         // Builtin verifier/epic flows consume Type and Demo from bare show.
         // Name full-only sections so callers cannot silently infer absence.
         let summary = format!(
-            "Type: {}\nDemo: {}\nOmitted from summary (full=true): Design, Deliverables (files/commit/merge), Dependencies/Epic/Subtasks, Outcome/Terminal reason/Superseded by, worktree.\n{}\n{}{}{}{}\nNotes:\n{}",
+            "Type: {}\nDemo: {}\n{qa_summary}Omitted from summary (full=true): Design, Deliverables (files/commit/merge), Dependencies/Epic/Subtasks, Outcome/Terminal reason/Superseded by, worktree.\n{}\n{}{}{}{}\nNotes:\n{}",
             task.task_type,
             clipping.excerpt(&task.demo_statement, 160),
             clipping.excerpt(&header, 400),
@@ -815,14 +827,21 @@ impl CasCore {
             batch_summary,
             task_show_notes(&task.notes, &task.id, &mut clipping)
         );
-        Ok(Self::success(render_task_read(
+        let mut answer = Self::success(render_task_read(
             &output,
             &summary,
             &task.id,
             "show",
             clipping.clipped,
             &req.read,
-        )?))
+        )?);
+        if req.read.full {
+            answer.structured_content = Some(match current_qa {
+                Ok(impact) => serde_json::json!({"qa_impact": impact}),
+                Err(error) => serde_json::json!({"qa_impact": null, "qa_impact_error": format!("{error:#}")}),
+            });
+        }
+        Ok(answer)
     }
 
     /// List blocked tasks

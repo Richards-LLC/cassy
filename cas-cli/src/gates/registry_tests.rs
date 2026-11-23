@@ -316,7 +316,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert!(facts::record_false_positive(&store, "G-999", None, "x").is_err());
 
     let counts = facts::summarize(&store, before).unwrap();
-    assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1 });
+    assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1, shadowed: 0 });
     assert_eq!(counts[UNCODED].refused, 1);
 
     // Replay the denied CLI command through its parser, handler and existing
@@ -330,7 +330,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let error = crate::cli::gates_cmd::execute(command, &cli, Some(dir.path())).unwrap_err();
     facts::observe_refusal(dir.path(), None, &format!("{error:#}"));
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-153"),
-        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, ..Default::default() }));
 
     // Exercise the real MCP transport/router with a non-task tool, so a
     // per-task observer cannot make the boundary test pass.
@@ -383,17 +383,17 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     // handler-drain signal, including its observer, rather than polling facts.
     work.wait_idle().await;
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-68"),
-        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
+        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0, shadowed: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
     client.cancel().await.unwrap();
     server.await.unwrap();
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-116"),
-        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, ..Default::default() }));
 
     // Invalid native input returns H-01 before the inner handle_hook route.
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok("{".into()), true).unwrap();
     assert!(facts::hook_denial(&output).is_some_and(|reason| codes_in(reason).contains(&"H-01")));
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-01"),
-        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, ..Default::default() }));
 
     // Drive an allowed stored publication override through the real outer
     // hook path; no Violet operation executes in this fixture.
@@ -407,7 +407,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok(input.clone()), false).unwrap();
     assert!(facts::hook_denial(&output).is_none());
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-07"),
-        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }));
+        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0, shadowed: 0 }));
     // Task notes are append-preserving; use a fresh epic with no approval.
     epic.id = "cas-publication-held".into();
     epic.notes.clear();
@@ -417,7 +417,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok(input.to_string()), false).unwrap();
     assert!(facts::hook_denial(&output).is_some());
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-07"),
-        Some(&facts::Counts { refused: 1, overridden: 1, false_positive: 0 }));
+        Some(&facts::Counts { refused: 1, overridden: 1, false_positive: 0, shadowed: 0 }));
 
     // The shared observer distinguishes a tagged accepted override from a
     // successful read quoting the same code.
@@ -431,7 +431,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         override_tag("G-108", override_tag("G-108", tag("G-114", "accepted"))))]));
     facts::observe_tool_result(dir.path(), None, &override_reply);
     assert_eq!(facts::summarize(&store, before).unwrap()["G-108"],
-        facts::Counts { refused: 0, overridden: 1, false_positive: 0 });
+        facts::Counts { refused: 0, overridden: 1, false_positive: 0, shadowed: 0 });
 
     // Replay CAS_SKIP_FAST_ROWS through the real hook. Capture only the
     // executable boundary, then dispatch its exact argv through the real CLI
@@ -450,12 +450,13 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         std::fs::set_permissions(&fake_cas, std::fs::Permissions::from_mode(0o755)).unwrap();
         let script = dir.path().join("fast-rows-pre-push.sh");
         std::fs::write(&script, include_str!("../../../scripts/fast-rows-pre-push.sh")).unwrap();
+        std::fs::write(dir.path().join("worker-run.sh"), include_str!("../../../scripts/worker-run.sh")).unwrap();
         for accepts_fact in [true, false] {
             if !accepts_fact {
                 std::fs::write(&fake_cas, "#!/bin/sh\nexit 1\n").unwrap();
             }
             let mut hook = Command::new("bash").arg(&script).current_dir(dir.path())
-                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv)
+                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv).env_remove("CAS_ROOT")
                 .env("CAS_SKIP_FAST_ROWS", "fixture hotfix")
                 .stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
             writeln!(hook.stdin.take().unwrap(), "refs/heads/factory/fixture {} refs/heads/factory/fixture {}", "1".repeat(40), "0".repeat(40)).unwrap();
@@ -515,8 +516,66 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         }
         let counts = facts::summarize(&store, before).unwrap();
         for code in ["C-07", "H-38"] {
-            assert_eq!(counts[code], facts::Counts { refused: 1, overridden: 1, false_positive: 0 });
+            assert_eq!(counts[code], facts::Counts { refused: 1, overridden: 1, false_positive: 0, shadowed: 0 });
         }
     }
     assert!(facts::summarize(&store, Utc::now() + chrono::Duration::seconds(5)).unwrap().is_empty());
+}
+
+/// Selection probe for capped worker checks (scripts/worker-proof-guards.py):
+/// writes 1 when the commits after CAS_GATE_AUDIT_SELECT_BASE touch anything
+/// the scan audits, else 0. Without both variables there is nothing to select.
+#[test]
+fn delivery_touches_audited_site() {
+    let (Ok(base), Ok(out)) = (std::env::var("CAS_GATE_AUDIT_SELECT_BASE"), std::env::var("CAS_GATE_AUDIT_SELECT_OUT")) else {
+        return;
+    };
+    let registry = REGISTRY.iter().map(|r| (r.code.into(), r.stage.into(), r.title.into(), r.source.into())).collect::<Vec<_>>();
+    // The guard names the checkout it checks; the compiled one is the default.
+    let root = std::env::var_os("CAS_GATE_AUDIT_SELECT_ROOT").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::test_paths::crate_root().join(".."));
+    let touched = gate_audit::touches_audited(&root, &base, &registry).unwrap_or_else(|error| {
+        eprintln!("gate-audit select: {error}; selecting the registry tests");
+        true
+    });
+    std::fs::write(out, if touched { "1" } else { "0" }).unwrap();
+}
+
+/// cas-19792: worker checks select this module from the scan's own inventory,
+/// so forms a line pattern misses are selected and test-only or ordinary
+/// error code is not.
+#[test]
+fn delivery_selection_follows_the_scan_inventory_cas_19792() {
+    let fixture = tempfile::tempdir().unwrap();
+    let repo = fixture.path();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").current_dir(repo)
+        .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]).args(args)
+        .status().unwrap().success(), "{args:?}");
+    let src = repo.join("cas-cli/src");
+    std::fs::create_dir_all(src.join("factory")).unwrap();
+    std::fs::write(src.join("guard.rs"), "pub fn guard() {\n    tag(\"G-01\", \"denied\");\n}\n").unwrap();
+    // An unchanged authority helper resolves across files, as in the full scan.
+    std::fs::write(src.join("role.rs"), "pub fn is_boss() -> bool { std::env::var(\"CAS_AGENT_ROLE\") == Ok(\"supervisor\".into()) }\n").unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    for (file, source, selected) in [
+        ("deny.rs", "pub fn deny() -> CallToolResult { CallToolResult::error(Vec::new()) }\n", true),
+        ("merge.rs", "pub fn merge(pushed_proof: bool) -> Result<(), String> { if pushed_proof { return Err(\"x\".into()); } Ok(()) }\n", true),
+        // Deleting a tag is read against the base revision.
+        ("guard.rs", "pub fn guard() {\n}\n", true),
+        ("parse.rs", "pub fn parse(s: &str) -> Result<u32, String> { if s.is_empty() { return Err(\"empty\".into()); } s.parse().map_err(|_| \"bad\".into()) }\n", false),
+        ("probe.rs", "pub fn ok() {}\n#[cfg(test)]\nmod probe { fn refuse(force: bool) -> Result<(), String> { if force { return Err(\"x\".into()); } Ok(()) } }\n", false),
+        ("flags.rs", "pub const ENABLED: bool = true;\npub struct Options { pub force: bool }\n", false),
+        ("factory/deny.rs", "pub fn deny() -> Result<(), String> { if is_boss() { return Err(\"x\".into()); } Ok(()) }\n", true),
+        ("declared.rs", "// gate-audit[force]: fixture\npub fn ok() {}\n", true),
+        // The scan excludes *_tests.rs, so its declarations cannot move the verdict.
+        ("probe_tests.rs", "// gate-audit[force]: fixture\npub fn ok() {}\n", false),
+    ] {
+        std::fs::write(src.join(file), source).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", file]);
+        assert_eq!(gate_audit::touches_audited(repo, "HEAD~1", &[]).unwrap(), selected, "{file}");
+        git(&["reset", "-q", "--hard", "HEAD~1"]);
+    }
 }

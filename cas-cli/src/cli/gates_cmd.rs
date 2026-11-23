@@ -139,19 +139,20 @@ fn report(cas_root: &Path, since: &str, json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     println!("Gate facts since {since} ({})", start.to_rfc3339());
-    println!("{:<8} {:>8} {:>10} {:>14}  title", "code", "refused", "overridden", "false positive");
+    println!("{:<8} {:>8} {:>10} {:>14} {:>9}  title", "code", "refused", "overridden", "false positive", "shadowed");
     let mut total = facts::Counts::default();
     for (code, n) in &counts {
         let title = crate::gates::find(code).map_or(
             if code == UNCODED { "refusal without a registered code" } else { "(not in this registry)" },
             |row| row.title,
         );
-        println!("{code:<8} {:>8} {:>10} {:>14}  {title}", n.refused, n.overridden, n.false_positive);
+        println!("{code:<8} {:>8} {:>10} {:>14} {:>9}  {title}", n.refused, n.overridden, n.false_positive, n.shadowed);
         total.refused += n.refused;
         total.overridden += n.overridden;
         total.false_positive += n.false_positive;
+        total.shadowed += n.shadowed;
     }
-    println!("{:<8} {:>8} {:>10} {:>14}  across {} codes", "total", total.refused, total.overridden, total.false_positive, counts.len());
+    println!("{:<8} {:>8} {:>10} {:>14} {:>9}  across {} codes", "total", total.refused, total.overridden, total.false_positive, total.shadowed, counts.len());
     Ok(())
 }
 

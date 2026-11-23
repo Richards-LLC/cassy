@@ -1997,6 +1997,60 @@ async fn no_code_qa_on_foreign_task_branch_closes_on_portable_proof_gh1177() {
     }
 }
 
+/// GH #2247: a supplemental read-only wait must resume without replacing the
+/// exact proof already submitted for the no-code delivery.
+#[tokio::test]
+async fn blocked_supplemental_work_resumes_without_invalidating_proof_gh2247() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    let id = "cas-bd3d";
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.priority = cas_types::Priority(0);
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PROOF.into());
+    f.put(&task);
+    claim(&f, id);
+    call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"Read-only delivery submitted for review",
+    })).await;
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
+        .unwrap().expect("close must submit an exact verification boundary");
+    let delivery = cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap();
+    let before = f.task(id);
+    call(&f.worker, serde_json::json!({"action":"update", "id":id, "status":"blocked"})).await;
+    assert_eq!(f.task(id).status, TaskStatus::Blocked);
+
+    // An operational resume must not reopen or change the reviewed scope.
+    for update in [
+        serde_json::json!({"action":"update", "id":id, "status":"open"}),
+        serde_json::json!({"action":"update", "id":id, "status":"blocked", "title":"New scope"}),
+    ] {
+        let error = f.worker.task(Parameters(serde_json::from_value(update).unwrap())).await.unwrap_err();
+        assert!(error.message.contains("[G-29]"), "{error:?}");
+        assert_eq!(f.task(id).status, TaskStatus::Blocked);
+    }
+    // After the supervisor approves supplemental work, start resumes it
+    // directly; findings stay in notes rather than replacing the proof.
+    call(&f.supervisor, serde_json::json!({
+        "action":"notes", "id":id, "note_type":"decision",
+        "notes":"Supplemental read-only fixture approved within the existing scope",
+    })).await;
+    call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    let resumed = f.task(id);
+    assert_eq!(resumed.status, TaskStatus::InProgress);
+    assert_eq!(resumed.external_ref, before.external_ref);
+    assert_eq!(resumed.title, before.title);
+    assert_eq!(serde_json::to_value(resumed.deliverables).unwrap(),
+        serde_json::to_value(before.deliverables).unwrap());
+    assert_eq!(serde_json::to_value(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()).unwrap(),
+        serde_json::to_value(Some(dispatch)).unwrap());
+    assert_eq!(serde_json::to_value(cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap()).unwrap(),
+        serde_json::to_value(delivery).unwrap());
+}
+
 #[tokio::test]
 async fn no_code_qa_evidence_on_foreign_task_branch_measures_no_code_paths_gh1177() {
     let mut env = TestEnvGuard::temp_home();
@@ -2383,6 +2437,108 @@ async fn retarget_empty_branch_rebind_then_start_gh1673() {
     }
 }
 
+/// GH #2157: reject a divergent base migration before the worker resets its
+/// old lane, then execute the supported recovery and park its scoped delivery.
+#[tokio::test]
+async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
+    let mut env = TestEnvGuard::temp_home();
+    for obstruction in ["open", "clean", "dirty", "foreign"] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let fork = git(repo, &["rev-parse", "main"]);
+        std::fs::write(repo.join("old.md"), "old integration history\n").unwrap();
+        git(repo, &["add", "old.md"]);
+        git(repo, &["commit", "-qm", "old integration"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-9122";
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        if obstruction == "open" {
+            call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "status":"open"})).await;
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+            assert!(f.task(id).deliverables.factory_branch_start.is_some());
+        }
+        if obstruction == "dirty" {
+            std::fs::write(checkout.join("local.txt"), "unsaved work\n").unwrap();
+        } else if obstruction == "foreign" {
+            std::fs::write(checkout.join("foreign.txt"), "another task\n").unwrap();
+            git(&checkout, &["add", "foreign.txt"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-dead): foreign work"]);
+        }
+        let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "develop", &fork]);
+        std::fs::write(repo.join("new.md"), "new integration history\n").unwrap();
+        git(repo, &["add", "new.md"]);
+        git(repo, &["commit", "-qm", "new integration"]);
+        git(repo, &["push", "-q", "origin", "develop"]);
+        let target_tip = git(repo, &["rev-parse", "HEAD"]);
+        let before = f.task(id);
+        let result = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"update", "id":id, "target_branch":"develop",
+            "reason":"Supervisor authorizes resetting the clean lane onto develop",
+        })).unwrap())).await;
+        let recovery = if obstruction == "foreign" {
+            // Nonempty retargets keep the old boundary and rely on explicit
+            // rebind attribution; a metadata edit must not erase that work.
+            result.unwrap();
+            assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
+            serde_json::json!({
+                "branch":format!("{lane}-retarget"), "base":"origin/develop",
+                "rebind":{"action":"rebind_branch", "id":id, "branch":format!("{lane}-retarget"),
+                    "reason":"Approve replacement without discarding foreign delivery"},
+            })
+        } else {
+            assert!(result.is_err(), "divergent target must not leave a stale start: {result:?}");
+            let error = result.unwrap_err();
+            assert_eq!(error.data.as_ref().unwrap()["rule_id"], "unparked_target_base_migration");
+            assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
+                serde_json::to_value(&before.deliverables).unwrap());
+            error.data.as_ref().unwrap()["recovery"].clone()
+        };
+        if let Some(start) = recovery.get("start") {
+            call(&f.worker, start.clone()).await;
+            assert_eq!(f.task(id).status, TaskStatus::InProgress);
+        }
+        if let Some(target_update) = recovery.get("target_update") {
+            call(&f.supervisor, target_update.clone()).await;
+        }
+        let replacement = recovery["branch"].as_str().unwrap();
+        git(&checkout, &["checkout", "-q", "-b", replacement, recovery["base"].as_str().unwrap()]);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(recovery["rebind"].clone()).unwrap())).await;
+        if matches!(obstruction, "dirty" | "foreign") {
+            assert!(rebound.is_err(), "{obstruction}: {rebound:?}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
+            if obstruction == "dirty" {
+                assert_eq!(std::fs::read(checkout.join("local.txt")).unwrap(), b"unsaved work\n");
+            }
+        } else {
+            rebound.unwrap();
+            call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            let start = f.task(id).deliverables.factory_branch_start.unwrap();
+            assert_eq!(start.base_sha, target_tip);
+            assert_eq!(start.work_target.target_branch, "develop");
+            std::fs::write(checkout.join("README.md"), "Scoped documentation delivery\n").unwrap();
+            git(&checkout, &["add", "README.md"]);
+            git(&checkout, &["commit", "-qm", "docs(cas-9122): scoped delivery"]);
+            git(&checkout, &["push", "-q", "origin", replacement]);
+            let closed = call(&f.worker, serde_json::json!({
+                "action":"close", "id":id, "reason":"Scoped documentation verified",
+            })).await;
+            assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{closed}");
+        }
+        assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "old lane must be retained");
+    }
+}
+
 /// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
@@ -2430,6 +2586,68 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
         let shown = call(&f.worker, serde_json::json!({"action":"show", "id":id, "full":full})).await;
         assert!(shown.contains(&format!("Recorded source branch: {LANE}")), "{shown}");
         assert!(shown.contains(&format!("Parked branch: {replacement}")), "{shown}");
+    }
+}
+
+/// cas-dae4 (GH #1579): a replacement spawned at the base after its
+/// predecessor retired must reach a bound lane without a supervisor override.
+/// An untouched predecessor lane (the handoff lives in the artifacts dir) binds
+/// at start. A predecessor lane with commits is kept (cas-57df never discards a
+/// pending delivery); the replacement starts, delivers, and the supervisor's
+/// rebind then succeeds instead of refusing for want of a delivery.
+#[tokio::test]
+async fn replacement_reaches_a_bound_lane_without_override_cas_dae4() {
+    for predecessor in ["untouched", "committed"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let id = "cas-1579";
+        let base = git(repo, &["rev-parse", "main"]);
+        git(repo, &["branch", "factory/old-worker", "main"]);
+        if predecessor == "committed" {
+            git(repo, &["checkout", "-q", "factory/old-worker"]);
+            std::fs::write(repo.join("HANDOFF.md"), "context checkpoint\n").unwrap();
+            git(repo, &["add", "HANDOFF.md"]);
+            git(repo, &["commit", "-q", "-m", "chore(cas-1579): handoff"]);
+            git(repo, &["checkout", "-q", "main"]);
+        }
+        let old_tip = git(repo, &["rev-parse", "factory/old-worker"]);
+        git(repo, &["push", "-q", "origin", "factory/old-worker"]);
+        let replacement = format!("{LANE}-{id}");
+        git(&worker_path, &["checkout", "-q", "-b", &replacement, "main"]);
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: "old-worker".into(),
+            branch: "factory/old-worker".into(),
+            base_sha: base,
+        });
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{predecessor}: {started}");
+        let bound = |f: &Fixture| f.task(id).deliverables.factory_branch_start.map(|start| start.branch);
+        if predecessor == "untouched" {
+            assert_eq!(bound(&f).as_deref(), Some(replacement.as_str()), "{started}");
+        } else {
+            assert_eq!(bound(&f).as_deref(), Some("factory/old-worker"), "{started}");
+            std::fs::write(worker_path.join("fix.rs"), "pub fn fix() {}\n").unwrap();
+            git(&worker_path, &["add", "fix.rs"]);
+            git(&worker_path, &["commit", "-q", "-m", "fix(cas-1579): replacement delivery"]);
+            git(&worker_path, &["push", "-q", "origin", &replacement]);
+            let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"rebind_branch", "id":id, "branch":replacement,
+                "reason":"Bind the replacement after its first delivery",
+            })).unwrap())).await;
+            assert!(rebound.is_ok(), "{rebound:?}");
+            assert_eq!(bound(&f).as_deref(), Some(replacement.as_str()));
+        }
+        assert_eq!(git(repo, &["rev-parse", "factory/old-worker"]), old_tip, "{predecessor}: the old lane is kept");
     }
 }
 
@@ -3127,13 +3345,25 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
             tokio::time::pause();
             tokio::time::advance(std::time::Duration::from_secs(56)).await;
-            let error = dispatch.await.unwrap().unwrap_err();
+            // The retained close now returns a normal structured disposition,
+            // rather than the old timeout error (cas-23c1).
+            let answer = dispatch.await.unwrap().unwrap();
             tokio::time::resume();
+            assert_eq!(answer.is_error, Some(false));
+            let data = answer.structured_content.as_ref().unwrap();
+            assert_eq!(data["mutation_outcome"], "COMMITTED");
+            assert_eq!(data["task_id"], first.id);
+            let continuation = data["continuation_id"].as_str().unwrap();
+            uuid::Uuid::parse_str(continuation).unwrap();
             let _ = resume_tx.send(());
             done_rx.await.unwrap();
-            assert_eq!(error.data.as_ref().unwrap()["mutation_outcome"], "COMMITTED", "{error}");
+            // Queue assertions below must observe the retained handler and its
+            // durable outcome writer, not just its early response.
+            closer.tool_work.wait_idle().await;
+            let outcome = format!("CLOSE_OUTCOME: continuation={continuation}");
+            assert_eq!(f.task(&first.id).notes.matches(&outcome).count(), 1);
 
-            error.message.to_string()
+            format!("{answer:?}")
         };
         assert_eq!(f.task(&first.id).status,
             if park { TaskStatus::AwaitingMerge } else { TaskStatus::Closed }, "{response}");
@@ -3323,6 +3553,174 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
     }
 }
 
+/// cas-22c6 (GH #2286): strong-cheetah-31 at 12:06 PM ET. A detached proof run
+/// was reading the worker's checkout when its park advanced the queue, and the
+/// auto-start switched that checkout to the next task's branch mid-run. The
+/// auto-start and a direct start both wait, with a code, until the run ends,
+/// and then the queued start proceeds.
+#[tokio::test]
+async fn queued_start_waits_for_a_detached_run_in_the_checkout_cas_22c6() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let config = f.cas_dir().join("config.toml");
+    let mut body = std::fs::read_to_string(&config).unwrap();
+    body.push_str("[orchestration.auto_prompt]\nenabled=false\n");
+    std::fs::write(&config, body).unwrap();
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("queue-session".into());
+        agent.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        if agent.role == AgentRole::Worker {
+            agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        }
+        agents.update(&agent).unwrap();
+    }
+    git(&checkout, &["reset", "--hard", "main"]);
+    std::fs::write(checkout.join("feature.txt"), "task A\n").unwrap();
+    // The real producer, committed so the checkout itself stays clean.
+    let sources = crate::test_paths::crate_root().join("../scripts");
+    std::fs::create_dir_all(checkout.join("scripts")).unwrap();
+    for script in ["journey-eval.sh", "worker-run.sh"] {
+        std::fs::copy(sources.join(script), checkout.join("scripts").join(script)).unwrap();
+    }
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "-qm", "feat(cas-22c6a): task A"]);
+    git(&checkout, &["push", "-q", "--force", "origin", LANE]);
+    let delivered = git(&checkout, &["rev-parse", "HEAD"]);
+    let first = assigned("cas-22c6a", TaskType::Task, "main");
+    f.put(&first);
+    claim(&f, &first.id);
+    // Preassigned to the worker, as an auto-start that got as far as its
+    // assignment leaves it.
+    let mut next = assigned("cas-22c6b", TaskType::Task, "main");
+    next.status = TaskStatus::Open;
+    f.put(&next);
+    let queued = call(&f.supervisor, serde_json::json!({
+        "action":"update", "id":next.id, "assignee":WORKER, "task_ids":[next.id],
+    })).await;
+    assert!(!queued.contains("REJECTED"), "{queued}");
+    // The journey run, held at its plan step while it reads the worker's checkout.
+    let journey = JourneyEval::start(&f.cas_dir(), &checkout);
+    let parked = call(&f.worker, serde_json::json!({"action":"close", "id":first.id, "reason":"Delivered"})).await;
+    assert_eq!(f.task(&first.id).status, TaskStatus::AwaitingMerge, "{parked}");
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(&next.id).status, TaskStatus::Open, "started under a running proof");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "the checkout moved mid-run");
+    let queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir())
+        .unwrap().get("queue-session", WORKER).unwrap();
+    assert!(queue.notes.iter().any(|note| crate::gates::codes_in(note).contains(&"G-165")), "{:?}", queue.notes);
+    // A direct start of the deferred successor takes the same admission.
+    let direct = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":next.id,
+    })).unwrap())).await.unwrap_err();
+    assert!(crate::gates::codes_in(&direct.message).contains(&"G-165"), "{direct:?}");
+    assert_eq!(f.task(&next.id).status, TaskStatus::Open);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), delivered, "a direct start moved the checkout mid-run");
+    journey.finish();
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(&next.id).status, TaskStatus::InProgress, "the start proceeds once the run ends");
+}
+
+const JOURNEY_CLI_ARGS: &str = "CAS_22C6_CLI_ARGS";
+
+/// `scripts/journey-eval.sh` run from a worker checkout, with `cas` served by
+/// this test binary's real CLI and its plan step held until [`Self::finish`].
+struct JourneyEval {
+    child: std::process::Child,
+    release: PathBuf,
+}
+
+impl JourneyEval {
+    fn start(cas_dir: &Path, checkout: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().unwrap().keep();
+        let shims = work.join("bin");
+        std::fs::create_dir_all(&shims).unwrap();
+        let python = String::from_utf8(std::process::Command::new("sh").args(["-c", "command -v python3"])
+            .output().unwrap().stdout).unwrap().trim().to_owned();
+        // Everything but the plan (held) and the browser tooling is real Python.
+        // The held plan prints journey-receipt.py's full plan contract for the
+        // checkout's real HEAD: an affected scope with no journeys selected.
+        let shim_python = format!(r#"#!/bin/sh
+case "$1" in
+  */journey-receipt.py)
+    if [ "$2" = plan ]; then
+      : > "$J_WORK/started"
+      while [ ! -e "$J_WORK/release" ]; do sleep 0.05; done
+      head="$(git -C "$4" rev-parse HEAD)"
+      printf '{{"schema":1,"repo":"%s","artifacts":"%s","task_id":null,"base_sha":"%s","head_sha":"%s","scope":"affected","selection_ids":[],"journeys":[],"workers":1,"grep":null}}\n' \
+        "$4" "$J_WORK/artifacts" "$head" "$head"
+    fi
+    exit 0;;
+  */journey_dist.py) exit 0;;
+  -) case "$2" in */package.json) echo 'playwright fixture'; exit 0;; esac;;
+esac
+exec {python} "$@"
+"#);
+        // Only the run id line; libtest's own banner is not CLI output.
+        let shim_cas = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$J_WORK/args.$$\"\n\
+             {JOURNEY_CLI_ARGS}=\"$J_WORK/args.$$\" \"$J_TEST_EXE\" --exact \"$J_TEST_NAME\" --nocapture --test-threads=1 \
+             | grep -E '^[0-9a-f]{{32}}$' || :\n"
+        );
+        for (name, body) in [("python3", shim_python), ("cas", shim_cas)] {
+            std::fs::write(shims.join(name), body).unwrap();
+            std::fs::set_permissions(shims.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let name = module_path!().split_once("::").unwrap().1.to_owned() + "::journey_eval_cas_cli_child_cas_22c6";
+        let child = std::process::Command::new("bash")
+            .arg(checkout.join("scripts/journey-eval.sh"))
+            .arg(work.join("artifacts"))
+            .current_dir(checkout)
+            .env("PATH", format!("{}:{}", shims.display(), std::env::var("PATH").unwrap_or_default()))
+            .env("CAS_ROOT", cas_dir)
+            .env("CAS_BIN", shims.join("cas"))
+            .env("J_WORK", &work)
+            .env("J_TEST_EXE", std::env::current_exe().unwrap())
+            .env("J_TEST_NAME", name)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !work.join("started").exists() {
+            assert!(std::time::Instant::now() < deadline, "journey-eval never reached its plan step");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Self { child, release: work.join("release") }
+    }
+
+    fn finish(mut self) {
+        std::fs::write(&self.release, "").unwrap();
+        assert!(self.child.wait().unwrap().success(), "journey-eval failed");
+    }
+}
+
+impl Drop for JourneyEval {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.release, "");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The `cas` CLI behind [`JourneyEval`]'s shim; idle in an ordinary run.
+#[test]
+fn journey_eval_cas_cli_child_cas_22c6() {
+    let Some(args) = std::env::var_os(JOURNEY_CLI_ARGS) else { return };
+    use clap::Parser;
+    let args = std::fs::read_to_string(args).unwrap();
+    let cli = crate::cli::Cli::try_parse_from(std::iter::once("cas").chain(args.lines())).unwrap();
+    let Some(crate::cli::Commands::Factory(command)) = &cli.command else { panic!("factory command") };
+    let root = std::env::var_os("CAS_ROOT").map(PathBuf::from);
+    let result = crate::cli::factory::execute(command, &cli, root.as_deref());
+    if let Err(error) = &result {
+        eprintln!("{error:#}");
+    }
+    std::process::exit(i32::from(result.is_err()));
+}
+
 fn queue_control_fixture(env: &mut TestEnvGuard) -> Fixture {
     let f = fixture(env, "main");
     env.set("CAS_FACTORY_SESSION", "queue-session");
@@ -3356,6 +3754,82 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
     let result = f.supervisor.factory(Parameters(request)).await.unwrap();
     result.content.iter().filter_map(|content| match content { rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None })
         .collect::<Vec<_>>().join("\n")
+}
+
+/// GH #2233: a terminal task can arrive before its lease cleanup (for
+/// example through peer sync). Both direct starts and queue repair must heal
+/// that stale ownership, while retaining the single unfinished task fence.
+#[tokio::test]
+async fn cancelled_work_does_not_block_next_start_gh2233() {
+    let mut env = TestEnvGuard::temp_home();
+    for daemon in [false, true] {
+        for state in ["cancelled", "cancelled-stale-lease", "closed-stale-lease", "assigned", "leased"] {
+            let f = queue_control_fixture(&mut env);
+            let previous = "cas-8488-current";
+            let next = "cas-8488-one";
+            let mut successor = f.task(next);
+            successor.execution_note = Some("no-code".into());
+            successor.external_ref = Some(PROOF.into());
+            f.put(&successor);
+            queue_control(&f, Some(vec![next])).await;
+            let agents = open_agent_store(&f.cas_dir()).unwrap();
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            match state {
+                "cancelled" | "cancelled-stale-lease" => {
+                    call(&f.supervisor, serde_json::json!({
+                        "action":"cancel", "id":previous, "reason":"Superseded by peer delivery",
+                    })).await;
+                    assert_eq!(f.task(previous).status, TaskStatus::Cancelled);
+                }
+                "closed-stale-lease" => {
+                    // Terminal projection arriving before lease cleanup.
+                    let mut task = f.task(previous);
+                    task.status = TaskStatus::Closed;
+                    f.put(&task);
+                }
+                "assigned" => { agents.release_lease(previous, "nocode-worker-session").unwrap(); }
+                "leased" => {
+                    let mut task = f.task(previous);
+                    task.status = TaskStatus::Open;
+                    f.put(&task);
+                }
+                _ => unreachable!(),
+            }
+            if state == "cancelled-stale-lease" {
+                claim(&f, previous);
+            }
+            env.set("CAS_AGENT_ROLE", "worker");
+            let unfinished = matches!(state, "assigned" | "leased");
+            if daemon {
+                crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+            } else {
+                let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+                    "action":"start", "id":next,
+                })).unwrap())).await;
+                if unfinished {
+                    let error = result.unwrap_err();
+                    assert!(error.message.contains("G-08"), "{state}: {error}");
+                    // Execute the suggested hold action through the real
+                    // handler; terminal work must never need this remedy.
+                    call(&f.worker, serde_json::json!({
+                        "action":"update", "id":previous, "status":"blocked",
+                    })).await;
+                    assert_eq!(f.task(previous).status, TaskStatus::Blocked);
+                } else {
+                    result.unwrap_or_else(|error| panic!("{state}: {error}"));
+                }
+            }
+            assert_eq!(f.task(next).status,
+                if unfinished { TaskStatus::Open } else { TaskStatus::InProgress },
+                "daemon={daemon}, state={state}");
+            if !unfinished {
+                assert!(agents.list_active_leases().unwrap().iter()
+                    .filter(|lease| lease.agent_id == "nocode-worker-session")
+                    .all(|lease| lease.task_id == next));
+                assert_eq!(agents.get("nocode-worker-session").unwrap().active_tasks, 1);
+            }
+        }
+    }
 }
 
 /// GH #1760: resuming blocked, untouched work through the queue binds its
@@ -4077,4 +4551,77 @@ async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
             .filter(|lease| lease.agent_id == "nocode-worker-session")
             .all(|lease| lease.task_id == id));
     }
+}
+
+/// GH #1695: a supervisor reopens an already-landed task for revalidation.
+/// The new cycle delivers nothing, so no_delivery is the honest close, and the
+/// handed-off verification must not hold the worker's next queued start.
+#[tokio::test(flavor = "multi_thread")]
+async fn revalidated_landed_task_closes_without_delivery_and_frees_queue_gh1695() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for agent_id in ["nocode-worker-session", "nocode-supervisor-session"] {
+        let mut agent = agents.get(agent_id).unwrap();
+        agent.factory_session = Some("queue-session".into());
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+    }
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+
+    // The first cycle's delivery landed on the target and the task closed.
+    let id = "cas-1695a";
+    let lane = format!("{LANE}-{id}");
+    git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+    std::fs::write(checkout.join("landed.rs"), "pub fn landed() {}\n").unwrap();
+    git(&checkout, &["add", "landed.rs"]);
+    git(&checkout, &["commit", "-q", "-m", "fix(cas-1695a): landed fix"]);
+    let landed = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let mut task = assigned(id, TaskType::Bug, "main");
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    task.deliverables.factory_branch_anchor = Some(landed.clone());
+    task.deliverables.parked_branch = Some(lane.clone());
+    task.deliverables.green_merge_commit = Some(landed.clone());
+    f.put(&task);
+    let mut next = assigned("cas-1695b", TaskType::Task, "main");
+    next.status = TaskStatus::Open;
+    next.assignee = None;
+    next.execution_note = Some("no-code".into());
+    next.external_ref = Some(PROOF.into());
+    f.put(&next);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let reopened = call(&f.supervisor, serde_json::json!({
+        "action":"reopen", "id":id, "reason":"Revalidate on the current tree",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Open, "{reopened}");
+    env.set("CAS_AGENT_ROLE", "worker");
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+    queue_control(&f, Some(vec![&next.id])).await;
+    let close = serde_json::json!({
+        "action":"close", "id":id, "no_delivery":true,
+        "reason":"Revalidated: the landed fix passes on the current tree",
+    });
+
+    // Until the retained tip is on the target, it is still a delivery.
+    let refused = call(&f.worker, close.clone()).await;
+    assert!(refused.contains("G-47"), "{refused}");
+    git(repo, &["merge", "-q", "--ff-only", &lane]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let closed = call(&f.worker, close).await;
+    assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some(), "{closed}");
+    let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":next.id,
+    })).unwrap())).await;
+    assert!(result.is_ok(), "{closed}\n---\n{result:?}");
+    assert_eq!(f.task(&next.id).status, TaskStatus::InProgress);
 }

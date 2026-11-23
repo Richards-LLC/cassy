@@ -389,6 +389,16 @@ Paths, shell commands and arbitrary filesystem reads are not accepted.
 
 ## Coordination messages and reminders
 
+Worker `target=supervisor` routing and its diagnostics use the same registry
+snapshot and heartbeat liveness policy. A registered but unavailable owner
+does not fall through to another supervisor. Multiple live pane names are
+ambiguous; same-name restart rows retain successor ordering. Session metadata
+cannot select a supervisor stamped to another factory session.
+An unresolved message returns `rule_id=worker_supervisor_unresolved`, a
+`reason` (`owner_unavailable`, `ambiguous_owner`, `no_session_owner` or
+`no_factory_session`) and supervisor rows with status, session, heartbeat and
+`live`. Restore the owner or repair the binding before retrying.
+
 An authenticated worker sends `coordination action=message target=supervisor
 kind=respawn task_id=<task> summary="Context checkpoint" message="<return contract>"`
 after committing/pushing and writing `HANDOFF.md` in its task artifact directory.
@@ -849,6 +859,28 @@ keep their existing MCP behavior under either value; hooks, account selection,
 Teams and worker credential protections still apply. Invalid values are refused
 by both config commands and TOML loading.
 
+`factory.claude.worker_sandbox` (default `shadow`) controls macOS Claude workers'
+OS sandbox (cas-3751a):
+
+- **`shadow`:** the worker settings carry a generated `sandbox` block, which
+  `cas-mux` completes at launch with the checkout's exact git paths. While the
+  sandbox enforces, the stage-A text guards record would-deny facts for Bash
+  instead of refusing it (`cas gates report`, column `shadowed`).
+- **Grants (cas-f157):** besides the checkout, git paths, the capped runner's
+  `CAS_ROOT` directories and the operator's effective write roots, the profile
+  grants only the worker's current tasks' artifact directories
+  (`<artifacts_root>/<project-key>/<task-id>`) and the checkout's own scratch
+  (its private temporary directory and a relocated Cargo target). The settings
+  are regenerated at every spawn and recycle. Starting a task the running
+  profile does not grant queues one recycle of that worker, and a queue
+  boundary restarts a sandboxed worker before its successor starts.
+- **`off`:** workers launch without the sandbox, and those guards enforce.
+
+Linux workers and supervisors are not sandboxed. The corpus test
+`worker_sandbox::tests::bypass_corpus_is_blocked_through_the_generated_profile`
+runs only when a named capped run passes `CAS_SRT_BIN=<sandbox-runtime srt>`;
+otherwise it skips with a reason.
+
 Use `cas config set factory.claude.remote_control true` to opt in, and
 `cas config set factory.claude.fallback_model sonnet` to choose a fallback.
 An empty fallback value clears it. Explicitly requested unsupported flags
@@ -1112,6 +1144,13 @@ compiled Cassy repository (`Richards-LLC/cassy`) when that component is absent.
 For example, `issues.repo = "example/downstream"` alone still files Cassy bugs
 in `Richards-LLC/cassy`, agreeing with `cas config get issues.components.cassy`.
 The checkout's inferred origin is never a Cassy filing target.
+
+Matching an open task also requires component ownership. A matching GitHub
+remote work target qualifies; otherwise the task must belong to the current
+project and that project must be Cassy's source or explicitly use the selected
+component tracker. A different explicit work target is excluded. A product
+task containing the refusal cannot suppress the component report. Matching
+component issues or tasks still receive the new evidence instead of duplicates.
 
 Legacy opt-out: a raw, explicitly blank or whitespace-only
 `[issues.components] cassy` value in config.toml permits a nonblank stored
@@ -1594,6 +1633,13 @@ After approving a worker's fresh delivery branch, a live registered supervisor
 can run `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"`.
 Use the caller harness's normal tool prefix. The task must be unparked and keep
 its assignee and declared target; use `request_changes` first for a parked delivery.
+After an approved `proof_scope_fix` retarget, retained branch/anchor history does
+not prevent recovery while Blocked. The worker can prepare a clean
+`factory/<worker>-<task>-r2` branch at the corrected target with its delivery;
+the supervisor rebinds it, then the worker resumes, pushes the fresh branch and
+parks normally. Blocked commit capture before a successful first park is also
+recoverable. Pending review, merge authority and an unretired prior park still
+refuse rebinding; neither history nor active proof may be overwritten.
 The assigned worker must have the existing replacement branch checked out cleanly
 in its registered repository. Canonical worker branches, the worker's per-task
 branch, and that per-task branch with a recovery suffix are supported. Cassy
@@ -2174,6 +2220,17 @@ behavior.
 
 ### Ordered worker task queues
 
+`factory action=spawn_workers task_id=<id> branch=origin/develop` checks the
+requested branch against the task's effective persisted target before queueing.
+For `task_ids`, it checks the first task, which controls the initial spawn base.
+`develop`, `origin/develop`, `refs/heads/develop` and
+`refs/remotes/origin/develop` name the same target. A disagreement returns
+`spawn_target_mismatch` with the task, requested branch and effective target;
+it changes neither the task nor the spawn queue. Persist the intended correction
+with `task action=update id=<id> target_branch=develop`, then retry. A
+`spawn_brief` supplies instructions but cannot retarget a task. Omitting
+`branch` keeps target selection under the task's existing authority.
+
 Queue one worker's work with `factory action=spawn_workers count=1 task_ids=["cas-a","cas-b"]`.
 Use either `task_id` or `task_ids`; a batch-level task list belongs to one worker.
 Ordered spawns default to `isolate=true`; explicit `isolate=false` is refused.
@@ -2249,8 +2306,14 @@ blocking pool. Once publication or the checked Closed/AwaitingMerge disposition
 commits, the response adds no post-commit grace: it names that outcome while
 close follow-up, dispatch and notes finish in the background. A committed park
 is still awaiting merge. Gate/audit writes alone do not certify a close, and a
-close still evaluating gates reports `IN_PROGRESS` at its deadline. The final
-continuation outcome is recorded in task notes. Receipts and tracing include
+close still evaluating gates reports `IN_PROGRESS` at its deadline. Retained
+closes return a normal, non-error MCP result with structured `mutation_outcome`,
+`continuation_id`, `task_id`, `elapsed_ms`, `budget_ms` and `timings`. Only a
+checked Closed/AwaitingMerge disposition reports `COMMITTED`; intermediate
+writes remain `IN_PROGRESS`. Read `task action=show id=<task_id>` instead of
+retrying the close. The final `CLOSE_OUTCOME` task note carries the same
+continuation identity, including a late refusal or successful park.
+Receipts and tracing include
 inclusive merge-tree, push, close-gate, dispatch and note timings; `+` means a
 phase is still running and zero means no measured work in that phase yet.
 
@@ -2893,6 +2956,10 @@ retain one-pass crate coverage. Vitest, Jest and Playwright use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`;
 Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
 of the changed tests alone, which `node:test` cannot retry.
+A spec that only a sibling config lists, such as `jest-integration.config.js` or
+`playwright.hermetic.config.ts`, runs under that config. The runner's own listing
+decides ownership, and the prescribed command names it with `--config`; a
+caller's `--config` always wins (GH #2058, #2195).
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
 When discovery cannot classify an input, the capped runner widens to the whole
@@ -2912,8 +2979,10 @@ If a broader Rust selection fails, prior valid stability can survive for owned
 tests with a positive passing result in every attempted run. Failed or unrun
 tests lose that evidence, and changed inputs still require fresh proof. This
 restores stability only; the failed selection receives no passing crate receipt.
-Stability uses the same receipt carry-forward as crate proof: documentation or
-changelog commits preserve it when no test/build inputs change. Target merges
+Stability and widened receipts use the same receipt carry-forward as crate
+proof: documentation, changelog or `docs/qa/bug-families/` fragment commits
+preserve them when no test/build inputs change. A bug-family YAML counts as an
+input only when a Rust source names it, not by its extension. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
 even when its name is unchanged or its product change is already on the target.
 For widened Playwright proof, a failing journey is replayed at the merge base
@@ -3364,13 +3433,19 @@ Slim lanes omit broad Rust tests for factory pushes, but run the train's
 impact selection (`scripts/ci-test-impact.py`) for the delivery's range on hosted
 runners (cas-2e1b). Selection compares the pushed head with its merge-base with
 the live target, as resolved by the classifier. Content merged in from the
-train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
-is used only for failure attribution, falling back to the inferred base when
-missing or not an ancestor. The plan logs both bases separately.
+train is excluded. Failure attribution uses that same merge-base: the newest
+target commit already contained in the delivery, including train merges after
+task start. The recorded start base in `refs/cas/delivery-base/<branch>` is a
+fallback only when the target cannot be resolved and the record is an ancestor
+of HEAD. The plan logs selection and attribution bases separately.
 `Scoped Validation — impact own tests` builds the selection and runs the changed
 modules' unit tests, edited integration suites, directly changed crates and
 explicit file-reading contracts first; up to three `impact ring` shards run the
-rest from its archive after own tests pass. Agent/config roots `.claude/`,
+rest from its archive after own tests pass. The plan's `own` expression is lane
+CI's (regex and `or` included); the plan also logs `Worker proof`, one admitted
+named-filter `worker-check` command per package and harness covering each own
+part, and `lane CI only` for parts no named filter can express, such as a whole
+crate or integration binary (GH #2140). Agent/config roots `.claude/`,
 `.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
 workflow inputs use their existing script/CI contract tier plus Rust test
 functions with matching file literals, including local helper/constant reads.
@@ -5143,6 +5218,19 @@ slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
 
+## Divergent unparked task migrations
+
+An ordinary task target edit that excludes an unparked task's recorded start
+base refuses before saving with `rule_id=unparked_target_base_migration` when
+its known local/origin source refs remain at that base. Nonempty or rewritten
+deliveries keep their recorded boundary and existing explicit rebind checks.
+The structured `recovery` names the explicit supervisor `proof_scope_fix`
+request, replacement branch/base and `rebind_branch` request. For an Open task,
+the assigned worker first executes `recovery.start` on the unchanged old lane
+so the supervisor correction applies to an active delivery cycle. Preserve the
+old lane; create the clean replacement from that base, approve its binding,
+then start again. Dirty checkouts and foreign work still refuse rebinding.
+
 ## Bounded MCP task reads
 
 `task show` (including `get`), `task notes` reads and `task start` default to
@@ -5156,6 +5244,8 @@ starts a byte page of that same text; follow its `next=` cursor until `end`.
 The page header is separate from the body, and concatenated bodies reproduce
 the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
 boundaries. Note summary cursors address the full `task notes` response.
+`task list` does not support offset pagination: a supplied `offset`, including
+zero, returns `INVALID_PARAMS`. Omit it and use filters or a larger `limit`.
 For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
 context. Start's default still performs the same claim and epic lifecycle work.
 Complete start advisories, including worktree directory instructions, are saved
@@ -5171,6 +5261,15 @@ Default show retains Type and Demo for builtin gates, and names full-only sectio
 (including dependencies, design, deliverables and terminal outcomes) explicitly.
 
 ## Durable task artifacts
+
+Park publication stores its complete per-file manifest, skipped uploads and
+excluded trees in `evidence-sync-report.json` under the task artifacts directory.
+Synced task notes contain counts, at most twenty sampled paths and the report
+path, under sixteen KiB per summary. Large manifests use a verified artifact
+reference; reviewers fetch the complete manifest before restoring its files.
+Small and legacy inline `EVIDENCE_SYNC` notes retain their existing semantics.
+Automatic scans prune `node_modules`, `.git`, `vendor` and `.venv` trees and
+ignore generated evidence reports. Explicit close citations remain required.
 
 `factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).
 New task evidence lives in `<base>/<project-key>/<task-id>/`; assignment briefs

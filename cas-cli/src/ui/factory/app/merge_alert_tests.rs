@@ -416,8 +416,8 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
 /// is emitted, so nothing in this fixture suppresses it. Then cas-9efb-test
 /// stays parked as the PREVIOUS task and the worker is assigned a second,
 /// distinct task with no delivery, no ready declaration and no pushed work. The
-/// consumer must target that task, with no wait suppression, and emit no
-/// delivery-tagged relay for it.
+/// consumer must keep the relay on the parked delivery (GH #1731 §3) and emit
+/// nothing that names or claims a delivery for the new task.
 #[test]
 fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() {
     let mut f = Fixture::new();
@@ -459,8 +459,12 @@ fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() 
         DirectorEvent::WorkerIdle { active_task: Some(active), .. } => Some(active.task_id.as_str()),
         _ => None,
     }).collect();
-    assert_eq!(targets, ["cas-9efb-next"], "the consumer must reach, and target, the new task: {events:?}");
-    assert!(prompts.iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-next")),
+    // GH #1731 §3: the relay was detected on the parked delivery. It stays
+    // about that delivery and never names the new assignment, whose idle
+    // basis would be the previous task's task_complete.
+    assert_eq!(targets, ["cas-9efb-test"], "the stale relay must stay about its parked delivery: {events:?}");
+    assert!(prompts.iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-next")
+            && !prompt.text.contains("cas-9efb-next")),
         "a task with nothing delivered has no delivery to report");
 }
 
@@ -753,6 +757,58 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
         1,
         "pending must not consume the settled relay"
     );
+}
+
+/// cas-f767 (GH #2132): a capped check refused for memory pressure records a
+/// capacity wait with a 120 s retry and its detached job exits 1. Each exit
+/// re-armed the idle relay, paging the supervisor five times in fifteen
+/// minutes for one worker. Replays that episode on controlled timestamps.
+#[test]
+fn cas_f767_recorded_capacity_wait_keeps_the_idle_relay_quiet() {
+    use cas_store::SupervisorQueueStore;
+    let mut f = Fixture::new();
+    f.in_progress();
+    f.ci(Some("failure"));
+    let cas_dir = f.app.cas_dir.clone();
+    let repo = f.repo.path().to_path_buf();
+    let log = repo.join("detached.log");
+    std::fs::write(&log, "").unwrap();
+    let exit = |code: i32, at: chrono::DateTime<Utc>| {
+        let run = crate::factory_worker_runs::register(&cas_dir, &repo, &log, at).unwrap().expect("worker run");
+        crate::factory_worker_runs::finish(&cas_dir, &run, code, at).unwrap();
+    };
+    // A long build episode outlives the fixture's 10-minute claim; the
+    // worker's heartbeat keeps one lease epoch alive throughout.
+    crate::store::open_agent_store(&cas_dir).unwrap().renew_lease("cas-9efb-test", "merge-w", 7200).unwrap();
+    // The director clock walks the episode forward from wall time; each
+    // retry window stays current for the capacity read.
+    let since = Utc::now();
+    // Every 2 minutes for 22 minutes: refusal, then the job's EXIT 1.
+    for retry in 0..=11 {
+        let at = since + chrono::Duration::minutes(2 * retry);
+        crate::factory_capacity_wait::record_refusal(&cas_dir, &repo,
+            "memory PSI some avg10 19.43% exceeds 10.00%", at).unwrap().expect("wait recorded");
+        exit(1, at);
+        f.app.merge_alert_retries.now = Some(at);
+        assert!(f.relay().is_empty(), "denied exit {retry} is a scheduled capacity retry, not an idle worker");
+    }
+    // The long wait still escalates once, through capacity reconciliation.
+    let mut supervisor = cas_types::Agent::new_with_role("merge-sup".into(), "merge-sup".into(),
+        cas_types::AgentRole::Supervisor);
+    supervisor.factory_session = crate::store::open_agent_store(&cas_dir).unwrap().get("merge-w").unwrap().factory_session;
+    crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+    let last = since + chrono::Duration::minutes(22);
+    assert_eq!(crate::factory_capacity_wait::reconcile(&cas_dir, None, last).unwrap(), 1, "20-minute wait escalates");
+    assert_eq!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().pending_count("merge-sup").unwrap(), 1);
+    assert!(f.relay().is_empty(), "escalation is the capacity notice, not an extra idle page");
+    // Once admitted, a real test failure relays.
+    crate::factory_capacity_wait::admitted(&cas_dir, &repo).unwrap();
+    let failed_at = last + chrono::Duration::minutes(1);
+    exit(101, failed_at);
+    f.app.merge_alert_retries.now = Some(failed_at);
+    let failed = f.relay();
+    assert_eq!(failed.len(), 1, "an admitted failing run still relays");
+    assert!(failed[0].text.contains("EXIT 101"), "the relay names the failed run: {}", failed[0].text);
 }
 
 /// A worker waiting on its own pushed CI is not stalled, even if repeated
@@ -1211,6 +1267,62 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     assert!(no_code.relay().is_empty(), "declared no-code work has no missing-CI decision");
 }
 
+/// cas-2421 (GH #2051): replay of gabber-studio tip 498b2dae at its alert
+/// time. Every test job had been skipped beside a green Vercel preview, so CI
+/// was unknown. The decision must name the query it read and what it saw.
+#[test]
+fn cas_2421_unknown_ci_decision_names_its_query_and_observed_checks() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    std::fs::write(f.app.cas_dir.join("ci.json"), r#"{"check_runs":[
+        {"id":3,"name":"Vercel Preview Comments","status":"completed","conclusion":"success","app":{"slug":"vercel"}},
+        {"id":2,"name":"Backend Test","status":"completed","conclusion":"skipped","app":{"slug":"github-actions"}},
+        {"id":1,"name":"Frontend Vitest","status":"completed","conclusion":"skipped","app":{"slug":"github-actions"}}]}"#).unwrap();
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    let prompts = f.relay();
+    assert_eq!(prompts.len(), 1);
+    let tip = prompts[0].merge_alert.as_ref().unwrap().factory_tip.clone();
+    for source in [format!("repos/acme/cas/commits/{tip}/check-runs"), "Backend Test".into(), "Frontend Vitest".into()] {
+        assert!(prompts[0].text.contains(&source), "{source} missing: {}", prompts[0].text);
+    }
+}
+
+/// cas-0c47 (GH #2273): a repo whose workflows run only on pull_request can
+/// never post CI for a factory push, so that unknown is not a decision. A push
+/// trigger that covers the branch keeps the bounded alert and its recovery.
+#[test]
+fn cas_0c47_unknown_ci_alerts_only_when_a_workflow_covers_the_push() {
+    let now = Utc::now();
+    for (on, covered) in [
+        ("pull_request:\n    branches: [develop, staging, main]\n  workflow_dispatch:", false),
+        ("push:\n    branches: ['factory/**', '!factory/skip-*']", true),
+    ] {
+        let mut f = Fixture::new();
+        let workflows = f.repo.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("ci.yml"), format!("name: CI\non:\n  {on}\njobs: {{}}\n")).unwrap();
+        git(f.repo.path(), &["add", "."]);
+        git(f.repo.path(), &["commit", "-qm", "cas-9efb-test workflows"]);
+        git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+        let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.deliverables.factory_branch_anchor = Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
+        store.update(&task).unwrap();
+        std::fs::write(f.app.cas_dir.join("ci.json"), "{\"check_runs\":[]}").unwrap();
+        f.app.merge_alert_retries.now = Some(now);
+        assert!(f.relay().is_empty());
+        f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+        let prompts = f.relay();
+        assert_eq!(prompts.len(), usize::from(covered), "{on}");
+        if covered {
+            f.ci(Some("success"));
+            assert!(f.relay()[0].is_merge_ready(), "covered CI recovers once it posts");
+        }
+    }
+}
+
 #[test]
 fn cas_9efb_missing_ci_retries_without_a_new_worker_idle_event() {
     let mut f = Fixture::new();
@@ -1426,6 +1538,29 @@ fn cas_c926_held_worker_gets_no_merge_retry_relay_until_release() {
     // Release restores the merge relay.
     let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
     assert_eq!(prompts.len(), 1);
+}
+
+/// cas-fcd5b (GH #1693): the supervisor ran clear_context on a worker with a
+/// parked delivery, and every retry minute re-sent its idle relay until the
+/// replacement registered. A recycle in flight is not an idle worker.
+#[test]
+fn cas_fcd5b_recycling_worker_gets_no_idle_relay_until_it_registers() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    f.ci(None);
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty(), "pending CI is remembered for retry");
+    let spawns = crate::store::open_spawn_queue_store(&f.app.cas_dir).unwrap();
+    let recycle = spawns.enqueue_recycle("merge-w", None, None).unwrap();
+    f.ci(Some("success"));
+    let minute = now + chrono::Duration::minutes(1);
+    f.app.merge_alert_retries.now = Some(minute);
+    let retries = f.app.merge_alert_retry_events_at(minute);
+    let (events, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert!(events.is_empty() && prompts.is_empty(), "a recycling worker gets no relay: {prompts:?}");
+    spawns.record_spawn_state(recycle, cas_store::SpawnLifecycleState::Registered, Some("merge-w"), None).unwrap();
+    let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert_eq!(prompts.len(), 1, "the registered worker's delivery relays again");
 }
 
 /// cas-43d2: a lane parked at a declined tip settles instead of costing a

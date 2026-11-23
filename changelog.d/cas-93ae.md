@@ -1,3 +1,0 @@
-### Fixed — Lane CI and worker proof
-
-- **Lane impact plans name a test command workers can actually run** — The plan's own-test expression uses regex and `or`, which the capped worker runner correctly refuses. The plan now also logs a `Worker proof` line with one accepted named-filter `worker-check` command per package and test harness, covering each own-test part. Parts that no named filter can express, such as a whole crate, are listed as `lane CI only`. Pre-merge verifiers accept receipts for those commands instead of asking for a receipt of the literal CI expression. The worker runner's filter rules are unchanged.

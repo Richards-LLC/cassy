@@ -1,9 +1,0 @@
-title: Stale idle relay names the worker's newer assignment
-statement: >-
-  An idle relay detected on one task never names a task the worker received
-  afterwards, whose idle basis would be the previous task's completion. A
-  plain idle premise is withdrawn; a merge-required alert for a task that is
-  still parked stays about that task.
-tasks: [cas-02a5]
-journeys: []
-invariants: []

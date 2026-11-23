@@ -1945,8 +1945,10 @@ impl FactoryApp {
                         } else {
                             "CI failed. Supervisor decision needed: request changes, or explicitly review and override red CI before merging."
                         };
+                        let source = if ready.ci_source.is_empty() { String::new() }
+                            else { format!("\nCI read: {}", ready.ci_source) };
                         let text = format!(
-                            "{decision}\nTask {} on {} at {}.\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
+                            "{decision}\nTask {} on {} at {}.{source}\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
                             ready.evidence.task_id, ready.evidence.factory_branch, ready.tip,
                             ready.evidence.unmerged_count, ready.evidence.checked_epic_ref,
                             ready.evidence.epic_sha, ready.evidence.task_id,

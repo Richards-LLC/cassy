@@ -210,15 +210,23 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const receipt = commandReceipts(page);
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload is queued until this turn ends.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
+        // cas-8c4f: a busy supervisor shows the wait instead of a refusal.
+        await expect(receipt.locator(".reload-wait")).toBeVisible();
+        await captureReload(page, "waiting", viewport.width);
         // A phone now shows the conversation; the list row behind it keeps the old version.
         await expect(versionOnRow("9.99.1")).toHaveCount(1);
         machine.sessions[0]!.mcp_version = "9.99.2";
+        (machine.sessions[0] as { mcp_loaded_at?: string }).mcp_loaded_at = "2026-11-23T22:44:00Z";
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         await captureReload(page, "reloaded-toast", viewport.width);
         // In step with its machine the row shows no version (cas-da546).
         await expect(versionOnRow(/\d+\.\d+\.\d+/)).toHaveCount(0);
+        // The open conversation keeps the loaded build and its Eastern load time (cas-8c4f).
+        await expect(page.getByTestId("conversation-cassy")).toContainText("9.99.2");
+        await expect(page.getByTestId("conversation-cassy")).toContainText("5:44 PM");
+        await captureReload(page, "loaded-badge", viewport.width);
         await expect(conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true })).toBeHidden();
         expect(hub.sends).toHaveLength(0);
       });
@@ -252,6 +260,34 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(toast(page, "PID 3303, version 9.99.2")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         expect(mutations()).toHaveLength(2);
+      });
+    });
+    test("HUB-J27 reload Cassy on a Codex supervisor only after confirming its restart", journeyPart, async ({ page, journey }) => {
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "codex" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
+      const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
+      const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
+      await journey.stage("The Codex card names the restart before anything is sent", async () => {
+        await journey.open();
+        await conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true }).click();
+        await expect(conversationList(page).getByRole("button", { name: "Restart and reload", exact: true })).toBeVisible();
+        expect(mutations()).toHaveLength(0);
+        await captureReload(page, "codex-confirm", viewport.width);
+      });
+      await journey.stage("Confirming sends one confirmed reload and shows the wait, then a mismatch names the next step", async () => {
+        await conversationList(page).getByRole("button", { name: "Restart and reload", exact: true }).click();
+        await expect.poll(() => mutations().length).toBe(1);
+        const request = mutations()[0].body as { client_ref: string; command: string; confirmed: boolean };
+        expect(request.command).toBe("mcp");
+        expect(request.confirmed).toBe(true);
+        const receipt = commandReceipts(page);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "submitted", detail: "Restarting the Codex supervisor on the installed build; workers keep running.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "submitted");
+        await expect(receipt.locator(".reload-wait")).toBeVisible();
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "unconfirmed", detail: "Cassy reconnected but runs 9.99.1, not the installed 9.99.2. Check which cas is first on PATH, then Reload Cassy again.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
+        await expect(receipt.locator(".reload-wait")).toHaveCount(0);
+        await captureReload(page, "codex-mismatch", viewport.width);
+        expect(hub.sends).toHaveLength(0);
       });
     });
     test("HUB-J27 dismiss reload refusal and resolve a later observed receipt", journeyPart, async ({ page, journey }) => {

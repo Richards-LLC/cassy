@@ -416,8 +416,8 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
 /// is emitted, so nothing in this fixture suppresses it. Then cas-9efb-test
 /// stays parked as the PREVIOUS task and the worker is assigned a second,
 /// distinct task with no delivery, no ready declaration and no pushed work. The
-/// consumer must target that task, with no wait suppression, and emit no
-/// delivery-tagged relay for it.
+/// consumer must keep the relay on the parked delivery (GH #1731 §3) and emit
+/// nothing that names or claims a delivery for the new task.
 #[test]
 fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() {
     let mut f = Fixture::new();
@@ -459,8 +459,12 @@ fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() 
         DirectorEvent::WorkerIdle { active_task: Some(active), .. } => Some(active.task_id.as_str()),
         _ => None,
     }).collect();
-    assert_eq!(targets, ["cas-9efb-next"], "the consumer must reach, and target, the new task: {events:?}");
-    assert!(prompts.iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-next")),
+    // GH #1731 §3: the relay was detected on the parked delivery. It stays
+    // about that delivery and never names the new assignment, whose idle
+    // basis would be the previous task's task_complete.
+    assert_eq!(targets, ["cas-9efb-test"], "the stale relay must stay about its parked delivery: {events:?}");
+    assert!(prompts.iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-next")
+            && !prompt.text.contains("cas-9efb-next")),
         "a task with nothing delivered has no delivery to report");
 }
 

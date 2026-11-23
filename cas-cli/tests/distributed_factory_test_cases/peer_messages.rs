@@ -800,6 +800,43 @@ async fn cas_13c7_outbox_expires_once_and_notifies_sender_after_restart() {
     .unwrap();
 }
 
+/// GH #1731 §4: Cloud accepted a send ("queued") and the peer read it 613 s
+/// later. Only the late, still-queued message alerts its sender, once.
+#[tokio::test]
+async fn gh_1731_accepted_peer_message_still_undelivered_alerts_sender_once() {
+    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let alpha = TestMachine::new("machine-alpha");
+        let beta = TestMachine::new("machine-beta");
+        seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+        seed_project(&beta, &endpoint, "github.com/acme/widgets");
+        supervisor(&alpha, "a");
+        supervisor(&beta, "b");
+        let peers = peers_of(&alpha.cas_dir, "a");
+        let read = send_to_peer(&alpha.cas_dir, "a", &peers[0], "read promptly", None, None).unwrap();
+        assert_eq!(tick(&beta.cas_dir, "b").delivered, 1);
+        let held = send_to_peer(&alpha.cas_dir, "a", &peers[0], "open the test window", None, None).unwrap();
+        let conn = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+        conn.execute(
+            "UPDATE peer_message_outbox SET created_at=?1",
+            [chrono::Utc::now().timestamp() - 600],
+        )
+        .unwrap();
+        let fresh = send_to_peer(&alpha.cas_dir, "a", &peers[0], "just sent", None, None).unwrap();
+        for _ in 0..2 {
+            assert!(tick(&alpha.cas_dir, "a").errors.is_empty());
+        }
+        let notices = inbox(&alpha.cas_dir);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].target, "sup-a");
+        assert!(notices[0].prompt.contains(&held.id));
+        assert!(!notices[0].prompt.contains(&read.id) && !notices[0].prompt.contains(&fresh.id));
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn cas_13c7_auth_failure_does_not_retry_and_nonfactory_recipient_is_typed_refusal() {
     use cas::cloud::peer_mailbox::{PeerMailboxRuntime, PeerSendError, outbox_status_text};

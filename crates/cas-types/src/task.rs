@@ -1013,6 +1013,21 @@ pub struct TaskBlockedHold {
     pub when: DateTime<Utc>,
 }
 
+/// GH #2278: a supervisor's hold on one parked delivery for an external
+/// review. It names who owes the next step and lapses at `until` or when the
+/// delivery is re-parked at another `anchor`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMergeHold {
+    pub owner: String,
+    pub reason: String,
+    pub until: DateTime<Utc>,
+    /// The supervisor that recorded the hold.
+    pub supervisor: String,
+    /// The parked delivery anchor the hold covers.
+    pub anchor: String,
+}
+
 /// Supervisor ownership of an unchanged worker blocker. The ask is a bounded
 /// fingerprint, not a second copy of the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1078,6 +1093,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "decisions",
     "next_step",
     "blocked_hold",
+    "merge_hold",
     "answered_blocker",
     "blocker_ask",
     "qa_impact",
@@ -1286,6 +1302,20 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
             }
             validate_state_string("blocked_hold.reason", &Value::String(hold.reason))?;
             validate_state_string("blocked_hold.who", &Value::String(hold.who))
+        }
+        "merge_hold" => {
+            let hold: TaskMergeHold = serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid merge_hold: {error}"))?;
+            if !(hold.anchor.len() == 40 && hold.anchor.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+                return Err("merge_hold requires a full anchor".into());
+            }
+            for (field, text) in [("owner", hold.owner), ("reason", hold.reason), ("supervisor", hold.supervisor)] {
+                if text.trim().is_empty() {
+                    return Err(format!("merge_hold requires {field}"));
+                }
+                validate_state_string(field, &Value::String(text))?;
+            }
+            Ok(())
         }
         _ => unreachable!("field checked against TASK_EXECUTION_STATE_FIELDS"),
     }
@@ -1944,6 +1974,16 @@ mod tests {
         let refused = merge_task_execution_state_patch(&state,
             &serde_json::json!({"close_refusal": refusal})).unwrap();
         assert_eq!(refused["close_refusal"]["code"], "phase_outcome_gate");
+        // GH #2278: a stored merge hold carries its stamped supervisor and full anchor.
+        let merge_hold = serde_json::json!({"owner": "Ben", "reason": "GitHub review",
+            "until": "2026-11-22T14:00:00Z", "supervisor": "lead", "anchor": "a".repeat(40)});
+        assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"merge_hold": merge_hold})).is_ok());
+        for (field, value) in [("anchor", serde_json::json!("abc")), ("supervisor", serde_json::json!(" ")),
+            ("owner", serde_json::json!("")), ("extra", serde_json::json!(1))] {
+            let mut hold = merge_hold.clone();
+            hold[field] = value;
+            assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"merge_hold": hold})).is_err(), "{field}");
+        }
         assert_eq!(merge_task_execution_state_patch(&refused,
             &serde_json::json!({"close_refusal": null})).unwrap(), state);
         for (field, invalid) in [

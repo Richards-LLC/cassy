@@ -26,7 +26,7 @@ Before the close reason, read `task action=show id=<task-id>` and apply installe
 
 ### Step 1: Check the close reason against the acceptance criteria
 
-Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" is not proof. NOT VERIFIED is acceptable only where the close names an owner by design (full-suite execution follows the gate's ownership rule; targeted tests have capped worker receipts). Reject an item skipped, stubbed, deferred, partly done, INCONCLUSIVE or unowned, and a vague "done enough" close.
+Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" is not proof. NOT VERIFIED is acceptable only where the close names an owner by design (full-suite execution follows the gate's ownership rule; targeted tests have capped worker receipts). A lane impact plan's `own` expression belongs to lane CI: accept receipts for its `Worker proof` commands and leave its `lane CI only` parts to lane CI, never demanding a receipt for a literal regex or `or` expression. Reject an item skipped, stubbed, deferred, partly done, INCONCLUSIVE or unowned, and a vague "done enough" close.
 
 ### Step 2: Compare the delivery with the plan
 

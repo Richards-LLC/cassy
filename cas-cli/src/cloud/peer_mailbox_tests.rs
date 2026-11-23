@@ -1469,3 +1469,32 @@ async fn remote_park_admission_binds_identity_evidence_and_g91_cas_b674() {
     assert_eq!(host.rows().len(),2);
     assert!(open_agent_store(&host.cas).unwrap().list(None).unwrap().iter().all(|a| a.role != AgentRole::Supervisor));
 }
+
+/// cas-cd0f review: a peer send whose Cloud attempt fails after its outbox row
+/// is persisted still delivers (the daemon retries the row), so its request
+/// receipt records the write and a late outcome never says "safe to resend".
+/// A permanently refused row is abandoned and records nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persisted_peer_send_records_its_write_even_when_the_attempt_fails_cas_cd0f() {
+    use crate::mcp::tools::service::mutation_receipt;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    for (status, delivers) in [(503, true), (400, false)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/peer-messages"))
+            .respond_with(ResponseTemplate::new(status)).mount(&server).await;
+        let machine = Machine::new();
+        crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+        crate::cloud::CloudConfig { endpoint: server.uri(), token: Some("test-token".into()), ..Default::default() }
+            .save_to_cas_dir(&machine.cas).unwrap();
+        machine.register("sender", "sender", AgentRole::Supervisor, "factory-a");
+        let receipt = mutation_receipt::Receipt::new("coordination", "message", None);
+        let root = machine.cas.clone();
+        let sent = mutation_receipt::scope(receipt.clone(), async move {
+            mutation_receipt::spawn_blocking(move || send_raw(&root, "sender", "peer", "body", None, None, "peer@box")).await.unwrap()
+        }).await;
+        assert!(sent.is_err(), "the Cloud attempt fails with {status}");
+        assert_eq!(receipt.commit.get().is_some(), delivers, "status {status}");
+    }
+}

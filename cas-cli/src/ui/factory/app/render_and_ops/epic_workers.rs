@@ -1393,6 +1393,9 @@ fn refresh_epic_base_from_parent(
         }
     }
 
+    let branch = epic_branch
+        .strip_prefix("refs/heads/")
+        .unwrap_or(epic_branch);
     // A verified namespace without authority refs needs no second origin
     // read. Otherwise refuse enrolled or unknown publication before moving
     // the local base: a refused spawn must retain its published checkout.
@@ -1400,15 +1403,12 @@ fn refresh_epic_base_from_parent(
         EpicBasePublication::Published { authority_refs: false }
         | EpicBasePublication::Unpublished { authority_refs: false })
     {
-        crate::worktree::git::train_authority::refuse_unfenced(repo_root, epic_branch)?;
+        crate::worktree::git::train_authority::refuse_unfenced(repo_root, branch)?;
     }
 
     // A ref update is invisible to any checkout that has this branch out:
     // inventory and guard those checkouts before moving the ref, then refresh
     // them after the compare-and-swap so spawn cannot strand a stale index.
-    let branch = epic_branch
-        .strip_prefix("refs/heads/")
-        .unwrap_or(epic_branch);
     let checkouts = git.list_worktrees().map_err(|error| {
         format!("could not inventory checkouts for epic base '{epic_branch}': {error}")
     })?;

@@ -52,6 +52,7 @@ pub mod codex_trust;
 pub mod conformance;
 mod display;
 mod error;
+pub mod gateway_key;
 pub mod input_queue;
 pub mod opencode;
 mod pty;

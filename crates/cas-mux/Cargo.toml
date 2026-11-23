@@ -39,6 +39,9 @@ thiserror.workspace = true
 anyhow.workspace = true
 toml = "0.9"
 url = "2.5"
+# Home-gateway readiness probe (same build as cas-cli)
+ureq = { version = "2.12", features = ["tls"] }
+dirs = "6"
 
 # Logging
 tracing = "0.1"

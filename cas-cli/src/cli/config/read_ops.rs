@@ -1260,6 +1260,8 @@ mod tests {
                 let mut candidates = vec![meta.default.to_owned()];
                 if key == "factory.scratch_root" {
                     candidates.push("/tmp/cas-config-path".into());
+                } else if key == "factory.gateway.endpoint" {
+                    candidates.push("http://127.0.0.1:8317".into());
                 } else if key == "qa.deployed_origins" {
                     candidates.push("https://example.com".into());
                 } else if key == "slack.channels" {

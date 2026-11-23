@@ -6141,6 +6141,10 @@ impl CasService {
                     || "\n    account: default/inherited".to_string(),
                     |account| format!("\n    account: {account}"),
                 );
+                let account_info = match agent.metadata.get("worker_transport") {
+                    Some(transport) => format!("{account_info}\n    transport: {transport}"),
+                    None => account_info,
+                };
                 let account_info = if usage_limited {
                     format!("{account_info}{}", worker_usage_reset_lines(agent, transcript_path_for_worker.as_deref(), now))
                 } else { account_info };

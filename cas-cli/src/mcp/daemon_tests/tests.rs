@@ -630,10 +630,16 @@ fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
         ("CAS_CLONE_PATH", Some("/tmp/cas-worker-clone")),
         ("CAS_FACTORY_WORKER_MODEL", Some("sonnet")),
         ("CAS_FACTORY_WORKER_EFFORT", Some("high")),
+        (cas_mux::gateway::TRANSPORT_ENV, Some("gateway http://127.0.0.1:8317")),
     ]);
     let mut agent = Agent::new("agent-id".to_string(), "agent".to_string());
 
     apply_factory_worker_metadata(&mut agent, None);
+
+    assert_eq!(
+        agent.metadata.get("worker_transport").map(String::as_str),
+        Some("gateway http://127.0.0.1:8317")
+    );
 
     assert_eq!(
         agent.metadata.get("clone_path").map(String::as_str),

@@ -6,6 +6,7 @@ import { ConversationView } from "./conversation-view";
 import { applePlatform, appearanceButtonMarkup, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName } from "./cloud-brand";
+import { cassyLoadedBadge } from "./machine-version";
 
 import { pendingSessionLabel, visibleCatalog } from "./worker-visibility";
 
@@ -35,6 +36,14 @@ it("shows the live supervisor's own Cassy version and flags an installed upgrade
       expect(badge?.textContent).toContain("↑");
     }
   }
+});
+
+it("names the build a supervisor's live MCP loaded and when, in Eastern time (cas-8c4f)", () => {
+  const badge = cassyLoadedBadge("v4.52.0", "2026-11-23T22:44:00Z");
+  expect(badge).toContain("4.52.0");
+  expect(badge).toContain("5:44 PM");
+  expect(cassyLoadedBadge("unknown", "2026-11-23T22:44:00Z")).toBeUndefined();
+  expect(cassyLoadedBadge("4.52.0", undefined)).toBeUndefined();
 });
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };

@@ -10,7 +10,7 @@ describe("supervisor slash commands", () => {
     }
     expect(commandsForHarness("grok")).toEqual([]);
   });
-  it("routes /mcp to Reload Cassy only for Claude and names unsupported harnesses", async () => {
+  it("routes /mcp to Reload Cassy for Claude, confirms Codex's supervisor restart, and names unsupported harnesses", async () => {
     for (const harness of ["claude", "codex", "grok", "other", undefined]) {
       document.body.innerHTML = '<section><textarea></textarea></section>';
       const input = document.querySelector("textarea")!;
@@ -21,6 +21,12 @@ describe("supervisor slash commands", () => {
       if (harness === "claude") {
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", false);
+      } else if (harness === "codex") {
+        // cas-8c4f: a Codex reload restarts the supervisor, so it runs only after confirmation.
+        expect(run).not.toHaveBeenCalled();
+        document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!.click();
+        await Promise.resolve();
+        expect(run).toHaveBeenCalledWith("mcp", true);
       } else {
         expect(run).not.toHaveBeenCalled();
         if (harness) expect(document.querySelector('[role="status"]')?.textContent).toContain(harness);
@@ -124,6 +130,10 @@ describe("supervisor slash commands", () => {
     expect(row.querySelector("p")?.textContent).toBe(detail);
     expect(row.querySelector("unsafe")).toBeNull();
     expect(row.querySelector("pre")?.textContent).toBe("<unsafe>");
+    // cas-8c4f: Reload Cassy animates only while it waits for a quiet moment or its proof.
+    for (const [phase, waiting] of [["queued", true], ["submitted", true], ["observed", false], ["unconfirmed", false]] as const) {
+      expect(Boolean(commandReceiptNode({ client_ref: "r", command: "mcp", phase, detail: "", output: "", interactive: false }).querySelector(".reload-wait"))).toBe(waiting);
+    }
     const send = vi.fn().mockReturnValue(true);
     const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
     await session.run("usage", false);

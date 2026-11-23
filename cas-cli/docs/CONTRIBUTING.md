@@ -2952,8 +2952,10 @@ runner runs each importing spec under the Playwright config that lists it
 (Playwright's `--list`, nearest directory first; the caller's `--config` wins)
 and records each spec's config. Park accepts the helper once every importing
 spec has a passing capped run at the tip, through that run or through the spec's
-own `playwright --config <config> <spec>`; an omitted consumer, an unrelated
-spec or a run that executed another spec is no proof. A spec counts only when it loads
+own `playwright --config <config> <spec>`, or through that spec's ordinary
+five-pass stability run when it executed every test the config lists in the spec
+(Playwright's `--list`; a partial selection proves nothing about the rest); an
+omitted consumer, an unrelated spec or a run that executed another spec is no proof. A spec counts only when it loads
 `@playwright/test` at runtime and imports no other runner; `import type` does
 not. A helper no spec imports, or a unit test also imports, keeps its previous
 proof (GH #2146).

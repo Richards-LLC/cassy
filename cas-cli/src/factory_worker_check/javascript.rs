@@ -54,19 +54,19 @@ pub(super) fn test_match(path: &str, runner: Option<&str>) -> bool {
 
 /// A scoped JavaScript stability command, however the shell names its runner.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Invocation {
-    pub(super) runner: &'static str,
+pub(crate) struct Invocation {
+    pub(crate) runner: &'static str,
     /// The runner's `--config` file, relative to the invocation directory.
-    pub(super) config: Option<String>,
+    pub(crate) config: Option<String>,
     /// Test files relative to the invocation directory.
-    pub(super) files: Vec<String>,
+    pub(crate) files: Vec<String>,
 }
 
 pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
-pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
+pub(crate) fn invocation(args: &[String]) -> Option<Invocation> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let args = match args.as_slice() {
         ["pnpm" | "yarn" | "npm", "exec", rest @ ..] => rest,

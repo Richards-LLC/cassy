@@ -2530,4 +2530,144 @@ sys.exit(0 if ok else 1)
             "another head's receipts do not count"
         );
     }
+
+    /// GH #2380, #2369, #2355, #2362, #2378 replayed through park: every gate
+    /// family shape ends in a runnable prescription whose passing receipt is
+    /// accepted, or in acceptance, never an impossible demand.
+    #[test]
+    fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
+        use crate::factory_worker_check::{javascript, widened};
+        let _env = crate::test_support::TestEnvGuard::new();
+        const VITEST: &str = "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nrelated = 'related' in args\nresults = [] if related else [{'name': str(Path('pages/index.test.ts').resolve()), 'status': 'passed',\n    'assertionResults': [{'fullName': 'renders', 'status': 'passed'}]}]\nPath(args[args.index('--outputFile') + 1]).write_text(json.dumps({'success': not related, 'testResults': results}))\nraise SystemExit(1 if related else 0)\n";
+        const REGISTRY: &str = "journeys:\n- id: join\n  status: live\n  spec: tests/journeys/join.spec.ts\n- id: delete\n  status: live\n  spec: tests/journeys/O1.spec.ts\n- id: audit\n  status: live\n  spec: tests/journeys/Q1.spec.ts\n";
+        let pw = "import { test } from '@playwright/test';\n";
+        // (issue, base files, delivered files, deleted files)
+        let rows: [(&str, Vec<(&str, String)>, Vec<(&str, String)>, Vec<&str>); 5] = [
+            ("#2380", vec![
+                ("package.json", "{}".into()), ("playwright.config.ts", "export default {};\n".into()),
+                ("docs/qa/journeys.yaml", REGISTRY.into()),
+                ("apps/web/package.json", "{}".into()), ("apps/web/vitest.config.ts", "export default {};\n".into()),
+                ("apps/web/locales/en.json", "{\"hi\": \"hi\"}\n".into()),
+                ("apps/web/src/chat.history.spec.ts", "import { it } from 'vitest';\nimport { chromium } from '@playwright/test';\nimport en from '../locales/en.json';\nit('renders history', () => { chromium; en; });\n".into()),
+                ("tests/journeys/join.spec.ts", format!("{pw}import copy from '../../apps/web/locales/en.json';\ntest('joins', () => {{ copy; }});\n")),
+            ], vec![("apps/web/locales/en.json", "{\"hi\": \"hello\"}\n".into())], vec![]),
+            ("#2369", vec![
+                ("apps/web/package.json", "{}".into()),
+                ("apps/web/vitest.config.ts", "import vue from '@vitejs/plugin-vue';\nexport default { plugins: [vue()] };\n".into()),
+                ("apps/web/pages/files.vue", "<template><p /></template>\n".into()),
+                ("apps/web/pages/index.test.ts", "import { it } from 'vitest';\nit('renders', () => {});\n".into()),
+            ], vec![("apps/web/pages/files.vue", "<template><p>files</p></template>\n".into())], vec![]),
+            ("#2355", vec![
+                ("package.json", "{}".into()), ("playwright.config.ts", "export default {};\n".into()),
+                ("docs/LOCAL_GATES.md", "gates\n".into()),
+                ("tests/config/gate.ts", "export const gate = 1;\n".into()),
+                ("tests/keep.spec.ts", format!("{pw}import {{ readFileSync }} from 'node:fs';\ntest('reads gates', () => {{ readFileSync(new URL('../docs/LOCAL_GATES.md', import.meta.url)); }});\n")),
+                ("tests/old1.spec.ts", format!("{pw}test('old one', () => {{}});\n")),
+                ("tests/old2.spec.ts", format!("{pw}test('old two', () => {{}});\n")),
+            ], vec![("docs/LOCAL_GATES.md", "gates, fewer\n".into()), ("tests/config/gate.ts", "// kept\nexport const gate = 1;\n".into())],
+            vec!["tests/old1.spec.ts", "tests/old2.spec.ts"]),
+            ("#2362", vec![
+                ("package.json", "{}".into()), ("docs/qa/journeys.yaml", REGISTRY.into()),
+                ("tests/journeys/playwright.config.ts", "export default {};\n".into()),
+                ("tests/journeys/flows.ts", "export const flow = () => 1;\n".into()),
+                ("tests/journeys/O1.spec.ts", format!("{pw}import {{ flow }} from './flows';\ntest('deletes workspace', () => {{ flow(); }});\n")),
+                ("tests/journeys/Q1.spec.ts", format!("{pw}import {{ flow }} from './flows';\ntest('audits shapes', () => {{ flow(); }});\n")),
+            ], vec![
+                ("tests/journeys/flows.ts", "export const flow = () => 2;\n".into()),
+                ("tests/journeys/O1.spec.ts", format!("{pw}import {{ flow }} from './flows';\ntest('deletes workspace', () => {{ flow(); flow(); }});\n")),
+            ], vec![]),
+            ("#2378", vec![
+                ("package.json", "{}".into()),
+                ("a.test.mjs", "import { test } from 'node:test';\ntest('fixed', () => {});\n".into()),
+            ], vec![("a.test.mjs", "import { test } from 'node:test';\nconst name = ['dyn'].join('');\ntest(name, () => {});\n".into())], vec![]),
+        ];
+        let mut failures = Vec::new();
+        for (issue, base_files, delivered, deleted) in rows {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+            // #2378: the supervisor's close reads the project checkout; the
+            // worker-check ran in the stopped worker's worktree.
+            let (checkout, repo) = if issue == "#2378" {
+                (root.path().join("project"), root.path().join("worktrees/worker"))
+            } else { (root.path().join("worktrees/worker"), root.path().join("worktrees/worker")) };
+            std::fs::create_dir_all(&checkout).unwrap();
+            let git = |dir: &Path, args: &[&str]| {
+                let output = std::process::Command::new("git").current_dir(dir)
+                    .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                    .args(args).output().unwrap();
+                assert!(output.status.success(), "{issue}: {output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            let write = |files: &[(&str, String)]| for (path, body) in files {
+                std::fs::create_dir_all(checkout.join(path).parent().unwrap()).unwrap();
+                std::fs::write(checkout.join(path), body).unwrap();
+            };
+            git(&checkout, &["init", "-q", "-b", "main"]);
+            write(&base_files);
+            write(&[(".gitignore", "node_modules/\n".into())]);
+            git(&checkout, &["add", "."]);
+            git(&checkout, &["commit", "-qm", "base"]);
+            git(&checkout, &["checkout", "-qb", "delivery"]);
+            write(&delivered);
+            for path in &deleted { git(&checkout, &["rm", "-q", path]); }
+            git(&checkout, &["add", "."]);
+            git(&checkout, &["commit", "-qm", "delivery"]);
+            let head = git(&checkout, &["rev-parse", "HEAD"]);
+            if checkout != repo { git(&checkout, &["worktree", "add", "-q", "--detach", repo.to_str().unwrap(), &head]); }
+            let paths: Vec<String> = delivered.iter().map(|(path, _)| path.to_string()).chain(deleted.iter().map(|path| path.to_string())).collect();
+            let task = crate::types::Task::new("cas-fcb1".into(), "fixture".into());
+            let g61 = || park_refusals(root.path(), &checkout, &task, &paths, &head, "main", None).into_iter()
+                .filter(|refusal| crate::gates::codes_in(refusal).contains(&"G-61")).collect::<Vec<_>>();
+            let held = g61();
+            let prescribed: Vec<javascript::Invocation> = held.iter()
+                .flat_map(|refusal| refusal.split("worker-check --cas-root ").skip(1))
+                .filter_map(|tail| tail.split_once(" -- ").map(|(_, command)| command.split(['`', ';']).next().unwrap().to_string()))
+                .map(|command| javascript::invocation(&command.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+                    .unwrap_or_else(|| panic!("{issue}: unrunnable prescription {command}")))
+                .collect();
+            for run in &prescribed {
+                assert!(run.files.iter().all(|file| checkout.join(file).exists()), "{issue}: {held:?}");
+            }
+            assert!(deleted.iter().all(|path| held.iter().all(|refusal| !refusal.contains(path))), "{issue}: {held:?}");
+            match issue {
+                "#2380" => {
+                    let spec = "apps/web/src/chat.history.spec.ts";
+                    if prescribed.iter().map(|run| (run.runner, run.files.clone())).collect::<Vec<_>>() != [("vitest", vec![spec.to_string()])] {
+                        failures.push((issue, held));
+                        continue;
+                    }
+                    widened::record(root.path(), &repo, &head, widened::Proof { runner: "vitest".into(),
+                        scope: widened::Scope::File(spec.into()), reason: String::new(), configs: Default::default() }, 1).unwrap();
+                }
+                "#2369" => {
+                    let runner = repo.join("apps/web/node_modules/.bin/vitest");
+                    std::fs::create_dir_all(runner.parent().unwrap()).unwrap();
+                    std::fs::write(&runner, VITEST).unwrap();
+                    #[cfg(unix)] {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    }
+                    let [run] = prescribed.as_slice() else { panic!("{issue}: {held:?}") };
+                    let args = ["vitest", "related", "--run"].into_iter().map(String::from).chain(run.files.clone()).collect::<Vec<_>>();
+                    if let Err(error) = javascript::execute(root.path(), &args, &repo, &[]) {
+                        failures.push((issue, vec![format!("{error:#}")]));
+                        continue;
+                    }
+                }
+                "#2355" => {
+                    assert!(!prescribed.is_empty(), "{issue}: {held:?}");
+                    widened::record(root.path(), &repo, &head, widened::Proof { runner: "playwright".into(),
+                        scope: widened::Scope::Package(String::new()), reason: String::new(), configs: Default::default() }, 1).unwrap();
+                }
+                "#2362" => {}
+                "#2378" => {
+                    javascript::execute(root.path(), &["node".into(), "--test".into(), "a.test.mjs".into()], &repo, &[]).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let after = g61();
+            if !after.is_empty() { failures.push((issue, after)); }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
 }

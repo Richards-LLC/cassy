@@ -199,6 +199,13 @@ impl Snapshot {
 
     pub(crate) fn read_optional(repo: &Path, train: &str) -> Result<Option<Self>, String> {
         let reference = reference(train)?;
+        // Legacy local trains can freeze before origin exists. A failed
+        // listing or a configured but unreadable origin still holds; callers
+        // with an enrolled projection also refuse a missing authority.
+        let remotes = command(repo, &["remote"], None)?;
+        if !remotes.lines().any(|remote| remote == "origin") {
+            return Ok(None);
+        }
         let remote = command(repo, &["ls-remote", "--refs", "origin", &reference], None)?;
         if remote.trim().is_empty() { return Ok(None); }
         Self::read(repo, train).map(Some)

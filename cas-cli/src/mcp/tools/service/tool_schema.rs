@@ -207,21 +207,21 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
             }
         }
     }
-    if tool_name == "factory"
-        && let Some(Value::Object(reason)) = properties.get_mut("reason")
-    {
-        reason.insert(
-            "description".to_string(),
-            Value::String("loop_cancel reason; worktree_merge audit reason with supervisor_override=true. train_freeze: \"release-freeze: <reason>\"; with decision=lift, the nonempty audited lift reason. No CI holds; see CONTRIBUTING.".to_string()),
-        );
-    }
-    if tool_name == "factory"
-        && let Some(Value::Object(decision)) = properties.get_mut("decision")
-    {
-        decision.insert(
-            "description".to_string(),
-            Value::String("train_freeze: promote validates and promotes an open epic, then freezes it; lift lets the train's live supervisor lift its freeze with a reason, audited and sent to the operator. epic_split id=<split>: accept, reject, cancel or status.".to_string()),
-        );
+    if tool_name == "factory" {
+        // Describe only this tool's actions; the shared request also carries
+        // coordination rules that factory never accepts.
+        for (name, description) in [
+            ("action", "Operation."),
+            ("reason", "loop_cancel/worktree_merge: audit reason. train_freeze: release-freeze: <reason>; lift: nonempty reason. No CI holds."),
+            ("decision", "train_freeze: promote validates then freezes an epic; lift is audited, owner-only and sent to operator. epic_split: accept|reject|cancel|status."),
+            ("task_id", "loop_start/worktree_create: task; spawn_workers: one worker's open task (no epic needed); server_start: owner; server_list: owner filter."),
+            ("isolate", "Prefer true: private worktree per worker. false/omitted shares mutable HEAD, commits, pushes and skills; spawns warn of contamination."),
+            ("owner_transfer", "train_owner_transfer: operation, authority scope and audit."),
+        ] {
+            if let Some(Value::Object(property)) = properties.get_mut(name) {
+                property.insert("description".to_string(), Value::String(description.to_string()));
+            }
+        }
     }
     if let Some(Value::Object(action)) = properties.get_mut("action") {
         action.insert(

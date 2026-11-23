@@ -661,6 +661,17 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     let published = Snapshot::read(&fixture.left, &train.id).unwrap();
     assert_eq!((fixture.target(), published.record.target_sha), (head.clone(), head));
     assert_eq!(published.record.generation, accepted.record.generation);
+
+    // A legacy local train can freeze without an origin. An enrolled train
+    // or a configured but unreadable origin must still hold admissions.
+    let mut local = tasks.get(&train.id).unwrap();
+    command(&fixture.left, &["remote", "remove", "origin"], None).unwrap();
+    assert!(crate::train_owner::authority(&root, &local).is_err());
+    local.labels.retain(|label| label != crate::train_owner::ENROLLED);
+    assert!(crate::train_owner::authority(&root, &local).unwrap().is_none());
+    let unavailable = fixture.left.join("missing-origin.git");
+    command(&fixture.left, &["remote", "add", "origin", unavailable.to_str().unwrap()], None).unwrap();
+    assert!(crate::train_owner::authority(&root, &local).is_err());
 }
 
 #[test]

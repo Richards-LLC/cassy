@@ -196,13 +196,23 @@ fn enqueue(
             PeerSendError::BuildRouteCooldown(cooldown.0.clone())
         } else { failed(error, None) }
     })?;
-    if let Some(id) = sent {
-        return Ok(SendReceipt { id, status: "duplicate".into() });
+    let receipt = if let Some(cloud_id) = sent {
+        Ok(SendReceipt { id: cloud_id, status: "duplicate".into() })
+    } else if defer_send {
+        Ok(SendReceipt { id: format!("peer-outbox:{id}"), status: "queued".into() })
+    } else {
+        retry_peer_send(root, id)
+    };
+    // cas-cd0f: a row that is not abandoned is the send. The daemon retries it
+    // even when this attempt failed, so a resend would duplicate it; only a
+    // permanently refused row was never delivered. An unreadable state counts
+    // as written.
+    let abandoned = connection(root).and_then(|conn| Ok(conn.query_row(
+        "SELECT state='abandoned' FROM peer_message_outbox WHERE id=?1", [id], |row| row.get::<_, bool>(0))?));
+    if !abandoned.unwrap_or(false) {
+        crate::mcp::tools::service::mutation_receipt::message_ref_committed(&format!("peer-outbox:{id}"));
     }
-    if defer_send {
-        return Ok(SendReceipt { id: format!("peer-outbox:{id}"), status: "queued".into() });
-    }
-    retry_peer_send(root, id)
+    receipt
 }
 
 /// Retry one persisted logical send; every HTTP attempt uses its original key.

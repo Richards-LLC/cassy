@@ -2953,8 +2953,10 @@ If a broader Rust selection fails, prior valid stability can survive for owned
 tests with a positive passing result in every attempted run. Failed or unrun
 tests lose that evidence, and changed inputs still require fresh proof. This
 restores stability only; the failed selection receives no passing crate receipt.
-Stability uses the same receipt carry-forward as crate proof: documentation or
-changelog commits preserve it when no test/build inputs change. Target merges
+Stability and widened receipts use the same receipt carry-forward as crate
+proof: documentation, changelog or `docs/qa/bug-families/` fragment commits
+preserve them when no test/build inputs change. A bug-family YAML counts as an
+input only when a Rust source names it, not by its extension. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability
 even when its name is unchanged or its product change is already on the target.
 For widened Playwright proof, a failing journey is replayed at the merge base

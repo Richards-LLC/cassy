@@ -1462,6 +1462,29 @@ fn cas_c926_held_worker_gets_no_merge_retry_relay_until_release() {
     assert_eq!(prompts.len(), 1);
 }
 
+/// cas-fcd5b (GH #1693): the supervisor ran clear_context on a worker with a
+/// parked delivery, and every retry minute re-sent its idle relay until the
+/// replacement registered. A recycle in flight is not an idle worker.
+#[test]
+fn cas_fcd5b_recycling_worker_gets_no_idle_relay_until_it_registers() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    f.ci(None);
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty(), "pending CI is remembered for retry");
+    let spawns = crate::store::open_spawn_queue_store(&f.app.cas_dir).unwrap();
+    let recycle = spawns.enqueue_recycle("merge-w", None, None).unwrap();
+    f.ci(Some("success"));
+    let minute = now + chrono::Duration::minutes(1);
+    f.app.merge_alert_retries.now = Some(minute);
+    let retries = f.app.merge_alert_retry_events_at(minute);
+    let (events, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert!(events.is_empty() && prompts.is_empty(), "a recycling worker gets no relay: {prompts:?}");
+    spawns.record_spawn_state(recycle, cas_store::SpawnLifecycleState::Registered, Some("merge-w"), None).unwrap();
+    let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert_eq!(prompts.len(), 1, "the registered worker's delivery relays again");
+}
+
 /// cas-43d2: a lane parked at a declined tip settles instead of costing a
 /// fetch and a GitHub lookup on every retry until the worker commits.
 #[test]

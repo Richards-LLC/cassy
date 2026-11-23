@@ -490,6 +490,112 @@ async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
     }
 }
 
+/// cas-fd1c (GH #2212): a no-code delivery with a portable external_ref, whose
+/// bundle files an earlier publication already receipted, parks through the
+/// real close handler without uploading those files again, and the nested raw
+/// and private request tree nothing cites is listed, never published.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_code_park_reuses_published_bundle_and_skips_nested_raw_files_gh2212() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let server = MockServer::start().await;
+    std::fs::write(f.cas_dir().join("cloud.json"), serde_json::json!({
+        "endpoint": server.uri(), "token": "fixture-token"
+    }).to_string()).unwrap();
+    let id = "cas-2212";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    // The no-code declaration and its portable proof are recorded on the task.
+    let mut declared = f.task(id);
+    declared.execution_note = Some("no-code".into());
+    declared.external_ref = Some(PROOF.into());
+    f.put(&declared);
+    std::fs::write(checkout.join(".gitignore"), ".cas/\ndurable-artifacts/\ntarget/\n").unwrap();
+    std::fs::write(checkout.join("runbook.md"), "deploy runbook\n").unwrap();
+    git(&checkout, &["add", ".gitignore", "runbook.md"]);
+    git(&checkout, &["commit", "-qm", "docs(cas-2212): deploy runbook"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+
+    let dir = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+        &f.cas_dir(), &f.task(id),
+    ).unwrap();
+    let write = |name: &str, body: &str| {
+        let file = dir.join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, body).unwrap();
+        file
+    };
+    let published = [write("captures.log", "captures: ok\n"), write("private-map.json", "{\"map\":1}\n")];
+    let summary = write("summary.md", "deployed\n");
+    for index in 0..40 {
+        write(&format!("raw/requests/{index:04}.json"), &format!("{{\"request\":{index}}}\n"));
+    }
+    write("raw/private/map.json", "{\"private\":true}\n");
+
+    // Cloud accepts each file once by name; the bundle files are published
+    // before the close, so durable committed receipts exist for them.
+    for (index, name) in ["captures.log", "private-map.json", "summary.md"].into_iter().enumerate() {
+        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+            .and(body_partial_json(serde_json::json!({"name": name})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": format!("cloud-{index}"),
+                "upload_url": format!("{}/blob/{index}", server.uri()), "required_headers": {}
+            }))).mount(&server).await;
+        Mock::given(method("PUT")).and(path(format!("/blob/{index}")))
+            .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST")).and(path(format!("/api/artifacts/cloud-{index}/complete")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+            .mount(&server).await;
+    }
+    let root = f.cas_dir();
+    let (task_id, bundle) = (id.to_string(), published.to_vec());
+    let receipts: Vec<String> = tokio::task::spawn_blocking(move || {
+        let config = crate::config::Config::load(&root).unwrap_or_default();
+        let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
+        let context = crate::artifacts::PublishContext {
+            store: &store,
+            roots: crate::artifacts::paths::PublishRoots::new(&root, &base, &task_id),
+            task_id: task_id.clone(), cloud: crate::artifacts::cloud_client(&root),
+        };
+        bundle.iter().map(|file| {
+            let artifact = crate::artifacts::publish(&context, file).unwrap().artifact;
+            assert_eq!(artifact.status, "committed");
+            artifact.id
+        }).collect()
+    }).await.unwrap();
+    let before = server.received_requests().await.unwrap().len();
+
+    let reply = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id,
+        "reason": format!("PASS bundle `{}` summary `{}`", published[0].display(), summary.display()),
+    })).await;
+    let task = f.task(id);
+    assert_eq!(task.status, TaskStatus::AwaitingMerge, "{reply}");
+
+    let uploads: Vec<serde_json::Value> = server.received_requests().await.unwrap()[before..].iter()
+        .filter(|request| request.url.path() == "/api/artifacts/begin")
+        .map(|request| serde_json::from_slice(&request.body).unwrap()).collect();
+    assert_eq!(uploads.len(), 1, "only the unpublished summary uploads: {uploads:?}");
+    assert_eq!(uploads[0]["name"], "summary.md");
+    let store = cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap();
+    let records = store.list_for_task(id).unwrap();
+    assert_eq!(records.len(), 3, "the bundle receipts are reused, the raw tree is not published");
+    for (file, receipt) in published.iter().zip(&receipts) {
+        let name = file.file_name().unwrap().to_str().unwrap();
+        assert_eq!(records.iter().filter(|record| record.name == name).map(|record| &record.id).collect::<Vec<_>>(), [receipt]);
+    }
+    assert!(records.iter().all(|record| !record.name.ends_with(".json") || record.name == "private-map.json"));
+    let manifest: serde_json::Value = task.notes.lines().find_map(|line| {
+        serde_json::from_str(line.strip_prefix("EVIDENCE_SYNC: ")?).ok()
+    }).expect("portable paths recorded for the peer");
+    let mut files: Vec<&str> = manifest["files"].as_array().unwrap().iter()
+        .map(|file| file["name"].as_str().unwrap()).collect();
+    files.sort();
+    assert_eq!(files, ["captures.log", "private-map.json", "summary.md"]);
+}
+
 #[tokio::test]
 async fn own_contextual_task_mention_can_park_gh1496() {
     let mut env = TestEnvGuard::temp_home();

@@ -2998,14 +2998,18 @@ mod tests {
         let playwright = repo.join("node_modules/.bin/playwright");
         std::fs::create_dir_all(playwright.parent().unwrap()).unwrap();
         std::fs::write(&playwright, format!(r#"#!/usr/bin/env python3
-import datetime, hashlib, json, os, re, sys
+import datetime, fnmatch, hashlib, json, os, re, sys
 from pathlib import Path
 a = sys.argv[1:]
 config = Path(a[a.index('--config') + 1]).name
-owned = {{'playwright.config.ts': ['summary.journey.ts', 'read-history.journey.ts', 'partial.journey.ts'], 'playwright.responsive.config.ts': ['pair-link.journey.ts']}}[config]
+# Each config's project, as written: the default one ignores the responsive spec. Files are
+# selected the way createFileMatcher selects them: matched by testMatch and not by testIgnore.
+test_match, test_ignore = {{'playwright.config.ts': (['**/*.journey.ts'], ['**/pair-link.journey.ts']),
+                           'playwright.responsive.config.ts': (['**/pair-link.journey.ts'], [])}}[config]
+selects = lambda path, patterns: any(fnmatch.fnmatch(path, '*' + p[2:]) for p in patterns)
 spec = os.path.relpath(re.sub(r'\\(.)', r'\1', a[-1]), os.getcwd())
 listing = '--list' in a
-shown = spec if Path(spec).name in owned else None
+shown = spec if selects(spec, test_match) and not selects(spec, test_ignore) else None
 if shown and not listing and os.path.exists({omit:?}) and Path(spec).name == 'summary.journey.ts':
     shown = 'e2e/journeys/read-history.journey.ts'
 grep = a[a.index('--grep') + 1] if '--grep' in a else None
@@ -3035,7 +3039,7 @@ report = json.dumps({{
                'preserveOutput': 'always', 'quiet': False, 'reporter': [['json']], 'reportSlowTests': {{'max': 5, 'threshold': 300000}},
                'rootDir': root, 'shard': None, 'tags': [], 'updateSnapshots': 'missing', 'version': '1.65.1', 'webServer': None, 'workers': 1,
                'projects': [{{'outputDir': root + '/test-results', 'repeatEach': repeats, 'retries': 0, 'metadata': {{}}, 'id': 'journeys',
-                             'name': 'journeys', 'testDir': root, 'testIgnore': [], 'testMatch': ['**/*.@(spec|test).?(c|m)[jt]s?(x)'], 'timeout': 30000}}]}},
+                             'name': 'journeys', 'testDir': root, 'testIgnore': test_ignore, 'testMatch': test_match, 'timeout': 30000}}]}},
     'suites': suites, 'errors': [],
     'stats': {{'startTime': started, 'duration': 10, 'expected': 0 if listing else count, 'skipped': count if listing else 0, 'unexpected': 0, 'flaky': 0}}}})
 # The JSON reporter writes to PLAYWRIGHT_JSON_OUTPUT_FILE when it is set and to stdout otherwise.

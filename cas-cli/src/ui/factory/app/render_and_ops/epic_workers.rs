@@ -2830,6 +2830,9 @@ impl WorkerSpawnContext {
                                     notices.push(notice);
                                 }
                             }
+                            Err(error) if !crate::gates::codes_in(&error).is_empty() || error.starts_with("TRAIN_") => {
+                                anyhow::bail!("{error}");
+                            }
                             Err(error) => notices.push(format!(
                                 "EPIC BRANCH UNVERIFIED: '{parent_branch}' ({}); {error}",
                                 full_sha(&repo_root, &parent_branch).unwrap_or_else(|| "missing".into())

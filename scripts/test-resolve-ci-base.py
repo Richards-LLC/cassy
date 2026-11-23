@@ -73,6 +73,7 @@ class LaneBaseTests(unittest.TestCase):
         result = subprocess.run(['bash', '-e', '-c', code], cwd=self.repo, env=env,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
         return dict(line.split('=', 1) for line in output.read_text().splitlines())
 
     def test_first_web_push_excludes_unreleased_epic_rust(self):
@@ -268,6 +269,22 @@ class LaneBaseTests(unittest.TestCase):
         self.assertIn(f'{advanced}\trefs/heads/{shipped}', refs)
         self.assertIn(f'{released}\trefs/heads/{opened}', refs)
 
+        # An immutable release record names its enrolled train even if a
+        # namespace listing cannot rediscover that train's removed authority.
+        # The CLI must receive that exact identity before cleanup can proceed.
+        self.git('checkout', '-q', 'main')
+        self.git('commit', '--allow-empty', '-qm', 'release: v9.99.7',
+                 '-m', 'Release-Version: 9.99.7', '-m', 'Release-Train: cas-shipped',
+                 '-m', f'Prepared by scripts/release.sh on {shipped} from main 9.99.6.')
+        recorded_release = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', f'{recorded_release}:refs/heads/main',
+                 f'{recorded_release}:refs/heads/{shipped}')
+        before = self.git('ls-remote', '--heads', 'origin')
+        held = subprocess.run(['bash', script, recorded_release, 'origin/main'], cwd=self.repo,
+                              env=dict(os.environ, FAKE_REQUIRED_TRAIN='cas-shipped'), capture_output=True, text=True)
+        self.assertEqual(held.returncode, 0, held.stdout + held.stderr)
+        self.assertEqual(self.git('ls-remote', '--heads', 'origin'), before)
+
         # Conflicting cut identities cannot authorize either branch's deletion.
         self.git('commit', '--allow-empty', '-qm', 'release: v9.99.7',
                  '-m', 'Release-Version: 9.99.7',
@@ -278,7 +295,7 @@ class LaneBaseTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.git('ls-remote', '--heads', 'origin'),
-                         refs.replace(f'{advanced}\trefs/heads/main', f'{ambiguous}\trefs/heads/main'))
+                         before.replace(f'{recorded_release}\trefs/heads/main', f'{ambiguous}\trefs/heads/main'))
 
 
 if __name__ == '__main__':

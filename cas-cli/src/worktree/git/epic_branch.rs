@@ -268,6 +268,24 @@ impl GitOperations {
                 "'{branch_label}' is not an epic lane eligible for first-use publication"
             ));
         }
+        let train_readiness = (|| -> Result<Option<EpicBranchReadiness>, String> {
+            let authority = if observation.authority_refs {
+                super::train_authority::fencing(&self.repo_root, branch)?
+            } else {
+                super::train_authority::require_no_missing_enrollment(&self.repo_root, branch)?;
+                None
+            };
+            let Some(authority) = authority else { return Ok(None); };
+            authority.validate_admission(&self.repo_root, &authority.record.identity)?;
+            let published = &authority.record.target_sha;
+            match self.resolve_commit(&refname) {
+                Some(local) if local != *published => return Err("TRAIN_OWNER_PUBLICATION_REQUIRED: publish or reconcile the enrolled base before preparing workers".into()),
+                None => self.create_branch_from(branch, published).map_err(|error| error.to_string())?,
+                _ => {}
+            }
+            Ok(Some(EpicBranchReadiness::ready(None)))
+        })().map_err(|error| crate::gates::tag("G-113", error))?;
+        if let Some(readiness) = train_readiness { return Ok(readiness); }
         let setting = std::env::var("CAS_PUSH_EPIC_BRANCH")
             .unwrap_or_else(|_| "unset (disabled at create)".into());
         let mut receipts = Vec::new();
@@ -334,6 +352,9 @@ impl GitOperations {
         if !origin.is_some_and(|origin| origin.branch == branch) {
             return Err("automatic publication refused: the factory did not record creating this lane under its current name; no local ref advanced or remote ref created".into());
         }
+        // First-use publication is generic epic setup. It must never create
+        // or resurrect a recorded/enrolled train target as a side effect.
+        super::train_authority::refuse_unfenced(&self.repo_root, branch)?;
         if let Some(base) = base {
             let base_label = Self::visible_git_label(base);
             if !observation.base_fetched {

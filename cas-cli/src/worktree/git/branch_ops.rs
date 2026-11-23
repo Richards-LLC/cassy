@@ -820,6 +820,12 @@ impl GitOperations {
     /// Pushes the specified branch to the 'origin' remote. If the branch doesn't exist
     /// on origin yet, it will be created. Uses -u to set up tracking.
     pub fn push_branch(&self, branch: &str) -> Result<()> {
+        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+        let valid = Command::new("git").args(["check-ref-format", "--branch", branch])
+            .current_dir(&self.repo_root).output()?;
+        if !valid.status.success() {
+            return Err(GitError::CommandFailed("branch publication requires a branch name, not options or a refspec".into()));
+        }
         super::train_authority::refuse_unfenced(&self.repo_root, branch).map_err(GitError::CommandFailed)?;
         let output = Command::new("git")
             .args(["push", "-u", "origin", branch])

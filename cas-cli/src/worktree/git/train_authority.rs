@@ -127,6 +127,7 @@ fn record_commit(repo: &Path, parent: Option<&str>, record: &Record) -> Result<S
 /// targets, so other branches answer without a network read. Read failures
 /// refuse: an unknown fence never falls back to an unfenced write.
 pub(crate) fn fencing(repo: &Path, branch: &str) -> Result<Option<Snapshot>, String> {
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
     if !branch.starts_with("epic/") || !GitOperations::new(repo.to_path_buf()).has_origin_remote() {
         require_no_missing_enrollment(repo, branch)?;
         return Ok(None);
@@ -152,6 +153,7 @@ const OBSERVED_PREFIX: &str = "refs/cas/observed/train-owner/";
 /// just mirrored, so one train merge entry reads origin once. Only a caller
 /// that fetched under the current target lock may use it.
 pub(crate) fn observed_fencing(repo: &Path, branch: &str) -> Result<Option<Snapshot>, String> {
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
     if !branch.starts_with("epic/") {
         return Ok(None);
     }
@@ -169,7 +171,8 @@ pub(crate) fn observed_fencing(repo: &Path, branch: &str) -> Result<Option<Snaps
 
 /// A removed authority or remote is an unavailable fence, never an explicit
 /// return to legacy behavior. Daemon/direct publishers also use this lookup.
-fn require_no_missing_enrollment(repo: &Path, branch: &str) -> Result<(), String> {
+pub(super) fn require_no_missing_enrollment(repo: &Path, branch: &str) -> Result<(), String> {
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
     if !branch.starts_with("epic/") { return Ok(()); }
     let Ok(root) = crate::store::find_cas_root_ignoring_env(repo) else { return Ok(()); };
     let store = crate::store::open_task_store_local(&root).map_err(|error| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error}"))?;
@@ -209,6 +212,7 @@ pub(crate) fn refuse_observed_unfenced(repo: &Path, branch: &str) -> Result<(), 
 /// The recorded task target still prevents generic creation/focus/manager
 /// paths from publishing that train as an ordinary epic.
 fn refuse_local_train(repo: &Path, branch: &str) -> Result<(), String> {
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
     if !branch.starts_with("epic/") { return Ok(()); }
     let Ok(root) = crate::store::find_cas_root_ignoring_env(repo) else { return Ok(()); };
     let store = crate::store::open_task_store_local(&root).map_err(|error| format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error}"))?;

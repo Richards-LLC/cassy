@@ -11,7 +11,7 @@ import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument("action")
-for name in ("tag", "sha", "branch", "pr", "repo", "notes", "title", "run", "attempt"):
+for name in ("tag", "sha", "branch", "train", "pr", "repo", "notes", "title", "run", "attempt"):
     parser.add_argument(f"--{name}")
 parser.add_argument("--remote", default="origin")
 parser.add_argument("--prerelease", action="store_true")
@@ -31,7 +31,9 @@ def gh(*argv):
 
 
 if args.action == "is-enrolled":
-    print(str(args.branch.removeprefix("refs/heads/") == os.environ.get("FAKE_ENROLLED_BRANCH")).lower())
+    expected_train = os.environ.get("FAKE_REQUIRED_TRAIN")
+    print(str(args.train == expected_train if expected_train else
+              args.branch.removeprefix("refs/heads/") == os.environ.get("FAKE_ENROLLED_BRANCH")).lower())
 elif args.action == "is-bound-tag":
     print(str(args.tag == os.environ.get("FAKE_BOUND_TAG")).lower())
 elif args.action == "publish-branch":

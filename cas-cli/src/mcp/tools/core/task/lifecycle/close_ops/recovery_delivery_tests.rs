@@ -561,8 +561,8 @@ case "$*" in
   *'/actions/runs/91/jobs'*) printf '%s' '{{"jobs":[{{"name":"Scoped Validation — impact own tests","conclusion":"failure"}}]}}' ;;
   *'/branches/'*) cat '{root}/branch.json' ;;
   *'/actions/runs'*) cat '{root}/runs.json' ;;
+  'api graphql '*'pr0: pullRequests'*) printf '%s' '{{"data":{{"repository":{{"pr0":{{"nodes":[]}}}}}}}}' ;;
   'api graphql '*) printf '%s' '{{"data":{{"repository":{{"pullRequests":{{"nodes":[]}}}}}}}}' ;;
-  'pr list '*) printf '[]' ;;
   'run view 91 '*) printf 'test log_only::decoy ... FAILED\nLane impact: caused by this delivery: log_only::decoy\n' ;;
   *) printf 'Unexpected gh request: %s\n' "$*" >&2; exit 97 ;;
 esac

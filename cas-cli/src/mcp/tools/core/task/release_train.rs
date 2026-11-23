@@ -123,6 +123,11 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
 /// A new train target and its initial authority are one expected-absent
 /// atomic publication. Existing targets require explicit owner enrollment.
 pub(crate) fn publish_train_branch(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, train: &Task, integration: &str) -> Result<(), String> {
+    publish_train_branch_as(root, repo, store, train, integration, None)
+}
+
+fn publish_train_branch_as(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, train: &Task, integration: &str,
+    principal: Option<&crate::types::Agent>) -> Result<(), String> {
     use crate::worktree::git::train_authority::Snapshot;
     let lane = train.effective_epic_branch().ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train lane missing")?;
     let git = crate::worktree::GitOperations::new(repo.to_path_buf());
@@ -147,25 +152,50 @@ pub(crate) fn publish_train_branch(root: &Path, repo: &Path, store: &dyn cas_sto
     }
     let owner = train.epic_verification_owner.as_deref()
         .ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: new train has no registered owner")?;
-    let agent = crate::store::open_agent_store(root).map_err(|error| error.to_string())?
-        .get(owner).map_err(|error| error.to_string())?;
+    let agent = match principal {
+        Some(actor) if crate::cloud::peer_mailbox::owns_recipient(root, actor, owner) => actor.clone(),
+        Some(_) => return Err("TRAIN_OWNER_PUBLICATION_REQUIRED: caller does not own the prepared train".into()),
+        None => crate::store::open_agent_store(root).map_err(|error| error.to_string())?
+            .get(owner).map_err(|error| error.to_string())?,
+    };
     if agent.role != crate::types::AgentRole::Supervisor || !agent.is_alive()
         || agent.machine_id.as_deref() != Some(crate::types::Agent::get_or_generate_machine_id().as_str())
     {
         return Err("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train owner is not a live local supervisor".into());
     }
     let actor = crate::train_owner::identity(&agent, owner)?;
+    let head = prepare_local_train_branch(repo, train, integration)?;
+    let checks = crate::train_owner::provider::GitHubChecks::new(repo)?;
+    let snapshot = Snapshot::enroll(repo, &project, &train.id, lane, &actor, &head, None, &checks)?;
+    crate::train_owner::repair_projection(root, store, train, &snapshot)?;
+    Ok(())
+}
+
+/// Metadata preparation does not publish or confer authority. A filing worker
+/// and release reconciliation may reserve work while its publisher is absent.
+fn prepare_local_train_branch(repo: &Path, train: &Task, integration: &str) -> Result<String, String> {
+    let lane = train.effective_epic_branch().ok_or("train lane missing")?;
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
     if !ref_exists(repo, lane) {
         let base = [format!("origin/{integration}"), integration.to_string()]
             .into_iter().find(|candidate| ref_exists(repo, candidate))
             .ok_or_else(|| format!("no `{integration}` to cut `{lane}` from"))?;
         git.create_branch_from(lane, &base).map_err(|error| error.to_string())?;
     }
-    let head = git.resolve_commit(lane).ok_or("TRAIN_TRANSFER_FENCE_UNAVAILABLE: train source missing")?;
-    let checks = crate::train_owner::provider::GitHubChecks::new(repo)?;
-    let snapshot = Snapshot::enroll(repo, &project, &train.id, lane, &actor, &head, None, &checks)?;
-    crate::train_owner::repair_projection(root, store, train, &snapshot)?;
-    Ok(())
+    git.resolve_commit(lane).ok_or_else(|| "TRAIN_TRANSFER_FENCE_UNAVAILABLE: train source missing".into())
+}
+
+fn prepare_train_for_work(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, train: &Task, integration: &str,
+    principal: Option<&crate::types::Agent>) -> Result<(Task, Option<String>), String> {
+    prepare_local_train_branch(repo, train, integration)?;
+    let held = publish_train_branch_as(root, repo, store, train, integration, principal).err();
+    if let Some(reason) = &held {
+        let note = format!("TRAIN_PUBLICATION_HELD: {reason}. Work is recorded; owner authority is required before publication or admission.");
+        if !train.notes.contains(&note) {
+            store.append_trusted_note(&train.id, &note).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok((store.get(&train.id).map_err(|error| error.to_string())?, held))
 }
 
 /// Prefer shared origin history over a machine's possibly stale local branch.
@@ -305,8 +335,7 @@ fn ensure_successor(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, 
         if !seen.insert(previous.id.clone()) { return Err("release train successor cycle".into()); }
         let next = store.get(id).map_err(|error| error.to_string())?;
         if !next.is_terminal() && !is_cut_train(&next) && !accepts_no_work(&next) {
-            publish_train_branch(root, repo, store, &next, integration)?;
-            return Ok(next);
+            return prepare_train_for_work(root, repo, store, &next, integration, None).map(|(next, _)| next);
         }
         previous = next;
     }
@@ -335,8 +364,7 @@ fn ensure_successor(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, 
     previous.labels.push(format!("{SUCCESSOR_LABEL}{}", next.id));
     previous.updated_at = chrono::Utc::now();
     store.update(&previous).map_err(|error| error.to_string())?;
-    publish_train_branch(root, repo, store, &next, integration)?;
-    Ok(next)
+    prepare_train_for_work(root, repo, store, &next, integration, None).map(|(next, _)| next)
 }
 
 fn rollover_children(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore, retired: &[Task], next: &Task, cut_tip: &str, included: &[String]) -> Result<(), String> {
@@ -567,8 +595,8 @@ impl CasCore {
     /// The release train a new task without an epic or explicit target joins,
     /// with a one-line receipt. `None` keeps the per-task integration target:
     /// the setting is off, the store is not in Git, or no integration branch
-    /// resolves. A train that cannot be opened degrades to that target too,
-    /// with the reason in the receipt.
+    /// resolves. Publisher unavailability records work on a prepared train,
+    /// with a hold that cannot grant publication/admission authority.
     pub(crate) async fn release_train_for_new_task(
         &self,
         store: &dyn cas_store::TaskStore,
@@ -586,20 +614,23 @@ impl CasCore {
                 "\n\nRELEASE TRAIN UNAVAILABLE: train lock: {error}. This task targets `{integration}` directly."
             ))),
         };
-        if let Some(train) = select_train(store, &repo, &integration)
+        let principal = self.resolve_live_supervisor_authority().ok();
+        if let Some(mut train) = select_train(store, &repo, &integration)
             .map_err(|error| McpError::invalid_params(error, None))?
         {
+            if train.epic_verification_owner.is_none() {
+                train.epic_verification_owner = principal.as_ref().map(|actor| actor.id.clone());
+            }
+            let (train, held) = prepare_train_for_work(&self.cas_root, &repo, store, &train, &integration, principal.as_ref())
+                .map_err(|error| McpError::invalid_params(error, None))?;
             let lane = train.effective_epic_branch().unwrap_or(&integration);
-            let published = publish_train_branch(&self.cas_root, &repo, store, &train, &integration);
-            if let Err(error) = published { return Err(McpError::invalid_params(error, None)); }
+            let held = held.map(|reason| format!("\nTRAIN_PUBLICATION_HELD: {reason}")).unwrap_or_default();
             return Ok((Some(train.id.clone()), format!(
-                "\n\nRELEASE TRAIN: joined {} ({lane}); its delivery merges into the train, which reaches `{integration}` once per release. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane.", train.id
+                "\n\nRELEASE TRAIN: joined {} ({lane}); its delivery merges into the train, which reaches `{integration}` once per release. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane.{held}", train.id
             )));
         }
         // Initial train identity and lane are stored together, before any
         // generic branch creation can publish it or mutate protected metadata.
-        let actor = self.resolve_live_supervisor_authority()
-            .map_err(|error| McpError::invalid_params(format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error:?}"), None))?;
         let id = store.generate_id().map_err(|error| McpError::internal_error(error.to_string(), None))?;
         let mut train = Task::new(id, RELEASE_TRAIN_TITLE.into());
         train.task_type = TaskType::Epic;
@@ -607,15 +638,16 @@ impl CasCore {
         train.labels = vec![RELEASE_TRAIN_LABEL.into(), crate::train_owner::ENROLLED.into()];
         train.branch = Some(format!("epic/release-train-vnext-{}", train.id));
         train.origin_project = crate::cloud::resolve_canonical_id(&self.cas_root);
-        train.epic_verification_owner = Some(actor.id);
+        train.epic_verification_owner = principal.as_ref().map(|actor| actor.id.clone());
         train.deliverables.work_target = super::repo_context::declare_work_target(
             &self.cas_root, repo.to_str(), Some(&integration))
             .map_err(|error| McpError::invalid_params(error, None))?;
         store.add(&train).map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        publish_train_branch(&self.cas_root, &repo, store, &train, &integration)
+        let (train, held) = prepare_train_for_work(&self.cas_root, &repo, store, &train, &integration, principal.as_ref())
             .map_err(|error| McpError::invalid_params(error, None))?;
+        let held = held.map(|reason| format!("\nTRAIN_PUBLICATION_HELD: {reason}")).unwrap_or_default();
         Ok((Some(train.id.clone()), format!(
-            "\n\nRELEASE TRAIN: opened {} ({}) from `{integration}`; this task joins it.",
+            "\n\nRELEASE TRAIN: opened {} ({}) from `{integration}`; this task joins it.{held}",
             train.id, train.effective_epic_branch().unwrap(),
         )))
     }

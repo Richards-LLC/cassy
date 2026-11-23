@@ -240,8 +240,16 @@ pub(crate) fn snapshot_with_installed(
 }
 
 pub(crate) fn installed_version() -> Option<String> {
+    #[cfg(test)]
+    if let Some(version) = INSTALLED_VERSION_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(version);
+    }
     installed_version_of(std::ffi::OsStr::new("cas"))
 }
+
+/// Lib tests may not change process PATH; a fixture names the installed build here.
+#[cfg(test)]
+pub(crate) static INSTALLED_VERSION_FOR_TEST: Mutex<Option<String>> = Mutex::new(None);
 
 /// The version a restart of this long-lived process (hub or factory daemon)
 /// would run. A service launches it by an absolute (pinned) path, which an

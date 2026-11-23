@@ -1014,15 +1014,9 @@ mod tests {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture_for};
         use cas_store::HistoryStore;
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::reload_cassy_requires_a_replacement_live_registry_pid_and_version") { return; }
-        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
-        // cas-8c4f: proof is the installed build, so the fixture installs one.
-        let installed = tempfile::tempdir().unwrap();
-        let cas = installed.path().join("cas");
-        std::fs::write(&cas, "#!/bin/sh\necho 'cas 9.99.2 (abc1234 2026-11-23)'\n").unwrap();
-        std::fs::set_permissions(&cas, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-        let path = std::env::join_paths(std::iter::once(installed.path().to_path_buf())
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
-        env.set("PATH", path);
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        // cas-8c4f: proof is the installed build, so the fixture names one.
+        *crate::factory_binary_skew::INSTALLED_VERSION_FOR_TEST.lock().unwrap() = Some("9.99.2".into());
         struct Child(std::process::Child);
         impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
         fn process() -> Child { Child(std::process::Command::new("/bin/sleep").arg("120").spawn().unwrap()) }

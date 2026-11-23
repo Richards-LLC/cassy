@@ -2980,7 +2980,12 @@ for title in re.findall(r'\btest\("([^"]+)"', Path(shown).read_text()) if shown 
     entry = {{'projectId': 'journeys', 'projectName': 'journeys', 'expectedStatus': 'passed', 'annotations': [], 'results': [] if listing else [{{'status': 'passed', 'retry': 0}}]}}
     specs.append({{'file': shown, 'title': title, 'tests': [entry] * (1 if listing else repeats)}})
 suites = [{{'title': Path(shown).name, 'column': 0, 'specs': specs, 'suites': []}}] if shown else []
-Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_FILE']).write_text(json.dumps({{'config': {{'rootDir': os.getcwd()}}, 'errors': [], 'suites': suites}}))
+report = json.dumps({{'config': {{'rootDir': os.getcwd()}}, 'errors': [], 'suites': suites}})
+# The JSON reporter writes to PLAYWRIGHT_JSON_OUTPUT_FILE when it is set and to stdout otherwise.
+if os.environ.get('PLAYWRIGHT_JSON_OUTPUT_FILE'):
+    Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_FILE']).write_text(report)
+else:
+    print(report)
 raise SystemExit(0 if shown else 1)
 "#, omit = omit.display().to_string())).unwrap();
         {

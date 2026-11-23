@@ -132,7 +132,12 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
         };
         let note = (!named.is_empty() && found.is_some()).then(|| format!("{}the covering specs' passes do not prove the package; run the whole package instead", named));
         note.into_iter().chain(javascript::runner_hint(repo, path).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"])
-            .into_iter().map(|runner| format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display()))).collect()
+            .into_iter().map(|runner| {
+                // GH #2195: a spec only a non-default config lists runs under it.
+                let config = (runner == "playwright").then(|| javascript::playwright_owner(repo, path)).flatten()
+                    .map(|config| format!("--config {} ", config.display())).unwrap_or_default();
+                format!("cas factory worker-check --cas-root {} -- {runner} {config}{path}", cas_root.display())
+            })).collect()
     }).collect()
 }
 

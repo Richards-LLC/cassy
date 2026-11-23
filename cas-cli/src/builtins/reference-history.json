@@ -1284,11 +1284,14 @@
       "a6c88d043fc5af29fdb3a07cd14ee866a520f2a5e62995c71b1095b7fcb80254"
     ],
     "skills/cas-playwright-tests/references/staleness-scan.md": [
+      "33d033167966528e46fe54f151b69318633a2383f23f1d082d8cbd11b2d1f500",
       "57d2885453e00fb5d73b3771b08cdc49f42a4c8d2c13bda12931753246bf2385",
-      "6d6bec3e47848340a31b2245d885aea36602fbfb0d76b6531091a079d88dc3d7"
+      "6d6bec3e47848340a31b2245d885aea36602fbfb0d76b6531091a079d88dc3d7",
+      "a821ac309ba47e1964c4bda2395fb1e1effd325f6aee2497bf870cb35c69497b"
     ],
     "skills/cas-playwright-tests/scripts/staleness-scan.py": [
-      "260e9a19c699dfa298fd5b425205381e50356703b90c49acbbd5b5fed7db843b"
+      "260e9a19c699dfa298fd5b425205381e50356703b90c49acbbd5b5fed7db843b",
+      "6784d99133554edeaac7ff0ddcd0703d1ccd99ebd21ba7374fc05e933033a81f"
     ],
     "skills/cas-qa-craft/SKILL.md": [
       "019600c3f25b2b5ded69bcfdf4a3eb645316b908988f4d985c9ece602dd718a0",

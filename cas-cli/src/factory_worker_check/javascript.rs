@@ -2987,7 +2987,7 @@ mod tests {
         assert_eq!(playwright_importers(&repo, helper), [pair, summary]);
         assert_eq!(playwright_importers(&repo, extra), [partial]);
         assert_eq!(playwright_importers(&repo, "e2e/journeys/world.ts"), [pair, partial, history, summary]);
-        let command = widened::commands(Path::new("/cas"), &repo, &[helper.into()], &scopes);
+        let command = widened::commands(Path::new("/cas"), &repo, &[helper.into()], &scopes, &Default::default());
         assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
         assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new(), configs: Default::default() }));
 
@@ -3034,7 +3034,7 @@ raise SystemExit(0 if shown else 1)
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let covered = |scope: &Scope| widened::missing(&super::super::PassingTests::new(cas.path(), &repo, &head), std::slice::from_ref(scope)).is_empty();
+        let covered = |scope: &Scope| widened::missing(&super::super::PassingTests::new(cas.path(), &repo, &head), std::slice::from_ref(scope), &Default::default()).is_empty();
         // The ordinary dispatch a worker runs: `worker-check -- playwright [--config c] <path>`.
         let exec = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
@@ -3076,7 +3076,7 @@ raise SystemExit(0 if shown else 1)
         assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
         let runtime = "e2e/journeys/hub-double-runtime.ts";
         let scopes = [widened::scope(&repo, runtime)];
-        assert_eq!(widened::commands(Path::new("/cas"), &repo, &[runtime.into()], &scopes),
+        assert_eq!(widened::commands(Path::new("/cas"), &repo, &[runtime.into()], &scopes, &Default::default()),
             [format!("cas factory worker-check --cas-root /cas -- vitest related --run {runtime}")]);
         assert!(playwright_importers(&repo, "src/shared.ts").is_empty());
     }

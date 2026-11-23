@@ -781,7 +781,9 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(allRows()).toHaveAccessibleName(/wild-shark-68/);
     await page.getByRole("searchbox", { name: "Search conversations" }).fill("calm-puma");
     await expect(allRows()).toHaveCount(0);
+    // The empty state is the list's only paragraph; no project card is left.
     await expect(list.getByRole("group")).toHaveCount(0);
+    await expect(list.getByRole("paragraph")).toBeVisible();
     await filters.getByRole("button", { name: /^Showing Borealis\./ }).click();
     await expect(allRows()).toHaveCount(1);
     await list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button").click();

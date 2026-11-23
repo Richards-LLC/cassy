@@ -1339,18 +1339,47 @@ pub(crate) fn jest_owner(repo: &Path, path: &str) -> Option<PathBuf> {
     config.strip_prefix(repo).ok().map(Path::to_path_buf)
 }
 
+/// Whether the local Playwright, run with `config`, lists a test in `spec`:
+/// the config's own `testDir`, `testMatch`, `testIgnore` and projects decide
+/// ownership (GH #2195). Listing loads the config without starting servers.
+fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> bool {
+    fn lists(suite: &Value) -> bool {
+        suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
+            || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(lists))
+    }
+    let Ok(playwright) = runner_path(repo, dir, "playwright") else { return false };
+    let Ok(output) = Command::new(playwright).current_dir(dir).env("CI", "1")
+        .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"])
+        .arg(regex::escape(&spec.to_string_lossy())).output()
+    else { return false };
+    output.status.success()
+        && serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|report| lists(&report))
+}
+
+/// The repository-relative non-default Playwright config that lists `path`,
+/// when its directory's default config does not (GH #2195).
+pub(crate) fn playwright_owner(repo: &Path, path: &str) -> Option<PathBuf> {
+    let (dir, config) = runner_root(repo, path, "playwright").ok()?;
+    let config = config?;
+    if runner_config(&dir, "playwright").as_ref() == Some(&config) { return None; }
+    config.strip_prefix(repo).ok().map(Path::to_path_buf)
+}
+
 /// The runner configs in `dir`, nearest default first. Jest repositories keep
-/// further configs beside it (`jest-integration.config.js`) for other specs.
+/// further configs beside it (`jest-integration.config.js`) for other specs, as
+/// Playwright ones do (`playwright.hermetic.config.ts`).
 fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
     let mut configs: Vec<PathBuf> = runner_config(dir, runner).into_iter().collect();
-    if runner == "jest" {
+    if matches!(runner, "jest" | "playwright") {
+        let defaults = if runner == "jest" { JEST_CONFIGS } else { PLAYWRIGHT_CONFIGS };
         let mut extra: Vec<PathBuf> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                name.contains("jest") && name.contains(".config.") && !JEST_CONFIGS.contains(&name.as_str())
+                (if runner == "jest" { name.contains("jest") } else { name.starts_with("playwright") })
+                    && name.contains(".config.") && javascript(&name) && !defaults.contains(&name.as_str())
             })
             .map(|entry| entry.path())
             .collect();
@@ -1363,7 +1392,8 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
 /// The runner's working directory and explicit config for a test file: the
 /// nearest ancestor holding that runner's config, else the nearest
 /// package.json. A nested package.json must not hide the config and its
-/// transforms (cas-1468). For Jest the config must select the file: a spec
+/// transforms (cas-1468). For Jest, or for one of several Playwright configs
+/// (GH #2195), the config must select the file: a spec
 /// outside the default config's `testRegex` belongs to the config that
 /// matches it (GH #2058); with no such config the nearest one stays.
 fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
@@ -1371,8 +1401,17 @@ fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option
     let mut current = spec.parent().context("test parent")?.to_path_buf();
     let (mut package, mut nearest) = (None, None);
     loop {
-        for config in runner_configs(&current, runner) {
-            if runner != "jest" || jest_config_selects(repo, &current, &config, &spec) {
+        let configs = runner_configs(&current, runner);
+        // One Playwright config owns its directory; among several, the one
+        // listing the spec does (GH #2195).
+        let several = configs.len() > 1;
+        for config in configs {
+            let selects = match runner {
+                "jest" => jest_config_selects(repo, &current, &config, &spec),
+                "playwright" if several => playwright_config_selects(repo, &current, &config, &spec),
+                _ => true,
+            };
+            if selects {
                 return Ok((current, Some(config)));
             }
             nearest.get_or_insert_with(|| (current.clone(), Some(config)));
@@ -2550,6 +2589,105 @@ process.exit(ok ? 0 : 1);
         execute_tests(cas_root.path(), repo.path(), &head, "jest", Some(&explicit), &tests, None, &[]).unwrap();
         assert!(super::super::stability::missing(&passing(), &tests).is_empty());
         assert_eq!(passing().receipts().len(), 1);
+    }
+
+    /// GH #2195: tests/e2e specs belong to playwright.hermetic.config.js, but
+    /// the capped run and its prescribed command used the default config,
+    /// which lists no such spec, so no stability proof could be earned.
+    #[test]
+    fn playwright_spec_runs_under_the_config_that_lists_it_gh2195() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let write = |path: &str, text: &str| {
+            let path = repo.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(&["init", "--quiet"]);
+        write("package.json", "{}");
+        write("playwright.config.js", "module.exports = { testDir: 'e2e' };");
+        write("playwright.hermetic.config.js", "module.exports = { testDir: 'tests/e2e' };");
+        // A stand-in Playwright emitting what Playwright 1.65.1's JSON reporter
+        // emits for a testDir-only config (checked against a real 1.65.1
+        // `--list` and `--repeat-each` run of this fixture): one unnamed
+        // project (id and name ''), rootDir is testDir and files are relative
+        // to it; `--list` keeps each discovered test with empty results; a run
+        // adds one test per repetition, each with one result. It lists the
+        // `.spec.ts` files under testDir that the positional pattern names
+        // ("No tests found" otherwise).
+        write("node_modules/.bin/playwright", r#"#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
+const config = path.resolve(at('--config')), root = path.join(path.dirname(config), require(config).testDir);
+const pattern = new RegExp(a[a.length - 1]), repeats = listing ? 1 : Number(at('--repeat-each'));
+const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(root, f)) : [];
+const listed = files.filter((file) => pattern.test(file)), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
+const metadata = listing || !listed.length ? {} : { actualWorkers: Math.min(workers, listed.length * repeats) };
+const testMatch = '**/*.@(spec|test).?(c|m)[jt]s?(x)';
+const project = { outputDir, repeatEach: repeats, retries: 0, metadata, id: '', name: '', testDir: root, testIgnore: [], testMatch: [testMatch], timeout: 30000 };
+const startTime = new Date().toISOString(), result = { workerIndex: 0, parallelIndex: 0, status: 'passed', duration: 1, errors: [],
+  stdout: [], stderr: [], retry: 0, startTime, annotations: [], attachments: [] };
+const test = { timeout: 30000, annotations: [], expectedStatus: 'passed', projectId: '', projectName: '',
+  results: listing ? [] : [result], status: listing ? 'skipped' : 'expected' };
+const noTests = 'Error: No tests found.\nMake sure that arguments are regular expressions matching test files.\nYou may need to escape symbols like "$" or "*" and quote the arguments.';
+const report = {
+  config: { argv: process.argv, configFile: config, rootDir: root, failOnFlakyTests: false, forbidOnly: false, fullyParallel: false, globalSetup: null,
+    globalTeardown: null, globalTimeout: 0, grep: {}, grepInvert: null, maxFailures: 0, metadata, preserveOutput: 'always',
+    filteredProjects: [{ grep: {}, grepInvert: null, outputDir, repeatEach: repeats, retries: 0, metadata, name: '', testDir: root,
+      snapshotDir: root, testIgnore: [], testMatch, timeout: 30000, use: {}, dependencies: [], ignoreSnapshots: false, __projectId: '' }],
+    projects: [project], quiet: false, reporter: [['json']], reportSlowTests: { max: 5, threshold: 300000 }, shard: null, tags: [],
+    updateSnapshots: 'default', updateSourceMethod: 'patch', version: '1.65.1', workers, webServer: null },
+  suites: listed.map((file, index) => {
+    const relative = path.relative(root, file);
+    return { title: relative, file: relative, column: 0, line: 0, specs: [{ title: 'hermetic sign in', ok: true, tags: [],
+      tests: Array(repeats).fill(test), id: `spec-${index}`, file: relative, line: 2, column: 1 }] };
+  }),
+  errors: listed.length ? [] : [{ message: noTests, stack: noTests }],
+  stats: { startTime, duration: 1, expected: listing ? 0 : listed.length * repeats, skipped: listing ? listed.length : 0, unexpected: 0, flaky: 0 },
+};
+if (listing) console.log(JSON.stringify(report));
+else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
+process.exit(listed.length ? 0 : 1);
+"#);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = "tests/e2e/sign-in.spec.ts";
+        let source = |body: &str| format!("import {{ test }} from '@playwright/test';\ntest('hermetic sign in', async () => {{ {body} }});\n");
+        write(spec, &source("throw 0;"));
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        write(spec, &source(""));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
+        assert_eq!(tests, [id(spec, "hermetic sign in")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        // Worker-check discovers the owning config and records five capped passes.
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &tests, None, &[]).unwrap();
+        assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
+        assert!(super::super::stability::missing(&passing(), &tests).is_empty());
+        // The prescribed command names that config, and runs as printed.
+        let config = "playwright.hermetic.config.js";
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        assert_eq!(prescribed.len(), 1);
+        assert!(prescribed[0].contains(&format!("-- playwright --config {config} {spec}`")), "{prescribed:?}");
+        let args: Vec<String> = ["playwright", "--config", config, spec].map(String::from).into();
+        let explicit = repo.path().join(invocation(&args).unwrap().config.unwrap());
+        execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&explicit), &tests, None, &[]).unwrap();
+        // An explicit caller config stays authoritative: the default lists no
+        // test, and a zero-test run is no proof.
+        let default = repo.path().join("playwright.config.js");
+        assert!(execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&default), &tests, None, &[]).is_err());
     }
 
     /// A config-free global test resolves its runner from package metadata;

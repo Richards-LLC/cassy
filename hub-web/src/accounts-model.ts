@@ -8,9 +8,14 @@ export interface AccountRow {
   login_state: "logged_in" | "logged_out" | "never_logged_in" | "stale_login" | "unknown";
   disabled: boolean; duplicate_of: string | null; is_default: boolean; recommendation: string | null;
   windows: AccountWindow[]; usage_observed_at: string | null;
+  /** `hub`: the one shared number for this login; `local`: this machine's own read; `hub_unreachable`: none shown. Absent: no hub configured. */
+  usage_source?: UsageSource;
   capabilities: Record<AccountOperation, string | null>;
 }
-export interface AccountsCatalog { accounts: AccountRow[] }
+export type UsageSource = "hub" | "local" | "hub_unreachable";
+/** Where this machine's capacity numbers come from. Older hubs omit it. */
+export interface QuotaSource { state: "off" | "hub" | "unreachable"; reason?: string }
+export interface AccountsCatalog { accounts: AccountRow[]; quota_source?: QuotaSource }
 /** One account on the machine's home gateway hub (GET /v1/accounts/gateway). Read-only; Team plans never appear. */
 export interface HubAccount { provider: string; label: string; state: "active" | "disabled" | "unavailable"; recent_requests: number; recent_failed: number; recent_minutes?: number }
 export interface GatewayInventory {

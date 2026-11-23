@@ -1,5 +1,5 @@
 import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
-import { fillMeters, meterMarkup, readings } from "./account-meters";
+import { fillMeters, lowPickNote, meterMarkup, readings } from "./account-meters";
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
@@ -23,7 +23,7 @@ export interface AccountsHost {
 const ACTIONS: Record<AccountOperation, string> = { set_default: "Set default", rename: "Rename", disable: "Disable", enable: "Enable", remove: "Remove" };
 const CLEANUP_WORD = "clean up";
 /** Least capacity left across known windows; unknown sorts last. */
-const headroom = (row: AccountRow) => Math.min(...readings(row.windows, row.usage_observed_at).map(reading => "left" in reading ? reading.left : -1));
+const headroom = (row: AccountRow) => Math.min(...readings(row.windows, row.usage_observed_at, Date.now(), row.usage_source).map(reading => "left" in reading ? reading.left : -1));
 /** The account New session preselects for a provider: its recommendation, else the logged-in default, else the first logged-in one. */
 function nextLaunch(rows: readonly AccountRow[]): AccountRow | undefined {
   const usable = rows.filter(row => row.login_state === "logged_in" && !row.disabled);
@@ -221,7 +221,10 @@ export class AccountsSheet {
     const cleanup = catalog.accounts.filter(needsCleanup);
     const observed = catalog.accounts.map(row => row.usage_observed_at).filter((at): at is string => Boolean(at)).sort().at(-1);
     const why = manage ? "" : "Needs manage access on this machine";
-    const summary = `<div class="accounts-summary"><p class="accounts-quiet">${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${observed ? ` · usage read ${escapeHtml(accountTime(observed))}` : ""}</p>${cleanup.length ? `<div class="accounts-cleanup-banner" data-testid="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : ""}</div>`;
+    const source = catalog.quota_source;
+    const from = source?.state === "hub" ? " · usage from the hub, one number per login on every machine" : "";
+    const unreachable = source?.state === "unreachable" ? `<p class="accounts-flag" data-testid="accounts-hub-unreachable" role="status">Hub unreachable${source.reason ? `: ${escapeHtml(source.reason)}` : ""}. Usage is hidden until it answers, rather than showing this machine's own read.</p>` : "";
+    const summary = `<div class="accounts-summary" data-quota-source="${escapeHtml(source?.state ?? "off")}"><p class="accounts-quiet">${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${observed && source?.state !== "unreachable" ? ` · usage read ${escapeHtml(accountTime(observed))}` : ""}${from}</p>${unreachable}${cleanup.length ? `<div class="accounts-cleanup-banner" data-testid="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : ""}</div>`;
     const groups = PROVIDERS.map(([provider, label]) => {
       const accounts = catalog.accounts.filter(row => row.provider === provider).sort((a, b) => Number(needsCleanup(a)) - Number(needsCleanup(b)) || headroom(b) - headroom(a));
       if (!accounts.length) return "";
@@ -245,8 +248,13 @@ export class AccountsSheet {
     const checked = this.usageChecks.result(machine.id, account.key);
     const lookalike = harnessLookalike(account) ? ` · ${HARNESS_NAME[account.provider]} profile` : "";
     const flag = account.duplicate_of ? `<span class="accounts-flag" data-duplicate-of>Duplicate of ${duplicateName(account.duplicate_of, accounts, machine.label)}</span>` : account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
+    const shown = readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at, Date.now(), checked ? undefined : account.usage_source);
+    const low = next && account.recommendation ? lowPickNote(shown) : undefined;
     const nextTag = next ? `<span class="accounts-next" data-testid="account-next" title="${escapeHtml(account.recommendation ?? "Default profile")}">Next launch</span><span class="accounts-sub">${escapeHtml(account.recommendation ?? "default profile")}</span>` : "";
-    const sub = [nextTag, flag, !next && account.is_default ? `<span class="accounts-sub">default</span>` : "", account.disabled ? `<span class="accounts-sub">disabled</span>` : "", account.location ? `<code class="accounts-sub" title="${escapeHtml(account.location)} on ${escapeHtml(machine.label)}">${escapeHtml(account.location)}</code>` : ""].filter(Boolean).join("");
+    const lowTag = low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(low)}</span>` : "";
+    // With a hub configured, a number that isn't the hub's says whose it is.
+    const local = (checked && account.usage_source) || account.usage_source === "local" ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own read</span>` : "";
+    const sub = [nextTag, lowTag, flag, local, !next && account.is_default ? `<span class="accounts-sub">default</span>` : "", account.disabled ? `<span class="accounts-sub">disabled</span>` : "", account.location ? `<code class="accounts-sub" title="${escapeHtml(account.location)} on ${escapeHtml(machine.label)}">${escapeHtml(account.location)}</code>` : ""].filter(Boolean).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];
@@ -257,7 +265,7 @@ export class AccountsSheet {
     const loggedIn = account.login_state === "logged_in";
     const cells = grok ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet" data-testid="accounts-readonly">Grok uses one account and doesn't report usage.</p></div>`
       : !loggedIn && !checked ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet">Not read · ${account.login_state === "stale_login" ? "stale login" : "logged out"}</p><div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy</button></div></div>`
-      : readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at).map(reading => `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
+      : shown.map(reading => `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
     return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}${next ? " is-next" : ""}" data-testid="account-row" data-account-key="${escapeHtml(account.key)}" data-login-state="${escapeHtml(account.login_state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})${lookalike}</span><span class="accounts-subline">${sub}</span></div>${actions}</div>${cells}</li>`;
   }
 

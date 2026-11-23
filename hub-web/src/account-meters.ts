@@ -6,7 +6,7 @@
  * only have gone down, so it says "≤ N% left" with its age.
  */
 import { escapeHtml } from "./cloud-brand";
-import { accountTime, type AccountWindow } from "./accounts-model";
+import { accountTime, type AccountWindow, type UsageSource } from "./accounts-model";
 
 export type WindowSlot = "5h" | "week";
 export const SLOTS: readonly WindowSlot[] = ["5h", "week"];
@@ -16,7 +16,7 @@ export const STALE_MS = 60 * 60_000;
 
 export type WindowReading =
   | { slot: WindowSlot; kind: "live" | "stale"; left: number; reset?: string; resetsIn?: string; age?: string }
-  | { slot: WindowSlot; kind: "reset" | "unknown" | "missing" };
+  | { slot: WindowSlot; kind: "reset" | "unknown" | "missing" | "unreachable" };
 
 const slotOf = (name: string): WindowSlot | undefined => /week|7d|seven/i.test(name) ? "week" : /^5h$|five|session/i.test(name) ? "5h" : undefined;
 
@@ -38,8 +38,9 @@ export function readAge(instant: string, now = Date.now()): string | undefined {
   return `read ${text.replace(" ", " ")} ago`;
 }
 
-/** Both slots, always in order, from whatever windows the source reported. */
-export function readings(windows: readonly AccountWindow[] | undefined, observed: string | null | undefined, now = Date.now()): WindowReading[] {
+/** Both slots, always in order, from whatever windows the source reported. An unreachable hub has no number to show. */
+export function readings(windows: readonly AccountWindow[] | undefined, observed: string | null | undefined, now = Date.now(), source?: UsageSource): WindowReading[] {
+  if (source === "hub_unreachable") return SLOTS.map(slot => ({ slot, kind: "unreachable" }));
   const observedAt = observed ? new Date(observed).getTime() : NaN;
   const stale = Number.isFinite(observedAt) && now - observedAt > STALE_MS;
   return SLOTS.map(slot => {
@@ -75,12 +76,26 @@ export function meterMarkup(reading: WindowReading, options: { labelled: boolean
     const aria = `${name}: ${reading.kind === "stale" ? "at most " : ""}${reading.left}% left${reading.reset ? `, resets ${reading.reset}` : ""}${reading.age ? `, ${reading.age}` : ""}`;
     return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" data-left="${reading.left}" data-tone="${tone(reading.left)}" role="img" aria-label="${escapeHtml(aria)}">${label}<span class="meter-bar" aria-hidden="true"><span data-fill="${reading.left}"></span></span><span class="meter-value">${value}<span class="meter-unit"> left</span></span><span class="meter-when">${when}${when && at ? " · " : ""}${at}</span></div>`;
   }
-  const words = reading.kind === "reset" ? "Unknown · reset since last read" : reading.kind === "unknown" ? "Unknown" : "Not reported";
+  const words = reading.kind === "reset" ? "Unknown · reset since last read" : reading.kind === "unknown" ? "Unknown" : reading.kind === "unreachable" ? "Hub unreachable" : "Not reported";
   return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" role="img" aria-label="${escapeHtml(`${name}: ${words}`)}">${label}<span class="meter-bar meter-bar--none" aria-hidden="true"></span><span class="meter-value meter-value--none">${words}</span></div>`;
+}
+
+/** Least share left across known windows, or undefined when none is known. */
+export function leastLeft(list: readonly WindowReading[]): number | undefined {
+  const known = list.flatMap(reading => "left" in reading ? [reading.left] : []);
+  return known.length ? Math.min(...known) : undefined;
+}
+/** Below this, a recommended account says on its row why it is still first. */
+export const LOW_PICK = 20;
+/** Why SoonestReset still picks a nearly spent account: its capacity expires first. */
+export function lowPickNote(list: readonly WindowReading[]): string | undefined {
+  const left = leastLeft(list);
+  return left !== undefined && left < LOW_PICK ? `Only ${left}% left: picked first because it resets soonest, so its capacity is used before it expires` : undefined;
 }
 
 /** "77% 5h · 62% week · resets in 2 h": the plan strip's one-line summary. */
 export function capacityLine(list: readonly WindowReading[]): string {
+  if (list.every(reading => reading.kind === "unreachable")) return "hub unreachable";
   const parts = list.map(reading => reading.kind === "live" ? `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "stale" ? `≤${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : `${SLOT_LABEL[reading.slot].toLowerCase()} unknown`);
   const soonest = list.filter((reading): reading is Extract<WindowReading, { kind: "live" | "stale" }> => (reading.kind === "live" || reading.kind === "stale") && Boolean(reading.resetsIn))[0];
   return `${parts.join(" · ")}${soonest?.resetsIn ? ` · resets ${soonest.resetsIn}` : ""}`;

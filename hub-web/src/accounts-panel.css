@@ -13,7 +13,7 @@
 .accounts-machine { margin: 0; font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); }
 .accounts-machine-summary { margin: var(--space-1) 0 var(--space-3); font-size: var(--fs-meta); }
 .accounts-provider-group { margin-top: var(--space-4); }
-.accounts-provider { margin: 0 0 var(--space-2); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.accounts-provider { margin: 0 0 var(--space-2); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
 .accounts-cleanup-lead { margin: 0 0 var(--space-2); font-size: var(--fs-meta); }
 /* Redesign (cas-87e9f238): one ledger grid for every provider and the hub.
    Identity and actions, then the 5-hour and weekly windows, aligned across
@@ -23,9 +23,9 @@
 .accounts-summary p { margin: 0; }
 .accounts-quiet { margin: 0; color: var(--ink-mid); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
 .accounts-flag { color: var(--state-warn); font-size: var(--fs-meta); font-weight: var(--weight-medium); }
-.accounts-cols { display: grid; grid-template-columns: var(--accounts-grid); gap: var(--space-4); padding: 0 var(--space-3) var(--space-2); border-bottom: var(--line-width) solid var(--line-subtle); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.accounts-cols { display: grid; grid-template-columns: var(--accounts-grid); gap: var(--space-4); padding: 0 var(--space-3) var(--space-2); border-bottom: var(--line-width) solid var(--line-subtle); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
 .accounts-provider-group, .accounts-gateway { margin-top: var(--space-4); }
-.accounts-provider { margin: 0 0 var(--space-1); padding-inline: var(--space-3); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.accounts-provider { margin: 0 0 var(--space-1); padding-inline: var(--space-3); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
 .accounts-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-2); }
 .accounts-group-head .accounts-provider { margin: 0; }
 .accounts-gateway > .accounts-quiet, .accounts-gateway > .accounts-flag { padding: 0 var(--space-3) var(--space-2); }
@@ -43,6 +43,9 @@
 code.accounts-sub { font-family: var(--font-mono); }
 .accounts-next { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
 .accounts-cell { min-width: 0; }
+/* Desktop names the windows in the column heads; only the phone labels each meter. */
+.accounts-row .meter-window { display: none; }
+.accounts-why { flex-basis: 100%; font-weight: var(--weight-regular); }
 .accounts-span { grid-column: 2 / -1; display: grid; gap: var(--space-2); }
 .accounts-num { font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
 .accounts-hub-row:hover { background: transparent; }
@@ -51,10 +54,10 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-skeleton .accounts-row { min-block-size: 56px; }
 .accounts-actions, .accounts-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .accounts-actions { flex-wrap: nowrap; }
-.accounts-actions button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
-.accounts-actions button:hover:not(:disabled), .accounts-login button:hover { background: var(--bg-hover); }
+.accounts-menu button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-menu button:hover:not(:disabled), .accounts-login button:hover { background: var(--bg-hover); }
 .accounts-actions button[data-operation="remove"] { color: var(--crit-bg); border-color: var(--crit-bg); }
-.accounts-actions button:disabled { cursor: not-allowed; border-style: dashed; color: var(--ink-mid); }
+.accounts-menu button:disabled { cursor: not-allowed; border-style: dashed; color: var(--ink-mid); }
 .accounts-login code { min-width: 0; padding: var(--space-1) var(--space-2); border-radius: var(--radius-control); background: var(--bg-panel); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-xs); }
 .accounts-readonly { font-size: var(--fs-meta); }
 .accounts-grant { display: grid; gap: var(--space-2); margin-bottom: var(--space-2); padding: var(--card-padding); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-surface); background: var(--bg-raised); font-size: var(--fs-meta); }
@@ -78,11 +81,12 @@ code.accounts-sub { font-family: var(--font-mono); }
   .accounts-sheet { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--space-4)); padding: var(--space-4); }
   .accounts-heading { gap: var(--space-2); }
   .accounts-cols { display: none; }
+  .accounts-row .meter-window { display: block; }
   .accounts-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: var(--space-3) var(--space-1); }
   .accounts-who, .accounts-span { grid-column: 1 / -1; }
   .accounts-hub-row { grid-template-columns: minmax(0, 1fr) auto; }
   .accounts-hub-row .accounts-who { grid-column: 1 / -1; }
-  .accounts-actions button, .accounts-login button, .accounts-more > summary, .accounts-cleanup-banner button { min-height: var(--rail-item-min); }
+  .accounts-menu button, .accounts-login button, .accounts-more > summary, .accounts-cleanup-banner button { min-height: var(--rail-item-min); }
   .accounts-more > summary { min-width: var(--rail-item-min); }
 }
 @media (prefers-contrast: more), (forced-colors: active) {

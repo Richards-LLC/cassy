@@ -2322,16 +2322,7 @@ fn listing_owner(
     let executable = runner_path(repo, package, "playwright")?;
     let mut directory = repo.join(spec);
     while directory.pop() && directory.starts_with(repo) {
-        let mut configs: Vec<PathBuf> = runner_config(&directory, "playwright").into_iter().collect();
-        let mut extra: Vec<PathBuf> = std::fs::read_dir(&directory).into_iter().flatten().flatten()
-            .filter(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                name.contains("playwright") && name.contains(".config.") && !PLAYWRIGHT_CONFIGS.contains(&name.as_str())
-            })
-            .map(|entry| entry.path()).collect();
-        extra.sort();
-        configs.extend(extra);
-        for config in configs {
+        for config in runner_configs(&directory, "playwright") {
             if playwright_listing(repo, &directory, &executable, &config, spec, environment, high, scratch).is_some() {
                 return Ok(config);
             }

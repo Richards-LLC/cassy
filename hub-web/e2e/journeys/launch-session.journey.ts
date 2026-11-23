@@ -464,6 +464,64 @@ test("HUB-J13 check native account usage before starting without switching", jou
   expect(calls).toContain("claude:main"); expect(calls).toContain("codex:main");
 });
 
+// Home-gateway routing: New session pins the worker route and names its scope;
+// Accounts keeps hub accounts apart from native profiles, read-only.
+test("HUB-J13 choose the home gateway for workers and read the hub's accounts", journeyPart, async ({ page, journey }) => {
+  const launch = atlasLaunch();
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: launch } });
+  const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,OPTIONS" };
+  const gateway = { available: true, preselected: "direct", clients: ["claude", "codex"] };
+  await page.route(/^https:\/\/atlas\.test\/v1\/launch\/profiles(?:\?.*)?$/, route => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+    const target = new URL(route.request().url()).searchParams.get("target");
+    return route.fulfill({ headers, json: { ...launch.profiles, ...(target ? { gateway } : {}) } });
+  });
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts$/, route => route.fulfill({ headers, json: { accounts: [{ key: "claude:main", provider: "claude", name: "main", display_name: "daniel@example.test", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Protected", disable: null, enable: "Already enabled", rename: "Protected", set_default: null } }] } }));
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts\/gateway$/, route => route.fulfill({ headers, json: { status: "ready", host: "loopback", inventory: "ok", team_accounts: 0, accounts: [
+    { provider: "claude", label: "hel***@example.test", state: "active", recent_requests: 75, recent_failed: 0, recent_minutes: 200 },
+    { provider: "codex", label: "sup***@example.test", state: "active", recent_requests: 41, recent_failed: 1, recent_minutes: 200 },
+    { provider: "codex", label: "pip***@example.test", state: "disabled", recent_requests: 0, recent_failed: 0, recent_minutes: 200 },
+  ] } }));
+  await journey.open();
+  const sheet = page.getByRole("dialog", { name: "New session", exact: true });
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 }); await page.emulateMedia({ colorScheme });
+    await journey.stage(`Worker route in New session at ${width} ${colorScheme}`, async () => {
+      await newSession(page).click();
+      const route = sheet.getByRole("group", { name: "Worker route" });
+      await expect(route).toBeHidden();
+      await sheet.getByRole("radio", { name: /ledger-api/ }).click();
+      await expect(route).toBeVisible();
+      await expect(route.getByRole("radio", { name: "Direct", exact: true })).toBeChecked();
+      await route.getByRole("radio", { name: "Home gateway", exact: true }).click();
+      await expect(route.getByRole("radio", { name: "Home gateway", exact: true })).toBeChecked();
+      await route.scrollIntoViewIfNeeded();
+      await expect(route.locator(".launch-route-note")).toBeVisible();
+      expect(await sheet.evaluate(el => el.scrollWidth <= el.clientWidth), "no sideways scrolling").toBe(true);
+    });
+    await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
+    await journey.stage(`Hub accounts apart from native profiles at ${width} ${colorScheme}`, async () => {
+      await page.getByRole("button", { name: "Accounts", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
+      const section = dialog.getByTestId("accounts-gateway");
+      await section.scrollIntoViewIfNeeded();
+      await expect(section.getByRole("listitem")).toHaveCount(3);
+      await expect(section.getByRole("button")).toHaveCount(0);
+      await expect(section.getByRole("radio")).toHaveCount(0);
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), "no sideways scrolling").toBe(true);
+    });
+    await page.getByRole("button", { name: "Close accounts" }).click();
+  }
+  await journey.stage("Start pins the gateway route for the session's workers", async () => {
+    await newSession(page).click();
+    await sheet.getByRole("radio", { name: /ledger-api/ }).click();
+    await sheet.getByRole("group", { name: "Worker route" }).getByRole("radio", { name: "Home gateway", exact: true }).click();
+    await sheet.getByRole("button", { name: "Start", exact: true }).click();
+    await expect.poll(() => hub.launches.length).toBe(1);
+    expect(hub.launches[0].body).toMatchObject({ target: target("p-ledger"), routing: "gateway" });
+  });
+});
+
 // cas-3dd7: the selected conversation's friction ledger, release over release, from the palette.
 test("HUB-J13 read a project's quality trend from the palette", journeyPart, async ({ page, journey }, testInfo) => {
   await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"] });

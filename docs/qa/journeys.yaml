@@ -3326,6 +3326,10 @@ invariants:
     statement: The shell Accounts control has a visible user-group glyph, an Accounts accessible name and tooltip, and an intact action group with the design-system gap and panel inset at desktop and 390px in light and dark.
     check: Walk the HUB-J13 shell Accounts part; measure the rendered glyph, gap and right inset before opening the dialog, then capture the header in all four viewport/scheme combinations.
     bug: {task: cas-a9d3}
+  HUB-J13-GATEWAY-ROUTE:
+    statement: For a selected project, New session offers Direct or Home gateway. It names the routed workers, says the supervisor stays direct, disables the gateway with the hub's reason when it isn't ready, and pins the chosen route on the launch. Accounts shows the machine's hub accounts read-only, apart from native profiles; it lists no Team accounts and sends no hub key or address. Team lanes show each worker's effective route and fallback reason.
+    check: Run gateway::tests::session_pin_overrides_the_project_setting_in_both_directions, gateway_accounts tests, the bridge status projection test, launch-session, accounts-panel and team-view vitest, and the HUB-J13 home-gateway journey (1280/390 light/dark). Batch QA starts real Claude and Codex sessions through the gateway on the candidate, and the hub dashboard attributes their requests to cassy/<worker>. It also stops the hub to read a fallback lane.
+    bug: {task: cas-87e9f23877d30ea6}
   HUB-J13-LAUNCH-STORE:
     statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
     check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store. This is defensive environment isolation; production did not carry CAS_ROOT in the cas-dd2e incident.

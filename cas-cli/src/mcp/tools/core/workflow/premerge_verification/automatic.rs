@@ -830,6 +830,7 @@ pub(super) async fn approved(
         )
     })
     .await;
+    let landed = matches!(&result, Ok(result) if result.is_error != Some(true));
     let detail = match result {
         Ok(result) if result.is_error != Some(true) => {
             "Approved; the merge continued automatically.".to_string()
@@ -843,8 +844,25 @@ pub(super) async fn approved(
             return Ok(detail);
         }
     };
-    // A readable receipt without a prompt: approval must not start another
-    // supervisor turn merely to acknowledge an automatic continuation.
+    // GH #2365: this merge runs from the verdict, inside no supervisor tool
+    // call, so no merge receipt reports it. Its landing opens the supervisor's
+    // next step (promotion, notes, dependents): one wake per dispatch.
+    if landed {
+        let status = core.open_task_store().ok().and_then(|tasks| tasks.get(&dispatch.task_id).ok())
+            .map_or_else(|| "unknown".to_string(), |task| task.status.to_string());
+        let woke = (|| -> Result<(), String> {
+            let rows = core.open_agent_store().map_err(|e| e.to_string())?.list(None).map_err(|e| e.to_string())?;
+            let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
+            crate::supervisor_notices::enqueue(&core.cas_root, &recipient, "merge_outcome",
+                &format!("Task {} dispatch {}: approved; the merge landed automatically and the task status is now `{status}`.",
+                    dispatch.task_id, dispatch.id),
+                &format!("automatic-approval:{}", dispatch.id)).map_err(|e| e.to_string())
+        })();
+        if let Err(error) = woke {
+            tracing::warn!(task = %dispatch.task_id, %error, "automatic merge landed; supervisor wake not recorded");
+        }
+    }
+    // A readable receipt without a prompt; a landed merge already woke the supervisor above.
     let queue = crate::store::open_supervisor_queue_store(&core.cas_root).map_err(fail)?;
     let notification = queue.notify_idempotent(&dispatch.owner_agent_id, "verification_approved",
         &serde_json::json!({"task_id":dispatch.task_id,"dispatch_id":dispatch.id,"detail":detail}).to_string(),
@@ -1812,7 +1830,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                             .current_dir(repo)
                             .args(["merge-base", "--is-ancestor", &source, "epic/train"])
                             .status()
-                            .is_ok_and(|s| s.success()),
+                            .is_ok_and(|s| s.success())
+                            && !crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty(),
                         "target_move" => cas_store::get_latest_verification_dispatch(&root, &task.id)
                             .unwrap().is_some_and(|latest| latest.id != dispatch.id
                                 && cas_store::get_verification_for_dispatch(&root, &latest.id).unwrap()
@@ -1898,12 +1917,10 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     )
                     .is_empty()
                 );
-                if status == "approved" {
-                    assert!(
-                        prompts.is_empty(),
-                        "approval must not wake the supervisor: {prompts:?}"
-                    );
-                }
+                // GH #2365: the landed merge opens the supervisor's next step,
+                // so it wakes it exactly once.
+                assert_eq!(prompts.len(), 1, "a landed automatic merge wakes the supervisor once: {prompts:?}");
+                assert!(prompts[0].prompt.contains(&dispatch.id), "{prompts:?}");
             } else if status == "late_error" {
                 // A late verifier error on a settled dispatch stays silent.
                 assert!(prompts.is_empty(), "no recovery notice: {prompts:?}");

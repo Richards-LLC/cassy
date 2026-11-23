@@ -110,6 +110,20 @@ pub(super) fn park_refusal(
     (!refusals.is_empty()).then(|| super::gate_preflight::park_reply(refusals))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The OS park judges `cfg(target_os)` gates against, so one host can
+    /// replay a park from the other (GH #2320).
+    static PARK_HOST_OS: std::cell::Cell<&'static str> = const { std::cell::Cell::new(std::env::consts::OS) };
+}
+
+fn park_host_os() -> &'static str {
+    #[cfg(test)]
+    return PARK_HOST_OS.get();
+    #[cfg(not(test))]
+    std::env::consts::OS
+}
+
 /// The class selector the last request_changes recorded for this task.
 fn recorded_class_audit(cas_root: &Path, task_id: &str) -> Option<String> {
     crate::mcp::tools::core::task::repair_class::recorded_class(
@@ -158,7 +172,10 @@ pub(super) fn park_refusals(
         ));
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target);
+    // A receipt minted on the machine that can build a platform-gated test
+    // travels on the task row (cas-289b), so park reads it too.
+    let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target)
+        .with_synced(&task.deliverables.test_receipts);
     if proof_repo.join(".git").exists() {
         use crate::factory_worker_check::stability;
         let started = std::time::Instant::now();
@@ -175,6 +192,27 @@ pub(super) fn park_refusals(
             }
         };
         let missing = stability::missing(&passing, &tests);
+        // GH #2320: a test gated to another OS selects nothing here, so this
+        // host can never run it. Lane CI's Rust test job, green at this tip,
+        // proves the lane OS's tests; any other OS needs five passes recorded
+        // on that OS.
+        let gates = stability::rust::platform_gates(proof_repo, head, &missing).unwrap_or_default();
+        let (foreign, missing): (Vec<_>, Vec<_>) = missing.into_iter()
+            .partition(|test| gates.get(test).is_some_and(|os| !os.contains(park_host_os())));
+        let lane = foreign.iter().any(|test| gates[test].contains(stability::LANE_CI_OS))
+            .then(|| crate::mcp::tools::core::workflow::delivery_tip_rust_tests(head, proof_repo));
+        let foreign = foreign.into_iter()
+            .filter(|test| !(lane.is_some_and(|(_, tested)| tested) && gates[test].contains(stability::LANE_CI_OS)))
+            .collect::<Vec<_>>();
+        if !foreign.is_empty() {
+            refusals.push(crate::gates::tag("G-61", format!(
+                "PLATFORM_TEST_PROOF_REQUIRED: task {} changes tests that this {host} host cannot build: {}. Do not run them here; the capped runner selects 0 of them. A test that builds on {lane_os} is proven when lane CI's Rust test job passes at {short} (lane CI now: {state}); a test for any other OS needs five consecutive capped passes recorded on that OS at {short}. Then retry park.",
+                task.id,
+                foreign.iter().map(|test| format!("{}::{} (target_os {})", test.path, test.name,
+                    gates[test].iter().cloned().collect::<Vec<_>>().join(" or "))).collect::<Vec<_>>().join(", "),
+                host = park_host_os(), lane_os = stability::LANE_CI_OS, state = lane.map_or("not needed", |(conclusion, tested)| if conclusion == "success" && !tested { "green without a Rust test job" } else { conclusion }),
+            )));
+        }
         if !missing.is_empty() {
             // GH #2288: name why an earlier five-pass proof did not carry.
             let voided = stability::invalidated(&passing, &missing).into_iter().map(|(tested, inputs)| {
@@ -1148,6 +1186,80 @@ mod tests {
             widened::invalidate(root.path(), repo.path(), &moved, &scope).unwrap();
             let withdrawn = PassingTests::new(root.path(), repo.path(), &moved).with_target("main");
             assert_eq!(widened::missing(&withdrawn, std::slice::from_ref(&scope), &Default::default()), [scope], "{runner}: failed rerun withdraws");
+        }
+    }
+
+    /// GH #2320 (cas-2e53 at 6e0b5d82ed): park demanded five local capped
+    /// passes for a changed `#[cfg(target_os = "linux")]` test on a macOS
+    /// worker, where the capped runner selects 0 tests. Replayed for that
+    /// host and its mirror, with the gate on the test and on its module: a
+    /// test gated to the other OS owes proof on that OS, from green
+    /// lane CI's Rust test job (not a lint-only green) when it builds there,
+    /// else from a five-pass receipt synced from that OS, never a local run.
+    #[test]
+    fn changed_test_gated_to_another_os_is_proven_on_that_os_gh2320() {
+        use crate::factory_worker_check::stability::{self, Identity, Proof};
+        let mut env = crate::test_support::TestEnvGuard::new();
+        // The incident (a Linux-only test parked from macOS), then its mirror.
+        for (host, other) in [("macos", "linux"), ("linux", "macos")] {
+            PARK_HOST_OS.set(host);
+            let repo = changelog_fixture();
+            let root = tempfile::tempdir().unwrap();
+            let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+                .current_dir(repo.path()).status().unwrap().success(), "git {args:?}");
+            std::fs::create_dir_all(repo.path().join("src")).unwrap();
+            std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+            std::fs::write(repo.path().join("src/lib.rs"), "mod child;\n").unwrap();
+            std::fs::write(repo.path().join("src/child.rs"), "#[test]\nfn host() {}\n").unwrap();
+            let base = commit_changelog_fixture(repo.path(), "base test");
+            git(&["update-ref", "refs/heads/main", &base]);
+            git(&["remote", "add", "origin", "https://github.com/acme/fixture.git"]);
+            std::fs::write(repo.path().join("src/child.rs"), format!(
+                "#[test]\nfn host() {{}}\n#[cfg(target_os = \"{other}\")]\n#[test]\nfn planted() {{ assert!(true); }}\n\
+                 #[cfg(all(unix, target_os = \"{other}\"))]\nmod gated {{\n    #[test]\n    fn nested() {{ assert!(true); }}\n}}\n")).unwrap();
+            let head = commit_changelog_fixture(repo.path(), "change a test gated to the other OS");
+            crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(child)");
+            let mut task = Task::new("cas-a0c0".into(), "platform-gated fixture".into());
+            task.notes = "[2026-11-23 01:20] ✅ DECISION no changelog: test-only fixture".into();
+            let paths = vec!["src/child.rs".to_string()];
+
+            let gh = root.path().join("gh");
+            let checks = root.path().join("checks.json");
+            std::fs::write(&gh, format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then echo '{{\"nameWithOwner\":\"acme/fixture\"}}'; exit 0; fi\n\
+                 [ \"$4\" = 'repos/acme/fixture/commits/{head}/check-runs' ] && cat '{}' && exit 0\nexit 97\n",
+                checks.display())).unwrap();
+            std::fs::set_permissions(&gh, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+            let lane = |name: &str, status: &str, conclusion: Option<&str>| std::fs::write(&checks, serde_json::json!({"check_runs": [{
+                "name": name, "status": status, "conclusion": conclusion,
+                "html_url": "https://github.com/acme/fixture/actions/runs/1/job/1"}]}).to_string()).unwrap();
+            let codes = |refusals: Vec<String>| refusals.iter()
+                .flat_map(|refusal| ["PLATFORM_TEST_PROOF_REQUIRED", "CHANGED_TEST_STABILITY_REQUIRED"]
+                    .into_iter().filter(|code| refusal.contains(code)))
+                .collect::<Vec<_>>();
+
+            let rust_job = "Scoped Validation — impact own tests";
+            lane(rust_job, "in_progress", None);
+            assert_eq!(codes(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None)),
+                ["PLATFORM_TEST_PROOF_REQUIRED"], "no local run is owed, and pending lane CI proves nothing");
+            lane("Lint", "completed", Some("success"));
+            assert_eq!(codes(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None)),
+                ["PLATFORM_TEST_PROOF_REQUIRED"], "a green lint-only lane ran no test");
+            lane(rust_job, "completed", Some("success"));
+            let lane_proves = other == stability::LANE_CI_OS;
+            assert_eq!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), lane_proves,
+                "lane CI's Rust test job proves only a test that builds on the lane's OS");
+            // The five passes ran on the machine that builds the test; only its
+            // exported receipt reaches this host, on the task row.
+            let producer = tempfile::tempdir().unwrap();
+            stability::record(producer.path(), repo.path(), &head, Proof { runner: "nextest".into(),
+                tests: ["child::planted", "child::gated::nested"].map(|name| Identity::exact("src/child.rs", name)).into(),
+                consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+            task.deliverables.test_receipts =
+                crate::factory_worker_check::PassingTests::new(producer.path(), repo.path(), &head).portable();
+            let refusals = park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None);
+            assert!(refusals.is_empty(), "a five-pass receipt synced from the test's OS proves it: {refusals:?}");
         }
     }
 

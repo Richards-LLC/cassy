@@ -6,6 +6,9 @@ pub(crate) mod rust;
 
 pub(crate) const REQUIRED_PASSES: u32 = 5;
 
+/// The OS lane CI's Rust jobs run on (`.github/workflows/lane.yml` runners).
+pub(crate) const LANE_CI_OS: &str = "linux";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Identity {
     pub path: String,

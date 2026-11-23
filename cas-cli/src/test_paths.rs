@@ -246,14 +246,6 @@ mod tests {
     use super::{find_workspace_root, runtime_workspace_root};
     use tempfile::tempdir;
 
-    /// cas-2e53 red probe (removed in the next commit): a raw tempdir
-    /// compared with its resolved path must fail under the lane's TMPDIR.
-    #[test]
-    fn raw_tempdir_comparison_probe_cas_2e53() {
-        let temp = tempdir().unwrap();
-        assert_eq!(temp.path(), temp.path().canonicalize().unwrap());
-    }
-
     #[cfg(unix)]
     #[test]
     fn short_socket_fixture_binds_with_a_deep_runtime_tmpdir() {

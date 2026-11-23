@@ -1,0 +1,3 @@
+## Core Concepts
+
+**Runnable test-proof prescriptions.** Park never demands a capped run that can't happen. The runner comes from the test API a file imports, so a Vitest spec that drives a browser with Playwright's library gets a Vitest run. A widened focused run that selects no test (for example `vitest related` for a page no test imports) runs the owning package instead, and park accepts that package's passing run for any input inside it. Deleted files owe no proof. Specs the QA journey registry declares, and helpers only those journeys import, follow the journey lane (batch QA), not worker capped passes. A passing receipt at the exact commit counts from any worktree of the repository, so a supervisor can prove a stopped worker's delivery from that worker's worktree.

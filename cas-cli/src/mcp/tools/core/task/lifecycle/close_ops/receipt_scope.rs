@@ -196,7 +196,7 @@ fn listed_park_refusals(
         let requirements = stability::requirements(proof_repo, head, target, changed_paths, delivery_ranges);
         tracing::info!(task_id = %task.id, gate = "G-61", phase = "changed_test_discovery", head,
             elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
-        let (tests, widened) = match requirements {
+        let (mut tests, widened) = match requirements {
             Ok(requirements) => requirements,
             Err(error) => {
                 // A declared Rust test absent from every Cargo target is
@@ -205,6 +205,24 @@ fn listed_park_refusals(
                 (Vec::new(), Vec::new())
             }
         };
+        // GH #2362, #2380: a registered journey follows its declared lane, so
+        // neither it nor a helper only journeys import owes a worker run here.
+        use crate::factory_worker_check::widened::{self as widen, Scope};
+        let journeys = widen::journey_specs(cas_root, proof_repo, head);
+        tests.retain(|test| !journeys.contains(&test.path));
+        let widened: Vec<Scope> = widened.into_iter().flat_map(|scope| match &scope {
+            Scope::File(spec) if journeys.contains(spec) => Vec::new(),
+            Scope::Related(helper) => match crate::factory_worker_check::javascript::related_tests(proof_repo, helper) {
+                Some(("playwright", specs)) if specs.iter().any(|spec| journeys.contains(spec)) =>
+                    specs.into_iter().filter(|spec| !journeys.contains(spec)).map(Scope::File).collect(),
+                _ => vec![scope],
+            },
+            _ => vec![scope],
+        }).collect();
+        // GH #2355: a deleted file owes nothing and is no package input.
+        let present: Vec<String> = changed_paths.iter().filter(|path| std::process::Command::new("git")
+            .args(["cat-file", "-e", &format!("{head}:{path}")]).current_dir(proof_repo)
+            .output().is_ok_and(|output| output.status.success())).cloned().collect();
         let missing = stability::missing(&passing, &tests);
         // GH #2320: a test gated to another OS selects nothing here, so this
         // host can never run it. Lane CI's Rust test job, green at this tip,
@@ -242,14 +260,14 @@ fn listed_park_refusals(
                 stability::rerun_commands(cas_root, proof_repo, &missing).join("; "),
             )));
         }
-        let covering = crate::factory_worker_check::widened::covering(proof_repo, head, changed_paths, &widened);
-        let missing = crate::factory_worker_check::widened::missing(&passing, &widened, &covering);
+        let covering = widen::covering(proof_repo, head, &present, &widened);
+        let missing = widen::missing(&passing, &widened, &covering);
         if !missing.is_empty() {
             // Classification is uncertain, but the broader capped receipt is
             // proven missing. Park reads proof; it never starts a test process.
             refusals.push(crate::gates::tag("G-61", format!(
                 "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require five passes.",
-                task.id, crate::factory_worker_check::widened::commands(cas_root, proof_repo, changed_paths, &missing, &covering).join("; ")
+                task.id, widen::commands(cas_root, proof_repo, &present, &missing, &covering).join("; ")
             )));
         }
     }
@@ -2621,7 +2639,8 @@ sys.exit(0 if ok else 1)
             let held = g61();
             let prescribed: Vec<javascript::Invocation> = held.iter()
                 .flat_map(|refusal| refusal.split("worker-check --cas-root ").skip(1))
-                .filter_map(|tail| tail.split_once(" -- ").map(|(_, command)| command.split(['`', ';']).next().unwrap().to_string()))
+                .filter_map(|tail| tail.split_once(" -- ").map(|(_, command)| command.split(['`', ';']).next().unwrap()
+                    .split(". ").next().unwrap().trim_end_matches(['.', '\n']).to_string()))
                 .map(|command| javascript::invocation(&command.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
                     .unwrap_or_else(|| panic!("{issue}: unrunnable prescription {command}")))
                 .collect();

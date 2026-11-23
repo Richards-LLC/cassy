@@ -19,6 +19,16 @@ pub(crate) use importers::related_tests;
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
 struct IsolatedCheckoutRequired;
 
+/// A focused run selected no test to execute (GH #2369). Its owning package's
+/// own run proves the input instead: unsure means run more, never refuse.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ZeroTests(String);
+
+impl ZeroTests {
+    fn new(message: String) -> Self { Self(crate::gates::tag("G-61", message)) }
+}
+
 fn safe_path(path: &str) -> bool {
     !path.is_empty()
         && Path::new(path)
@@ -1508,7 +1518,15 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
         }
     }
     for (scope, (file, cause)) in &widened {
-        execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file, cause)), test_env)?;
+        match execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file, cause)), test_env) {
+            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !matches!(scope, super::widened::Scope::Package(_)) => {
+                let package = super::widened::owning_package(&repo, file, invocation.runner);
+                eprintln!("{scope:?} selected no test ({error:#}); running its package {package:?} instead");
+                let cause = format!("{cause}; {scope:?} selected no test");
+                execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((&package, file, &cause)), test_env)?;
+            }
+            result => { result?; }
+        }
     }
     if tests.is_empty() { return Ok(()); }
     let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None, test_env)?;
@@ -1747,7 +1765,7 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
 /// (GH #2195), the config must select the file: a spec
 /// outside the default config's `testRegex` belongs to the config that
 /// matches it (GH #2058); with no such config the nearest one stays.
-fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
+pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
     let spec = repo.join(path);
     let mut current = spec.parent().context("test parent")?.to_path_buf();
     let (mut package, mut nearest) = (None, None);
@@ -1827,14 +1845,16 @@ fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
 /// absent evidence leaves the runner unknown.
 pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     let source = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
-    if source.contains("@playwright/test") {
-        return Some("playwright");
-    }
+    // GH #2380: a unit test may drive a browser through `@playwright/test`'s
+    // library (`chromium`); its test API import names the runner.
     if source.contains("'vitest'") || source.contains("\"vitest\"") {
         return Some("vitest");
     }
     if source.contains("@jest/globals") {
         return Some("jest");
+    }
+    if source.contains("@playwright/test") {
+        return Some("playwright");
     }
     // GH #2055: a node:test file beside a Jest config is Node's own runner.
     if source.contains("'node:test'") || source.contains("\"node:test\"") {
@@ -1908,7 +1928,7 @@ fn execute_tests(
     let consumers = match widened {
         Some((super::widened::Scope::Related(helper), _, _)) if matches!(runner, "playwright" | "node") => {
             let Some((_, specs)) = related_tests(repo, helper).filter(|(owner, _)| *owner == runner) else {
-                bail!(crate::gates::tag("G-61", format!("no {runner} test imports {helper}")));
+                bail!(ZeroTests::new(format!("no {runner} test imports {helper}")));
             };
             eprintln!("Running {helper} through its importing tests: {}", specs.join(" "));
             specs
@@ -2121,6 +2141,9 @@ fn execute_tests(
     Ok(())
     })();
     if let Err(error) = outcome {
+        if error.downcast_ref::<ZeroTests>().is_some() {
+            return Err(error);
+        }
         if runner == "vitest" {
             return Err(match retain_vitest_reports(cas_root, repo, head, reports.path()) {
                 Ok(kept) => anyhow::anyhow!(
@@ -2546,11 +2569,10 @@ fn validate_report_with_inherited(
             bail!("Playwright stability report contains runner errors");
         }
     } else {
-        for file in report
-            .get("testResults")
-            .and_then(Value::as_array)
-            .context("testResults missing")?
-        {
+        let reported = report.get("testResults").and_then(Value::as_array).context("testResults missing")?;
+        // Vitest and Jest call a run that found no test file unsuccessful.
+        if reported.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
+        for file in reported {
             let path = report_path(
                 repo,
                 file.get("name")
@@ -2644,7 +2666,7 @@ fn validate_report_with_inherited(
     if !tests.is_empty() && results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
-    if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
+    if results.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
     for file in files {
         if !results.keys().any(|ran| ran.path == *file) {
             bail!(crate::gates::tag("G-61", format!("{runner} executed no test of the required spec {file}")));

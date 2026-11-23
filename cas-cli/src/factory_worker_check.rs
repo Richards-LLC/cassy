@@ -1316,23 +1316,27 @@ fn passing_test_records(
     let Ok(repo) = repo.canonicalize() else {
         return Default::default();
     };
-    let path = receipt_path(cas_root, &repo, head);
-    let Some(directory) = path.parent() else {
-        return Default::default();
-    };
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Default::default();
-    };
-    let mut entries = entries.flatten().collect::<Vec<_>>();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut entries = Vec::new();
+    for checkout in std::iter::once(repo.clone()).chain(sibling_worktrees(&repo)) {
+        let Some(Ok(found)) = receipt_path(cas_root, &checkout, head).parent().map(std::fs::read_dir) else {
+            continue;
+        };
+        let mut found = found.flatten().collect::<Vec<_>>();
+        found.sort_by_key(std::fs::DirEntry::file_name);
+        entries.extend(found.into_iter().map(|entry| (checkout.clone(), entry)));
+    }
     let mut exact = BTreeMap::new();
     let mut ancestors = Vec::new();
-    for entry in entries {
+    for (checkout, entry) in entries {
         let Some((receipt_head, package, test)) =
-            read_passing_test_record(cas_root, &repo, &entry)
+            read_passing_test_record(cas_root, &checkout, &entry)
         else {
             continue;
         };
+        // GH #2378: another checkout's pass counts only at this exact head.
+        if checkout != repo && receipt_head != head {
+            continue;
+        }
         if receipt_head == head {
             exact.insert(
                 (package, test.harness.clone(), test.filter.clone()),
@@ -1402,6 +1406,17 @@ fn passing_test_records(
         .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
         .collect();
     (records, voided)
+}
+
+/// GH #2378: the other checkouts of this repository. A receipt binds a clean
+/// commit, so a pass in any of them proves the same tree at that head; a
+/// supervisor closing for a stopped worker runs in that worker's worktree.
+fn sibling_worktrees(repo: &Path) -> Vec<PathBuf> {
+    git_output(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default().lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .filter_map(|path| Path::new(path).canonicalize().ok())
+        .filter(|path| path != repo)
+        .collect()
 }
 
 fn read_passing_test_record(

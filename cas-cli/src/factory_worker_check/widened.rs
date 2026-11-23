@@ -73,6 +73,38 @@ fn package(repo: &Path, path: &str) -> Scope {
     Scope::Package(directory.strip_prefix(repo).unwrap_or(Path::new("")).to_string_lossy().into())
 }
 
+/// GH #2369: the package whose own run proves `path` under `runner` when a
+/// focused run of it selects no test: the directory holding the runner's
+/// config for it, else its nearest manifest.
+pub(crate) fn owning_package(repo: &Path, path: &str, runner: &str) -> Scope {
+    javascript::runner_root(repo, path, runner).ok()
+        .and_then(|(directory, _)| directory.strip_prefix(repo).ok().map(|relative| Scope::Package(relative.to_string_lossy().into())))
+        .unwrap_or_else(|| package(repo, path))
+}
+
+/// The package runs that prove a widened scope (GH #2369): run more, never
+/// an impossible narrower demand. A crate or package is its own owner.
+fn owners(repo: &Path, scope: &Scope) -> Vec<Scope> {
+    let (Scope::File(path) | Scope::Related(path)) = scope else { return Vec::new() };
+    let mut owners = vec![package(repo, path)];
+    if let Some(runner) = javascript::runner_hint(repo, path).filter(|runner| *runner != "node --test") {
+        owners.push(owning_package(repo, path, runner));
+    }
+    owners
+}
+
+/// The test files the journey registry declares at `head`. Their declared lane
+/// (batch QA against the deployed target) proves them, never a worker's capped
+/// run (GH #2362, #2380).
+pub(crate) fn journey_specs(cas_root: &Path, repo: &Path, head: &str) -> BTreeSet<String> {
+    let registry = crate::config::Config::load(cas_root).map(|config| config.qa().registry.path)
+        .unwrap_or_else(|_| crate::qa_registry::DEFAULT_PATH.into());
+    git(repo, &["show", &format!("{head}:{registry}")]).ok()
+        .and_then(|contents| crate::qa_registry::parse(&contents).ok())
+        .map(|registry| registry.journeys.into_iter().filter_map(|journey| journey.spec).collect())
+        .unwrap_or_default()
+}
+
 /// What resolved for one widened package's changed inputs (GH #2224, #2266).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Covering {
@@ -112,6 +144,8 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
         proof.runner == "playwright" && proof.configs.contains_key(spec)
             && (proof.scope == Scope::File(spec.into()) || matches!(&proof.scope, Scope::Related(_))));
     scopes.iter().filter(|scope| {
+        // GH #2369: the owning package's own passing run proves any input in it.
+        if owners(passing.repo, scope).iter().any(|owner| recorded(owner)) { return false; }
         if let Scope::Related(helper) = scope {
             let consumers = javascript::related_tests(passing.repo, helper)
                 .filter(|(runner, _)| *runner == "playwright").map(|(_, specs)| specs).unwrap_or_default();

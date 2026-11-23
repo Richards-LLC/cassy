@@ -1,0 +1,8 @@
+title: Accepted peer message held in Cloud with no signal to the sender
+statement: >-
+  A supervisor's peer message that Cassy Cloud accepted but the peer has not
+  received two minutes later alerts the sender once with its Cloud message id.
+  A delivered message and a message still inside the threshold raise nothing.
+tasks: [cas-02a5]
+journeys: []
+invariants: []

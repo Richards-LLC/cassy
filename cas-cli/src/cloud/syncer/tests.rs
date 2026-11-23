@@ -6451,3 +6451,65 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     }
 
 }
+
+/// cas-3d8b (GH #1000): the quarantine ledger is keyed by bare task id, so an
+/// entry older than a local task this project created under the same id hid
+/// that task's peer updates from every pull and deleted its queued pushes. A
+/// row that already existed when it was quarantined stays quarantined.
+#[tokio::test]
+async fn stale_quarantine_entry_for_a_later_local_task_no_longer_blocks_pull_or_push_cas_3d8b() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (project, team) = ("stale-quarantine-project", "stale-quarantine-team");
+    let (stale, leaked) = ("cas-stale-quarantine", "cas-leaked-quarantine");
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let queue = Arc::new(SyncQueue::open(&root).unwrap());
+    queue.init().unwrap();
+
+    let old = |id: &str| {
+        let mut task = Task::new(id.into(), "local task".into());
+        task.origin_project = Some(project.into());
+        task.updated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        task
+    };
+    // The leaked row existed locally when it was quarantined; the other id was
+    // quarantined first and a new task took the same bare id afterwards.
+    tasks.add(&old(leaked)).unwrap();
+    for id in [stale, leaked] {
+        queue.quarantine_row("task", id, "purge-foreign peer-evidence row from verified delete-set").unwrap();
+    }
+    let mut live = old(stale);
+    live.created_at = chrono::Utc::now() + chrono::Duration::seconds(1);
+    tasks.add(&live).unwrap();
+    queue.enqueue_for_team(EntityType::Task, stale, SyncOperation::Upsert,
+        Some(&serde_json::to_string(&live).unwrap()), team).unwrap();
+
+    let parked_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    let rows = [stale, leaked].map(|id| team_task_fixture(id, TaskStatus::AwaitingMerge, project, project, parked_at));
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path(format!("/api/teams/{team}/sync/pull")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": rows, "task_dependencies": [], "team_id": team,
+            "pulled_at": "2026-11-22T23:00:00Z", "status": "ok"
+        }))).mount(&server).await;
+    let syncer = CloudSyncer::new_for_project(Arc::clone(&queue), CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), project.into(), &root);
+
+    let pulled = syncer.pull_team(team, project,
+        &*crate::store::open_store_local(&root).unwrap(), &*tasks,
+        &*crate::store::open_rule_store_local(&root).unwrap(),
+        &*crate::store::open_skill_store_local(&root).unwrap()).unwrap();
+    assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
+
+    assert_eq!(tasks.get(stale).unwrap().status, TaskStatus::AwaitingMerge, "peer park never applied");
+    assert_eq!(queue.pending_for_team(team, 10, 5).unwrap().len(), 1, "queued push was deleted");
+    assert_eq!(tasks.get(leaked).unwrap().status, TaskStatus::Open, "a quarantined row must stay out");
+    assert_eq!(queue.quarantined_ids("task").unwrap().into_iter().collect::<Vec<_>>(), [leaked.to_string()]);
+}

@@ -539,6 +539,11 @@ pub(super) struct WorkerWait {
 fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
     use crate::cli::factory::wedged;
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
+    // cas-f767 (GH #2132): a refused capped check records a capacity wait and
+    // its scheduled retry; that exit is a routine wait, not an idle worker.
+    if crate::factory_capacity_wait::view(cas_dir, &agent.id, Utc::now()).is_ok_and(|wait| wait.is_some()) {
+        return true;
+    }
     let Some(stored) = crate::store::open_agent_store(cas_dir).ok().and_then(|store| store.get(&agent.id).ok()) else {
         return false;
     };

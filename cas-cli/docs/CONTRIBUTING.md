@@ -859,6 +859,28 @@ keep their existing MCP behavior under either value; hooks, account selection,
 Teams and worker credential protections still apply. Invalid values are refused
 by both config commands and TOML loading.
 
+`factory.claude.worker_sandbox` (default `shadow`) controls macOS Claude workers'
+OS sandbox (cas-3751a):
+
+- **`shadow`:** the worker settings carry a generated `sandbox` block, which
+  `cas-mux` completes at launch with the checkout's exact git paths. While the
+  sandbox enforces, the stage-A text guards record would-deny facts for Bash
+  instead of refusing it (`cas gates report`, column `shadowed`).
+- **Grants (cas-f157):** besides the checkout, git paths, the capped runner's
+  `CAS_ROOT` directories and the operator's effective write roots, the profile
+  grants only the worker's current tasks' artifact directories
+  (`<artifacts_root>/<project-key>/<task-id>`) and the checkout's own scratch
+  (its private temporary directory and a relocated Cargo target). The settings
+  are regenerated at every spawn and recycle. Starting a task the running
+  profile does not grant queues one recycle of that worker, and a queue
+  boundary restarts a sandboxed worker before its successor starts.
+- **`off`:** workers launch without the sandbox, and those guards enforce.
+
+Linux workers and supervisors are not sandboxed. The corpus test
+`worker_sandbox::tests::bypass_corpus_is_blocked_through_the_generated_profile`
+runs only when a named capped run passes `CAS_SRT_BIN=<sandbox-runtime srt>`;
+otherwise it skips with a reason.
+
 Use `cas config set factory.claude.remote_control true` to opt in, and
 `cas config set factory.claude.fallback_model sonnet` to choose a fallback.
 An empty fallback value clears it. Explicitly requested unsupported flags
@@ -3420,9 +3442,11 @@ Slim lanes omit broad Rust tests for factory pushes, but run the train's
 impact selection (`scripts/ci-test-impact.py`) for the delivery's range on hosted
 runners (cas-2e1b). Selection compares the pushed head with its merge-base with
 the live target, as resolved by the classifier. Content merged in from the
-train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
-is used only for failure attribution, falling back to the inferred base when
-missing or not an ancestor. The plan logs both bases separately.
+train is excluded. Failure attribution uses that same merge-base: the newest
+target commit already contained in the delivery, including train merges after
+task start. The recorded start base in `refs/cas/delivery-base/<branch>` is a
+fallback only when the target cannot be resolved and the record is an ancestor
+of HEAD. The plan logs selection and attribution bases separately.
 `Scoped Validation — impact own tests` builds the selection and runs the changed
 modules' unit tests, edited integration suites, directly changed crates and
 explicit file-reading contracts first; up to three `impact ring` shards run the
@@ -5202,6 +5226,19 @@ earlier registration, so concurrent supervisors should use the default session
 slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
+
+## Divergent unparked task migrations
+
+An ordinary task target edit that excludes an unparked task's recorded start
+base refuses before saving with `rule_id=unparked_target_base_migration` when
+its known local/origin source refs remain at that base. Nonempty or rewritten
+deliveries keep their recorded boundary and existing explicit rebind checks.
+The structured `recovery` names the explicit supervisor `proof_scope_fix`
+request, replacement branch/base and `rebind_branch` request. For an Open task,
+the assigned worker first executes `recovery.start` on the unchanged old lane
+so the supervisor correction applies to an active delivery cycle. Preserve the
+old lane; create the clean replacement from that base, approve its binding,
+then start again. Dirty checkouts and foreign work still refuse rebinding.
 
 ## Bounded MCP task reads
 

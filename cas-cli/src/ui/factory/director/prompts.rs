@@ -429,7 +429,7 @@ pub fn revalidate_event_for_delivery_with_context(
                 return None;
             }
 
-            let active_task = unfiltered_data
+            let mut active_task = unfiltered_data
                 .agents
                 .iter()
                 .find(|agent| agent.name == *worker)
@@ -447,6 +447,22 @@ pub fn revalidate_event_for_delivery_with_context(
                             pending_qa: None,
                         })
                 });
+            // GH #1731 §3: the worker's lease moved to a later assignment
+            // after detection. The idle premise was about the earlier task and
+            // cannot describe the new one; only a merge alert for a task that
+            // is still parked stays, and it stays about that task.
+            if let (Some(enqueued), Some(live)) = (enqueued_active_task.as_ref(), active_task.as_ref())
+                && live.task_id != enqueued.task_id
+            {
+                let still_parked = is_merge_required_idle(enqueued)
+                    && unfiltered_data.in_progress_tasks.iter().any(|task| {
+                        task.id == enqueued.task_id && task.status == TaskStatus::AwaitingMerge
+                    });
+                if !still_parked {
+                    return None;
+                }
+                active_task = Some(enqueued.clone());
+            }
 
             let supervisor_already_contacted = idle_since
                 .and_then(|idle_since| {
@@ -2721,6 +2737,44 @@ mod tests {
             revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "an event enqueued while taskless must be dropped when any assignment lands"
         );
+    }
+
+    /// GH #1731 §3: an idle signal detected on one task reached the
+    /// supervisor right after the worker was given the next one, and named
+    /// that new task. A plain idle premise is withdrawn; a merge-required
+    /// alert stays about its own parked task.
+    #[test]
+    fn idle_detected_on_one_task_never_names_a_later_assignment_gh_1731() {
+        let lease = |id: &str, status| ActiveLeaseSummary {
+            task_id: id.to_string(),
+            task_title: id.to_string(),
+            task_status: status,
+            // A parked delivery's lease carries its close refusal (cas-627f).
+            close_rejected_reason: (status == TaskStatus::AwaitingMerge).then(|| "MERGE REQUIRED".to_string()),
+            pending_qa: None,
+        };
+        for (old_status, survives) in [(TaskStatus::InProgress, false), (TaskStatus::AwaitingMerge, true)] {
+            let event = DirectorEvent::WorkerIdle {
+                worker: "swift-fox".to_string(),
+                active_task: Some(lease("cas-old", old_status)),
+            };
+            let mut data = make_data(0);
+            data.in_progress_tasks = vec![
+                task_with_status("cas-old", Some("swift-fox"), old_status),
+                task_with_status("cas-50a3", Some("swift-fox"), TaskStatus::InProgress),
+            ];
+            data.agents[0].active_lease = Some(lease("cas-50a3", TaskStatus::InProgress));
+
+            let rechecked = revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None);
+            let named = match rechecked {
+                Some(DirectorEvent::WorkerIdle { active_task, .. }) => active_task.map(|task| task.task_id),
+                other => {
+                    assert!(other.is_none(), "{other:?}");
+                    None
+                }
+            };
+            assert_eq!(named.as_deref(), survives.then_some("cas-old"), "{old_status:?}");
+        }
     }
 
     #[test]

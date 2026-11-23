@@ -990,7 +990,13 @@ fn park_merge_fixture(cas_root: &Path, source: &Path, worker: &str, task_id: &st
     let mut task = existing.clone().unwrap_or_else(|| Task::new(task_id.into(), "Delivery".into()));
     task.assignee = Some(worker.into());
     task.status = TaskStatus::AwaitingMerge;
-    task.deliverables.parked_branch = Some(git_stdout(source, &["branch", "--show-current"]));
+    let branch = git_stdout(source, &["branch", "--show-current"]);
+    if Command::new("git").args(["remote", "get-url", "origin"]).current_dir(source).output().unwrap().status.success() {
+        run_git(&["push", "origin", &branch], source);
+    } else {
+        task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
+    }
+    task.deliverables.parked_branch = Some(branch);
     task.deliverables.factory_branch_anchor = Some(git_stdout(source, &["rev-parse", "HEAD"]));
     if existing.is_some() {
         tasks.update(&task).unwrap();
@@ -1119,6 +1125,7 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     std::fs::write(wt_path.join("repo-b-work.txt"), "repo B only").unwrap();
     run_git(&["add", "repo-b-work.txt"], &wt_path);
     run_git(&["commit", "-m", "repo B work"], &wt_path);
+    if !implicit { park_merge_fixture(&cas_root_a, &wt_path, "alice", &task.id); }
 
     if implicit {
         task.status = TaskStatus::AwaitingMerge;
@@ -1389,6 +1396,7 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
     std::fs::write(wt_path.join("bound-repo-work.txt"), "clone B only").unwrap();
     run_git(&["add", "bound-repo-work.txt"], &wt_path);
     run_git(&["commit", "-m", "bound clone B work"], &wt_path);
+    park_merge_fixture(&cas_root_a, &wt_path, "alice", &task.id);
 
     let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
     let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
@@ -2170,6 +2178,8 @@ fn create_epic_and_worker_task(
     task_store.add(&epic).expect("add epic task");
 
     let mut worker_task = Task::new("worker-task-1".to_string(), "Worker task".to_string());
+    // These shared routing/authority fixtures use local-only repositories.
+    worker_task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
     // cas-bd5f: explicit task_id merges require assignee/lease belonging to the worker.
     if let Some(name) = assignee {
         worker_task.assignee = Some(name.to_string());
@@ -2244,6 +2254,8 @@ async fn cut_frozen_train_admits_only_its_red_repair_cas_82e4() {
     run_git(&["commit", "-m", "fix(cas-4dab): repair the ejected verification test"], &worker);
     let repair_tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
     run_git(&["push", "origin", "factory/alice"], &worker);
+    park_merge_fixture(&root, &worker, "alice", &repair.id);
+    repair = tasks.get(&repair.id).unwrap();
     register_delivery_agent(&root, "release-supervisor", "supervisor", AgentRole::Supervisor, "release-repair");
     let service = delivery_service(&root, "release-supervisor");
     env.set_current_dir(&repo.root);
@@ -2418,6 +2430,30 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                     .unwrap()
                     .success()
             );
+
+        }
+        let remote_before = origin_only.then(|| {
+            git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
+        });
+
+        // cas-bd5f: task must belong to alice (matching worker/task/epic).
+        let (_epic_id, worker_task_id) =
+            create_epic_and_worker_task(&cas_root, "epic/foo", Some("alice"));
+
+        let wt_path = cas_root.join("worktrees").join("alice");
+        repo.add_worktree(&wt_path, "factory/alice");
+        std::fs::write(wt_path.join("alice-work.txt"), "alice's work").unwrap();
+        run_git(&["add", "."], &wt_path);
+        run_git(&["commit", "-m", "alice work"], &wt_path);
+        if origin_only {
+            run_git(&["push", "origin", "factory/alice"], &repo.root);
+            let tasks = open_task_store(&cas_root).unwrap();
+            let mut task = tasks.get(&worker_task_id).unwrap();
+            task.delivery_mode = cas::types::DeliveryMode::PushBranch;
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.parked_branch = Some("factory/alice".into());
+            task.deliverables.factory_branch_anchor = Some(git_stdout(&wt_path, &["rev-parse", "HEAD"]));
+            tasks.update(&task).unwrap();
             let hook = repo.root.join(".git/hooks/pre-push");
             let log = remote.path().join("push-tree.log");
             let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
@@ -2433,19 +2469,6 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                 std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        let remote_before = origin_only.then(|| {
-            git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
-        });
-
-        // cas-bd5f: task must belong to alice (matching worker/task/epic).
-        let (_epic_id, worker_task_id) =
-            create_epic_and_worker_task(&cas_root, "epic/foo", Some("alice"));
-
-        let wt_path = cas_root.join("worktrees").join("alice");
-        repo.add_worktree(&wt_path, "factory/alice");
-        std::fs::write(wt_path.join("alice-work.txt"), "alice's work").unwrap();
-        run_git(&["add", "."], &wt_path);
-        run_git(&["commit", "-m", "alice work"], &wt_path);
 
         let _env = env.enter_dir(&repo.root);
 
@@ -2641,6 +2664,11 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
             .branch,
         branch
     );
+    let mut parked = tasks.get(&task.id).unwrap();
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.deliverables.factory_branch_anchor = Some(tip.clone());
+    parked.deliverables.parked_branch = Some(branch.clone());
+    tasks.update(&parked).unwrap();
     ReboundMergeFixture {
         repo,
         origin,
@@ -2666,6 +2694,10 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         let attributed = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
         let tasks = open_task_store(&f.cas_root).unwrap();
         let mut task = tasks.get("cas-e429").unwrap();
+        task.status = TaskStatus::InProgress;
+        task.deliverables.parked_branch = None;
+        tasks.update(&task).unwrap();
+        task = tasks.get("cas-e429").unwrap();
         task.deliverables.factory_branch_anchor = Some(attributed.clone());
         tasks.update(&task).unwrap();
 
@@ -2756,13 +2788,13 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
         let mut task = tasks.get("cas-e429").unwrap();
         let fast_lane = verdict == "approved" && !local_merge;
         task.depth = if fast_lane { TaskDepth::Light } else { TaskDepth::Deep };
-        task.status = if fast_lane { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        task.status = TaskStatus::AwaitingMerge;
         if fast_lane { task.task_type = TaskType::Bug; }
         task.labels = if local_merge { vec![] } else { vec!["force-verifier".into()] };
         if local_merge { task.delivery_mode = cas::types::DeliveryMode::LocalMerge; }
         task.acceptance_criteria = "Review this candidate before publishing it.".into();
-        task.deliverables.factory_branch_anchor = (!fast_lane).then(|| fixture.tip.clone());
-        task.deliverables.parked_branch = (!fast_lane).then(|| fixture.branch.clone());
+        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
         tasks.update(&task).unwrap();
         let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
         let mut merge = coord_req("worktree_merge");
@@ -3542,20 +3574,48 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
 }
 
 #[tokio::test]
-async fn cas_619c_worktree_merge_warns_for_an_unparked_in_progress_task() {
+async fn cas_619c_worktree_merge_requires_a_pushed_parked_delivery() {
     let mut env = test_env();
+    for case in ["legacy_rebase", "recorded_rebase", "pushed_active", "parked_unpushed", "parked"] {
     let fixture = rebound_merge_fixture(&mut env).await;
-    let task = open_task_store(&fixture.cas_root).unwrap().get("cas-e429").unwrap();
-    assert_eq!(task.status, TaskStatus::InProgress);
-    assert!(task.deliverables.parked_branch.is_none());
+    let tasks = open_task_store(&fixture.cas_root).unwrap();
+    let mut task = tasks.get("cas-e429").unwrap();
+    if matches!(case, "legacy_rebase" | "recorded_rebase" | "parked_unpushed") {
+        let base = git_stdout(&fixture.repo.root, &["merge-base", &fixture.branch, "epic/rebound"]);
+        run_git(&["switch", "-c", "rebased-target", "epic/rebound"], &fixture.repo.root);
+        std::fs::write(fixture.repo.root.join("sibling.txt"), "new rebase base\n").unwrap();
+        run_git(&["add", "sibling.txt"], &fixture.repo.root);
+        run_git(&["commit", "-m", "new rebase base"], &fixture.repo.root);
+        run_git(&["rebase", "--onto", "rebased-target", &base], &fixture.worker);
+        assert_ne!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip);
+    }
+    if case == "legacy_rebase" { task.deliverables.factory_branch_start = None; }
+    let source = git_stdout(&fixture.worker, &["rev-parse", "HEAD"]);
+    task.status = if case.starts_with("parked") { TaskStatus::AwaitingMerge } else { TaskStatus::InProgress };
+    task.deliverables.factory_branch_anchor = case.starts_with("parked").then(|| source.clone());
+    task.deliverables.parked_branch = case.starts_with("parked").then(|| fixture.branch.clone());
+    tasks.update(&task).unwrap();
+    let target = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+    let remote = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+    let pushed_source = git_stdout(fixture.origin.path(), &["rev-parse", &format!("refs/heads/{}", fixture.branch)]);
     let mut request = coord_req("worktree_merge");
     request.id = Some(fixture.branch.clone());
-    request.task_id = Some(task.id);
+    request.task_id = Some(task.id.clone());
     request.cleanup = Some(false);
-    let response = fixture.service.factory(Parameters(request)).await.unwrap();
-    let text = get_text(&response);
-    assert!(text.contains("UNPARKED TASK") && text.contains("cas-e429"),
-        "an explicit merge must disclose the worker's unfinished lifecycle state: {text}");
+    let response = fixture.service.factory(Parameters(request)).await;
+    if case == "parked" {
+        run_git(&["merge-base", "--is-ancestor", &source, "epic/rebound"], &fixture.repo.root);
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+            git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), "{response:?}");
+    } else {
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), target, "{case}: {response:?}");
+        assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote, "{case}");
+        assert!(response.as_ref().map_or(true, |result| result.is_error.unwrap_or(false)), "{case}: {response:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().status, task.status, "{case}");
+    }
+    assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), source, "{case}");
+    assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", &format!("refs/heads/{}", fixture.branch)]), pushed_source, "{case}");
+    }
 }
 
 #[tokio::test]
@@ -3630,6 +3690,8 @@ async fn test_worktree_merge_refuses_stale_or_conflicting_rebound_ref_gh1397() {
             _ => {
                 let tasks = open_task_store(&fixture.cas_root).unwrap();
                 let mut task = tasks.get("cas-e429").unwrap();
+                // The recorded start authorizes active-task source resolution.
+                task.status = TaskStatus::InProgress;
                 task.deliverables
                     .factory_branch_start
                     .as_mut()
@@ -4577,6 +4639,7 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
     let tasks = open_task_store(&cas_root).unwrap();
     let mut task = tasks.get(&task_id).unwrap();
     task.status = TaskStatus::AwaitingMerge;
+    task.delivery_mode = cas::types::DeliveryMode::PushBranch;
     task.deliverables.factory_branch_anchor = Some(anchor.clone());
     task.deliverables.parked_branch = Some("factory/alice".into());
     tasks.update(&task).unwrap();
@@ -4731,8 +4794,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
-    // cas-d8ab: count origin fetches. Containment, the target sync and its
-    // re-check share the merge's one origin read.
+    // Source publication needs one live read before merging. Containment,
+    // target sync and the final close share one further origin read.
     let fetch_log = remote.path().join("fetches.log");
     let counter = remote.path().join("count-upload-pack");
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
@@ -4741,8 +4804,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED") && !get_text(&landed).contains("PUSH NOT CONFIRMED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
-    assert_eq!(fetches, 1,
-        "the merge's one origin read also serves the final close's integration proof (verification is disabled in this routing fixture): {}", get_text(&landed));
+    assert_eq!(fetches, 2,
+        "one source publication read and one shared target/close read (verification is disabled in this routing fixture): {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
 
@@ -4772,18 +4835,15 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]), train_before);
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), train_before);
 
-    // cas-d8ab: origin is unreachable, and charlie's delivery is already in
-    // the local target. The merge says containment is unverified, instead of
-    // re-running the merge and push to end in NOT PUSHED.
+    // Origin is unreachable, and charlie's delivery is already in the local
+    // target. Local containment cannot authorize publication without origin.
     run_git(&["config", "--unset", "remote.origin.uploadpack"], &repo.root);
     let local_before = git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]);
     let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
     run_git(&["remote", "set-url", "origin", remote.path().join("gone.git").to_str().unwrap()], &repo.root);
-    let offline = runtime.block_on(service.factory(Parameters(request("charlie")))).unwrap();
-    let offline = get_text(&offline);
-    // pin: the operator-facing wording is the cas-d8ab acceptance criterion.
-    assert!(offline.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{offline}");
-    assert!(!offline.contains("NOT PUSHED") && !offline.contains("PUSH NOT CONFIRMED"), "{offline}");
+    let offline = runtime.block_on(service.factory(Parameters(request("charlie"))))
+        .expect_err("unreachable origin cannot verify this parked source");
+    assert!(cas::gates::codes_in(offline.message.as_ref()).contains(&"G-97"), "{offline}");
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), local_before, "the local target did not move");
     assert_eq!(git_stdout(remote.path(), &["for-each-ref"]), origin_refs, "origin did not move");
 
@@ -4925,6 +4985,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     // rather than the old factory/alice ref that is already contained.
     let recorded = format!("factory/alice-{}", task.id);
     run_git(&["branch", &recorded, &tip], &repo.root);
+    run_git(&["push", "origin", &recorded], &repo.root);
     task.deliverables.parked_branch = Some(recorded);
     tasks.update(&task).unwrap();
     env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
@@ -5188,6 +5249,7 @@ async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge(
         let tasks = open_task_store(&cas_root).unwrap();
         let mut task = tasks.get(&task_id).unwrap();
         task.status = if case == "not_parked" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        task.delivery_mode = cas::types::DeliveryMode::PushBranch;
         task.deliverables.factory_branch_anchor = Some(anchor);
         tasks.update(&task).unwrap();
         let dirty = "uncommitted next task\n";
@@ -5300,6 +5362,7 @@ async fn standalone_non_trunk_work_target_does_not_require_allow_trunk_cas_84df(
     std::fs::write(wt_path.join("staging-only.txt"), "staging delivery").unwrap();
     run_git(&["add", "staging-only.txt"], &wt_path);
     run_git(&["commit", "-m", "staging delivery"], &wt_path);
+    park_merge_fixture(&cas_root, &wt_path, "alice", &standalone_task.id);
 
     let _env = env.enter_dir(&repo.root);
 
@@ -5400,6 +5463,7 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
     std::fs::write(wt_path.join("production.txt"), "published to trunk").unwrap();
     run_git(&["add", "production.txt"], &wt_path);
     run_git(&["commit", "-m", "production delivery"], &wt_path);
+    park_merge_fixture(&cas_root, &wt_path, "bob", &standalone_task.id);
     let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
@@ -5521,6 +5585,7 @@ done
     std::fs::write(worker.join("delivery.txt"), "task delivery\n").unwrap();
     run_git(&["add", "delivery.txt"], &worker);
     run_git(&["commit", "-m", "fix(cas-d6cf): delivery"], &worker);
+    park_merge_fixture(&cas_root, &worker, "bob", &task.id);
     let source = git_stdout(&worker, &["rev-parse", "HEAD"]);
     let pr_url = "https://github.com/org/protected/pull/37";
     let gh_calls = env.home().join("gh-calls.log");

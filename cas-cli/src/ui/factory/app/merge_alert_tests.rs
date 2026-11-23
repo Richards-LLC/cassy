@@ -416,8 +416,8 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
 /// is emitted, so nothing in this fixture suppresses it. Then cas-9efb-test
 /// stays parked as the PREVIOUS task and the worker is assigned a second,
 /// distinct task with no delivery, no ready declaration and no pushed work. The
-/// consumer must target that task, with no wait suppression, and emit no
-/// delivery-tagged relay for it.
+/// consumer must keep the relay on the parked delivery (GH #1731 §3) and emit
+/// nothing that names or claims a delivery for the new task.
 #[test]
 fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() {
     let mut f = Fixture::new();
@@ -459,8 +459,12 @@ fn cas_97dc_new_assignment_after_task_complete_gets_no_pending_delivery_relay() 
         DirectorEvent::WorkerIdle { active_task: Some(active), .. } => Some(active.task_id.as_str()),
         _ => None,
     }).collect();
-    assert_eq!(targets, ["cas-9efb-next"], "the consumer must reach, and target, the new task: {events:?}");
-    assert!(prompts.iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-next")),
+    // GH #1731 §3: the relay was detected on the parked delivery. It stays
+    // about that delivery and never names the new assignment, whose idle
+    // basis would be the previous task's task_complete.
+    assert_eq!(targets, ["cas-9efb-test"], "the stale relay must stay about its parked delivery: {events:?}");
+    assert!(prompts.iter().all(|prompt| prompt.retract_task.as_deref() != Some("cas-9efb-next")
+            && !prompt.text.contains("cas-9efb-next")),
         "a task with nothing delivered has no delivery to report");
 }
 
@@ -753,6 +757,58 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
         1,
         "pending must not consume the settled relay"
     );
+}
+
+/// cas-f767 (GH #2132): a capped check refused for memory pressure records a
+/// capacity wait with a 120 s retry and its detached job exits 1. Each exit
+/// re-armed the idle relay, paging the supervisor five times in fifteen
+/// minutes for one worker. Replays that episode on controlled timestamps.
+#[test]
+fn cas_f767_recorded_capacity_wait_keeps_the_idle_relay_quiet() {
+    use cas_store::SupervisorQueueStore;
+    let mut f = Fixture::new();
+    f.in_progress();
+    f.ci(Some("failure"));
+    let cas_dir = f.app.cas_dir.clone();
+    let repo = f.repo.path().to_path_buf();
+    let log = repo.join("detached.log");
+    std::fs::write(&log, "").unwrap();
+    let exit = |code: i32, at: chrono::DateTime<Utc>| {
+        let run = crate::factory_worker_runs::register(&cas_dir, &repo, &log, at).unwrap().expect("worker run");
+        crate::factory_worker_runs::finish(&cas_dir, &run, code, at).unwrap();
+    };
+    // A long build episode outlives the fixture's 10-minute claim; the
+    // worker's heartbeat keeps one lease epoch alive throughout.
+    crate::store::open_agent_store(&cas_dir).unwrap().renew_lease("cas-9efb-test", "merge-w", 7200).unwrap();
+    // The director clock walks the episode forward from wall time; each
+    // retry window stays current for the capacity read.
+    let since = Utc::now();
+    // Every 2 minutes for 22 minutes: refusal, then the job's EXIT 1.
+    for retry in 0..=11 {
+        let at = since + chrono::Duration::minutes(2 * retry);
+        crate::factory_capacity_wait::record_refusal(&cas_dir, &repo,
+            "memory PSI some avg10 19.43% exceeds 10.00%", at).unwrap().expect("wait recorded");
+        exit(1, at);
+        f.app.merge_alert_retries.now = Some(at);
+        assert!(f.relay().is_empty(), "denied exit {retry} is a scheduled capacity retry, not an idle worker");
+    }
+    // The long wait still escalates once, through capacity reconciliation.
+    let mut supervisor = cas_types::Agent::new_with_role("merge-sup".into(), "merge-sup".into(),
+        cas_types::AgentRole::Supervisor);
+    supervisor.factory_session = crate::store::open_agent_store(&cas_dir).unwrap().get("merge-w").unwrap().factory_session;
+    crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+    let last = since + chrono::Duration::minutes(22);
+    assert_eq!(crate::factory_capacity_wait::reconcile(&cas_dir, None, last).unwrap(), 1, "20-minute wait escalates");
+    assert_eq!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().pending_count("merge-sup").unwrap(), 1);
+    assert!(f.relay().is_empty(), "escalation is the capacity notice, not an extra idle page");
+    // Once admitted, a real test failure relays.
+    crate::factory_capacity_wait::admitted(&cas_dir, &repo).unwrap();
+    let failed_at = last + chrono::Duration::minutes(1);
+    exit(101, failed_at);
+    f.app.merge_alert_retries.now = Some(failed_at);
+    let failed = f.relay();
+    assert_eq!(failed.len(), 1, "an admitted failing run still relays");
+    assert!(failed[0].text.contains("EXIT 101"), "the relay names the failed run: {}", failed[0].text);
 }
 
 /// A worker waiting on its own pushed CI is not stalled, even if repeated

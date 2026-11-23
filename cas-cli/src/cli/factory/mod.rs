@@ -878,6 +878,29 @@ pub enum FactoryCommands {
         #[arg(last = true, required = true, value_name = "RUNNER_ARGS")]
         cargo_args: Vec<String>,
     },
+    /// Internal: record a proof script's run in a worker checkout so a task
+    /// start waits for it; prints the run id, or nothing outside a worker checkout.
+    #[command(hide = true)]
+    WorkerRunBegin {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        /// Any directory inside the checkout the script reads.
+        #[arg(long)]
+        repo: std::path::PathBuf,
+        /// The script's own process; the run holds the checkout while it lives.
+        #[arg(long)]
+        pid: u32,
+    },
+    /// Internal: record the exit of a run from `worker-run-begin`.
+    #[command(hide = true)]
+    WorkerRunEnd {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long, allow_hyphen_values = true)]
+        code: i32,
+    },
     /// Create a disposable task-owned detached checkout; print its absolute path.
     #[command(override_usage = "cas factory scratch-checkout [OPTIONS]\n       --cas-root <ROOT> --task-id <TASK> --head <SHA>")]
     ScratchCheckout {
@@ -1483,11 +1506,31 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 cargo_args,
             } => {
                 let execute = || crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref(), test_env);
-                match completion_id {
-                    Some(id) => crate::factory_worker_runs::monitor(cas_root, id, execute),
+                // cas-22c6: a foreground check holds its checkout like a detached one.
+                let id = match completion_id {
+                    Some(id) => Some(id.clone()),
+                    None => crate::factory_worker_runs::attend(
+                        cas_root,
+                        &std::env::current_dir()?,
+                        crate::factory_worker_check::stdout_log_path().as_deref(),
+                        std::process::id(),
+                        chrono::Utc::now(),
+                    )?,
+                };
+                match id {
+                    Some(id) => crate::factory_worker_runs::monitor(cas_root, &id, execute),
                     None => execute(),
                 }
             },
+            FactoryCommands::WorkerRunBegin { cas_root, repo, pid } => {
+                if let Some(id) = crate::factory_worker_runs::attend(cas_root, repo, None, *pid, chrono::Utc::now())? {
+                    println!("{id}");
+                }
+                Ok(())
+            }
+            FactoryCommands::WorkerRunEnd { cas_root, id, code } => {
+                crate::factory_worker_runs::finish(cas_root, id, *code, chrono::Utc::now())
+            }
             FactoryCommands::ScratchCheckout { cas_root, task_id, dispatch_id, head } => {
                 let checkout = crate::factory_review_scratch::create(
                     cas_root, &std::env::current_dir()?, task_id, dispatch_id.as_deref(), head,

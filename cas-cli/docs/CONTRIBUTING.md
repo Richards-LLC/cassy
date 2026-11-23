@@ -2948,8 +2948,12 @@ Only Jest treats an arbitrary file under `__tests__` as a test by default;
 Vitest helpers there retain their source role and select importing specs.
 A Playwright helper that only Playwright specs import, directly or through other
 relative imports in its package, uses `playwright <helper file>`. The capped
-runner runs those importing specs under the helper's config (or the caller's
-`--config`) and records proof for the helper. A spec counts only when it loads
+runner runs each importing spec under the Playwright config that lists it
+(Playwright's `--list`, nearest directory first; the caller's `--config` wins)
+and records each spec's config. Park accepts the helper once every importing
+spec has a passing capped run at the tip, through that run or through the spec's
+own `playwright --config <config> <spec>`; an omitted consumer, an unrelated
+spec or a run that executed another spec is no proof. A spec counts only when it loads
 `@playwright/test` at runtime and imports no other runner; `import type` does
 not. A helper no spec imports, or a unit test also imports, keeps its previous
 proof (GH #2146).

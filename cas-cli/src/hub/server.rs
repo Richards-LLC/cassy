@@ -32,7 +32,7 @@ mod secret_request;
 #[path = "account_routes.rs"]
 mod account_routes;
 #[path = "gateway_accounts.rs"]
-mod gateway_accounts;
+pub(super) mod gateway_accounts;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
 #[path = "command_receipts.rs"]
@@ -1951,7 +1951,7 @@ mod launch_profile_tests {
                 logged_in: true,
                 is_default: false,
                 recommendation: None,
-                usage: None, windows: Vec::new(), usage_observed_at: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None, usage_source: None,
                 exclusion: None,
             },
             super::super::launch_env::LaunchProfile {
@@ -1959,7 +1959,7 @@ mod launch_profile_tests {
                 logged_in: false,
                 is_default: true,
                 recommendation: None,
-                usage: None, windows: Vec::new(), usage_observed_at: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None, usage_source: None,
                 exclusion: None,
             },
         ];
@@ -1993,7 +1993,7 @@ mod launch_profile_tests {
             logged_in: true,
             is_default: true,
             recommendation: None,
-            usage: None, windows: Vec::new(), usage_observed_at: None,
+            usage: None, windows: Vec::new(), usage_observed_at: None, usage_source: None,
             exclusion: None,
         }])));
         let body = serde_json::json!({"claude": available, "codex": missing});

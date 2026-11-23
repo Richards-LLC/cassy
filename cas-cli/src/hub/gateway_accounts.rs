@@ -4,7 +4,10 @@
 //! `[factory.gateway]` settings: readiness uses the worker probe, and the
 //! upstream accounts come from the hub's existing dashboard. Neither key nor
 //! address leaves this machine, and Codex Team accounts are never listed.
+use crate::account_registry::{Account, UsageWindow};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -113,6 +116,130 @@ pub(crate) fn inventory() -> GatewayInventory {
     inventory
 }
 
+/// The quota the hub holds for each login: one number for one account on
+/// every machine that reads this hub. Reading it needs only the user-level
+/// dashboard keys, never the gateway endpoint, so pointing a machine's
+/// Accounts here never routes its workers through the hub.
+#[derive(Debug)]
+pub(crate) enum SharedQuota {
+    /// No dashboard configured: each machine shows its own read.
+    Off,
+    /// Configured but unreadable: no number is shown as the shared one.
+    Unreachable(String),
+    Read(Vec<HubQuota>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HubQuota {
+    provider: String,
+    /// Lowercased login email; matched server-side, never sent to Commander.
+    email: String,
+    windows: Vec<UsageWindow>,
+    observed_at: DateTime<Utc>,
+}
+
+/// Where a row's capacity came from: `hub` (shared), `local` (this machine's
+/// own read; the hub has none for it) or `hub_unreachable` (none shown).
+pub(crate) type UsageSource = &'static str;
+
+pub(crate) fn shared_quota() -> SharedQuota {
+    let settings = cas_mux::gateway::user_settings();
+    let Some(dashboard) = settings.dashboard.as_deref().filter(|url| !url.trim().is_empty()) else {
+        return SharedQuota::Off;
+    };
+    match dashboard_client(dashboard, settings.dashboard_key_file.as_deref()).and_then(|client| {
+        client.get(READ_PATHS[0]).map_err(|error| match error {
+            DashboardError::NotReadOnly => "refused a non-read dashboard path".to_string(),
+            DashboardError::Failed(reason) => reason,
+        })
+    }) {
+        Ok(files) => SharedQuota::Read(quotas(&files)),
+        Err(reason) => SharedQuota::Unreachable(home_relative(&reason)),
+    }
+}
+
+impl SharedQuota {
+    /// `off`, `hub` or `unreachable`, with the reason for the last.
+    pub(crate) fn state(&self) -> (&'static str, Option<&str>) {
+        match self {
+            SharedQuota::Off => ("off", None),
+            SharedQuota::Unreachable(reason) => ("unreachable", Some(reason)),
+            SharedQuota::Read(_) => ("hub", None),
+        }
+    }
+
+    /// Replace each matched login's local read with the hub's. An unreachable
+    /// hub clears every read: a local number is never shown as the shared one.
+    /// Returns each account's source, by folder.
+    pub(crate) fn apply(&self, accounts: &mut [Account]) -> HashMap<PathBuf, UsageSource> {
+        let mut sources = HashMap::new();
+        for account in accounts.iter_mut() {
+            let source = match self {
+                SharedQuota::Off => continue,
+                SharedQuota::Unreachable(_) => {
+                    account.windows.clear();
+                    account.usage_observed_at = None;
+                    "hub_unreachable"
+                }
+                SharedQuota::Read(quotas) => {
+                    let email = account.email.as_deref().map(|email| email.trim().to_lowercase());
+                    match quotas.iter().find(|quota| quota.provider == account.provider.name() && Some(&quota.email) == email.as_ref()) {
+                        Some(quota) => {
+                            account.windows = quota.windows.clone();
+                            account.usage_observed_at = Some(quota.observed_at);
+                            "hub"
+                        }
+                        None => "local",
+                    }
+                }
+            };
+            sources.insert(account.folder.clone(), source);
+        }
+        sources
+    }
+}
+
+/// Auth-file `quota.signals` → usage windows, per provider's header family.
+fn quotas(files: &serde_json::Value) -> Vec<HubQuota> {
+    let mut out = Vec::new();
+    for file in files["files"].as_array().into_iter().flatten() {
+        let (Some(provider), Some(email)) = (file["provider"].as_str(), file["email"].as_str()) else { continue };
+        let quota = &file["quota"];
+        let Some(observed_at) = quota["observed_at"].as_str().and_then(|at| DateTime::parse_from_rfc3339(at).ok()) else { continue };
+        let signal = |key: &str| -> Option<f64> {
+            let value = &quota["signals"][key];
+            value.as_f64().or_else(|| value.as_str()?.trim().parse().ok())
+        };
+        let at = |key: &str| signal(key).and_then(|secs| DateTime::from_timestamp(secs as i64, 0));
+        let windows: Vec<UsageWindow> = match provider {
+            "claude" => [("5h", "5h"), ("7d", "weekly")]
+                .into_iter()
+                .filter_map(|(header, name)| {
+                    let used = signal(&format!("Anthropic-Ratelimit-Unified-{header}-Utilization"))?;
+                    Some(UsageWindow { name: name.into(), used_percent: Some(used * 100.0), resets_at: at(&format!("Anthropic-Ratelimit-Unified-{header}-Reset")) })
+                })
+                .collect(),
+            "codex" => ["Primary", "Secondary"]
+                .into_iter()
+                .filter_map(|which| {
+                    let name = match signal(&format!("X-Codex-{which}-Window-Minutes"))? as i64 {
+                        300 => "5h",
+                        10080 => "weekly",
+                        _ => return None,
+                    };
+                    Some(UsageWindow { name: name.into(), used_percent: signal(&format!("X-Codex-{which}-Used-Percent")), resets_at: at(&format!("X-Codex-{which}-Reset-At")) })
+                })
+                .collect(),
+            _ => continue,
+        };
+        if windows.is_empty() {
+            continue;
+        }
+        out.push(HubQuota { provider: provider.into(), email: email.trim().to_lowercase(), windows, observed_at: observed_at.with_timezone(&Utc) });
+    }
+    out
+}
+
 fn dashboard_client(url: &str, key_file: Option<&str>) -> Result<Dashboard, String> {
     let endpoint = cas_mux::gateway::validate_endpoint(url).map_err(|_| "dashboard must be loopback or tailnet".to_string())?;
     let key_file = key_file
@@ -203,6 +330,53 @@ mod tests {
             assert_eq!(client.get(path).unwrap_err(), DashboardError::NotReadOnly, "{path}");
         }
         assert!(listener.accept().is_err(), "a refused path must not reach the dashboard");
+    }
+
+    /// Two machines hold different local reads of one login; both read the
+    /// same hub and show its one number. A dashboard-only machine can't route.
+    #[test]
+    fn two_machines_reading_one_hub_show_one_number_for_one_login() {
+        let hub = SharedQuota::Read(quotas(&serde_json::json!({"files": [
+            {"provider": "claude", "email": "Daniel@Example.com", "quota": {"observed_at": "2026-11-23T18:44:57-05:00", "signals": {
+                "Anthropic-Ratelimit-Unified-7d-Utilization": "0.2", "Anthropic-Ratelimit-Unified-7d-Reset": "1795986000"}}},
+            {"provider": "codex", "email": "daniel@example.com", "quota": {"observed_at": "2026-11-23T18:12:55-05:00", "signals": {
+                "X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Used-Percent": "86", "X-Codex-Primary-Reset-At": "1795702350",
+                "X-Codex-Secondary-Window-Minutes": "0", "X-Codex-Secondary-Used-Percent": "0"}}},
+        ]})));
+        let machine = |folder: &str, used: f64, minutes_ago: i64| crate::account_registry::Account {
+            provider: crate::accounts::Provider::Claude,
+            name: "daniel".into(),
+            folder: PathBuf::from(folder),
+            email: Some("daniel@example.com".into()),
+            display_name: "daniel@example.com".into(),
+            identity: None,
+            plan: None,
+            login_state: crate::account_registry::LoginState::LoggedIn,
+            windows: vec![UsageWindow { name: "weekly".into(), used_percent: Some(used), resets_at: None }],
+            usage_observed_at: Some(Utc::now() - chrono::Duration::minutes(minutes_ago)),
+            flags: Default::default(),
+        };
+        let mut soundwave = vec![machine("/home/a/.claude-daniel", 10.0, 3)];
+        let mut prowl = vec![machine("/Users/a/.claude-daniel", 70.0, 600)];
+        assert_eq!(hub.apply(&mut soundwave).values().collect::<Vec<_>>(), [&"hub"]);
+        hub.apply(&mut prowl);
+        assert_eq!(soundwave[0].windows, prowl[0].windows);
+        assert_eq!(soundwave[0].usage_observed_at, prowl[0].usage_observed_at);
+        assert_eq!(soundwave[0].windows[0].used_percent.map(f64::round), Some(20.0));
+        assert_eq!(soundwave[0].windows[0].resets_at, DateTime::from_timestamp(1795986000, 0));
+
+        // An unreachable hub shows no number rather than the local one.
+        let mut offline = vec![machine("/Users/a/.claude-daniel", 70.0, 600)];
+        SharedQuota::Unreachable("dashboard unreachable".into()).apply(&mut offline);
+        assert!(offline[0].windows.is_empty() && offline[0].usage_observed_at.is_none());
+
+        // Reading quota needs only the dashboard keys; without an endpoint the machine can't route.
+        let dashboard_only = cas_types::factory_gateway::FactoryGatewayConfig {
+            dashboard: Some("http://100.64.0.1:18317".into()),
+            dashboard_key_file: Some("~/.config/hub/admin.key".into()),
+            ..Default::default()
+        };
+        assert!(cas_mux::gateway::readiness(&dashboard_only).is_err());
     }
 
     /// Team plans are counted, never listed; labels are masked.

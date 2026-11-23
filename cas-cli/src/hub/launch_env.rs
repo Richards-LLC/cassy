@@ -434,6 +434,9 @@ pub struct LaunchProfile {
     pub usage: Option<String>,
     pub windows: Vec<crate::account_registry::UsageWindow>,
     pub usage_observed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// `hub`, `local` or `hub_unreachable`; absent when no hub is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusion: Option<String>,
 }
@@ -537,7 +540,7 @@ pub fn profiles_for_project(
                         logged_in: probe_login(cli, executable, &set, remove).unwrap_or(false),
                         name: p.name,
                         recommendation: None,
-                        usage: None, windows: Vec::new(), usage_observed_at: None,
+                        usage: None, windows: Vec::new(), usage_observed_at: None, usage_source: None,
                         exclusion: None,
                     }
                 })
@@ -550,6 +553,8 @@ pub fn profiles_for_project(
     });
     if let Some(provider) = provider(cli) {
         if let Ok(mut accounts) = crate::account_registry::collect_for(provider, &home, true) {
+            // One number per login on every machine: the hub's, when configured.
+            let sources = super::server::gateway_accounts::shared_quota().apply(&mut accounts);
             // The service's login-shell binary/path above is authoritative for
             // Codex too; a missing bare CLI on a service PATH is not logout.
             for account in &mut accounts {
@@ -566,6 +571,9 @@ pub fn profiles_for_project(
                 chrono::Utc::now(),
                 &crate::account_selection::load_policy(cas_root),
             );
+            for row in &mut rows {
+                row.usage_source = accounts.iter().find(|account| account.name == row.name).and_then(|account| sources.get(&account.folder).copied());
+            }
         }
     }
     Ok(rows)
@@ -926,7 +934,7 @@ mod tests {
             let mut accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
             accounts[0].usage_observed_at = Some("2026-10-27T09:00:00Z".parse().unwrap());
             if provider == crate::accounts::Provider::Claude { accounts[0].windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
-            let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, exclusion: None }];
+            let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, usage_source: None, exclusion: None }];
             mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &soonest);
             assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 41% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()), "{cli:?}");
             assert_eq!(rows[0].windows, accounts[0].windows);
@@ -950,7 +958,7 @@ mod tests {
             duplicate.folder = "/fixture/duplicate".into();
             duplicate.flags.duplicate_of = Some(idle_accounts[0].folder.clone());
             idle_accounts.extend([later, duplicate]);
-            rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, exclusion: None }));
+            rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, usage_source: None, exclusion: None }));
             mark_recommendation(&mut rows, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &soonest);
             assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 90% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));
             assert_eq!(rows[1].exclusion.as_deref(), Some(format!("resets later than chosen; {}", crate::cli::limits::format_reset(Some("2026-10-30T00:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));

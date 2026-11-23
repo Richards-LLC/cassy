@@ -719,7 +719,7 @@ pub fn human_error_message(error: &anyhow::Error) -> String {
 /// logging/telemetry and again for library callers of `run`.
 pub fn validate_process_startup(cli: &Cli) -> anyhow::Result<()> {
     if let Some(Commands::Factory(args)) = &cli.command
-        && let Some(factory::FactoryCommands::Daemon { session, cwd, .. }) = &args.command
+        && let Some(factory::FactoryCommands::Daemon(factory::DaemonArgs { session, cwd, .. })) = &args.command
     {
         crate::ui::factory::validate_daemon_start(session, cwd)?;
     }

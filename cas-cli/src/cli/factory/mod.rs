@@ -802,6 +802,194 @@ pub enum TrainCommand {
     },
 }
 
+// `cas factory daemon` arguments, built in their own frame (see FactoryCommands).
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct DaemonArgs {
+    /// Session name
+    #[arg(long)]
+    pub session: String,
+
+    /// Working directory
+    #[arg(long)]
+    pub cwd: std::path::PathBuf,
+
+    /// Number of workers
+    #[arg(long, default_value = "0")]
+    pub workers: u8,
+
+    /// Disable worktree-based worker isolation
+    #[arg(long)]
+    pub no_worktrees: bool,
+
+    /// Custom directory for worker worktrees
+    #[arg(long)]
+    pub worktree_root: Option<std::path::PathBuf>,
+
+    /// Enable notifications
+    #[arg(long)]
+    pub notify: bool,
+
+    /// Supervisor CLI to use (claude, codex, or grok)
+    #[arg(long, default_value = "claude")]
+    pub supervisor_cli: String,
+
+    /// Worker CLI to use (claude, codex, or grok)
+    #[arg(long, default_value = "claude")]
+    pub worker_cli: String,
+
+    /// Use tabbed worker view
+    #[arg(long)]
+    pub tabbed: bool,
+
+    /// Record terminal sessions
+    #[arg(long)]
+    pub record: bool,
+
+    /// Run in foreground
+    #[arg(long)]
+    pub foreground: bool,
+
+    /// Disable cloud phone-home
+    #[arg(long)]
+    pub no_phone_home: bool,
+
+    /// Stream boot initialization progress via socket before attach (internal use)
+    #[arg(long, hide = true)]
+    pub boot_progress: bool,
+
+    /// Explicit supervisor name (internal use)
+    #[arg(long, hide = true)]
+    pub supervisor_name: Option<String>,
+
+    /// Explicit worker names (internal use, repeat per worker)
+    #[arg(long = "worker-name", hide = true)]
+    pub worker_names: Vec<String>,
+
+    /// Per-worker spec JSON overrides (internal use, repeat per worker)
+    #[arg(long = "worker-spec-json", hide = true)]
+    pub worker_spec_jsons: Vec<String>,
+
+    /// Supervisor spec JSON override (internal use, singular)
+    #[arg(long = "supervisor-spec-json", hide = true)]
+    pub supervisor_spec_json: Option<String>,
+}
+
+// `cas factory message` arguments, built in their own frame (see FactoryCommands).
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct MessageArgs {
+    /// Session name (default: most recent attachable session for this project)
+    #[arg(long)]
+    pub session: Option<String>,
+
+    /// Project directory to scope session discovery (default: current directory)
+    #[arg(long)]
+    pub project_dir: Option<std::path::PathBuf>,
+
+    /// Target: supervisor | all_workers | <worker-name>
+    #[arg(long)]
+    pub target: String,
+
+    /// Message text to enqueue
+    #[arg(long)]
+    pub message: String,
+
+    /// Commander operator turn kind (requires --target operator)
+    #[arg(long, value_parser = ["answer", "status", "receipt", "ask", "blocker"])]
+    pub kind: Option<String>,
+
+    /// Quick-reply label for --kind ask (repeat for each choice)
+    #[arg(long = "option", requires = "kind")]
+    pub options: Vec<String>,
+
+    /// Source label for attribution in wrapped message (default: openclaw)
+    #[arg(long, default_value = "openclaw")]
+    pub from: String,
+
+    /// Enqueue the raw message without wrapping in an XML `<message>` tag
+    #[arg(long)]
+    pub no_wrap: bool,
+
+    /// Wait until the factory daemon records an injection event for this message ID
+    #[arg(long)]
+    pub wait_ack: bool,
+
+    /// Timeout in milliseconds for --wait-ack
+    #[arg(long, default_value = "5000")]
+    pub timeout_ms: u64,
+
+    /// Explicit Cassy root (.cas directory) to use instead of resolving from project_dir/session metadata
+    #[arg(long)]
+    pub cas_root: Option<std::path::PathBuf>,
+}
+
+// `cas factory probecomm` arguments, built in their own frame (see FactoryCommands).
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct ProbeCommArgs {
+    /// JSONL output path for per-scenario stage evidence
+    #[arg(long)]
+    pub jsonl: std::path::PathBuf,
+
+    /// Disposable Cassy root to use for the probe; defaults to a temp root
+    #[arg(long)]
+    pub cas_root: Option<std::path::PathBuf>,
+
+    /// Recorded harness artifact root for Claude/Codex/Grok/OpenCode adapters
+    #[arg(long)]
+    pub artifact_root: Option<std::path::PathBuf>,
+
+    /// Explicitly permit using the active parent Cassy root
+    #[arg(long)]
+    pub allow_active_cas_root: bool,
+
+    /// Probe adapter. Unit 6 ships only the deterministic fake adapter.
+    #[arg(long, value_enum, default_value = "fake")]
+    pub adapter: probe_comm::ProbeAdapterKind,
+
+    /// Legacy per-sample delivery threshold in milliseconds (hidden; use aggregate transport gates)
+    #[arg(long, default_value = "2000", hide = true)]
+    pub delivery_slo_ms: u64,
+
+    /// Legacy fake-runner selection threshold in milliseconds
+    #[arg(long, default_value = "250", hide = true)]
+    pub selection_slo_ms: u64,
+
+    /// Normal transport p95 SLO threshold in milliseconds (epic contract: <=2000ms)
+    #[arg(long, default_value = "2000")]
+    pub normal_transport_p95_slo_ms: u64,
+
+    /// Normal transport max SLO threshold in milliseconds (epic contract: <=10000ms)
+    #[arg(long, default_value = "10000")]
+    pub normal_transport_max_slo_ms: u64,
+
+    /// Urgent transport p95 SLO threshold in milliseconds (epic contract: <=2000ms)
+    #[arg(long, default_value = "2000")]
+    pub urgent_transport_p95_slo_ms: u64,
+
+    /// Urgent transport max SLO threshold in milliseconds (epic contract: <=5000ms)
+    #[arg(long, default_value = "5000")]
+    pub urgent_transport_max_slo_ms: u64,
+
+    /// Worker wake p95 SLO threshold in milliseconds (epic contract: <=5000ms)
+    #[arg(long, default_value = "5000")]
+    pub wake_p95_slo_ms: u64,
+
+    /// Visible reaction p95 SLO threshold in milliseconds when observable (epic contract: <=15000ms)
+    #[arg(long, default_value = "15000")]
+    pub reaction_p95_slo_ms: u64,
+
+    /// Inject a transport failure as SCENARIO:MESSAGE_ID
+    #[arg(long, value_name = "SCENARIO:MESSAGE_ID")]
+    pub inject_transport_failure: Option<String>,
+
+    /// Inject an SLO failure as SCENARIO:MESSAGE_ID:DELIVERED_AFTER_MS
+    #[arg(long, value_name = "SCENARIO:MESSAGE_ID:MS")]
+    pub inject_slo_failure: Option<String>,
+}
+
+// Clap's derived subcommand builder holds every inline argument's builder
+// temporaries in one debug-build frame: FactoryCommands reached 1.1 MiB and,
+// with `Commands` above it, parsing `Cli` overflowed a 2 MiB thread
+// (cas-6456). The largest commands keep their arguments in `Args` structs.
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
@@ -954,75 +1142,7 @@ pub enum FactoryCommands {
 
     /// Run as a factory daemon (internal use)
     #[command(hide = true)]
-    Daemon {
-        /// Session name
-        #[arg(long)]
-        session: String,
-
-        /// Working directory
-        #[arg(long)]
-        cwd: std::path::PathBuf,
-
-        /// Number of workers
-        #[arg(long, default_value = "0")]
-        workers: u8,
-
-        /// Disable worktree-based worker isolation
-        #[arg(long)]
-        no_worktrees: bool,
-
-        /// Custom directory for worker worktrees
-        #[arg(long)]
-        worktree_root: Option<std::path::PathBuf>,
-
-        /// Enable notifications
-        #[arg(long)]
-        notify: bool,
-
-        /// Supervisor CLI to use (claude, codex, or grok)
-        #[arg(long, default_value = "claude")]
-        supervisor_cli: String,
-
-        /// Worker CLI to use (claude, codex, or grok)
-        #[arg(long, default_value = "claude")]
-        worker_cli: String,
-
-        /// Use tabbed worker view
-        #[arg(long)]
-        tabbed: bool,
-
-        /// Record terminal sessions
-        #[arg(long)]
-        record: bool,
-
-        /// Run in foreground
-        #[arg(long)]
-        foreground: bool,
-
-        /// Disable cloud phone-home
-        #[arg(long)]
-        no_phone_home: bool,
-
-        /// Stream boot initialization progress via socket before attach (internal use)
-        #[arg(long, hide = true)]
-        boot_progress: bool,
-
-        /// Explicit supervisor name (internal use)
-        #[arg(long, hide = true)]
-        supervisor_name: Option<String>,
-
-        /// Explicit worker names (internal use, repeat per worker)
-        #[arg(long = "worker-name", hide = true)]
-        worker_names: Vec<String>,
-
-        /// Per-worker spec JSON overrides (internal use, repeat per worker)
-        #[arg(long = "worker-spec-json", hide = true)]
-        worker_spec_jsons: Vec<String>,
-
-        /// Supervisor spec JSON override (internal use, singular)
-        #[arg(long = "supervisor-spec-json", hide = true)]
-        supervisor_spec_json: Option<String>,
-    },
+    Daemon(DaemonArgs),
 
     /// Check if worktree is behind its sync target (used as SessionStart hook)
     CheckStaleness {
@@ -1133,51 +1253,7 @@ pub enum FactoryCommands {
     },
 
     /// Inject a message into supervisor/workers via the prompt queue (no PTY attach)
-    Message {
-        /// Session name (default: most recent attachable session for this project)
-        #[arg(long)]
-        session: Option<String>,
-
-        /// Project directory to scope session discovery (default: current directory)
-        #[arg(long)]
-        project_dir: Option<std::path::PathBuf>,
-
-        /// Target: supervisor | all_workers | <worker-name>
-        #[arg(long)]
-        target: String,
-
-        /// Message text to enqueue
-        #[arg(long)]
-        message: String,
-
-        /// Commander operator turn kind (requires --target operator)
-        #[arg(long, value_parser = ["answer", "status", "receipt", "ask", "blocker"])]
-        kind: Option<String>,
-
-        /// Quick-reply label for --kind ask (repeat for each choice)
-        #[arg(long = "option", requires = "kind")]
-        options: Vec<String>,
-
-        /// Source label for attribution in wrapped message (default: openclaw)
-        #[arg(long, default_value = "openclaw")]
-        from: String,
-
-        /// Enqueue the raw message without wrapping in an XML `<message>` tag
-        #[arg(long)]
-        no_wrap: bool,
-
-        /// Wait until the factory daemon records an injection event for this message ID
-        #[arg(long)]
-        wait_ack: bool,
-
-        /// Timeout in milliseconds for --wait-ack
-        #[arg(long, default_value = "5000")]
-        timeout_ms: u64,
-
-        /// Explicit Cassy root (.cas directory) to use instead of resolving from project_dir/session metadata
-        #[arg(long)]
-        cas_root: Option<std::path::PathBuf>,
-    },
+    Message(MessageArgs),
 
     /// Run the isolated supervisor/worker communication conformance probe
     /// Launched-agent skill + instruction parity conformance gate (cas-bd9d):
@@ -1190,67 +1266,7 @@ pub enum FactoryCommands {
         jsonl: Option<std::path::PathBuf>,
     },
 
-    ProbeComm {
-        /// JSONL output path for per-scenario stage evidence
-        #[arg(long)]
-        jsonl: std::path::PathBuf,
-
-        /// Disposable Cassy root to use for the probe; defaults to a temp root
-        #[arg(long)]
-        cas_root: Option<std::path::PathBuf>,
-
-        /// Recorded harness artifact root for Claude/Codex/Grok/OpenCode adapters
-        #[arg(long)]
-        artifact_root: Option<std::path::PathBuf>,
-
-        /// Explicitly permit using the active parent Cassy root
-        #[arg(long)]
-        allow_active_cas_root: bool,
-
-        /// Probe adapter. Unit 6 ships only the deterministic fake adapter.
-        #[arg(long, value_enum, default_value = "fake")]
-        adapter: probe_comm::ProbeAdapterKind,
-
-        /// Legacy per-sample delivery threshold in milliseconds (hidden; use aggregate transport gates)
-        #[arg(long, default_value = "2000", hide = true)]
-        delivery_slo_ms: u64,
-
-        /// Legacy fake-runner selection threshold in milliseconds
-        #[arg(long, default_value = "250", hide = true)]
-        selection_slo_ms: u64,
-
-        /// Normal transport p95 SLO threshold in milliseconds (epic contract: <=2000ms)
-        #[arg(long, default_value = "2000")]
-        normal_transport_p95_slo_ms: u64,
-
-        /// Normal transport max SLO threshold in milliseconds (epic contract: <=10000ms)
-        #[arg(long, default_value = "10000")]
-        normal_transport_max_slo_ms: u64,
-
-        /// Urgent transport p95 SLO threshold in milliseconds (epic contract: <=2000ms)
-        #[arg(long, default_value = "2000")]
-        urgent_transport_p95_slo_ms: u64,
-
-        /// Urgent transport max SLO threshold in milliseconds (epic contract: <=5000ms)
-        #[arg(long, default_value = "5000")]
-        urgent_transport_max_slo_ms: u64,
-
-        /// Worker wake p95 SLO threshold in milliseconds (epic contract: <=5000ms)
-        #[arg(long, default_value = "5000")]
-        wake_p95_slo_ms: u64,
-
-        /// Visible reaction p95 SLO threshold in milliseconds when observable (epic contract: <=15000ms)
-        #[arg(long, default_value = "15000")]
-        reaction_p95_slo_ms: u64,
-
-        /// Inject a transport failure as SCENARIO:MESSAGE_ID
-        #[arg(long, value_name = "SCENARIO:MESSAGE_ID")]
-        inject_transport_failure: Option<String>,
-
-        /// Inject an SLO failure as SCENARIO:MESSAGE_ID:DELIVERED_AFTER_MS
-        #[arg(long, value_name = "SCENARIO:MESSAGE_ID:MS")]
-        inject_slo_failure: Option<String>,
-    },
+    ProbeComm(ProbeCommArgs),
 
     /// Classify a worker as alive / wedged / approval-hung / starved / dead (cas-4513).
     ///
@@ -1556,7 +1572,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
             FactoryCommands::Gc { command } => gc::execute(command, cli, cas_root),
-            FactoryCommands::Daemon {
+            FactoryCommands::Daemon(DaemonArgs {
                 session,
                 cwd,
                 workers,
@@ -1574,7 +1590,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 worker_names,
                 worker_spec_jsons,
                 supervisor_spec_json,
-            } => daemon::execute_daemon(
+            }) => daemon::execute_daemon(
                 session,
                 cwd,
                 *workers,
@@ -1653,7 +1669,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 session,
                 project_dir,
             } => queries::execute_targets(cli, session.as_deref(), project_dir.as_deref()),
-            FactoryCommands::Message {
+            FactoryCommands::Message(MessageArgs {
                 session,
                 project_dir,
                 target,
@@ -1665,7 +1681,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 wait_ack,
                 timeout_ms,
                 cas_root,
-            } => queries::execute_message(
+            }) => queries::execute_message(
                 cli,
                 session.as_deref(),
                 project_dir.as_deref(),
@@ -1680,7 +1696,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 cas_root.as_deref(),
             ),
             FactoryCommands::Parity { jsonl } => parity::execute_parity(jsonl.clone()),
-            FactoryCommands::ProbeComm {
+            FactoryCommands::ProbeComm(ProbeCommArgs {
                 jsonl,
                 cas_root: sub_cas_root,
                 artifact_root,
@@ -1696,7 +1712,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 reaction_p95_slo_ms,
                 inject_transport_failure,
                 inject_slo_failure,
-            } => probe_comm::execute_probe_comm(
+            }) => probe_comm::execute_probe_comm(
                 jsonl.clone(),
                 sub_cas_root.clone(),
                 artifact_root.clone(),

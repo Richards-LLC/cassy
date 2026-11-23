@@ -2432,6 +2432,14 @@ async fn retarget_empty_branch_rebind_then_start_gh1673() {
             assert_eq!(start.assignee, WORKER);
             assert!(task.deliverables.factory_branch_anchor.is_none());
             assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), target_tip);
+            // cas-db91 (GH #1698): close judges the rebound lane, not the original.
+            // The approved empty replacement has no commits and is unpushed, so G-81
+            // refuses it by name, where the original lane would be named instead.
+            assert_eq!(close_measured_factory_branch(repo, &task, WORKER).trim_start_matches("origin/"), replacement);
+            let MergeRealityOutcome::Refuse(message) = check_close_merge_reality(repo, &task, WORKER, "new-target") else {
+                panic!("G-81 must judge the empty rebound lane");
+            };
+            assert!(message.contains(&replacement), "{message}");
         }
         assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "{obstruction}");
     }
@@ -2489,11 +2497,12 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
 
 /// cas-db91 (GH #1698): after a supervisor rebinds a task to its rebuilt
 /// `-r2` lane, close measures `-r2`, whether its tip is local or only on
-/// origin, or still empty (an approved empty rebind, GH #1673), never the old
-/// per-task lane that still carries the first build. G-81 judges the same lane.
+/// origin, never the old per-task lane that still carries the first build.
+/// G-81 judges the same lane. The empty rebind is covered through the real
+/// handler in `retarget_empty_branch_rebind_then_start_gh1673`.
 #[tokio::test]
 async fn rebound_r2_lane_is_the_close_measured_branch_cas_db91() {
-    for (remote_only, empty) in [(false, false), (true, false), (false, true)] {
+    for remote_only in [false, true] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
@@ -2516,37 +2525,23 @@ async fn rebound_r2_lane_is_the_close_measured_branch_cas_db91() {
         git(&checkout, &["push", "-q", "origin", &lane]);
         let rebuilt = format!("{lane}-r2");
         git(&checkout, &["checkout", "-q", "-b", &rebuilt, "main"]);
-        if empty {
-            // The approved empty rebind records the lane before its first commit.
-            let mut task = f.task(id);
-            let start = task.deliverables.factory_branch_start.as_mut().unwrap();
-            start.branch = rebuilt.clone();
-            start.base_sha = git(repo, &["rev-parse", "main"]);
-            f.put(&task);
-        } else {
-            std::fs::write(checkout.join("rebuilt.rs"), "pub fn rebuilt() {}\n").unwrap();
-            git(&checkout, &["add", "rebuilt.rs"]);
-            git(&checkout, &["commit", "-q", "-m", "fix(cas-1698): rebuilt delivery"]);
-            git(&checkout, &["push", "-q", "origin", &rebuilt]);
-            let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
-                "action":"rebind_branch", "id":id, "branch":rebuilt, "reason":"Bind the rebuilt delivery",
-            })).unwrap())).await;
-            assert!(rebound.is_ok(), "{rebound:?}");
-        }
+        std::fs::write(checkout.join("rebuilt.rs"), "pub fn rebuilt() {}\n").unwrap();
+        git(&checkout, &["add", "rebuilt.rs"]);
+        git(&checkout, &["commit", "-q", "-m", "fix(cas-1698): rebuilt delivery"]);
+        git(&checkout, &["push", "-q", "origin", &rebuilt]);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"rebind_branch", "id":id, "branch":rebuilt, "reason":"Bind the rebuilt delivery",
+        })).unwrap())).await;
+        assert!(rebound.is_ok(), "{rebound:?}");
         if remote_only {
             git(&checkout, &["checkout", "-q", "--detach"]);
             git(repo, &["branch", "-D", &rebuilt]);
         }
         assert_eq!(close_measured_factory_branch(repo, &f.task(id), WORKER).trim_start_matches("origin/"),
-            rebuilt, "remote_only={remote_only} empty={empty}");
-        // G-81 judges that same lane. The first build is pushed with unmerged
-        // commits and would proceed; an empty, unpushed `-r2` lane must refuse by name.
+            rebuilt, "remote_only={remote_only}");
+        // G-81 judges that same lane: a published rebuilt tip proceeds.
         let reality = check_close_merge_reality(repo, &f.task(id), WORKER, "main");
-        match (empty, reality) {
-            (true, MergeRealityOutcome::Refuse(message)) => assert!(message.contains(&rebuilt), "{message}"),
-            (false, MergeRealityOutcome::Proceed) => {}
-            (empty, _) => panic!("G-81 judged the wrong lane: remote_only={remote_only} empty={empty}"),
-        }
+        assert!(matches!(reality, MergeRealityOutcome::Proceed), "remote_only={remote_only}");
     }
 }
 

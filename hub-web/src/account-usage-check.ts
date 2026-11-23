@@ -1,5 +1,5 @@
 import { escapeHtml } from "./cloud-brand";
-import { accountTime, type AccountWindow } from "./accounts-model";
+import type { AccountWindow } from "./accounts-model";
 
 export interface CheckedAccountUsage {
   checked_at: string; observed_at: string | null; source: string;
@@ -23,16 +23,13 @@ export class AccountUsageChecks {
   reset(): void { this.controller.abort(); this.controller = new AbortController(); this.states.clear(); }
   private key(machine: string, account: string): string { return JSON.stringify([machine, account]); }
   hasResult(machine: string, account: string): boolean { return Boolean(this.states.get(this.key(machine, account))?.result); }
+  /** The latest explicit check for this account; callers draw its windows as meters. */
+  result(machine: string, account: string): CheckedAccountUsage | undefined { return this.states.get(this.key(machine, account))?.result; }
+  /** The ↻ control and its live status. It never selects or changes an account. */
   markup(machine: string, account: string): string {
     const state = this.states.get(this.key(machine, account)) ?? {};
-    const result = state.result;
-    const windows = result ? ["5h", "weekly"].map(name => {
-      const window = result.windows.find(window => window.name === name);
-      const amount = window?.used_percent;
-      return `<p>${name} ${amount === null || amount === undefined || !Number.isFinite(amount) || amount < 0 || amount > 100 ? "usage unknown" : `${Math.round(amount)}% used`}${window?.resets_at ? ` · resets ${escapeHtml(accountTime(window.resets_at))}` : " · reset time unknown"}</p>`;
-    }).join("") : "";
-    const detail = result ? `${windows}<p>Checked at ${escapeHtml(accountTime(result.checked_at))}</p><p>Usage as of ${result.observed_at ? escapeHtml(accountTime(result.observed_at)) : "unknown"} · ${escapeHtml(result.source)}</p>${result.reason ? `<p>${escapeHtml(result.reason)}</p>` : ""}` : "";
-    return `<div class="account-usage-check" data-usage-machine="${escapeHtml(machine)}" data-usage-account="${escapeHtml(account)}"><button type="button" data-check-usage${state.pending ? " disabled" : ""} aria-label="Check usage for ${escapeHtml(account)}">${state.pending ? "Checking usage…" : "Check usage"}</button><div class="account-usage-result" role="status" aria-label="Usage for ${escapeHtml(account)}" aria-live="polite">${detail}${state.error ? `<p>${escapeHtml(state.error)}</p>` : ""}</div></div>`;
+    const status = state.pending ? "Refreshing usage" : state.error ? state.error : state.result ? `Usage refreshed${state.result.reason ? `. ${state.result.reason}` : ""}` : "";
+    return `<span class="account-usage-check" data-usage-machine="${escapeHtml(machine)}" data-usage-account="${escapeHtml(account)}"><button type="button" class="account-refresh" data-testid="account-refresh" data-check-usage${state.pending ? ' aria-busy="true" disabled' : ""} aria-label="Check usage for ${escapeHtml(account)}" title="Refresh usage"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span class="account-usage-result${state.error ? " is-error" : ""}" data-testid="account-usage-status" role="status" aria-label="Usage for ${escapeHtml(account)}" aria-live="polite">${escapeHtml(status)}</span></span>`;
   }
   handle(event: Event): boolean {
     const button = (event.target as Element).closest("[data-check-usage]");

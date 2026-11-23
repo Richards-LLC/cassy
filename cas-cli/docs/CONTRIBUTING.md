@@ -5192,6 +5192,19 @@ slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
 
+## Divergent unparked task migrations
+
+An ordinary task target edit that excludes an unparked task's recorded start
+base refuses before saving with `rule_id=unparked_target_base_migration` when
+its known local/origin source refs remain at that base. Nonempty or rewritten
+deliveries keep their recorded boundary and existing explicit rebind checks.
+The structured `recovery` names the explicit supervisor `proof_scope_fix`
+request, replacement branch/base and `rebind_branch` request. For an Open task,
+the assigned worker first executes `recovery.start` on the unchanged old lane
+so the supervisor correction applies to an active delivery cycle. Preserve the
+old lane; create the clean replacement from that base, approve its binding,
+then start again. Dirty checkouts and foreign work still refuse rebinding.
+
 ## Bounded MCP task reads
 
 `task show` (including `get`), `task notes` reads and `task start` default to

@@ -190,6 +190,10 @@ async fn dynamic_spawn_names_keep_clear_of_other_namespaces_cas_dc08() {
     git(&["init", "-b", "main"]);
     git(&["-c", "user.name=f", "-c", "user.email=f@example.test", "commit", "--allow-empty", "-m", "base"]);
     git(&["update-ref", "refs/remotes/origin/factory/calm-lark-3-hotfix", "HEAD"]);
+    // `brave-owl-88` has only a per-task branch of a known task (cas-stalled,
+    // from setup); `keen-fox-1` has one named for no task.
+    git(&["update-ref", "refs/remotes/origin/factory/brave-owl-88-cas-stalled", "HEAD"]);
+    git(&["update-ref", "refs/remotes/origin/factory/keen-fox-1-scratch", "HEAD"]);
     crate::store::open_agent_store(daemon.app.cas_dir()).unwrap().register(
         &cas_types::Agent::new_with_role("swift-id".into(), "swift".into(), cas_types::AgentRole::Worker),
     ).unwrap();
@@ -210,11 +214,12 @@ async fn dynamic_spawn_names_keep_clear_of_other_namespaces_cas_dc08() {
     daemon.cancel_provisioning();
 
     // Generated names: redrawn past an overlap with registered `swift`, the
-    // namespace of origin `factory/calm-lark-3-hotfix`, and a live worker.
+    // namespace of origin `factory/calm-lark-3-hotfix`, and a branch of no
+    // known task; a known task's own branch does not block its name.
     let registry = crate::ui::factory::app::render_and_ops::epic_workers::load_spawn_name_registry(
         daemon.app.cas_dir(), dir.path(), None,
     ).unwrap();
-    let mut candidates = ["swift-falcon-7", "calm-lark-3", "brave-owl-88"].into_iter();
+    let mut candidates = ["swift-falcon-7", "calm-lark-3", "keen-fox-1", "brave-owl-88"].into_iter();
     let context = daemon.app.snapshot_worker_spawn_with(
         None, false, None, registry, &mut || candidates.next().expect("bounded fixture candidates").to_owned(),
     ).unwrap();

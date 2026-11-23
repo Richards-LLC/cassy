@@ -219,13 +219,26 @@ pub fn worker_name_overlap(
 
 /// N1 naming inputs, read once (cas-dc08): this machine's worker names, the
 /// `factory/*` branches in local and origin refs (name to full ref; never the
-/// network) and the task store for known task ids.
+/// network) and the task ids those branch names carry that the task store
+/// knows. Everything is read in [`WorkerNameRegistry::load`]; the checks hold
+/// no store, so they are safe to run anywhere.
 #[derive(Default)]
 pub struct WorkerNameRegistry {
     pub workers: Vec<String>,
     pub refs: std::collections::HashMap<String, String>,
     branches: std::collections::HashSet<String>,
-    tasks: Option<std::sync::Arc<dyn crate::store::TaskStore>>,
+    known_tasks: std::collections::HashSet<String>,
+}
+
+/// Every task-id-shaped piece of `branch` that the overlap rule can ask about:
+/// each hyphen-delimited stretch that starts after a hyphen and either ends at
+/// a hyphen or at the end of the name.
+fn task_id_candidates(branch: &str, into: &mut std::collections::HashSet<String>) {
+    for (at, _) in branch.match_indices('-') {
+        let rest = &branch[at + 1..];
+        let ends = rest.match_indices('-').map(|(end, _)| end).chain([rest.len()]);
+        into.extend(ends.map(|end| &rest[..end]).filter(|id| is_task_id_like(id)).map(str::to_string));
+    }
 }
 
 impl WorkerNameRegistry {
@@ -269,6 +282,13 @@ impl WorkerNameRegistry {
         let agents = crate::store::open_agent_store(cas_root)
             .and_then(|store| store.list(None).map_err(Into::into))
             .map_err(|error| error.to_string())?;
+        // Known task membership is resolved here, once, so the overlap checks
+        // that run on the daemon loop never touch the store.
+        let mut candidates = std::collections::HashSet::new();
+        refs.keys().for_each(|branch| task_id_candidates(branch, &mut candidates));
+        let known_tasks: std::collections::HashSet<String> = crate::store::open_task_store(cas_root)
+            .map(|tasks| candidates.into_iter().filter(|id| tasks.get(id).is_ok()).collect())
+            .unwrap_or_default();
         Ok(Self {
             workers: agents.into_iter()
                 .filter(|agent| agent.role == cas_types::AgentRole::Worker)
@@ -276,7 +296,7 @@ impl WorkerNameRegistry {
                 .collect(),
             branches: refs.keys().cloned().collect(),
             refs,
-            tasks: crate::store::open_task_store(cas_root).ok(),
+            known_tasks,
         })
     }
 
@@ -291,7 +311,7 @@ impl WorkerNameRegistry {
     }
 
     fn is_task(&self, id: &str) -> bool {
-        self.tasks.as_ref().is_some_and(|tasks| tasks.get(id).is_ok())
+        self.known_tasks.contains(id)
     }
 }
 

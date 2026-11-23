@@ -7,7 +7,7 @@ statement: >-
   worker name that extends another worker's name across a hyphen is refused,
   so no branch has two owners. Supervisors are exempt, and names without a
   hyphen boundary (eager-panda-2, eager-panda-27) both register. Spawn
-  and factory launch (final --worker-spec names included) apply the same
+  and factory launch (final --worker-spec names included, and dynamic GUI or WebSocket spawns) apply the same
   rule against local and origin factory branches, the name generators,
   daemon fallback included, skip overlapping names, and cas doctor reports existing overlaps.
 tasks: [cas-ea31, cas-dc08]

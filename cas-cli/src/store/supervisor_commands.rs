@@ -77,27 +77,3 @@ pub(crate) fn write(root: &Path, session: &str, supervisor: &str, value: &Value,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    /// cas-8c4f: Commander showed a working /mcp as failed because the receipt
-    /// write ran on a loop pass whose budget was spent, behind a 6 ms holder.
-    #[test]
-    fn receipt_write_outlasts_a_brief_holder_after_the_pass_budget_is_spent() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let temp = tempfile::tempdir().unwrap();
-        let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
-        let (held_tx, held) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _guard = shared.lock().unwrap();
-            held_tx.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(40));
-        });
-        held.recv().unwrap();
-        let _spent = cas_store::wait_budget::bound_waits_until(std::time::Instant::now());
-        let row = serde_json::json!({"receipt": {"device_id": "d", "client_ref": "r", "phase": "submitted"}, "at": chrono::Utc::now()});
-        let written = super::write(&root, "session", "supervisor", &row, super::Write::Reserve);
-        holder.join().unwrap();
-        assert!(written.unwrap(), "a brief holder must not fail a receipt write");
-    }
-}

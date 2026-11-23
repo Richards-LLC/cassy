@@ -130,8 +130,22 @@ fn recorded_class_audit(cas_root: &Path, task_id: &str) -> Option<String> {
         crate::store::open_task_store(cas_root).ok()?.as_ref(), task_id)
 }
 
-/// Every receipt-scope refusal at this tip, not just the first.
+/// Every receipt-scope refusal at this tip, not just the first. Each runner
+/// config is listed once for the whole judgement (GH #2331).
 pub(super) fn park_refusals(
+    cas_root: &Path,
+    proof_repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> Vec<String> {
+    crate::factory_worker_check::javascript::with_listing_cache(||
+        listed_park_refusals(cas_root, proof_repo, task, changed_paths, head, target, delivery_ranges))
+}
+
+fn listed_park_refusals(
     cas_root: &Path,
     proof_repo: &Path,
     task: &Task,

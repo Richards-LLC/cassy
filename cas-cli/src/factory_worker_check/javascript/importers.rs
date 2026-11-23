@@ -14,16 +14,79 @@ const EXTENSIONS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "c
 /// relative specifiers resolve, so an alias-only import finds no importer and
 /// the helper keeps its package proof.
 pub(crate) fn related_tests(repo: &Path, path: &str) -> Option<(&'static str, Vec<String>)> {
-    static SPECIFIER: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?:\bfrom|\bimport|\brequire\s*\()\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).unwrap()
-    });
     let target = normalize(&repo.join(path));
     let mut package = target.clone();
     while package.pop() && package.starts_with(repo) && !package.join("package.json").is_file() {}
     if !package.starts_with(repo) { package = repo.to_path_buf(); }
+    let graph = match GRAPHS.with(|cache| cache.borrow().as_ref().map(|cache| cache.get(&package).cloned())) {
+        Some(Some(graph)) => graph,
+        Some(None) => {
+            let graph = std::rc::Rc::new(graph(repo, &package));
+            GRAPHS.with(|cache| cache.borrow_mut().as_mut().map(|cache| cache.insert(package.clone(), graph.clone())));
+            graph
+        }
+        None => std::rc::Rc::new(graph(repo, &package)),
+    };
+    let Graph { importers, playwright, node, unit } = graph.as_ref();
+    let reached = |roots: Vec<PathBuf>| {
+        let mut seen = BTreeSet::new();
+        let mut queue = roots;
+        while let Some(file) = queue.pop() {
+            for importer in importers.get(&file).into_iter().flatten() {
+                if seen.insert(importer.clone()) { queue.push(importer.clone()); }
+            }
+        }
+        seen
+    };
+    let runs_playwright = reached(playwright.clone()).into_iter().chain(playwright.iter().cloned()).collect::<BTreeSet<_>>();
+    let tests: Vec<_> = reached(vec![target]).into_iter().filter_map(|file| {
+        let relative = file.strip_prefix(repo).ok()?.to_str()?.to_owned();
+        super::test_match(&relative, None).then_some((file, relative))
+    }).collect();
+    let runner = |file: &PathBuf| if node.contains(file) { Some("node") }
+        else if runs_playwright.contains(file) && !unit.contains(file) { Some("playwright") } else { None };
+    let first = runner(&tests.first()?.0)?;
+    tests.iter().all(|(file, _)| runner(file) == Some(first))
+        .then(|| (first, tests.into_iter().map(|(_, relative)| relative).collect()))
+}
+
+/// One package's import graph: who imports each module, and the files that
+/// load Playwright, `node:test` or a unit runner.
+struct Graph {
+    importers: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
+    playwright: Vec<PathBuf>,
+    node: BTreeSet<PathBuf>,
+    unit: BTreeSet<PathBuf>,
+}
+
+thread_local! {
+    static GRAPHS: std::cell::RefCell<Option<BTreeMap<PathBuf, std::rc::Rc<Graph>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// GH #2331: while `work` runs, each package's import graph is read once. A
+/// close asks about every changed file, and each fresh read walks and parses
+/// the whole package, built bundles included.
+pub(crate) fn with_graph_cache<T>(work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            if self.0 { GRAPHS.with(|cache| cache.borrow_mut().take()); }
+        }
+    }
+    let _reset = Reset(GRAPHS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.is_none().then(|| cache.replace(BTreeMap::new())).is_some()
+    }));
+    work()
+}
+
+fn graph(repo: &Path, package: &Path) -> Graph {
+    static SPECIFIER: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?:\bfrom|\bimport|\brequire\s*\()\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).unwrap()
+    });
     let mut importers: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
     let (mut playwright, mut node, mut unit) = (Vec::new(), BTreeSet::new(), BTreeSet::new());
-    for entry in ignore::WalkBuilder::new(&package).build().flatten() {
+    for entry in ignore::WalkBuilder::new(package).build().flatten() {
         let file = entry.path();
         if !entry.file_type().is_some_and(|kind| kind.is_file())
             || !super::javascript(&file.to_string_lossy())
@@ -40,26 +103,7 @@ pub(crate) fn related_tests(repo: &Path, path: &str) -> Option<(&'static str, Ve
             }
         }
     }
-    let reached = |roots: Vec<PathBuf>| {
-        let mut seen = BTreeSet::new();
-        let mut queue = roots;
-        while let Some(file) = queue.pop() {
-            for importer in importers.get(&file).into_iter().flatten() {
-                if seen.insert(importer.clone()) { queue.push(importer.clone()); }
-            }
-        }
-        seen
-    };
-    let runs_playwright = reached(playwright.clone()).into_iter().chain(playwright).collect::<BTreeSet<_>>();
-    let tests: Vec<_> = reached(vec![target]).into_iter().filter_map(|file| {
-        let relative = file.strip_prefix(repo).ok()?.to_str()?.to_owned();
-        super::test_match(&relative, None).then_some((file, relative))
-    }).collect();
-    let runner = |file: &PathBuf| if node.contains(file) { Some("node") }
-        else if runs_playwright.contains(file) && !unit.contains(file) { Some("playwright") } else { None };
-    let first = runner(&tests.first()?.0)?;
-    tests.iter().all(|(file, _)| runner(file) == Some(first))
-        .then(|| (first, tests.into_iter().map(|(_, relative)| relative).collect()))
+    Graph { importers, playwright, node, unit }
 }
 
 /// Whether `source` loads `@playwright/test` when it runs. `import type`,

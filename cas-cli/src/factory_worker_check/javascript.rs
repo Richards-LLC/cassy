@@ -2531,20 +2531,27 @@ process.exit(ok ? 0 : 1);
         write("package.json", "{}");
         write("playwright.config.js", "module.exports = { testDir: 'e2e' };");
         write("playwright.hermetic.config.js", "module.exports = { testDir: 'tests/e2e' };");
-        // A stand-in Playwright: lists or runs the `.spec.ts` files under its
-        // config's testDir that the positional pattern names ("No tests found" otherwise).
+        // A stand-in Playwright that keeps the JSON reporter's contract: rootDir
+        // is the config's testDir and files are relative to it; `--list` keeps
+        // each discovered test with empty results, and a run records one result
+        // per repetition. It lists the `.spec.ts` files under testDir that the
+        // positional pattern names ("No tests found" otherwise).
         write("node_modules/.bin/playwright", r#"#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
-const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
-const config = path.resolve(at('--config')), dir = path.join(path.dirname(config), require(config).testDir);
-const pattern = new RegExp(a[a.length - 1]), repeats = a.includes('--list') ? 0 : Number(at('--repeat-each'));
-const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(dir, f)) : [];
-const listed = files.filter((file) => pattern.test(file)), root = path.dirname(config);
-const result = { status: 'passed', retry: 0 }, test = { expectedStatus: 'passed', projectName: 'chromium', results: [result] };
-const report = { config: { rootDir: root }, errors: listed.length ? [] : [{ message: 'No tests found' }], suites: listed.map((file) => ({
-  title: path.relative(root, file), column: 0, suites: [],
-  specs: [{ file: path.relative(root, file), title: 'hermetic sign in', tests: Array(repeats).fill(test) }] })) };
-if (a.includes('--list')) console.log(JSON.stringify(report));
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
+const config = path.resolve(at('--config')), root = path.join(path.dirname(config), require(config).testDir);
+const pattern = new RegExp(a[a.length - 1]), repeats = listing ? 1 : Number(at('--repeat-each'));
+const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith('.spec.ts')).map((f) => path.join(root, f)) : [];
+const listed = files.filter((file) => pattern.test(file));
+const test = (repeat) => ({ timeout: 30000, annotations: [], expectedStatus: 'passed', projectId: 'chromium', projectName: 'chromium',
+  results: listing ? [] : [{ workerIndex: 0, status: 'passed', duration: 1, errors: [], retry: 0, repeatEachIndex: repeat }],
+  status: listing ? 'skipped' : 'expected' });
+const report = { config: { rootDir: root }, errors: listed.length ? [] : [{ message: 'No tests found' }], suites: listed.map((file) => {
+  const relative = path.relative(root, file);
+  return { title: relative, file: relative, line: 0, column: 0, suites: [], specs: [{ title: 'hermetic sign in', ok: true, tags: [],
+    file: relative, line: 2, column: 1, tests: Array.from({ length: repeats }, (_, repeat) => test(repeat)) }] };
+}) };
+if (listing) console.log(JSON.stringify(report));
 else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
 process.exit(listed.length ? 0 : 1);
 "#);

@@ -60,6 +60,8 @@ const SPAWN_BOOT_VERIFICATION_WINDOW: Duration = Duration::from_secs(
 /// for a cold `git worktree add` on a large repo, short enough that a hung git
 /// process cannot wedge the spawn queue for a whole session.
 const SPAWN_PROVISION_TIMEOUT: Duration = Duration::from_secs(300);
+/// cas-dc08 (N1): the worker-name registry read has a 5 s Git budget plus the stores.
+const SPAWN_NAME_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// cas-2702: how often the daemon inspects the queue for rows it never drained.
 const SPAWN_QUEUE_STALL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// cas-2702: age at which an undrained queue row is reported as stalled.
@@ -11907,6 +11909,27 @@ impl FactoryDaemon {
         self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
     }
 
+    /// cas-dc08 (N1): read the worker and branch registry on a blocking
+    /// thread (Git and both stores), bounded so a stuck read cannot hold the
+    /// spawn queue. The loop thread does none of that work.
+    async fn load_spawn_names(
+        &self,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<crate::factory_isolation::WorkerNameRegistry> {
+        let (cas_dir, project, task_id) =
+            (self.app.cas_dir().to_path_buf(), self.app.project_path().to_path_buf(), task_id.map(str::to_string));
+        let load = tokio::task::spawn_blocking(move || {
+            crate::ui::factory::app::render_and_ops::epic_workers::load_spawn_name_registry(
+                &cas_dir, &project, task_id.as_deref(),
+            )
+        });
+        match tokio::time::timeout(SPAWN_NAME_CHECK_TIMEOUT, load).await {
+            Ok(Ok(loaded)) => loaded.map_err(anyhow::Error::msg),
+            Ok(Err(error)) => Err(anyhow::anyhow!("spawn refused: worker name check stopped: {error}. No worker was started.")),
+            Err(_) => Err(anyhow::anyhow!("spawn refused: worker name check timed out after {}s. No worker was started.", SPAWN_NAME_CHECK_TIMEOUT.as_secs())),
+        }
+    }
+
     pub(super) async fn process_pending_spawns(&mut self) {
         self.poll_worker_cleanup_jobs_at(Instant::now());
         // Step 1: Check if in-flight background spawn completed
@@ -12395,6 +12418,13 @@ impl FactoryDaemon {
             return;
         }
 
+        // cas-dc08 (N1): a dynamic spawn's name is checked against the worker
+        // and branch registry before it is bound or launched.
+        let mut names = None;
+        if let PendingSpawn::Anonymous { task_id, .. } | PendingSpawn::Named { task_id, .. } = &action {
+            names = Some(self.load_spawn_names(task_id.as_deref()).await);
+        }
+
         match action {
             PendingSpawn::Anonymous {
                 request_id,
@@ -12404,9 +12434,10 @@ impl FactoryDaemon {
             } => {
                 // cas-7587 (GH #122): task_id decides the worktree base (its
                 // epic branch), not the session's pinned epic focus.
-                match self
-                    .app
-                    .snapshot_worker_spawn(None, isolate, task_id.as_deref())
+                match names
+                    .take()
+                    .expect("name registry read before an Anonymous spawn")
+                    .and_then(|names| self.app.snapshot_worker_spawn(None, isolate, task_id.as_deref(), names))
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
@@ -12501,9 +12532,10 @@ impl FactoryDaemon {
             } => {
                 // cas-7587 (GH #122): see the Anonymous arm — the task's epic
                 // branch outranks the pinned focus for base resolution.
-                match self
-                    .app
-                    .snapshot_worker_spawn(Some(&name), isolate, task_id.as_deref())
+                match names
+                    .take()
+                    .expect("name registry read before a Named spawn")
+                    .and_then(|names| self.app.snapshot_worker_spawn(Some(&name), isolate, task_id.as_deref(), names))
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();

@@ -8665,12 +8665,12 @@ mod spawn_isolation_tests {
         app.factory_session = Some("spawn-focus-fixture".into());
         app.epic_branch = Some("obsolete-snapshot-focus".into());
         let task_snapshot = serde_json::to_vec(
-            &app.snapshot_worker_spawn(Some("task-worker"), true, Some("cas-child"))
+            &app.snapshot_worker_spawn(Some("task-worker"), true, Some("cas-child"), crate::factory_isolation::WorkerNameRegistry::default())
                 .unwrap(),
         )
         .unwrap();
         let focus_snapshot = serde_json::to_vec(
-            &app.snapshot_worker_spawn(Some("focus-worker"), true, None)
+            &app.snapshot_worker_spawn(Some("focus-worker"), true, None, crate::factory_isolation::WorkerNameRegistry::default())
                 .unwrap(),
         )
         .unwrap();

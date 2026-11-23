@@ -220,6 +220,7 @@ pub fn worker_name_overlap(
 /// N1 naming inputs, read once (cas-dc08): this machine's worker names, the
 /// `factory/*` branches in local and origin refs (name to full ref; never the
 /// network) and the task store for known task ids.
+#[derive(Default)]
 pub struct WorkerNameRegistry {
     pub workers: Vec<String>,
     pub refs: std::collections::HashMap<String, String>,
@@ -245,7 +246,11 @@ impl WorkerNameRegistry {
             budget,
         )
         .map_err(|error| format!("could not inspect worker branch names in {}: {error:?}", repo.display()))?;
-        if !output.status.success() {
+        // A project that is not a repository (a `--no-worktrees` fleet) has no
+        // factory branches; any other Git failure leaves the names unchecked.
+        let not_a_repository = !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("not a git repository");
+        if !output.status.success() && !not_a_repository {
             return Err(format!(
                 "could not inspect worker branch names in {}: {}",
                 repo.display(),

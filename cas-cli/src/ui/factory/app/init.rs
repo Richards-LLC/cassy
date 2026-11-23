@@ -932,10 +932,14 @@ mod tests {
         assert_eq!(workers.len(), 20, "{workers:?}");
         assert!(!workers.iter().any(|name| name == "kevin"), "{workers:?}");
 
+        // A store that cannot be read leaves the names unchecked, so it stops
+        // the launch; names the launcher supplied read no registry at all.
         let outside = tempfile::tempdir().unwrap();
-        assert!(fallback_names(&root, outside.path(), true, 1, None, Vec::new()).is_err());
+        let broken_store = outside.path().join("store");
+        std::fs::write(&broken_store, "not a directory").unwrap();
+        assert!(fallback_names(&broken_store, repo, true, 1, None, Vec::new()).is_err());
         assert!(
-            fallback_names(&root, outside.path(), true, 1, Some("lead".into()), vec!["named".into()]).is_ok(),
+            fallback_names(&broken_store, repo, true, 1, Some("lead".into()), vec!["named".into()]).is_ok(),
             "launcher-supplied names read no registry"
         );
     }

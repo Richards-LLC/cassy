@@ -175,6 +175,52 @@ fn setup() -> (tempfile::TempDir, FactoryDaemon) {
     (dir, daemon)
 }
 
+/// cas-dc08 (N1): dynamic (GUI/WebSocket) spawns check their names against the
+/// worker and branch registry before anything is bound or launched. A supplied
+/// name inside a registered worker's namespace is refused; a generated one is
+/// redrawn past registered workers and factory branches.
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_spawn_names_keep_clear_of_other_namespaces_cas_dc08() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (dir, mut daemon) = setup();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(dir.path()).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-b", "main"]);
+    git(&["-c", "user.name=f", "-c", "user.email=f@example.test", "commit", "--allow-empty", "-m", "base"]);
+    git(&["update-ref", "refs/remotes/origin/factory/calm-lark-3-hotfix", "HEAD"]);
+    crate::store::open_agent_store(daemon.app.cas_dir()).unwrap().register(
+        &cas_types::Agent::new_with_role("swift-id".into(), "swift".into(), cas_types::AgentRole::Worker),
+    ).unwrap();
+
+    // The queue consumer: an explicit overlap starts no provisioner.
+    let named = |name: &str| PendingSpawn::Named {
+        request_id: None, name: name.into(), isolate: false, spec: None, task_id: None,
+    };
+    daemon.pending_spawns.push_back(named("swift-hawk-3"));
+    daemon.app.spawning_count += 1;
+    daemon.process_pending_spawns().await;
+    assert!(daemon.spawn_task.is_none(), "an overlapping name must not start a provisioner");
+    assert_eq!(daemon.app.spawning_count, 0);
+    daemon.pending_spawns.push_back(named("quick-otter-12"));
+    daemon.app.spawning_count += 1;
+    daemon.process_pending_spawns().await;
+    assert_eq!(daemon.spawn_task.as_ref().map(|task| task.0.as_str()), Some("quick-otter-12"));
+    daemon.cancel_provisioning();
+
+    // Generated names: redrawn past an overlap with registered `swift`, the
+    // namespace of origin `factory/calm-lark-3-hotfix`, and a live worker.
+    let registry = crate::ui::factory::app::render_and_ops::epic_workers::load_spawn_name_registry(
+        daemon.app.cas_dir(), dir.path(), None,
+    ).unwrap();
+    let mut candidates = ["swift-falcon-7", "calm-lark-3", "brave-owl-88"].into_iter();
+    let context = daemon.app.snapshot_worker_spawn_with(
+        None, false, None, registry, &mut || candidates.next().expect("bounded fixture candidates").to_owned(),
+    ).unwrap();
+    assert_eq!(context.worker_name, "brave-owl-88");
+}
+
 async fn drain_failure(daemon: &mut FactoryDaemon) {
     let started = Instant::now();
     while daemon.spawn_task.is_some() && started.elapsed() < Duration::from_secs(3) {

@@ -24,7 +24,11 @@ test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true
 test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage"] } });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-  const row = (codename: string) => list.locator(".conversation-row", { hasText: codename });
+  // A row is named "gabber-studio on Atlas, <codename>, …"; End session controls are not.
+  const rows = list.getByRole("button", { name: /^gabber-studio on / });
+  const row = (codename: string) => rows.filter({ hasText: codename });
+  // Rows sort by supervisor name, so the last End control belongs to LAST (asserted below).
+  const lastEnd = () => list.getByTestId("conversation-end").last();
   /** Rows whose whole box is inside the list's visible area. */
   const rowsInView = () => list.evaluate((nav) => {
     const box = nav.getBoundingClientRect();
@@ -34,8 +38,8 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
 
   await journey.stage("See six sessions at once", async () => {
     await journey.open();
-    await expect(list.locator(".conversation-group-head")).toContainText("7");
-    await expect(list.locator(".conversation-row")).toHaveCount(7);
+    await expect(list.getByTestId("conversation-group-head")).toContainText("7");
+    await expect(rows).toHaveCount(7);
     const bounds = await rowsInView();
     expect(bounds.count, `at least six sessions fit the phone list: ${JSON.stringify(bounds)}`).toBeGreaterThanOrEqual(6);
     // End session is in each row's corner, not a line of its own.
@@ -52,14 +56,15 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
   });
 
   await journey.stage("Tap a session's time to open it, then come back", async () => {
-    await row("swift-heron-51").locator(".conversation-when").tap();
-    await expect(page.locator("#conversation-back")).toBeVisible();
-    await page.locator("#conversation-back").tap();
-    await expect(list.locator(".conversation-row")).toHaveCount(7);
+    await row("swift-heron-51").getByTestId("conversation-when").tap();
+    const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
+    await expect(back).toBeVisible();
+    await back.tap();
+    await expect(rows).toHaveCount(7);
   });
 
   await journey.stage("End session asks at once, focused on Cancel", async () => {
-    const last = list.locator(".conversation-end").last();
+    const last = lastEnd();
     // The confirmation is there in the same task as the tap: no wait for a catalog poll.
     const at = await last.evaluate((control) => {
       control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
@@ -80,7 +85,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
   });
 
   await journey.stage("A failed End session keeps its row and returns focus for retry (cas-a549)", async () => {
-    const last = list.locator(".conversation-end").last();
+    const last = lastEnd();
     // One refused request, then the normal protocol double handles the retry.
     await page.route(`**/v1/sessions/gabber-studio-${LAST}`, async (route) => {
       if (route.request().method() !== "DELETE") return route.fallback();
@@ -122,7 +127,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await page.keyboard.press("Tab");
     await page.keyboard.press("Enter");
     const failure = `Could not end ${LAST} on Atlas. Try End session again. If it still fails, check the session on Atlas.`;
-    await expect(last.locator(".conversation-end-error")).toHaveText(failure);
+    await expect(last.getByTestId("conversation-end-error")).toHaveText(failure);
     await expect(last.getByRole("button", { name: `End session ${LAST} on Atlas` })).toBeFocused();
     // Focus came back to End session, which reads the failure as its
     // description, so the failure is not also an alert: said once (cas-9ae6).
@@ -132,7 +137,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     const heard = await page.evaluate(() => (window as unknown as { __heard: string[] }).__heard);
     expect(heard.filter((words) => words.includes("Could not end")), "the failure is said once").toEqual([failure]);
     await expect(row(LAST)).toHaveCount(1);
-    await expect(list.locator(".conversation-row")).toHaveCount(7);
+    await expect(rows).toHaveCount(7);
     expect(hub.ends).toEqual([]);
     // Enter on the returned control deliberately opens a fresh confirmation.
     await page.keyboard.press("Enter");
@@ -140,7 +145,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
   });
 
   await journey.stage("Cancel, then end it from the keyboard", async () => {
-    const last = list.locator(".conversation-end").last();
+    const last = lastEnd();
     await last.getByRole("button", { name: "Cancel" }).tap();
     await expect(last.getByRole("button", { name: `End session ${LAST} on Atlas` })).toBeFocused();
     expect(hub.ends).toEqual([]);
@@ -155,10 +160,10 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     // The ended row was the last: focus lands on the row before it, never on the page.
     await expect(row("swift-heron-51")).toBeFocused();
     expect(hub.ends).toEqual([{ machine: "atlas", session: `gabber-studio-${LAST}`, scopes: [...SCOPES, "factory-manage"] }]);
-    await expect(list.locator(".conversation-group-head")).toContainText("6");
+    await expect(list.getByTestId("conversation-group-head")).toContainText("6");
     // cas-f60a: told it ended, on screen where the row was and to a screen reader.
-    await expect(list.locator(".conversation-ended")).toContainText(String(LAST));
-    await expect(list.locator(".conversation-ended")).toBeInViewport();
-    await expect(page.locator(".conversation-ended-status[role=status]")).toContainText(String(LAST));
+    await expect(list.getByTestId("conversation-ended")).toContainText(String(LAST));
+    await expect(list.getByTestId("conversation-ended")).toBeInViewport();
+    await expect(page.getByRole("status", { name: "Session ended", exact: true })).toContainText(String(LAST));
   });
 });

@@ -1,7 +1,22 @@
 import { openConversationActions, clickConversationHeaderAction, test, expect, journeyPart, type Journey } from "./journey";
-import type { Page, Route } from "@playwright/test";
+import type { Locator, Page, Route } from "@playwright/test";
 import { SCOPES, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
+
+// Located by role, name or test id (cas-9fcc). A list row is named
+// "<project> on <machine>, …"; the fleet rail's rows are articles with test ids.
+const conversationRow = (page: Page, project: string) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: new RegExp(`^${project} on `) });
+const statusRail = (page: Page) => page.getByTestId("status-view");
+const agentRow = (page: Page, name: string) => statusRail(page).getByTestId("status-agent").filter({ hasText: name });
+const actionSheet = (page: Page) => page.getByTestId("fleet-action-sheet");
+const taskRow = (page: Page, id: string) => statusRail(page).getByTestId("status-task").filter({ hasText: id });
+/** The one live region every fleet result is spoken in. */
+const fleetResults = (page: Page) => page.getByRole("status", { name: "Fleet results" });
+/** A row's inline Stop confirmation. */
+const stopConfirm = (row: Locator) => row.getByTestId("fleet-ops-confirm");
+const phoneNotice = (page: Page) => page.getByTestId("fleet-phone-undo");
+/** Whose tasks the phone sheet shows; it is the sheet's description. */
+const sheetWhere = (page: Page) => page.getByTestId("context-sheet-where");
 
 // cas-a474 (fleet-operations brief S5): the desktop rail runs the fleet. The
 // hub double serves the brief's operations endpoint (op_id dedupe, 409 stale,
@@ -37,12 +52,12 @@ const fleetMachine = (machine: Machine): Machine => ({
 // test budget. Seven recorded stages in one case exhausted it under load.
 async function openFailureFleet(page: Page, journey: Journey, width: number) {
   await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
-  const row = page.locator("#status-view .status-agent", { hasText: "swift-lark-3" });
-  const panel = () => width === 390 ? page.locator("dialog.fleet-action-sheet") : row;
-  const result = page.locator("#fleet-ops-announcer");
+  const row = agentRow(page, "swift-lark-3");
+  const panel = () => width === 390 ? actionSheet(page) : row;
+  const result = fleetResults(page);
   await journey.stage("Open the fleet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
     await expect(row).toBeVisible();
   });
@@ -61,7 +76,7 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await panel().getByRole("button", { name: "Stop", exact: true }).click();
         const text = "Could not stop swift-lark-3: the machine returned an error. Try again.";
         await expect(result).toHaveText(text);
-        await expect(row.locator(".fleet-ops-note")).toHaveText(text);
+        await expect(row.getByTestId("fleet-ops-note")).toHaveText(text);
         expect(await row.evaluate((element) => {
           const trigger = element.querySelector(".fleet-ops-trigger")!.getBoundingClientRect();
           const range = document.createRange(); range.selectNodeContents(element.querySelector(".fleet-ops-note")!);
@@ -76,18 +91,18 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
           return Math.round(note.clientWidth - parseFloat(getComputedStyle(note).paddingRight) - content);
         }), "the failure note spans the row").toBe(0);
         // cas-d2df: the note names its row in the row header's mono face.
-        await expect(row.locator(".fleet-ops-note .fleet-ops-note-subject")).toHaveText("swift-lark-3");
+        await expect(row.getByTestId("fleet-ops-note").getByText("swift-lark-3", { exact: true })).toHaveText("swift-lark-3");
         expect(await row.evaluate((element) => getComputedStyle(element.querySelector(".fleet-ops-note-subject")!).fontFamily
           === getComputedStyle(element.querySelector(".status-line .status-identifier")!).fontFamily), "same face as the row header").toBe(true);
-        if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
-        await expect(row.locator(".status-chip")).toBeVisible();
+        if (width === 390) await expect(phoneNotice(page)).toContainText(text);
+        await expect(row.getByTestId("status-chip")).toBeVisible();
       });
       await journey.stage("A successful retry clears failure feedback and offers Undo", async () => {
         await page.unroute("**/v1/sessions/*/operations");
         await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
         await panel().getByRole("menuitem", { name: "Pause" }).click();
         await expect(result).toContainText("swift-lark-3");
-        await expect(row.locator(".fleet-ops-note")).toHaveCount(0);
+        await expect(row.getByTestId("fleet-ops-note")).toHaveCount(0);
 
         await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
@@ -97,17 +112,17 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
       await journey.stage("A failed assignment names the task before its assignee", async () => {
         await page.unroute("**/v1/sessions/*/operations");
         await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, contentType: "text/html", body: "Internal Server Error" }));
-        const task = page.locator("#status-view .status-task", { hasText: "cas-2001" });
+        const task = taskRow(page, "cas-2001");
         if (width === 390) {
           await task.getByRole("button", { name: "Actions for cas-2001" }).click();
-          await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Assign…" }).click();
+          await actionSheet(page).getByRole("menuitem", { name: "Assign…" }).click();
         } else await task.getByRole("button", { name: "Assign cas-2001" }).click();
-        const menu = width === 390 ? page.locator("dialog.fleet-action-sheet") : task;
+        const menu = width === 390 ? actionSheet(page) : task;
         await menu.getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click();
         const text = "Could not assign cas-2001 to quiet-owl-7: the machine returned an error. Try again.";
         await expect(result).toHaveText(text);
-        await expect(task.locator(".fleet-ops-note")).toHaveText(text);
-        if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
+        await expect(task.getByTestId("fleet-ops-note")).toHaveText(text);
+        if (width === 390) await expect(phoneNotice(page)).toContainText(text);
       });
     });
   });
@@ -116,6 +131,66 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
 for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`phone fleet feedback ${colorScheme} cas_c2e7`, () => {
     test.use({ viewport: { width: 390, height: 844 }, colorScheme });
+    test("HUB-J17 phone feedback clears the composer and task rows and can be dismissed", journeyPart, async ({ page, journey }) => {
+      const atlas = fleetMachine(ATLAS);
+      const world = fleet();
+      const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: world } });
+      await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, json: { error: "unavailable" } }));
+      const rail = statusRail(page);
+      const agent = agentRow(page, "swift-lark-3");
+      const notice = page.getByTestId("fleet-phone-undo");
+      const open = () => clickConversationHeaderAction(page, "#conversation-fleet");
+      /** Both boxes, once laid out: a status refresh redraws the notice, so a one-shot read can see it mid-replacement (cas-9fcc). */
+      const boxes = async (...targets: Locator[]) => {
+        const all = await Promise.all(targets.map((target) => target.boundingBox()));
+        return all.every(Boolean) ? all as NonNullable<(typeof all)[number]>[] : undefined;
+      };
+      await journey.stage("A refused Stop leaves the final task readable at rest", async () => {
+        await journey.open();
+        await conversationRow(page, "cas-src").click();
+        await open();
+        await agent.getByRole("button", { name: "Actions for swift-lark-3" }).click();
+        await actionSheet(page).getByRole("menuitem", { name: "Stop…" }).click();
+        await actionSheet(page).getByRole("button", { name: "Stop", exact: true }).click();
+        await expect(notice).toBeVisible();
+        const task = rail.getByTestId("status-task").last();
+        await expect.poll(async () => {
+          const laid = await boxes(task, notice);
+          return laid && laid[0].y + laid[0].height <= laid[1].y;
+        }, { message: "feedback reserves space after the last task" }).toBe(true);
+        // A status refresh replaces the row; each poll reads the current one.
+        await expect.poll(() => task.evaluate((row) => {
+          row.scrollIntoView({ block: "nearest" });
+          const r = row.getBoundingClientRect();
+          return row.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+        }, undefined, { timeout: 1_000 }).catch(() => false), { message: "the final task receives pointer input" }).toBe(true);
+      });
+      await journey.stage("Close the sheet; dismiss feedback by keyboard without losing the row's error", async () => {
+        await page.getByRole("button", { name: "Close tasks & progress" }).click();
+        const composer = page.getByRole("textbox", { name: "Your message" });
+        await expect(notice).toBeVisible();
+        await expect.poll(async () => {
+          const laid = await boxes(notice, composer);
+          return laid && laid[0].y + laid[0].height <= laid[1].y;
+        }, { message: "feedback stays above the composer pill" }).toBe(true);
+        const dismiss = notice.getByRole("button", { name: "Dismiss fleet notice", exact: true });
+        await dismiss.focus(); await expect(dismiss).toBeFocused();
+        // Real status and shell replacements must retain this keyboard stop.
+        world.tasks[0]!.title = "Docs lane refreshed";
+        await page.evaluate((session) => (window as unknown as { __journeyMachineEvent: (host: string, event: string) => void }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "fleet_changed", session })), PELICAN);
+        await expect(rail.getByTestId("status-task").filter({ hasText: "cas-1234" })).toContainText("Docs lane refreshed");
+        await expect(dismiss).toBeFocused();
+        atlas.sessions[0]!.project_dir = "/projects/cas-src-refreshed";
+        await hub.announceCatalog("atlas");
+        await expect(page.getByTestId("conversation-heading").getByRole("heading", { level: 1 })).toHaveText("cas-src-refreshed");
+        await expect(dismiss).toBeFocused(); await page.keyboard.press("Enter");
+        await expect(notice).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "More conversation actions", exact: true })).toBeFocused();
+        await open(); await expect(agent.getByTestId("fleet-ops-note")).toBeVisible();
+        await page.getByRole("button", { name: "Close tasks & progress" }).click();
+        await expect(notice, "redrawing the same result does not undo Dismiss").toHaveCount(0);
+      });
+    });
     test("HUB-J17 phone pickers visibly identify the task and current epic", journeyPart, async ({ page, journey }) => {
       const world = fleet();
       const catalog = [...world.epics,
@@ -125,22 +200,23 @@ for (const colorScheme of ["light", "dark"] as const) {
       ];
       world.epics = catalog;
       const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: world } });
-      const sheet = page.locator("dialog.fleet-action-sheet");
+      const sheet = actionSheet(page);
       const namedWorkers = async () => {
-        const rail = page.locator("#status-view");
-        await expect(rail.locator(".status-agent")).toHaveCount(world.agents.length);
+        const rail = statusRail(page);
+        await expect(rail.getByTestId("status-agent")).toHaveCount(world.agents.length);
         for (const agent of world.agents) {
-          await expect(rail.locator(".status-agent", { hasText: agent.name }).locator(".status-line").getByText(agent.name, { exact: true })).toBeVisible();
+          // The row header's name: the only element in the row whose whole text is the worker's name.
+          await expect(agentRow(page, agent.name).getByText(agent.name, { exact: true })).toBeVisible();
         }
       };
       await journey.stage("cas-e466c: read every worker header on phone without opening Team", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await conversationRow(page, "cas-src").click();
         await clickConversationHeaderAction(page, "#conversation-fleet");
         await namedWorkers();
       });
       await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
-        await page.locator(".status-task", { hasText: "cas-2001" }).getByRole("button", { name: "Actions for cas-2001" }).click();
+        await taskRow(page, "cas-2001").getByRole("button", { name: "Actions for cas-2001" }).click();
         await sheet.getByRole("menuitem", { name: "Assign…" }).click();
         await expect(sheet.getByRole("heading", { name: "Assign cas-2001 to", exact: true })).toBeVisible();
         await expect(sheet.getByRole("searchbox")).toBeFocused();
@@ -150,9 +226,9 @@ for (const colorScheme of ["light", "dark"] as const) {
         await page.keyboard.press("Escape");
       });
       await journey.stage("Choose a new focus while seeing the current epic", async () => {
-        await page.locator("#status-view").getByRole("button", { name: "Focus epic…" }).click();
+        await statusRail(page).getByRole("button", { name: "Focus epic…" }).click();
         await expect(sheet.getByRole("heading", { name: "Focus epic", exact: true })).toBeVisible();
-        await expect(sheet.locator(".fleet-picker-context")).toContainText(world.epics[0]!.title!);
+        await expect(sheet.getByTestId("fleet-picker-context")).toContainText(world.epics[0]!.title!);
         await expect(sheet.getByRole("searchbox")).toBeFocused();
         const items = sheet.getByRole("menuitem");
         await expect(items).toHaveCount(2);
@@ -162,15 +238,15 @@ for (const colorScheme of ["light", "dark"] as const) {
       });
       await journey.stage("cas-e466c: read every worker header on desktop without opening Team", async () => {
         await page.keyboard.press("Escape");
-        await expect(page.locator("#status-view").getByRole("button", { name: "Focus epic…" })).toBeFocused();
+        await expect(statusRail(page).getByRole("button", { name: "Focus epic…" })).toBeFocused();
         await page.getByRole("button", { name: "Close tasks & progress", exact: true }).click();
         await page.setViewportSize({ width: 1280, height: 800 });
         await namedWorkers();
       });
       await journey.stage("cas-b200: desktop offers the same named live choices", async () => {
-        const rail = page.locator("#status-view");
+        const rail = statusRail(page);
         await rail.getByRole("button", { name: "Focus epic…", exact: true }).click();
-        const menu = rail.locator(".fleet-ops-epics");
+        const menu = rail.getByRole("menu", { name: "Focus epic", exact: true });
         const items = menu.getByRole("menuitem");
         await expect(items).toHaveCount(2);
         await expect(items.first()).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
@@ -178,10 +254,10 @@ for (const colorScheme of ["light", "dark"] as const) {
         expect(box.height).toBeLessThanOrEqual(400);
       });
       await journey.stage("Focus sends the exact epic identity and reports its title", async () => {
-        const rail = page.locator("#status-view");
-        await rail.locator(".fleet-ops-epics").getByRole("menuitem").first().click();
+        const rail = statusRail(page);
+        await rail.getByRole("menu", { name: "Focus epic", exact: true }).getByRole("menuitem").first().click();
         await expect.poll(() => hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "focus_epic", epic_id: "train" }, expected: { epic_id: "cas-f29b" } });
-        await expect(rail.locator(".fleet-ops-undo")).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
+        await expect(rail.getByTestId("fleet-ops-undo")).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
       });
     });
   });
@@ -196,16 +272,16 @@ async function openDesktopFleet(page: Page, journey: Journey) {
     scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"], studio: SCOPES },
     fleet: { [PELICAN]: fleet(), [OTTER]: fleet() },
   });
-  const rail = page.locator("#status-view");
-  const announcer = page.locator("#fleet-ops-announcer");
-  const row = (name: string) => rail.locator(".status-agent", { hasText: name });
-  const task = (id: string) => rail.locator(".status-task", { hasText: id });
+  const rail = statusRail(page);
+  const announcer = fleetResults(page);
+  const row = (name: string) => agentRow(page, name);
+  const task = (id: string) => taskRow(page, id);
   /** Operations the double received for a session, by kind and status. */
   const sent = (session: string) => hub.operations.filter((call) => call.session === session).map((call) => `${String((call.body.op as Record<string, unknown>).kind)}:${call.status}`);
 
   await journey.stage("Open the conversation; the rail lists the fleet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await expect(row("swift-lark-3")).toBeVisible();
     await expect(rail.getByRole("button", { name: "Add worker…" })).toBeVisible();
     await expect(rail.getByRole("button", { name: "Focus epic…" })).toBeVisible();
@@ -227,8 +303,8 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(menu.getByRole("menuitem", { name: "Pause" })).toBeFocused();
     await menu.getByRole("menuitem", { name: "Pause" }).click();
     await expect(announcer).toContainText("swift-lark-3");
-    await expect(row("swift-lark-3").locator(".status-chip")).toBeVisible();
-    await expect(rail.locator(".fleet-ops-undo")).toContainText("swift-lark-3");
+    await expect(row("swift-lark-3").getByTestId("status-chip")).toBeVisible();
+    await expect(rail.getByTestId("fleet-ops-undo")).toContainText("swift-lark-3");
     await rail.getByRole("button", { name: "Undo" }).click();
     await expect(announcer).toContainText("swift-lark-3");
 
@@ -242,7 +318,7 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await menu.getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click();
     await expect(announcer).toContainText(new RegExp("(?=[\\s\\S]*cas\\-2001)(?=[\\s\\S]*quiet\\-owl\\-7)"));
     // cas-943b: the card shows the task title and keeps the id in its title attribute.
-    await expect(row("quiet-owl-7").locator('.status-activity[title="cas-2001"]')).toBeVisible();
+    await expect(row("quiet-owl-7").getByTitle("cas-2001", { exact: true })).toBeVisible();
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "assign_task", task_id: "cas-2001", assignee: "quiet-owl-7" }, expected: { assignee: null, updated_at: "2026-10-03T11:20:00Z" } });
   });
 
@@ -264,8 +340,9 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
   await journey.stage("Stop another worker after confirming", async () => {
     await row("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
     await row("brisk-wren-9").getByRole("menuitem", { name: "Stop…" }).click();
-    const confirm = row("brisk-wren-9").locator(".fleet-ops-confirm");
-    await expect(confirm.locator(".fleet-ops-question")).toContainText(new RegExp("(?=[\\s\\S]*cas\\-1500)(?=[\\s\\S]*brisk\\-wren\\-9)"));
+    const confirm = stopConfirm(row("brisk-wren-9"));
+    const question = new RegExp("(?=[\\s\\S]*cas\\-1500)(?=[\\s\\S]*brisk\\-wren\\-9)");
+    await expect(confirm.getByText(question)).toContainText(question);
     await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
     // Escape closes it, back to the opener; nothing was sent.
     await page.keyboard.press("Escape");
@@ -274,33 +351,33 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     const before = hub.operations.length;
     await page.keyboard.press("Enter");
     await row("brisk-wren-9").getByRole("menuitem", { name: "Stop…" }).click();
-    await row("brisk-wren-9").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
+    await stopConfirm(row("brisk-wren-9")).getByRole("button", { name: "Stop", exact: true }).click();
     await expect(announcer).toContainText("brisk-wren-9");
     await expect(row("brisk-wren-9")).toHaveCount(0);
     // cas-97d58 F12: the row is gone, so its result shows where an Undo would,
     // in view and focused (never <body>, QA N1), and without an Undo.
-    const result = rail.locator(".fleet-ops-result");
+    const result = rail.getByTestId("fleet-ops-result");
     await expect(result).toContainText("brisk-wren-9");
     await expect(result).toBeFocused();
     await expect(result).toBeInViewport();
     expect(hub.operations.length).toBe(before + 1);
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "shutdown_workers", workers: ["brisk-wren-9"] }, expected: { worker: "brisk-wren-9", generation: 4 } });
     // No Undo for a destructive action.
-    await expect(rail.locator(".fleet-ops-undo")).toHaveCount(0);
+    await expect(rail.getByTestId("fleet-ops-undo")).toHaveCount(0);
     // cas-d043 G15: the task's chip says the word the confirmation promised.
-    await expect(task("cas-1500").locator(".status-chip")).toBeVisible();
+    await expect(task("cas-1500").getByTestId("status-chip")).toBeVisible();
   });
 
   await journey.stage("Stopping a row hands focus to the next row", async () => {
     await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
     await row("swift-lark-3").getByRole("menuitem", { name: "Stop…" }).click();
-    await row("swift-lark-3").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
+    await stopConfirm(row("swift-lark-3")).getByRole("button", { name: "Stop", exact: true }).click();
     await expect(announcer).toBeVisible();
     await expect(row("swift-lark-3")).toHaveCount(0);
     await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeFocused();
     // cas-d043 G06: with a row following, the result line is in view as well.
-    await expect(page.locator(".conversation-context .fleet-ops-result")).toBeVisible();
-    await expect(page.locator(".conversation-context .fleet-ops-result")).toBeInViewport();
+    await expect(page.getByTestId("conversation-context").getByTestId("fleet-ops-result")).toBeVisible();
+    await expect(page.getByTestId("conversation-context").getByTestId("fleet-ops-result")).toBeInViewport();
     await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeInViewport();
   });
 
@@ -314,8 +391,8 @@ test("HUB-J17 a stale worker generation refuses Stop", journeyPart, async ({ pag
     world.agents.find((agent) => agent.name === "swift-lark-3")!.generation = 3;
     await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
     await row("swift-lark-3").getByRole("menuitem", { name: "Stop…" }).click();
-    await row("swift-lark-3").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
-    await expect(row("swift-lark-3").locator(".fleet-ops-note")).toContainText("swift-lark-3");
+    await stopConfirm(row("swift-lark-3")).getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(row("swift-lark-3").getByTestId("fleet-ops-note")).toContainText("swift-lark-3");
     await expect(announcer).toContainText("swift-lark-3");
     expect(sent(PELICAN).at(-1)).toBe("shutdown_workers:409");
     await expect(row("swift-lark-3")).toBeVisible();
@@ -327,21 +404,21 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
   const { hub, rail, announcer, row, task } = await openDesktopFleet(page, journey);
   await journey.stage("Ask the supervisor to merge, after seeing the exact message", async () => {
     await task("cas-1999").getByRole("button", { name: "Ask supervisor to merge" }).click();
-    const preview = task("cas-1999").locator(".fleet-ops-preview");
-    await expect(preview.locator(".fleet-ops-preview-text")).toContainText("/wren-cas-1999");
+    const preview = task("cas-1999").getByRole("group", { name: "Message to the supervisor", exact: true });
+    await expect(preview.getByRole("blockquote")).toContainText("/wren-cas-1999");
     await expect(preview.getByRole("button", { name: "Cancel" })).toBeFocused();
     await preview.getByRole("button", { name: "Send" }).click();
     await expect(announcer).toContainText("cas-1999");
-    await expect(task("cas-1999").locator(".fleet-ops-asked")).toHaveText(/^Asked (just now|\d+[smh] ago)$/);
+    await expect(task("cas-1999").getByTestId("fleet-ops-asked")).toHaveText(/^Asked (just now|\d+[smh] ago)$/);
     expect(hub.operations.filter((call) => (call.body.op as Record<string, unknown>).kind === "request_merge")).toHaveLength(1);
   });
 
   await journey.stage("A pairing without factory:manage", async () => {
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page, "gabber-studio").click();
     await expect(row("swift-lark-3")).toBeVisible();
     // cas-d043 G13: the merge was asked on cas-src; the same task id here is another task.
     await expect(task("cas-1999")).toBeVisible();
-    await expect(task("cas-1999").locator(".fleet-ops-asked")).toHaveCount(0);
+    await expect(task("cas-1999").getByTestId("fleet-ops-asked")).toHaveCount(0);
     await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
     const stop = row("swift-lark-3").getByRole("menuitem", { name: "Stop…" });
     await expect(stop).toHaveAttribute("aria-disabled", "true");
@@ -354,19 +431,20 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
     await expect(reason).not.toContainText(/factory:|--scopes/);
     // Pause needs factory:operate, which this control pairing may allow itself.
     await expect(row("swift-lark-3").getByRole("menuitem", { name: "Pause" })).toHaveAttribute("aria-disabled", "true");
-    await expect(row("swift-lark-3").locator(".fleet-ops-reason").first()).toBeVisible();
-    const header = page.locator("#status-view .fleet-ops-header");
+    await expect(row("swift-lark-3").getByTestId("fleet-ops-reason").first()).toBeVisible();
+    const header = statusRail(page).getByTestId("fleet-ops-header");
     await expect(header.getByRole("button")).toHaveCount(0);
-    const permissions = header.locator("details");
-    await expect(permissions.locator("summary")).toBeVisible();
-    await permissions.locator("summary").click();
+    const permissions = header.getByTestId("fleet-permissions");
+    await expect(permissions.getByTestId("fleet-permissions-summary")).toBeVisible();
+    await permissions.getByTestId("fleet-permissions-summary").click();
     await expect(permissions).toBeVisible();
     const before = hub.operations.length;
     await stop.click({ force: true });
     expect(hub.operations.length, "a disabled item sends nothing").toBe(before);
     await page.keyboard.press("Escape");
-    await page.locator("#paired-machines-toggle").click();
-    const paired = page.locator("#paired-machines-dialog");
+    // The footer opener reads "<n> paired machines <state>" with two machines paired.
+    await page.getByRole("complementary", { name: "Supervisor conversations" }).getByRole("button", { name: /^2 paired machines\b/ }).click();
+    const paired = page.getByRole("dialog", { name: "Paired machines", exact: true });
     await expect(paired).toBeVisible();
   });
 });
@@ -375,11 +453,11 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
 // separate goal with their own fresh fleet and entry through the first sheet.
 async function openPhoneFleet(page: Page, journey: Journey) {
   const hub = await journey.hub({ machines: [fleetMachine(ATLAS), fleetMachine(STUDIO)], paired: ["atlas", "studio"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"], studio: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet(), [OTTER]: fleet() } });
-  const rail = page.locator("#status-view");
-  const agent = (name: string) => rail.locator(".status-agent", { hasText: name });
-  const task = (id: string) => rail.locator(".status-task", { hasText: id });
-  const actions = () => page.locator("dialog.fleet-action-sheet");
-  const result = page.locator("#fleet-ops-announcer");
+  const rail = statusRail(page);
+  const agent = (name: string) => agentRow(page, name);
+  const task = (id: string) => taskRow(page, id);
+  const actions = () => actionSheet(page);
+  const result = fleetResults(page);
   const openFleet = () => clickConversationHeaderAction(page, "#conversation-fleet");
   const target = async (control: ReturnType<typeof page.getByRole>) => {
     await expect(control).toBeVisible(); const box = await control.boundingBox();
@@ -387,12 +465,12 @@ async function openPhoneFleet(page: Page, journey: Journey) {
   };
   await journey.stage("Open the first machine's Tasks & progress sheet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await conversationRow(page, "cas-src").click();
     await openConversationActions(page); await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
     await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toBeVisible();
     // cas-d043 G01: the sheet covers the header, so it names whose tasks these are.
-    await expect(page.locator(".context-sheet-where")).toBeVisible();
-    await expect(page.locator(".context-sheet-where")).toBeVisible();
+    await expect(sheetWhere(page)).toBeVisible();
+    await expect(sheetWhere(page)).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toHaveAccessibleDescription(/\S/);
     await expect(agent("swift-lark-3")).toBeVisible();
   });
@@ -417,8 +495,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await journey.stage("Switch conversation and confirm Stop on the second machine", async () => {
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
         await page.getByRole("button", { name: "‹ Conversations" }).click();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click(); await openFleet();
-        await expect(page.locator(".context-sheet-where")).toBeVisible();
+        await conversationRow(page, "gabber-studio").click(); await openFleet();
+        await expect(sheetWhere(page)).toBeVisible();
         await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
         // cas-5d53: the phone sheet names the worker it acts on.
         await expect(actions().getByRole("heading", { name: "Actions for brisk-wren-9" })).toBeVisible();
@@ -444,9 +522,9 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         await expect(result).toContainText("swift-lark-3"); await expect(agent("swift-lark-3")).toBeVisible();
         expect(hub.operations.at(-1)).toMatchObject({ machine: "studio", session: OTTER, status: 409 });
         // cas-2796a F02: the refusal is in view in the open sheet, landscape included.
-        await expect(page.locator("#fleet-phone-undo")).toBeVisible();
-        await expect(page.locator("#fleet-phone-undo")).toBeInViewport();
-        await page.keyboard.press("Escape"); await expect(page.locator("#conversation-more")).toBeFocused();
+        await expect(phoneNotice(page)).toBeVisible();
+        await expect(phoneNotice(page)).toBeInViewport();
+        await page.keyboard.press("Escape"); await expect(page.getByRole("button", { name: "More conversation actions", exact: true })).toBeFocused();
       });
     });
     test(`HUB-J17 phone ${viewport.width}×${viewport.height}: Undo and searchable fleet pickers`, journeyPart, async ({ page, journey }) => {
@@ -458,7 +536,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
         const undo = page.getByRole("button", { name: "Undo", exact: true }); await target(undo);
         // cas-2796a F03: the × says what dismissing does to Undo.
-        await expect(page.locator("#fleet-phone-undo").getByRole("button", { name: "Dismiss; Undo stays in Tasks & progress", exact: true })).toBeVisible();
+        await expect(phoneNotice(page).getByRole("button", { name: "Dismiss; Undo stays in Tasks & progress", exact: true })).toBeVisible();
         await undo.focus(); await page.keyboard.press("Enter"); await expect(result).toContainText("swift-lark-3");
         await openFleet();
       });
@@ -466,8 +544,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         await agent("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
         await actions().getByRole("menuitem", { name: "Pause" }).click(); await expect(result).toContainText("swift-lark-3");
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
-        await page.locator("#fleet-phone-undo").getByRole("button", { name: "Dismiss; Undo stays in Tasks & progress", exact: true }).click();
-        await expect(page.locator("#fleet-phone-undo")).toHaveCount(0);
+        await phoneNotice(page).getByRole("button", { name: "Dismiss; Undo stays in Tasks & progress", exact: true }).click();
+        await expect(phoneNotice(page)).toHaveCount(0);
         await openFleet();
         const kept = rail.getByRole("button", { name: "Undo", exact: true });
         await expect(kept).toBeVisible();
@@ -504,28 +582,28 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         const hub = await journey.hub({ machines: [machine], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
         let request: Route | undefined;
         await page.route("**/v1/sessions/*/operations", async (route) => { request = route; });
-        const agent = () => page.locator(".status-agent", { hasText: "swift-lark-3" });
+        const agent = () => agentRow(page, "swift-lark-3");
         const raw = () => page.getByRole("button", { name: "Raw output", exact: true });
         const drawer = () => page.getByRole("dialog", { name: "Raw output" });
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await conversationRow(page, "cas-src").click();
         await journey.stage("M12 a pending notice survives a shell rebuild and Raw output", async () => {
           await clickConversationHeaderAction(page, "#conversation-fleet");
           await agent().getByRole("button", { name: "Actions for swift-lark-3" }).click();
-          await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Pause" }).click();
+          await actionSheet(page).getByRole("menuitem", { name: "Pause" }).click();
           await expect.poll(() => Boolean(request)).toBe(true);
           await page.getByRole("button", { name: "Close tasks & progress" }).click();
-          await expect(page.locator("#fleet-phone-undo")).toContainText("swift-lark-3");
+          await expect(phoneNotice(page)).toContainText("swift-lark-3");
           // A catalog change re-renders, which replaces the shell.
           await hub.announceCatalog("atlas");
-          await expect(page.locator("#fleet-phone-undo")).toContainText("swift-lark-3");
-          await expect(agent().locator(".fleet-ops-progress")).toContainText("swift-lark-3");
+          await expect(phoneNotice(page)).toContainText("swift-lark-3");
+          await expect(agent().getByRole("status", { name: "Fleet progress", exact: true, includeHidden: true })).toContainText("swift-lark-3");
           await raw().click();
           await expect(drawer()).toBeVisible();
           await page.keyboard.press("Escape");
           await expect(drawer()).toBeHidden();
           await expect(raw()).toBeFocused();
-          await expect(page.locator("#fleet-phone-undo")).toContainText("swift-lark-3");
+          await expect(phoneNotice(page)).toContainText("swift-lark-3");
         });
         await journey.stage("M12 a completion under Raw output keeps its feedback and the keyboard return", async () => {
           await raw().click();
@@ -535,16 +613,16 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
             ? { json: { op_id: body.op_id, outcome: { kind: "set_worker_hold" } } }
             : { status: 409, json: { error: "stale", current: { worker: "swift-lark-3", generation: 3 } } });
           const text = disposition === "success" ? "swift-lark-3 paused." : "swift-lark-3 already restarted.";
-          await expect(page.locator("#fleet-ops-announcer")).toHaveText(text);
-          await expect(agent().locator(".fleet-ops-progress")).toHaveCount(0);
+          await expect(fleetResults(page)).toHaveText(text);
+          await expect(agent().getByRole("status", { name: "Fleet progress", exact: true, includeHidden: true })).toHaveCount(0);
           // On a phone the Undo sits above the composer, not in the sheet.
-          if (disposition === "stale") await expect(agent().locator(".fleet-ops-note")).toHaveText(text);
+          if (disposition === "stale") await expect(agent().getByTestId("fleet-ops-note")).toHaveText(text);
           await page.keyboard.press("Escape");
           await expect(drawer()).toBeHidden();
           await expect(raw()).toBeFocused();
-          await expect(page.locator("#fleet-phone-undo")).toContainText(text);
+          await expect(phoneNotice(page)).toContainText(text);
           if (disposition === "success") {
-            const undo = page.locator("#fleet-phone-undo").getByRole("button", { name: "Undo", exact: true });
+            const undo = phoneNotice(page).getByRole("button", { name: "Undo", exact: true });
             await expect(undo).toBeVisible();
             // The real hit target, not force-clicking through a fixed overlay.
             expect(await undo.evaluate((button) => {
@@ -557,7 +635,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
             // next action. Wait for the catalog read-back, then check focus.
             machine.sessions.push({ ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/new-project", workers: [] });
             await hub.announceCatalog("atlas", { added: ["calm-wren-2"] });
-            await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
+            // Only a conversation row's name starts "<project> on <machine>, ".
+            await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).getByRole("button", { name: /^\S+ on Atlas, /, includeHidden: true })).toHaveCount(2);
             await expect(undo).toBeFocused();
           }
         });

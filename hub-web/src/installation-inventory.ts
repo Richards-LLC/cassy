@@ -26,7 +26,7 @@ function installationTime(doc: Document, value: string): HTMLElement {
   if (!Number.isFinite(timestamp)) {
     const missing = doc.createElement("span"); missing.textContent = "Not recorded"; return missing;
   }
-  const time = doc.createElement("time"); time.dateTime = value;
+  const time = doc.createElement("time"); time.dateTime = value; time.dataset.testid = "installation-time";
   time.title = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", hour12: true }).format(timestamp);
   // A machine clock can lead this browser's. Activity cannot be in the
   // future; retain the exact timestamp in the title and Technical details.
@@ -70,7 +70,7 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
     status.textContent = machine.scopes.includes("hub-admin") ? `${devices.length} installations. ${devices.filter((device) => device.account_enrollment?.state === "enrolled").length} in your operator inbox.` : "This browser's access. Viewing other installations requires hub admin permission.";
     devices.sort((a, b) => Number(b.device_id === machine.deviceId) - Number(a.device_id === machine.deviceId));
     for (const device of devices) {
-      const row = doc.createElement("section"); row.className = "installation-inventory-row";
+      const row = doc.createElement("section"); row.className = "installation-inventory-row"; row.dataset.testid = "installation-inventory-row";
       const label = device.device_label.trim() || "Unnamed browser";
       const heading = doc.createElement("h3"); heading.textContent = `${label} · ${device.device_id === machine.deviceId ? "This browser" : "Another browser"}`;
       const summary = doc.createElement("dl"); summary.className = "pair-details installation-summary";
@@ -85,9 +85,9 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
       const id = doc.createElement("code"); id.textContent = device.device_id;
       detailRow(doc, details, "Installation ID", id).dataset.field = "device_id";
       for (const [field, name, value] of [["credential_generation", "Credential generation", String(device.credential_generation)], ["issued_at", "Paired (UTC)", device.issued_at], ["last_used_at", "Last used (UTC)", device.last_used_at], ["controller_origin", "Origin", device.controller_origin], ["key_fingerprint", "Signing key", device.key_fingerprint]]) {
-        detailRow(doc, details, name!, value!).dataset.field = field!;
+        Object.assign(detailRow(doc, details, name!, value!).dataset, { field: field!, testid: field!.replaceAll("_", "-") });
       }
-      if (device.account_enrollment?.state === "enrolled") detailRow(doc, details, "Account key epoch", device.account_enrollment.epoch).dataset.field = "epoch";
+      if (device.account_enrollment?.state === "enrolled") Object.assign(detailRow(doc, details, "Account key epoch", device.account_enrollment.epoch).dataset, { field: "epoch", testid: "epoch" });
       technical.append(disclosure, details);
       row.append(heading, summary, technical);
       if (!device.revoked_at) {

@@ -60,7 +60,7 @@ function reasoningDetail(document: Document, detail: HTMLElement, event: WorkEve
   raw.open = context.isOpen(key);
   raw.ontoggle = () => { if (raw.isConnected) context.setOpen(key, raw.open); };
   const toggle = document.createElement("summary"); toggle.textContent = "Raw summary"; toggle.dataset.focusKey = key;
-  const record = document.createElement("pre"); record.className = "work-record"; record.textContent = text;
+  const record = document.createElement("pre"); record.className = "work-record"; record.dataset.testid = "work-record"; record.textContent = text;
   raw.append(toggle, record);
   detail.append(content, raw);
 }
@@ -201,7 +201,7 @@ function readyDetail(document: Document, detail: HTMLElement, event: WorkEvent, 
   }
   if (publishedReasoning(event) !== undefined) reasoningDetail(document, detail, event, state.text, context);
   else {
-    const record = document.createElement("pre"); record.className = "work-record"; record.textContent = state.text;
+    const record = document.createElement("pre"); record.className = "work-record"; record.dataset.testid = "work-record"; record.textContent = state.text;
     detail.append(record);
   }
   if (state.truncated) { const cut = document.createElement("p"); cut.className = "work-detail-limit"; cut.textContent = "…cut at 16 KB"; detail.append(cut); }
@@ -232,6 +232,7 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   row.className = `work-row work-row--${event.kind}`;
   row.classList.toggle("is-failed", workFailed(event));
   row.dataset.eventId = event.id;
+  row.dataset.testid = "work-row";
   row.classList.toggle("is-live", event.kind === "tool" && !workFailed(event) && event.tool?.exit_code === undefined && !event.lifecycle?.outcome && !event.lifecycle?.ended_at
     && (event.lifecycle?.stage === "start" || event.lifecycle?.stage === "phase"));
   const key = `row:${event.id}`;
@@ -247,7 +248,7 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
     preview.textContent = plainTextMarkdown(published);
     text.replaceChildren(label, preview);
   }
-  const gutter = document.createElement("span"); gutter.className = "work-row-gutter"; gutter.setAttribute("aria-hidden", "true");
+  const gutter = document.createElement("span"); gutter.className = "work-row-gutter"; gutter.dataset.testid = "work-row-gutter"; gutter.setAttribute("aria-hidden", "true");
   if (expandable) gutter.insertAdjacentHTML("afterbegin", CHEVRON);
   const parts: HTMLElement[] = [gutter, text];
   if (workFailed(event)) {
@@ -277,6 +278,7 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   if (open) {
     const detail = document.createElement("div");
     detail.className = "work-detail";
+    detail.dataset.testid = "work-detail";
     detail.id = `work-detail-${domId(event.id)}`;
     toggle.setAttribute("aria-controls", detail.id);
     detail.tabIndex = 0;

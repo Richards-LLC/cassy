@@ -1725,8 +1725,8 @@ mod tests {
         let reads = fixture.root.join("origin-reads.log");
         let counter = fixture.root.join("count-upload-pack");
         std::fs::write(&counter, format!(
-            "#!/bin/sh\ntr '\\0' ' ' < /proc/$(cut -d' ' -f4 /proc/$PPID/stat)/cmdline >> '{}'\necho >> '{}'\nexec git upload-pack \"$@\"\n",
-            reads.display(), reads.display(),
+            "#!/bin/sh\nprintf '%s | %s\\n' \"$(ps -o args= -p $PPID)\" \"$(ps -o args= -p \"$(ps -o ppid= -p $PPID | tr -d ' ')\")\" >> '{}'\nexec git upload-pack \"$@\"\n",
+            reads.display(),
         )).unwrap();
         std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         git(fixture._repo.path(), &["config", "remote.origin.uploadpack", counter.to_str().unwrap()]);

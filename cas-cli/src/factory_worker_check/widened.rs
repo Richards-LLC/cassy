@@ -303,7 +303,7 @@ mod tests {
         }
         // GH #2164: with no JavaScript input left, the package's manifest
         // selects its own run, and that selection widens to this package.
-        let commands = commands(Path::new("/cas"), repo.path(), &paths[..2], &scopes, &Default::default());
+        let commands = super::commands(Path::new("/cas"), repo.path(), &paths[..2], &scopes, &Default::default());
         assert!(!commands.is_empty());
         for command in &commands {
             let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();

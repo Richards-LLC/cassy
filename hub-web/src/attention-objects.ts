@@ -110,7 +110,7 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
     // always true, so every blocker that stopped waiting claimed a reply.
     object.dataset.acknowledged = "true";
     object.setAttribute("aria-label", `Blocker from ${context.supervisor}, acknowledged`);
-    const handled = document.createElement("p"); handled.className = "blk-handled"; handled.dataset.testid = "blk-handled";
+    const handled = document.createElement("p"); handled.className = "blk-handled";
     handled.append(tick(document), document.createTextNode("Acknowledged — you replied"));
     body.append(handled);
   } else if (!context.history?.retirement(reply.notification_id) && context.history?.writtenSince(reply.notification_id)) {

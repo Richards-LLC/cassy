@@ -4826,7 +4826,17 @@ async fn ops_only_epic_on_root_commit_closes_by_ordinary_path_gh2384() {
     verdict.provenance = VerificationProvenance::SupervisorDirect;
     verdict.agent_id = Some("nocode-supervisor-session".into());
     verdict.issuer_agent_id = verdict.agent_id.clone();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &f.cas_dir(), &epic.id, "nocode-supervisor-session", "nocode-supervisor-session",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    verdict.dispatch_id = Some(dispatch.id.clone());
     cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+    let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+    ).unwrap();
     let close = serde_json::json!({"action":"close", "id":epic.id, "reason":"All operations children verified"});
 
     let refused = call(&f.supervisor, close.clone()).await;

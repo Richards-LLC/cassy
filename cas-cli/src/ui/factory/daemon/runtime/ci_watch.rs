@@ -1150,9 +1150,12 @@ impl GhCiTransport {
         struct Artifact { id: u64, name: String, size_in_bytes: u64, expired: bool }
         #[derive(Deserialize)]
         struct Artifacts { artifacts: Vec<Artifact> }
-        let response: Artifacts = self.gh_json(&[
-            "api".into(), format!("repos/{}/actions/runs/{run_id}/artifacts?per_page=100", self.repo),
-        ])?;
+        let response: Artifacts = serde_json::from_slice(&crate::gh_budget::shared_read(
+            &format!("run-artifacts {} {run_id}", self.repo),
+            RUN_EVIDENCE_TTL,
+            || self.gh_bytes(&["api".into(), format!("repos/{}/actions/runs/{run_id}/artifacts?per_page=100", self.repo)]),
+        )?)
+        .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))?;
         let prefix = format!("lane-impact-{run_id}-");
         let mut names = Vec::new();
         for artifact in response.artifacts.into_iter().filter(|artifact| {
@@ -1264,7 +1267,26 @@ fn note_runs_signature(repo: &str, sha: &str, signature: &str) {
     }
 }
 
+/// How long a failed run's jobs, log and artifact list are shared (cas-0bc1):
+/// they change only by a rerun, and a red run was re-read on every poll.
+const RUN_EVIDENCE_TTL: Duration = Duration::from_secs(600);
+
 impl GhCiTransport {
+    fn run_jobs(&self, run_id: u64) -> Result<JobsResponse, CiWatchError> {
+        let bytes = crate::gh_budget::shared_read(
+            &format!("run-jobs {} {run_id}", self.repo),
+            RUN_EVIDENCE_TTL,
+            || self.gh_bytes(&[
+                "api".to_string(),
+                "-X".to_string(),
+                "GET".to_string(),
+                format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
+            ]),
+        )?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
+    }
+
     fn recent_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
         if let Some(runs) = self.recent.get() {
             return Ok(runs.clone());
@@ -1302,12 +1324,7 @@ impl CiTransport for GhCiTransport {
     }
 
     fn failing_job(&self, run_id: u64) -> Result<Option<String>, CiWatchError> {
-        let response: JobsResponse = self.gh_json(&[
-            "api".to_string(),
-            "-X".to_string(),
-            "GET".to_string(),
-            format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
-        ])?;
+        let response = self.run_jobs(run_id)?;
         Ok(response
             .jobs
             .into_iter()
@@ -1318,28 +1335,44 @@ impl CiTransport for GhCiTransport {
     fn branch_tip(&self, branch: &str) -> Result<Option<String>, CiWatchError> {
         // An unreadable tip (a deleted branch, a transient API error) keeps
         // the pre-cas-c188 behaviour rather than silencing a real red run.
-        Ok(self
-            .gh_json::<BranchResponse>(&[
+        Ok(crate::gh_budget::shared_read(
+            &format!("branch-tip {} {branch}", self.repo),
+            Duration::from_secs(60),
+            || self.gh_bytes(&[
                 "api".to_string(),
                 "-X".to_string(),
                 "GET".to_string(),
                 format!("repos/{}/branches/{branch}", self.repo),
-            ])
-            .ok()
-            .map(|response| response.commit.sha)
-            .filter(|sha| !sha.is_empty()))
+            ]),
+        )
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BranchResponse>(&bytes).ok())
+        .map(|response| response.commit.sha)
+        .filter(|sha| !sha.is_empty()))
     }
 
     fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError> {
-        let log = self.gh_text(&[
-            "run".to_string(),
-            "view".to_string(),
-            run_id.to_string(),
-            "--repo".to_string(),
-            self.repo.clone(),
-            "--log-failed".to_string(),
-        ])?;
-        Ok((!log.is_empty()).then_some(log))
+        let cached = crate::gh_budget::shared_read(
+            &format!("failed-log {} {run_id}", self.repo),
+            RUN_EVIDENCE_TTL,
+            || match self.gh_text(&[
+                "run".to_string(),
+                "view".to_string(),
+                run_id.to_string(),
+                "--repo".to_string(),
+                self.repo.clone(),
+                "--log-failed".to_string(),
+            ]) {
+                Ok(log) if !log.is_empty() => Ok(log.into_bytes()),
+                Ok(_) => Err(None),
+                Err(error) => Err(Some(error)),
+            },
+        );
+        match cached {
+            Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            Err(None) => Ok(None),
+            Err(Some(error)) => Err(error),
+        }
     }
 
     /// Every run of the commit. A run still going shows in the newest runs,
@@ -1415,12 +1448,7 @@ impl CiTransport for GhCiTransport {
     }
 
     fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
-        let response: JobsResponse = self.gh_json(&[
-            "api".to_string(),
-            "-X".to_string(),
-            "GET".to_string(),
-            format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
-        ])?;
+        let response = self.run_jobs(run_id)?;
         Ok(response
             .jobs
             .into_iter()
@@ -2359,7 +2387,7 @@ mod tests {
         write("checks.json", serde_json::json!({"check_runs": []}));
         let gh = dir.join("gh");
         crate::test_paths::warm_stub(&gh, &format!(
-            "#!/bin/sh\necho \"$@\" >> '{dir}/calls.log'\ncase \"$4\" in\nrepos/org/repo/actions/runs) cat '{dir}/runs.json' ;;\nrepos/org/repo/commits/*/check-runs) cat '{dir}/checks.json' ;;\n*) exit 97 ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{dir}/calls.log'\ncase \"$4\" in\nrepos/org/repo/actions/runs) cat '{dir}/runs.json' ;;\nrepos/org/repo/commits/*/check-runs) cat '{dir}/checks.json' ;;\nrepos/org/repo/actions/runs/7/jobs) cat '{dir}/jobs.json' ;;\nrepos/org/repo/branches/*) cat '{dir}/branch.json' ;;\n*) exit 97 ;;\nesac\n",
             dir = dir.display(),
         ));
         let calls = || std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().count());
@@ -2397,10 +2425,21 @@ mod tests {
         assert!(transport().runs_for_sha(sha).unwrap().iter().any(|run| run.status != "completed"));
         write("runs.json", run(2, "completed"));
         let before = calls();
-        let transport = transport();
-        transport.runs_for_sha(sha).unwrap();
-        transport.check_runs_for_sha(sha).unwrap();
+        let polled = transport();
+        polled.runs_for_sha(sha).unwrap();
+        polled.check_runs_for_sha(sha).unwrap();
         assert_eq!(calls() - before, 3);
+
+        // A red run's failing job and its branch tip are read once while it stays red.
+        write("jobs.json", serde_json::json!({"jobs": [{"name": "Scoped Validation", "conclusion": "failure", "steps": []}]}));
+        write("branch.json", serde_json::json!({"commit": {"sha": "abc"}}));
+        let before = calls();
+        for _ in 0..5 {
+            let polled = transport();
+            assert_eq!(polled.failing_job(7).unwrap().as_deref(), Some("Scoped Validation"));
+            assert_eq!(polled.branch_tip("factory/x").unwrap().as_deref(), Some("abc"));
+        }
+        assert_eq!(calls() - before, 2);
     }
 
     /// cas-e845 / cas-ae6a: `ci_completed` waits only while a check-run of the

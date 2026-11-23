@@ -1117,9 +1117,7 @@ mod tests {
         agents.register(&successor).unwrap();
         agents.update(&successor).unwrap();
         let tasks = fixture.core.open_task_store().unwrap();
-        let mut epic = tasks.get("cas-train").unwrap();
-        epic.labels.push(crate::train_owner::ENROLLED.into());
-        tasks.update(&epic).unwrap();
+        let epic = tasks.get("cas-train").unwrap();
         let repo = fixture._repo.path();
         let head = git(repo, &["rev-parse", "epic/train"]);
         let identity = crate::train_owner::identity(&successor, "supervisor-2").unwrap();

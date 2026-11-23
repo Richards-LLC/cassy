@@ -1464,19 +1464,18 @@ mod tests {
     /// (`proof/`) and top-level logs in its task evidence directory. The merge
     /// owner, holding only the synced task notes, restores each at the path the
     /// ledger cites; an artifact it cannot fetch never blocks the dispatch.
-    /// cas-fd1c (GH #2212): a no-code close whose ledger cites nested captures
-    /// the way the ledger gate accepts (one path per cell: relative, absolute
-    /// inside the directory, or another machine's artifacts path) publishes and
-    /// restores them; an uncited terminal-qa receipt still travels, uncited raw
-    /// captures stay unpublished, and a retried close reuses what is already
-    /// published.
+    /// cas-fd1c (GH #2212): a ledger citing nested captures the way the ledger
+    /// gate accepts (one path per cell: relative, absolute inside the
+    /// directory, or another machine's artifacts path) publishes and restores
+    /// them; an uncited terminal-qa receipt still travels and uncited raw
+    /// captures stay unpublished. Bundle-receipt reuse on a no-code close is
+    /// covered through the real close handler in `no_code_close_tests`.
     #[tokio::test(flavor = "multi_thread")]
     async fn ordinary_park_evidence_reaches_the_merge_owner_at_cited_paths_gh2079() {
         use wiremock::matchers::body_partial_json;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let server = MockServer::start().await;
-        let mut task = cas_types::Task::new("cas-2079-fixture".into(), "parked elsewhere".into());
-        task.execution_note = Some("no-code".into());
+        let task = cas_types::Task::new("cas-2079-fixture".into(), "parked elsewhere".into());
         let parking = PeerReviewer::new(&server.uri(), task);
         let absolute = parking.evidence_dir().join("proof/shot.png");
         let foreign = "/Users/other/.cas/artifacts/cassy-0123456789ab/cas-2079-fixture/proof/second.png";
@@ -1523,8 +1522,6 @@ mod tests {
         let checked = crate::qa_ledger::check(&parking.evidence_dir().join("LEDGER.md"), 0);
         assert!(checked.ok, "{:?}", checked.diagnostics);
         let (parked, parking_dir) = tokio::task::spawn_blocking(move || {
-            publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
-            // A retried close reuses the published copies: no second upload.
             publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
             let parked = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
             (parked, parking.evidence_dir())

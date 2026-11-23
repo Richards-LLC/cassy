@@ -3023,8 +3023,11 @@ impl HistoryStore for SqliteHistoryStore {
         // names the replacement file and its mtime says nothing about the
         // process being recorded. Never persist that mtime as proof.
         let trusted_binary_mtime = epoch.trusted_binary_mtime();
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
+        // GH #2183: this reads before it writes. A DEFERRED transaction must
+        // then upgrade, which SQLite refuses without the busy handler when
+        // another process writes first, so a reconnect burst lost the epoch
+        // and the live MCP's version stayed unknown. Take the lock up front.
+        let tx = shared_db::begin_immediate_pooled(&self.conn)?;
 
         // Identity lookup rather than `ON CONFLICT`, because the uniqueness
         // constraint is an *expression* index (`COALESCE(pid, -1)`) and naming
@@ -4387,6 +4390,30 @@ mod tests {
             .unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].pid, Some(42), "newest heartbeat wins the cap");
+    }
+
+    /// GH #2183: a reconnected MCP starts while other factory processes
+    /// write. Its start epoch is its only version proof, so a write that
+    /// commits while the record is in flight must not discard it.
+    #[test]
+    fn record_epoch_survives_a_concurrent_writer_gh_2183() {
+        let (temp, store) = store();
+        let (held, release) = std::sync::mpsc::channel();
+        let db = temp.path().join("cas.db");
+        let writer = std::thread::spawn(move || {
+            let other = Connection::open(db).unwrap();
+            other.execute_batch("BEGIN IMMEDIATE").unwrap();
+            other.execute("INSERT INTO history_epochs (epoch_kind, started_at, pid, recorded_at)
+                VALUES ('daemon_start', '2026-11-19T20:47:00Z', 7, '2026-11-19T20:47:00Z')", []).unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            other.execute_batch("COMMIT").unwrap();
+        });
+        release.recv().unwrap();
+        let recorded = store.record_epoch(&epoch("2026-11-19T20:47:23Z", 2297590));
+        writer.join().unwrap();
+        recorded.expect("the epoch waits out the other writer instead of being lost");
+        assert!(store.list_epochs(None, 10).unwrap().iter().any(|row| row.pid == Some(2297590)));
     }
 
     #[test]

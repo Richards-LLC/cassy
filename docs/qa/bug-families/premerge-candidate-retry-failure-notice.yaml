@@ -1,0 +1,10 @@
+title: Each failed pre-merge candidate retry reports its own failure
+statement: >-
+  A worktree_merge retry after a failed candidate preparation builds again and
+  fails again. Each failed attempt sends its own premerge_candidate_failed
+  notice, so a held retry never stalls silently on a candidate preparation
+  that continues in the background. A successful preparation still reports one
+  ready notice per source, target and context.
+tasks: [cas-c998]
+journeys: [FACTORY-MERGE]
+invariants: []

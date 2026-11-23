@@ -1653,8 +1653,13 @@ fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<Strin
     if changed.is_empty() { return Some(BTreeSet::new()); }
     let tree = delivered_tree(repo, head)?;
     let mut inputs = BTreeSet::new();
+    // cas-3080/cas-d9c72: the bug-family fragment a close asks for is QA
+    // registry data, not a runner input. Its `.yaml` extension alone must not
+    // void tested-input proof; a Rust source naming it still does.
+    let registry = crate::qa_registry::DEFAULT_PATH;
+    let bug_family = |path: &str| path != registry && crate::qa_registry::is_registry_input(registry, path);
     let external = changed.iter().filter(|path| {
-        if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
+        if (!bug_family(path) && is_test_or_build_input_path(path)) || tree.is_workspace_crate_path(path) {
             inputs.insert((*path).clone()); false
         } else { true }
     }).cloned().collect::<Vec<_>>();
@@ -2155,7 +2160,9 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
     };
     matches!(key, "HOME" | "CARGO_HOME" | "RUSTUP_HOME" | "CI"
         | "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
-        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL")
+        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL"
+        // cas-3751a: the sandbox-runtime binary the worker sandbox corpus test runs through.
+        | "CAS_SRT_BIN")
         .then_some((key, value))
 }
 

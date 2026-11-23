@@ -613,6 +613,7 @@
         "note_type",
         "notes",
         "offset",
+        "operator_decision",
         "origin_project",
         "priority",
         "project",

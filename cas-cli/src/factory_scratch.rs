@@ -10,13 +10,17 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use sha2::{Digest, Sha256};
 
 /// Short enough to leave room for Unix socket filenames. Full checkout identity
 /// lives in the private directory's marker, rather than its pathname.
 pub(crate) fn test_tmp_dir(cas_dir: &Path, worktree: &Path) -> PathBuf {
+    cas_types::factory_scratch::checkout_tmp_dir(&test_tmp_root(cas_dir), worktree)
+}
+
+/// The root every checkout's private temporary directory lives under.
+pub(crate) fn test_tmp_root(cas_dir: &Path) -> PathBuf {
     // Test fixtures must not inherit a checkout or protected .cas ancestry (#2085).
-    let root = configured_scratch_root(cas_dir).filter(|root| {
+    configured_scratch_root(cas_dir).filter(|root| {
         !root.ancestors().any(|part| part.file_name().is_some_and(|name| name == ".cas"))
             && existing_ancestor(root).is_none_or(|parent|
                 crate::worktree::GitOperations::detect_repo_root(parent).is_err())
@@ -28,10 +32,7 @@ pub(crate) fn test_tmp_dir(cas_dir: &Path, worktree: &Path) -> PathBuf {
         }
         #[cfg(not(unix))]
         { std::env::temp_dir().join("cas") }
-    });
-    let checkout = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
-    let key = hex::encode(Sha256::digest(checkout.as_os_str().as_encoded_bytes()));
-    root.join("t").join(&key[..16])
+    })
 }
 
 fn test_tmp_owner(cas_dir: &Path, worktree: &Path) -> io::Result<serde_json::Value> {

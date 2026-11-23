@@ -38,6 +38,11 @@ impl Identity {
                     chars.next();
                     pattern.push_str(".*");
                 }
+                // Jest's `$#` is the row index of an object table (GH #2225).
+                ('$', Some('#')) => {
+                    chars.next();
+                    pattern.push_str(".*");
+                }
                 ('$', Some(next)) if next.is_ascii_alphabetic() || next == '_' => {
                     while chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) {
                         chars.next();
@@ -213,6 +218,13 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
                 eprintln!("Changed-test classification uncertain for {path} ({error:#}); widening to {scope:?}");
                 widened.insert(scope);
             }
+        }
+    }
+    // GH #2221: a changed JSON catalogue regenerates the tests of every spec
+    // importing it, though those specs have no changed line.
+    for data in paths.iter().filter(|path| path.ends_with(".json")) {
+        for spec in super::javascript::catalogue_specs(repo, head, data)? {
+            widened.insert(super::widened::Scope::File(spec));
         }
     }
     Ok((tests.into_iter().collect(), widened.into_iter().collect()))

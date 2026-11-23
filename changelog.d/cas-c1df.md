@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **Vitest table rows that share a name prove their test** — An `it.each` test whose rows expand to the same name used to fail capped stability, even when every row passed. This covers `%s` rows with a repeated first column and static titles. Worker-check and park now credit the source test when every row passes. A failing row, a test with no rows, or any difference from the rows the source table expands to (a row missing even when a same-named sibling still passes, or one row standing in for another) is still refused. Vitest's expanded names are derived from the source for static, `%s` and `$key` titles over literal tables; a table or title that cannot be expanded exactly is refused with advice to prove the whole spec.

@@ -10,6 +10,8 @@ use crate::ui::factory::daemon::FactoryDaemon;
 use crate::ui::factory::supervisor_commands::{SupervisorCommand as Command, SupervisorCommandKey as Key, SupervisorCommandPhase as Phase, SupervisorCommandReceipt as Receipt};
 
 type Owner = (String, String);
+/// Reload admission either answered the caller or found an idle prompt to type into.
+enum ReloadAdmission { Answered(DaemonMessage), TypeNow(u32) }
 /// What a Codex reload costs; Commander shows it before the operator confirms.
 pub(crate) const CODEX_RELOAD_CONSEQUENCE: &str = "Codex reloads Cassy by restarting its supervisor on the installed build, with a fresh context; workers keep running.";
 /// Receipts held at once. Only a burst inside the replay window can reach it.
@@ -691,7 +693,7 @@ impl FactoryDaemon {
     /// restarts on the installed build while workers keep running. The
     /// MCP front cannot do it: it refuses any swap whose tool schemas changed
     /// (front.rs `incompatibility`), which nearly every release does.
-    async fn admit_reload(&mut self, owner: Owner, confirmed: bool) -> anyhow::Result<DaemonMessage> {
+    async fn admit_reload(&mut self, owner: Owner, confirmed: bool) -> anyhow::Result<ReloadAdmission> {
         use cas_mux::SupervisorCli::{Claude, Codex};
         let cli = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?.harness();
         anyhow::ensure!(matches!(cli, Claude | Codex),
@@ -705,10 +707,17 @@ impl FactoryDaemon {
         let server = server.ok_or_else(|| anyhow::anyhow!("Reload Cassy was not sent: the supervisor's live Cassy MCP PID and version are unavailable."))?;
         if installed.is_some() && server.version == installed {
             let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {}", installed.unwrap_or_default()));
-            return self.record_command(owner, Command::ReloadCassy, None, Phase::Observed, format!("Already current: {badge}. Nothing was sent."));
+            return self.record_command(owner, Command::ReloadCassy, None, Phase::Observed, format!("Already current: {badge}. Nothing was sent."))
+                .map(ReloadAdmission::Answered);
+        }
+        // An idle Claude prompt reconnects now; anything busy, and every Codex
+        // restart, waits for the loop's native idle boundary instead of refusing.
+        if cli == Claude && matches!(tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await, Ok(Ok(()))) {
+            return Ok(ReloadAdmission::TypeNow(server.pid));
         }
         self.record_command(owner, Command::ReloadCassy, Some(server.pid), Phase::Queued,
             "Waiting for a quiet moment: Cassy reloads when the supervisor's turn ends. Nothing has been sent yet.".into())
+            .map(ReloadAdmission::Answered)
     }
     pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
@@ -764,11 +773,18 @@ impl FactoryDaemon {
                 anyhow::ensure!(command.mapping(pane.harness()).is_some(), "This harness does not support that command.");
                 return self.queue_command(owner, *command, None);
             }
-            if *command == Command::ReloadCassy { return self.admit_reload(owner, *confirmed).await; }
-            match tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await
-                .map_err(|_| anyhow::anyhow!("The supervisor is busy: its output did not settle within 3 seconds. Wait until its turn ends."))? {
-                Err(error) if error.is::<TurnOpen>() => return self.queue_command(owner, *command, None),
-                ready => ready?,
+            let reload_before = if *command == Command::ReloadCassy {
+                match self.admit_reload(owner.clone(), *confirmed).await? {
+                    ReloadAdmission::Answered(receipt) => return Ok(receipt),
+                    ReloadAdmission::TypeNow(pid) => Some(pid),
+                }
+            } else { None };
+            if reload_before.is_none() {
+                match tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await
+                    .map_err(|_| anyhow::anyhow!("The supervisor is busy: its output did not settle within 3 seconds. Wait until its turn ends."))? {
+                    Err(error) if error.is::<TurnOpen>() => return self.queue_command(owner, *command, None),
+                    ready => ready?,
+                }
             }
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
             let text = command.mapping(pane.harness()).ok_or_else(|| anyhow::anyhow!("This harness does not support that command."))?;
@@ -776,10 +792,10 @@ impl FactoryDaemon {
             let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
             let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Submitted,
                 detail: "Command submitted; harness execution is not confirmed yet.".into(), output: String::new(), interactive: false };
-            let saved = serde_json::to_value(SavedRecord { receipt: receipt.clone(), at: Utc::now(), before: before.clone(), before_command: before.clone(), reload_before: None, birth: Birth::current() })?;
+            let saved = serde_json::to_value(SavedRecord { receipt: receipt.clone(), at: Utc::now(), before: before.clone(), before_command: before.clone(), reload_before, birth: Birth::current() })?;
             anyhow::ensure!(durable::write(self.app.cas_dir(), &self.session_name, self.app.supervisor_name(), &saved, durable::Write::Reserve)?, "Command reference is already recorded; read its receipt before retrying.");
             let write = pane.inject_prompt_tracked(text)?;
-            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before: None, birth: Birth::current() });
+            self.supervisor_commands.records.insert(owner, Record { receipt: receipt.clone(), started: Instant::now(), at: Utc::now(), before_command: before.clone(), before, write: Box::new(move || write.result()), hook: None, last_key: None, output_from, reload_before, birth: Birth::current() });
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         anyhow::ensure!(self.supervisor_commands.records.contains_key(&owner), "The original command receipt is unavailable. Do not resend an uncertain command.");

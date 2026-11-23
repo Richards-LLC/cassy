@@ -424,7 +424,7 @@ open_or_update_pr() {
     # Build concurrency stays independent; only landing must be a singleton.
     singleton_queue <<<"$state"
     if ! admitted <<<"$state"; then
-        CAS_ROOT="$release_store_root" "${release_candidate:-$cas_bin}" factory train publication arm-pr \
+        CAS_ROOT="$release_store_root" CAS_GH_BIN="$gh_bin" "${release_candidate:-$cas_bin}" factory train publication arm-pr \
             --pr "$pr_number" --sha "$(git rev-parse HEAD)" >/dev/null
         state="$(pr_state)"
         singleton_queue <<<"$state"
@@ -472,7 +472,7 @@ query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
 }
 
 publish_branch() {
-    CAS_ROOT="$release_store_root" "${release_candidate:-$cas_bin}" factory train publication publish-branch \
+    CAS_ROOT="$release_store_root" CAS_GH_BIN="$gh_bin" "${release_candidate:-$cas_bin}" factory train publication publish-branch \
         --branch "$branch" --sha "$(git rev-parse HEAD)" --remote "$remote"
 }
 

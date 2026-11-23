@@ -56,6 +56,7 @@ HEAVY = {
 # cas-2077 changed one and first failed in the merge queue (4 GiB != 2 GiB);
 # this one assertion pins that contract in 0.001 s. The full suite stays HEAVY.
 NAMED = {
+    "scripts/tests/train-publication-cli.py": "bash scripts/test-release.sh && python3 scripts/test-resolve-ci-base.py",
     "scripts/cleanup-merged-epics.sh": "python3 scripts/test-resolve-ci-base.py",
     "scripts/release-cache-key.py": "./scripts/test-find-release-prebuild.sh",
     **{path: "python3 scripts/test-accounting-journals.py" for path in (

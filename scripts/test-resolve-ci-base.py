@@ -19,6 +19,13 @@ class LaneBaseTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name)
+        self.publication_cli = self.repo / 'publication-cli'
+        self.publication_cli.write_text('#!/bin/sh\nshift 3\nexec python3 ' +
+                                        shlex.quote(str(ROOT / 'scripts/tests/train-publication-cli.py')) + ' "$@"\n')
+        self.publication_cli.chmod(0o755)
+        prior_cli = os.environ.get('CAS_BIN')
+        os.environ['CAS_BIN'] = str(self.publication_cli)
+        self.addCleanup(lambda: os.environ.pop('CAS_BIN', None) if prior_cli is None else os.environ.__setitem__('CAS_BIN', prior_cli))
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.email', 'fixture@example.test')
         self.git('config', 'user.name', 'Fixture')
@@ -204,6 +211,17 @@ class LaneBaseTests(unittest.TestCase):
         step = next(s for s in workflow['jobs']['release']['steps'] if s.get('id') == 'cleanup-epics')
         # Execute the actual publish step; all pushes go to this temporary bare repo.
         shutil.copy2(ROOT / 'scripts/cleanup-merged-epics.sh', self.repo / 'scripts')
+        # An enrolled terminal/merged branch survives; an unavailable lookup
+        # also preserves every ref. The CLI is the replaced external boundary.
+        before_refs = self.git('ls-remote', '--heads', 'origin')
+        for injected, expected_status in [({'FAKE_ENROLLED_BRANCH': shipped}, 0),
+                                          ({'FAKE_CAS_REFUSE_PUBLICATION': '1'}, 77)]:
+            held = subprocess.run(['bash', '-e', '-c', step['run']], cwd=self.repo,
+                                  env=dict(os.environ, GITHUB_SHA=released, DEFAULT_BRANCH='main',
+                                           GITHUB_STEP_SUMMARY=str(self.repo / '.git' / 'summary'), **injected),
+                                  capture_output=True, text=True)
+            self.assertEqual(held.returncode, expected_status, held.stdout + held.stderr)
+            self.assertEqual(self.git('ls-remote', '--heads', 'origin'), before_refs)
         for _ in range(2):
             result = subprocess.run(['bash', '-e', '-c', step['run']], cwd=self.repo,
                                     env=dict(os.environ, GITHUB_SHA=released, DEFAULT_BRANCH='main',

@@ -54,6 +54,9 @@ impl Snapshot {
             );
         }
         let reference = reference(train)?;
+        if super::fencing(repo, target)?.is_some() {
+            return Err("TRAIN_TRANSFER_CONFLICT: target already has an enrolled authority".into());
+        }
         let target_ref = format!("refs/heads/{target}");
         command(repo, &["check-ref-format", &target_ref], None)?;
         let refs = command(

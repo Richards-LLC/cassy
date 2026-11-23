@@ -53,6 +53,14 @@ case "$1 $2" in
 esac
 EOF
 chmod +x "$tmp/bin/gh"
+cat >"$tmp/bin/cas" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1 $2 $3" == 'factory train publication' ]] || exit 2
+shift 3
+exec python3 "${FAKE_PUBLICATION_CLI:?}" "$@"
+EOF
+chmod +x "$tmp/bin/cas"
+export CAS_BIN="$tmp/bin/cas" FAKE_PUBLICATION_CLI="$script_dir/tests/train-publication-cli.py"
 
 remote="$tmp/origin.git"
 git init --quiet --bare "$remote"
@@ -160,6 +168,13 @@ check '[[ "$(git -C "$remote" rev-parse "refs/tags/dryrun-v9.99.2-1^{}")" == "$o
 # substitution returned while the publisher was still pushing into origin.git.
 output="$(run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-2 --notes-out /dev/stdout 2>/dev/null)"
 check 'grep -q "<!-- cas-release-timer pr= opened= published=" <<<"$output" && grep -q "release create dryrun-v9.99.2-2" "$tmp/gh.log"' 'a commit with no merged PR finishes publishing with a timer line'
+
+# A helper hold has no raw shell fallback and never creates a tag/Release.
+: >"$tmp/gh.log"
+status=0
+FAKE_CAS_REFUSE_PUBLICATION=1 run_publish --version 9.99.2 --sha "$other" --assets "$assets" \
+    --tag dryrun-held --prerelease >"$tmp/held.log" 2>&1 || status=$?
+check '[[ "$status" == 77 ]] && ! git -C "$remote" show-ref --verify --quiet refs/tags/dryrun-held && ! grep -q "release create" "$tmp/gh.log"' 'a publication helper hold leaves both external publications untouched'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

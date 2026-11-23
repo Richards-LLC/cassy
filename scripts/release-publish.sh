@@ -120,7 +120,7 @@ if [[ -n "$remote_tag" ]]; then
 else
     printf 'preparing annotated tag %s at %s\n' "$tag" "$sha"
 fi
-"$cas_bin" factory train publication publish-tag --tag "$tag" --sha "$sha" "${continuation[@]}"
+CAS_GH_BIN="$gh_bin" "$cas_bin" factory train publication publish-tag --tag "$tag" --sha "$sha" "${continuation[@]}"
 
 # 4. The release.
 release_args=(factory train publication create-release --tag "$tag" --sha "$sha" --repo "$repo" \
@@ -128,5 +128,5 @@ release_args=(factory train publication create-release --tag "$tag" --sha "$sha"
 if "$prerelease"; then
     release_args+=(--prerelease)
 fi
-"$cas_bin" "${release_args[@]}" -- "${archives[@]}"
+CAS_GH_BIN="$gh_bin" "$cas_bin" "${release_args[@]}" -- "${archives[@]}"
 printf 'published %s (%s) from %s\n' "$tag" "$([[ "$prerelease" == true ]] && echo prerelease || echo release)" "$sha"

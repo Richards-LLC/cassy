@@ -68,6 +68,10 @@ cat >"$tmp/bin/cas" <<'EOF'
 printf '%s\n' "$*" >>"${FAKE_CAS_LOG:?}"
 [[ "$1" == release ]] && printf 'CAS_ROOT=%s release %s\n' "${CAS_ROOT:-}" "$2" >>"$FAKE_CAS_LOG"
 case "$1 $2" in
+  "factory train")
+    [[ "$3" == publication ]] || exit 2
+    shift 3
+    exec python3 "${FAKE_PUBLICATION_CLI:?}" "$@" ;;
   "--version "*) echo 'cas 9.99.0' ;;
   "release context")
     case "${FAKE_CONTEXT_MODE:-}" in
@@ -106,6 +110,7 @@ EOF
 chmod +x "$tmp/bin/cas"
 cp "$tmp/bin/cas" "$tmp/bin/cas-candidate"
 export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
+export FAKE_PUBLICATION_CLI="$script_dir/tests/train-publication-cli.py"
 # The cut derives the live store root itself (cas-8e1b); never inherit one.
 unset CAS_ROOT
 
@@ -524,7 +529,8 @@ rerun_after_repair() {
     status=0
     rm -f "$FAKE_GH_STATE/admitted"
     out="$(cd "$epic" && FAKE_MERGE_EXIT=42 ./scripts/release.sh --no-watch 2>&1)" || status=$?
-    [[ $status -eq 42 && "$out" == *"error:"* && "$out" == *"42"* && "$out" == *'pr merge'* ]]
+    [[ $status -ne 0 && ! -f "$FAKE_GH_STATE/admitted" ]] &&
+        grep -q '^factory train publication arm-pr --pr 77 --sha ' "$FAKE_CAS_LOG"
 }
 check 'rerun_after_repair' 'a repaired release requeues once with old/new notes paths and reports command failures'
 

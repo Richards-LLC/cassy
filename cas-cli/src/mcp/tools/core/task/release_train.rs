@@ -15,7 +15,6 @@ use fs2::FileExt;
 use rmcp::ErrorData as McpError;
 
 use crate::mcp::server::CasCore;
-use crate::mcp::tools::types::TaskCreateRequest;
 use crate::types::{Task, TaskStatus, TaskType};
 
 pub(crate) const RELEASE_TRAIN_LABEL: &str = "release-train";
@@ -597,39 +596,28 @@ impl CasCore {
                 "\n\nRELEASE TRAIN: joined {} ({lane}); its delivery merges into the train, which reaches `{integration}` once per release. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane.", train.id
             )));
         }
-        let request: TaskCreateRequest = serde_json::from_value(serde_json::json!({
-            "title": RELEASE_TRAIN_TITLE,
-            "task_type": "epic",
-            "priority": 1,
-            "labels": format!("{RELEASE_TRAIN_LABEL},{}", crate::train_owner::ENROLLED),
-            "description": format!(
-                "Default target for tasks created without an epic. Children merge into this lane; the release goes to `{integration}` once."
-            ),
-        })).map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        let repo_arg = repo.to_string_lossy().to_string();
-        let created = Box::pin(self.cas_task_create_with_delivery_mode(
-            request, Some(&repo_arg), Some(&integration), true, None,
-        )).await;
-        if let Err(McpError { message, .. }) = created {
-            return Ok((None, format!(
-                "\n\nRELEASE TRAIN UNAVAILABLE: {message}. This task targets `{integration}` directly."
-            )));
-        }
-        let train = select_train(store, &repo, &integration)
+        // Initial train identity and lane are stored together, before any
+        // generic branch creation can publish it or mutate protected metadata.
+        let actor = self.resolve_live_supervisor_authority()
+            .map_err(|error| McpError::invalid_params(format!("TRAIN_TRANSFER_FENCE_UNAVAILABLE: {error:?}"), None))?;
+        let id = store.generate_id().map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let mut train = Task::new(id, RELEASE_TRAIN_TITLE.into());
+        train.task_type = TaskType::Epic;
+        train.priority = crate::types::Priority(1);
+        train.labels = vec![RELEASE_TRAIN_LABEL.into(), crate::train_owner::ENROLLED.into()];
+        train.branch = Some(format!("epic/release-train-vnext-{}", train.id));
+        train.origin_project = crate::cloud::resolve_canonical_id(&self.cas_root);
+        train.epic_verification_owner = Some(actor.id);
+        train.deliverables.work_target = super::repo_context::declare_work_target(
+            &self.cas_root, repo.to_str(), Some(&integration))
             .map_err(|error| McpError::invalid_params(error, None))?;
-        match train {
-            Some(train) => {
-                let lane = train.effective_epic_branch().unwrap_or(&integration);
-                let published = match publish_train_branch(&self.cas_root, &repo, store, &train, &integration) {
-                    Ok(()) => String::new(),
-                    Err(error) => format!(" Publishing `{lane}` to origin failed ({error}); push it before retargeting work there."),
-                };
-                Ok((Some(train.id.clone()), format!(
-                    "\n\nRELEASE TRAIN: opened {} ({lane}) from `{integration}`; this task joins it.{published}", train.id
-                )))
-            }
-            None => Ok((None, String::new())),
-        }
+        store.add(&train).map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        publish_train_branch(&self.cas_root, &repo, store, &train, &integration)
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        Ok((Some(train.id.clone()), format!(
+            "\n\nRELEASE TRAIN: opened {} ({}) from `{integration}`; this task joins it.",
+            train.id, train.effective_epic_branch().unwrap(),
+        )))
     }
 
 }
@@ -637,6 +625,7 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::tools::types::TaskCreateRequest;
     use crate::test_support::TestEnvGuard;
     use cas_types::{Dependency, DependencyType};
     use rmcp::handler::server::wrapper::Parameters;
@@ -648,7 +637,7 @@ mod tests {
         assert!(output.status.success(), "git {args:?}: {output:?}");
     }
 
-    fn repo() -> TempDir {
+    fn repo(env: &mut TestEnvGuard) -> TempDir {
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-q", "-b", "main"]);
@@ -658,7 +647,58 @@ mod tests {
         std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
         git(repo, &["add", "seed.txt"]);
         git(repo, &["commit", "-q", "-m", "seed"]);
+        let gh = repo.join(".git/fixture-gh");
+        std::fs::write(&gh, r#"#!/bin/sh
+case "$1 $2" in
+  'api graphql') printf '%s' '{"data":{"repository":{"nameWithOwner":"example/train-test","pullRequests":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;
+  'api --method') printf '%s' '{"total_count":0,"workflow_runs":[]}' ;;
+  *) exit 2 ;;
+esac
+"#).unwrap();
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+        env.set("CAS_GH_BIN", &gh);
         temp
+    }
+
+    fn core(repo: &Path) -> CasCore {
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        let config = root.join("config.toml");
+        let mut body = std::fs::read_to_string(&config).unwrap_or_default();
+        if !body.contains("canonical_id") { body.push_str("\n[project]\ncanonical_id='train-fixture'\n"); std::fs::write(config, body).unwrap(); }
+        let mapped = Command::new("git").args(["config", "--get-regexp", "^url[.]"]).current_dir(repo).output().unwrap();
+        if !mapped.status.success() {
+            let bare = repo.join(".git/fixture-origin.git");
+            git(repo, &["init", "--bare", "-q", bare.to_str().unwrap()]);
+            git(repo, &["config", &format!("url.{}.insteadOf", bare.display()), "https://github.com/example/train-test.git"]);
+            git(repo, &["push", "-q", "origin", "main"]);
+        }
+        let core = CasCore::with_daemon(root, None, None);
+        let mut actor = crate::types::Agent::new_with_role("train-fixture-owner".into(), "train-fixture-owner".into(), crate::types::AgentRole::Supervisor);
+        actor.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
+        actor.factory_session = Some("train-fixture-session".into());
+        actor.cc_session_id = Some("train-fixture-harness".into());
+        actor.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut actor, std::process::id());
+        let agents = core.open_agent_store().unwrap();
+        if agents.get(&actor.id).is_err() { agents.register(&actor).unwrap(); agents.update(&actor).unwrap(); }
+        core.set_agent_id_for_testing(actor.id);
+        core
+    }
+
+    fn explicitly_enroll(core: &CasCore, repo: &Path, train: &Task) {
+        use crate::worktree::git::train_authority::Snapshot;
+        let store = core.open_task_store().unwrap();
+        let snapshot = match Snapshot::read_optional(repo, &train.id).unwrap() {
+            Some(snapshot) => snapshot,
+            None => {
+                let actor = core.resolve_live_supervisor_authority().unwrap();
+                let identity = crate::train_owner::identity(&actor, &actor.id).unwrap();
+                let lane = train.effective_epic_branch().unwrap();
+                let head = crate::worktree::GitOperations::new(repo.to_path_buf()).fetch_merge_target(lane).unwrap().unwrap();
+                Snapshot::enroll(repo, "train-fixture", &train.id, lane, &identity, &head, Some(&head), &crate::train_owner::provider::GitHubChecks::new(repo).unwrap()).unwrap()
+            }
+        };
+        crate::train_owner::repair_projection(&core.cas_root, store.as_ref(), train, &snapshot).unwrap();
     }
 
     fn request(title: &str) -> TaskCreateRequest {
@@ -672,14 +712,14 @@ mod tests {
     /// must share one train.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_creates_open_a_single_train() {
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let temp = repo();
+        let temp = repo(&mut env);
         let root = temp.path().to_path_buf();
         std::fs::create_dir_all(root.join(".cas")).unwrap();
         std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
         let spawn = |title: &'static str| {
-            let core = CasCore::with_daemon(root.clone(), None, None);
+            let core = core(&root);
             tokio::spawn(async move {
                 core.cas_task_create(Parameters(request(title))).await.map(|_| ()).map_err(|e| e.message)
             })
@@ -687,7 +727,7 @@ mod tests {
         let (a, b) = (spawn("Repair alpha parser"), spawn("Tune beta renderer colours"));
         a.await.unwrap().unwrap();
         b.await.unwrap().unwrap();
-        let store = CasCore::with_daemon(root.clone(), None, None).open_task_store().unwrap();
+        let store = core(&root).open_task_store().unwrap();
         let trains: Vec<_> = store.list(None).unwrap().into_iter().filter(is_release_train).collect();
         assert_eq!(trains.len(), 1, "{trains:?}");
         assert_eq!(store.get_subtasks(&trains[0].id).unwrap().len(), 2);
@@ -696,18 +736,18 @@ mod tests {
     /// cas-25f1: a train opened on task create is on origin immediately.
     #[tokio::test]
     async fn opened_train_branch_is_published_to_origin_cas_25f1() {
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let temp = repo();
+        let temp = repo(&mut env);
         let root = temp.path().to_path_buf();
         let bare = TempDir::new().unwrap();
         git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
         // Keep the GitHub-shaped origin the repo resolves by; git pushes it to the bare repo.
-        git(&root, &["config", &format!("url.{}.pushInsteadOf", bare.path().display()), "https://github.com/example/train-test.git"]);
+        git(&root, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/example/train-test.git"]);
         git(&root, &["push", "-q", "origin", "main"]);
         std::fs::create_dir_all(root.join(".cas")).unwrap();
         std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\nepic_base_branch = \"main\"\n").unwrap();
-        let core = CasCore::with_daemon(root.clone(), None, None);
+        let core = core(&root);
         let created = core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
         let store = core.open_task_store().unwrap();
         let train = store.list(None).unwrap().into_iter().find(is_release_train).unwrap_or_else(|| panic!("no train: {created:?}"));
@@ -721,13 +761,13 @@ mod tests {
     /// child stay exactly as they were.
     #[tokio::test]
     async fn retire_leaves_trains_alone_unless_config_reads_off() {
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let temp = repo();
+        let temp = repo(&mut env);
         let root = temp.path().to_path_buf();
         std::fs::create_dir_all(root.join(".cas")).unwrap();
         std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
-        let core = CasCore::with_daemon(root.clone(), None, None);
+        let core = core(&root);
         core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
         let store = core.open_task_store().unwrap();
         let snapshot = || {
@@ -747,13 +787,13 @@ mod tests {
     /// aimed at the frozen train, joins the next train.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn new_work_joins_the_next_train_while_one_is_frozen() {
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let temp = repo();
+        let temp = repo(&mut env);
         let root = temp.path().to_path_buf();
         std::fs::create_dir_all(root.join(".cas")).unwrap();
         std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
-        let core = CasCore::with_daemon(root.clone(), None, None);
+        let core = core(&root);
         core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
         let store = core.open_task_store().unwrap();
         let frozen = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
@@ -764,6 +804,7 @@ mod tests {
         git(&root, &["add", "work.txt"]);
         git(&root, &["commit", "-qm", "work"]);
         git(&root, &["checkout", "-q", "main"]);
+        crate::train_owner::publication::publish_branch(Some(&core), &root, &lane, &crate::worktree::GitOperations::new(root.clone()).resolve_commit(&lane).unwrap(), "origin").unwrap();
         crate::mcp::tools::core::workflow::release_freeze::freeze(&root, &frozen.id, "operator", None).unwrap();
         let aimed: TaskCreateRequest = serde_json::from_value(serde_json::json!({
             "title": "Tune beta renderer colours", "task_type": "task", "priority": 2, "risk": "none",
@@ -807,9 +848,9 @@ mod tests {
     /// with unfinished children. The actual task-create handler owns routing.
     #[tokio::test]
     async fn default_train_uses_shared_live_branch_across_machines_cas_7ab6() {
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let seed = repo();
+        let seed = repo(&mut env);
         let bare = TempDir::new().unwrap();
         git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
         git(seed.path(), &["tag", "seed"]);
@@ -861,11 +902,12 @@ mod tests {
             std::fs::create_dir(repo.join(".cas")).unwrap();
             std::fs::write(repo.join(".cas/config.toml"),
                 "[project]\ncanonical_id='train-fixture'\n[factory]\nrelease_train=true\nepic_base_branch='main'\n").unwrap();
-            let core = CasCore::with_daemon(repo.clone(), None, None);
+            let core = core(&repo);
             let store = core.open_task_store().unwrap();
             for row in [&stale, &live] { store.add(row).unwrap(); }
             let fresh = train("cas-a888", "epic/empty-old", 0);
             store.add(&fresh).unwrap();
+            explicitly_enroll(&core, &repo, &live);
             let unfinished = Task::new("cas-a000".into(), "Unfinished old work".into());
             store.create_atomic(&unfinished, &[], Some(&stale.id), None).unwrap();
             core.cas_task_create(Parameters(request("New repair"))).await.unwrap();
@@ -881,9 +923,9 @@ mod tests {
             let mut alias = train("cas-a777", "epic/live", 0);
             alias.created_at = live.created_at; // Equal-tip and timestamp tie uses the stable ID.
             store.add(&alias).unwrap();
-            core.cas_task_create(Parameters(request("Equivalent lane repair"))).await.unwrap();
-            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Equivalent lane repair").unwrap();
-            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, alias.id);
+            // An alias task cannot silently acquire the enrolled branch's authority.
+            assert!(core.cas_task_create(Parameters(request("Equivalent lane repair"))).await.is_err());
+            assert!(store.list(None).unwrap().into_iter().all(|task| task.title != "Equivalent lane repair"));
 
             let other = train("cas-a333", "epic/other", 100);
             store.add(&other).unwrap();
@@ -893,7 +935,8 @@ mod tests {
             for id in [&live.id, &other.id] { assert!(refusal.message.contains(id)); }
             assert_eq!(store.list(None).unwrap().len(), before);
 
-            for mut row in [live.clone(), other, contained, alias] {
+            for row in [live.clone(), other, contained, alias] {
+                let mut row = store.get(&row.id).unwrap();
                 row.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
                 store.update(&row).unwrap();
             }
@@ -905,6 +948,7 @@ mod tests {
             // Reverse insertion order on the other machine must not affect election.
             let empty = if machine == "one" { [&older, &newer] } else { [&newer, &older] };
             for row in empty { store.add(row).unwrap(); }
+            explicitly_enroll(&core, &repo, &newer);
             core.cas_task_create(Parameters(request("Fresh train work"))).await.unwrap();
             let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Fresh train work").unwrap();
             assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, newer.id);
@@ -916,8 +960,8 @@ mod tests {
     /// instead of opening a second one; a cut with none still opens one.
     #[test]
     fn cut_adopts_the_lazy_successor_and_opens_one_only_when_none_gh2181() {
-        let _env = TestEnvGuard::temp_home();
-        let temp = repo();
+        let mut env = TestEnvGuard::temp_home();
+        let temp = repo(&mut env);
         let repo = temp.path();
         let bare = TempDir::new().unwrap();
         git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
@@ -934,8 +978,9 @@ mod tests {
             let output = Command::new("git").args(["rev-parse", branch]).current_dir(repo).output().unwrap();
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
-        let cas_root = crate::store::init_cas_dir(repo).unwrap();
-        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let core = core(repo);
+        let cas_root = core.cas_root.clone();
+        let store = core.open_task_store().unwrap();
         let train = |id: &str, lane: &str, age: i64| {
             let mut task = Task::new(id.into(), RELEASE_TRAIN_TITLE.into());
             task.task_type = TaskType::Epic;
@@ -949,6 +994,7 @@ mod tests {
         };
         store.add(&train("cas-b111", "epic/cut", 600)).unwrap();
         store.add(&train("cas-b222", "epic/lazy", 60)).unwrap();
+        explicitly_enroll(&core, repo, &store.get("cas-b222").unwrap());
         let trains = || store.list(None).unwrap().into_iter().filter(is_release_train).map(|t| t.id).collect::<Vec<_>>();
         let successor = |id: &str| store.get(id).unwrap().labels.iter()
             .find_map(|label| label.strip_prefix(SUCCESSOR_LABEL).map(str::to_string));

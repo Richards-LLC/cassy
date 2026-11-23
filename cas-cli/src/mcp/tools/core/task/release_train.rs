@@ -144,10 +144,14 @@ fn publish_train_branch_as(root: &Path, repo: &Path, store: &dyn cas_store::Task
         return Ok(());
     }
     // A missing authority on a formerly enrolled train is never recreated.
-    if store.get_execution_state(&train.id).map_err(|error| error.to_string())?
-        .as_ref().and_then(|state| state.get("train_owner")).is_some()
-        || git.fetch_merge_target(lane).map_err(|error| error.to_string())?.is_some()
+    let existing_target = git.fetch_merge_target(lane).map_err(|error| error.to_string())?.is_some();
+    if existing_target && Snapshot::all(repo)?.iter().any(|authority|
+        authority.record.target == lane && authority.record.train != train.id)
     {
+        return Err("TRAIN_TRANSFER_CONFLICT: target belongs to another train authority".into());
+    }
+    if store.get_execution_state(&train.id).map_err(|error| error.to_string())?
+        .as_ref().and_then(|state| state.get("train_owner")).is_some() || existing_target {
         return Err("TRAIN_OWNER_PUBLICATION_REQUIRED: existing target requires explicit current-owner enrollment and readback".into());
     }
     let owner = train.epic_verification_owner.as_deref()
@@ -190,6 +194,11 @@ fn prepare_train_for_work(root: &Path, repo: &Path, store: &dyn cas_store::TaskS
     prepare_local_train_branch(repo, train, integration)?;
     let held = publish_train_branch_as(root, repo, store, train, integration, principal).err();
     if let Some(reason) = &held {
+        // Missing publisher availability may defer metadata work. A known
+        // conflicting identity/target cannot turn into an accepted new binding.
+        if matches!(reason.split(':').next(), Some("TRAIN_TRANSFER_CONFLICT" | "TRAIN_TRANSFER_TARGET_DIVERGED")) {
+            return Err(reason.clone());
+        }
         let note = format!("TRAIN_PUBLICATION_HELD: {reason}. Work is recorded; owner authority is required before publication or admission.");
         if !train.notes.contains(&note) {
             store.append_trusted_note(&train.id, &note).map_err(|error| error.to_string())?;

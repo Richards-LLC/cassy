@@ -472,10 +472,11 @@ async fn one_pull_rebases_a_rejected_park_that_outranks_the_remote_open_row_gh_2
                 task.as_object_mut().unwrap().remove("revision");
                 state.0 = task;
                 serde_json::json!({"inserted":0,"updated":1,"skipped":0,
-                    "accepted": {id.clone(): {"revision": state.1.to_string()}}})
+                    "accepted": {id.clone(): {"revision": state.1.to_string(), "canonical_id": project}}})
             } else {
                 serde_json::json!({"inserted":0,"updated":0,"skipped":1,
-                    "rejected":[{"id":id,"reason":"revision_conflict","current_revision":state.1.to_string()}]})
+                    "rejected":[{"id":id,"reason":"revision_conflict","existing_canonical_id":project,
+                        "current_revision":state.1.to_string()}]})
             };
             ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{"tasks":detail}}))
         }).mount(&server).await;
@@ -484,7 +485,10 @@ async fn one_pull_rebases_a_rejected_park_that_outranks_the_remote_open_row_gh_2
         .respond_with(move |_: &wiremock::Request| {
             let state = reading.lock().unwrap();
             let mut task = state.0.clone();
+            // The team-pull producer overlays revision, project and team on the stored body.
             task["revision"] = serde_json::json!(state.1.to_string());
+            task["project_id"] = serde_json::json!(project);
+            task["team_id"] = serde_json::json!(team);
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "tasks":[task],"task_dependencies":[],"team_id":team,
                 "pulled_at":"2026-11-22T23:00:00Z","status":"ok"

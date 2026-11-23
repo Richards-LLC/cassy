@@ -1,0 +1,10 @@
+title: Close checks, including the merge-reality gate, measure the rebound lane
+statement: >-
+  After a supervisor rebinds a task to a rebuilt lane such as task-r2, every
+  close check measures that lane whether its tip is local, only on origin or
+  still empty. The G-81 merge-reality gate judges the same lane, so it neither
+  refuses a published rebound tip nor passes an empty unpushed one because the
+  earlier build is intact.
+tasks: [cas-db91]
+journeys: [FACTORY-CLOSE]
+invariants: []

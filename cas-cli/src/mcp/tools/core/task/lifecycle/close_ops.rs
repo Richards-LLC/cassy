@@ -19634,9 +19634,7 @@ pub(crate) fn check_close_merge_reality(
     assignee: &str,
     parent_branch: &str,
 ) -> MergeRealityOutcome {
-    // RED STATE: the earlier derivation, ignoring a rebound lane.
-    let measured = worker_task_branch_ref(repo_path, assignee, &task.id)
-        .unwrap_or_else(|| format!("factory/{assignee}"));
+    let measured = close_measured_factory_branch(repo_path, task, assignee);
     check_factory_branch_merge_reality_with_delivery_mode(
         repo_path,
         measured.strip_prefix("origin/").unwrap_or(&measured),

@@ -28,8 +28,11 @@ gate_exit() {
         fi
     fi
 }
-trap 'gate_exit "$?" "[C-07]" "[H-38]"' EXIT
-
+trap 'status=$?; worker_run_end "$status"; gate_exit "$status" "[C-07]" "[H-38]"' EXIT
+# shellcheck source=scripts/worker-run.sh
+. "$(dirname "${BASH_SOURCE[0]}")/worker-run.sh"
+# The rows read the pushing checkout (the hook's working directory).
+worker_run_begin "$PWD"
 
 zero='0000000000000000000000000000000000000000'
 common="$(git rev-parse --path-format=absolute --git-common-dir)" || exit 1

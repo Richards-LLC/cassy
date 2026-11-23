@@ -1777,7 +1777,8 @@ mod tests {
 
     /// A train asks origin about its target once per entry: under the merge
     /// lock, shared by containment, the target sync, publication and the
-    /// close's integration proof.
+    /// close's integration proof. Each entry also proves its immutable source
+    /// with one read-only origin query before any ref mutation.
     #[tokio::test]
     async fn train_merge_reads_origin_once_per_entry() {
         let fixture = Fixture::build(false);
@@ -1802,6 +1803,11 @@ mod tests {
             assert!(operations.is_ancestor(sha, "origin/epic/train"), "{:?}", queue.outcomes);
         }
         let reads = std::fs::read_to_string(&reads).unwrap_or_default();
-        assert_eq!(reads.lines().count(), fixture.ids.len(), "origin reads:\n{reads}");
+        assert_eq!(reads.lines().filter(|line| line.contains("git fetch ")).count(), fixture.ids.len(), "target fetches:\n{reads}");
+        for index in 1..=fixture.ids.len() {
+            let source = format!("git ls-remote --heads origin refs/heads/factory/worker-{index} ");
+            assert_eq!(reads.lines().filter(|line| *line == source).count(), 1, "source publication reads:\n{reads}");
+        }
+        assert_eq!(reads.lines().count(), fixture.ids.len() * 2, "one source proof and one shared target/close fetch per entry:\n{reads}");
     }
 }

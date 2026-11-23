@@ -859,6 +859,28 @@ keep their existing MCP behavior under either value; hooks, account selection,
 Teams and worker credential protections still apply. Invalid values are refused
 by both config commands and TOML loading.
 
+`factory.claude.worker_sandbox` (default `shadow`) controls macOS Claude workers'
+OS sandbox (cas-3751a):
+
+- **`shadow`:** the worker settings carry a generated `sandbox` block, which
+  `cas-mux` completes at launch with the checkout's exact git paths. While the
+  sandbox enforces, the stage-A text guards record would-deny facts for Bash
+  instead of refusing it (`cas gates report`, column `shadowed`).
+- **Grants (cas-f157):** besides the checkout, git paths, the capped runner's
+  `CAS_ROOT` directories and the operator's effective write roots, the profile
+  grants only the worker's current tasks' artifact directories
+  (`<artifacts_root>/<project-key>/<task-id>`) and the checkout's own scratch
+  (its private temporary directory and a relocated Cargo target). The settings
+  are regenerated at every spawn and recycle. Starting a task the running
+  profile does not grant queues one recycle of that worker, and a queue
+  boundary restarts a sandboxed worker before its successor starts.
+- **`off`:** workers launch without the sandbox, and those guards enforce.
+
+Linux workers and supervisors are not sandboxed. The corpus test
+`worker_sandbox::tests::bypass_corpus_is_blocked_through_the_generated_profile`
+runs only when a named capped run passes `CAS_SRT_BIN=<sandbox-runtime srt>`;
+otherwise it skips with a reason.
+
 Use `cas config set factory.claude.remote_control true` to opt in, and
 `cas config set factory.claude.fallback_model sonnet` to choose a fallback.
 An empty fallback value clears it. Explicitly requested unsupported flags
@@ -2934,6 +2956,10 @@ retain one-pass crate coverage. Vitest, Jest and Playwright use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`;
 Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
 of the changed tests alone, which `node:test` cannot retry.
+A spec that only a sibling config lists, such as `jest-integration.config.js` or
+`playwright.hermetic.config.ts`, runs under that config. The runner's own listing
+decides ownership, and the prescribed command names it with `--config`; a
+caller's `--config` always wins (GH #2058, #2195).
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
 When discovery cannot classify an input, the capped runner widens to the whole

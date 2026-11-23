@@ -347,6 +347,8 @@ let conversationSearchQuery = "";
 const conversationList = new ProjectNavigation();
 const latestRelease = new LatestRelease();
 const pendingSubmissions = new Set<string>();
+/** cas-400a2 (GH #2321): the end of each thread's line of Sends; a Send made while one is held waits its turn. */
+const submissionTurns = new Map<string, Promise<void>>();
 /**
  * The thread for machine:session. With `session`, the thread learns which
  * supervisor session it is attached to, so questions a session that has since
@@ -4329,7 +4331,7 @@ function supervisorPhrase(machineId: string, session: string): string {
   return project ? `the ${project} supervisor` : "the supervisor";
 }
 
-async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, destination: { birth?: string; attach?: AttachSnapshot }, replyTo?: number, retryOf?: string, editOf?: string): Promise<boolean> {
+async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, destination: { birth?: string; attach?: AttachSnapshot }, release: () => void, replyTo?: number, retryOf?: string, editOf?: string): Promise<boolean> {
   await restoredMachines.get(machine.id);
   if (!sessionIsUp(machine.id, session) && !machineWillReconnect(machine.id)) {
     showComposerStatus(connectionStates.get(machine.id)?.authFailure ? `${pairingRefusal(machine.label)} Your message is kept; re-pair, then send it.` : outageRefusal(machine.label), "error", true);
@@ -4408,6 +4410,8 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     else showHeldSendStatus(machine.id, session);
     composer?.focus();
   }
+  // The message is held, so the next Send may be held behind it while this one flushes.
+  release();
   if (sessionIsUp(machine.id, session)) await flushHeldSends(machine, session);
   return true;
 }
@@ -4462,7 +4466,22 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   const supervisor = machine && session ? supervisorTarget(sessions.get(machine.id)?.find((item) => item.name === session)) : undefined;
   if (!machine || !session || !supervisor) return;
   const submissionKey = sessionKey(machine.id, session);
-  if (pendingSubmissions.has(submissionKey)) return;
+  // cas-400a2 (GH #2321): a Send made while an earlier one is still being held
+  // is queued behind it, not dropped with its text left in the composer.
+  const previousTurn = submissionTurns.get(submissionKey);
+  let endTurn!: () => void;
+  const turn = new Promise<void>(resolve => { endTurn = resolve; });
+  submissionTurns.set(submissionKey, turn);
+  // Idempotent: delivery ends the turn before its flush, and the finally below again.
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (submissionTurns.get(submissionKey) === turn) submissionTurns.delete(submissionKey);
+    pendingSubmissions.delete(submissionKey);
+    endTurn();
+  };
+  await previousTurn;
   pendingSubmissions.add(submissionKey);
   try {
   // cas-0b3d: a chip answers an ask; a composer send was spoken if dictation
@@ -4482,7 +4501,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       }
     });
   }
-  const sent = await deliverSupervisorMessage(machine, session, supervisor, text, destination, replyTo, quick?.retryOf, editOf);
+  const sent = await deliverSupervisorMessage(machine, session, supervisor, text, destination, release, replyTo, quick?.retryOf, editOf);
   if (sent && uploads && hasAttachments) {
     uploads.clear();
     if (messageStatus?.session === submissionKey && !messageStatus?.held) clearComposerStatus();
@@ -4499,7 +4518,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
     }
   } finally {
-    pendingSubmissions.delete(submissionKey);
+    release();
   }
 }
 

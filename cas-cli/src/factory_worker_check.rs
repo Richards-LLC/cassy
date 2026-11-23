@@ -2160,7 +2160,9 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
     };
     matches!(key, "HOME" | "CARGO_HOME" | "RUSTUP_HOME" | "CI"
         | "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
-        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL")
+        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL"
+        // cas-3751a: the sandbox-runtime binary the worker sandbox corpus test runs through.
+        | "CAS_SRT_BIN")
         .then_some((key, value))
 }
 
@@ -2303,6 +2305,11 @@ exit "$code"
     if let Some(id) = run { command.arg("--completion-id").arg(id); }
     command.arg("--").args(args);
     command
+}
+
+/// This process's stdout when it is a regular file (a foreground check's log).
+pub(crate) fn stdout_log_path() -> Option<PathBuf> {
+    detached_log_path().filter(|path| path.is_file())
 }
 
 /// Resolve the actual redirected file, rather than interpreting shell text.

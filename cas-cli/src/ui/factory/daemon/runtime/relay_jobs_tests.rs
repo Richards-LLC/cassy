@@ -1478,7 +1478,7 @@ async fn cas_58a3_a_respawn_waits_for_the_crashed_workers_cleanup() {
         "the respawn was requeued, not dropped"
     );
     assert!(
-        daemon.app.snapshot_worker_spawn(Some(relay_worker()), false, None).is_err(),
+        daemon.app.snapshot_worker_spawn(Some(relay_worker()), false, None, crate::factory_isolation::WorkerNameRegistry::default()).is_err(),
         "a named spawn treats the name as busy"
     );
 
@@ -1489,7 +1489,7 @@ async fn cas_58a3_a_respawn_waits_for_the_crashed_workers_cleanup() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(daemon.relay_jobs.crash_cleanups.is_empty());
-    assert!(daemon.app.snapshot_worker_spawn(Some(relay_worker()), false, None).is_ok(), "released");
+    assert!(daemon.app.snapshot_worker_spawn(Some(relay_worker()), false, None, crate::factory_isolation::WorkerNameRegistry::default()).is_ok(), "released");
     // The requeued respawn now runs instead of waiting again. (This test
     // daemon has no harness, so the relaunch itself fails; what matters is
     // that it was attempted, not refused as still cleaning.)

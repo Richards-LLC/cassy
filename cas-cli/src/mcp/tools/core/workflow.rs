@@ -10,7 +10,7 @@ pub(crate) mod premerge_verification;
 pub(crate) use worktree_ops::check_runs_still_running;
 pub(crate) use worktree_ops::{rerun_workflow_run, retry_ci_status};
 pub(crate) use worktree_ops::delivery_ci_pending;
-pub(crate) use worktree_ops::{delivery_tip_ci_conclusion, delivery_tip_ci_reading};
+pub(crate) use worktree_ops::{delivery_tip_ci_conclusion, delivery_tip_ci_reading, delivery_tip_rust_tests};
 pub(crate) use worktree_ops::epic_tip_ci_proof;
 pub(crate) use worktree_ops::task_delivery_branch_matches;
 

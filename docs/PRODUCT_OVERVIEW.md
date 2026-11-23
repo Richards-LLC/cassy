@@ -998,6 +998,10 @@ A recorded capacity wait (an admission refusal with its scheduled retry, fenced 
 
 A worker with a spawn or recycle still in flight in the durable spawn queue is not idle. The director withholds its idle and pending-delivery notices until the replacement registers, then resumes the normal one-notice-per-episode behaviour.
 
+The recorded start boundary decides which branch close measures. After a rebind, the rebound lane is the close-measured branch whether its tip is local, only on origin, or not yet committed, and the merge-reality check judges that same lane. The old per-task branch is never measured in its place.
+
+Spawn keeps worker namespaces exclusive across machines too. A new worker name is refused (`WORKER_NAME_OVERLAPS`) when it would share a `factory/` namespace with a registered worker or with an existing local or origin `factory/*` branch. A name's own task branches never block it. `cas factory` applies the same check to its initial names, including `--worker-spec` names, and workers added later from the GUI or WebSocket go through it before they are bound or launched. It stops when the registry cannot be read. Generated names, including the daemon's fallback names, skip such candidates, and overflow minion names read `kevin2`, not `kevin-2`. `cas doctor` reports any overlap that already exists in a `worker names` row, with the way back, and changes nothing.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

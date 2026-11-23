@@ -1438,6 +1438,7 @@ function openAccounts(): void {
     machines: () => [...machines.values()].map(machine => ({ id: machine.id, label: machine.label, scopes: machine.scopes })),
     checkUsage: (machineId, account, signal) => launchConnection(machineId).checkAccountUsage(account, signal),
     list: (machineId, signal) => launchConnection(machineId).accounts(signal),
+    gateway: (machineId, signal) => launchConnection(machineId).gatewayAccounts(signal),
     change: (machineId, change) => launchConnection(machineId).changeAccount(change),
     changed: machineId => launchSheet.accountsChanged(machineId),
     copy: text => navigator.clipboard.writeText(text),

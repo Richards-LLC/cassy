@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
-import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
+import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog, type GatewayInventory } from "./accounts-model";
 const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
@@ -13,10 +13,10 @@ const settle = async () => {
     expect(document.querySelector('.accounts-machine-body > [role="status"]')).toBeNull();
   });
 };
-function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] })) {
+function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] }), gateway: AccountsHost["gateway"] = async () => { throw new Error("404"); }) {
   const host: AccountsHost = {
     machines: () => [{ id: "linux", label: "Soundwave", scopes: manage ? ["machine-read", "factory-manage"] : ["machine-read"] }],
-    checkUsage: vi.fn(), list: vi.fn(list), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
+    checkUsage: vi.fn(), list: vi.fn(list), gateway: vi.fn(gateway), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
   };
   const sheet = new AccountsSheet(host); sheet.open();
   return { sheet, host };
@@ -175,4 +175,24 @@ it.each(["claude", "codex"] as const)("rechecks %s usage without management or s
   check.mockRejectedValueOnce(Object.assign(new Error("GET usage failed (429)"), { status: 429 })); button().click();
   await vi.waitFor(() => expect(document.body.textContent).toBeTruthy());
   expect(button().disabled).toBe(false);
+});
+
+it("lists hub accounts apart from native profiles, read-only, and only when the machine has a hub", async () => {
+  const hub: GatewayInventory = { status: "unavailable", reason: "hub unreachable", host: "loopback", inventory: "ok", team_accounts: 1,
+    accounts: [{ provider: "claude", label: "hel***@example.test", state: "active", recent_requests: 6, recent_failed: 1, recent_minutes: 200 }, { provider: "codex", label: "pro***@example.test", state: "disabled", recent_requests: 0, recent_failed: 0 }] };
+  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, false], [async () => ({ ...hub, status: "off" as const, accounts: [] }), false], [async () => hub, true]] as const) {
+    setup(true, row, undefined, gateway);
+    await settle();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const section = document.querySelector<HTMLElement>('[data-testid="accounts-gateway"]');
+    expect(Boolean(section)).toBe(shown);
+    if (section) {
+      expect(section.querySelectorAll(".accounts-hub-row")).toHaveLength(2);
+      expect(section.querySelectorAll("button, input, select")).toHaveLength(0);
+      expect(section.querySelector('[data-testid="gateway-reason"]')).not.toBeNull();
+      expect(section.querySelector('[data-testid="gateway-team"]')).not.toBeNull();
+      expect(section.closest(".accounts-provider-group")?.querySelector("[data-operation]")).toBeNull();
+    }
+    document.body.innerHTML = "";
+  }
 });

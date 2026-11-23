@@ -11,6 +11,13 @@ export interface AccountRow {
   capabilities: Record<AccountOperation, string | null>;
 }
 export interface AccountsCatalog { accounts: AccountRow[] }
+/** One account on the machine's home gateway hub (GET /v1/accounts/gateway). Read-only; Team plans never appear. */
+export interface HubAccount { provider: string; label: string; state: "active" | "disabled" | "unavailable"; recent_requests: number; recent_failed: number; recent_minutes?: number }
+export interface GatewayInventory {
+  status: "off" | "ready" | "unavailable"; reason?: string; host?: "loopback" | "tailnet";
+  inventory: "ok" | "off" | "unavailable"; inventory_reason?: string;
+  accounts: HubAccount[]; team_accounts: number;
+}
 export interface AccountChange { operation: AccountOperation; account: string; confirmation?: string; new_name?: string }
 
 export function accountTime(instant: string): string {

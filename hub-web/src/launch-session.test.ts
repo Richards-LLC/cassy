@@ -496,6 +496,27 @@ describe("accounts (cas-9666)", () => {
     await vi.waitFor(() => expect(calls.launches[0]?.request.profile).toBe("main"));
   });
 
+  it("pins the worker route shown for the chosen project and never offers a hub that isn't ready", async () => {
+    for (const [available, choose, sent] of [[true, "gateway", "gateway"], [false, "gateway", "direct"]] as const) {
+      const gateway = { available, preselected: "direct" as const, clients: ["claude", "codex"], ...(available ? {} : { reason: "hub unreachable" }) };
+      const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: async (target) => ({ ...ACCOUNTS, ...(target ? { gateway } : {}) }), catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+      s.open();
+      await flush();
+      const route = dialog().querySelector<HTMLElement>(".launch-route")!;
+      expect(route.hidden).toBe(true);
+      pick(dialog(), 'input[name="launch-project"]');
+      await vi.waitFor(() => expect(route.hidden).toBe(false));
+      expect(route.querySelector("#launch-route-scope")!.textContent).not.toBe("");
+      const option = dialog().querySelector<HTMLInputElement>(`input[name="launch-route"][value="${choose}"]`)!;
+      expect(option.disabled).toBe(!available);
+      if (available) pick(dialog(), `input[name="launch-route"][value="${choose}"]`);
+      dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+      await vi.waitFor(() => expect(calls.launches[0]?.request.routing).toBe(sent));
+      s.close();
+      document.body.innerHTML = "";
+    }
+  });
+
   it("hides the step for Grok, shows a failed check with a retry for Codex, and sends no account for either", async () => {
     const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: ACCOUNTS, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
     s.open();

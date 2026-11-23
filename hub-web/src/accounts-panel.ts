@@ -2,7 +2,7 @@ import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-chec
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
-import { accountMeters, accountTime, type AccountChange, type AccountOperation, type AccountRow, type AccountsCatalog } from "./accounts-model";
+import { accountMeters, accountTime, type AccountChange, type AccountOperation, type AccountRow, type AccountsCatalog, type GatewayInventory } from "./accounts-model";
 import { FACTORY_MANAGE_SCOPE, scopeGrantCommand } from "./pairing-scopes";
 import { HARNESS_NAME, providerAvatarMarkup } from "./provider-mark";
 import type { Scope } from "./types";
@@ -11,6 +11,8 @@ export interface AccountsMachine { id: string; label: string; scopes: readonly S
 export interface AccountsHost {
   machines(): AccountsMachine[];
   list(machineId: string, signal: AbortSignal): Promise<AccountsCatalog>;
+  /** The machine's home gateway; a hub without the route rejects and the section stays hidden. */
+  gateway(machineId: string, signal: AbortSignal): Promise<GatewayInventory>;
   checkUsage: CheckAccountUsage;
   change(machineId: string, change: AccountChange): Promise<void>;
   changed(machineId: string): void;
@@ -39,11 +41,37 @@ function duplicateName(key: string, accounts: readonly AccountRow[], machine: st
 const harnessLookalike = (row: AccountRow) => PROVIDERS.some(([id]) => id !== row.provider && id === row.display_name.trim().toLowerCase());
 const CONFIRM_VERB: Partial<Record<AccountOperation, string>> = { remove: "remove", disable: "disable" };
 
+const HUB_STATE: Record<string, [string, string]> = { active: ["Active", "active"], disabled: ["Disabled", "idle"], unavailable: ["Unavailable", "blocked"] };
+
+/**
+ * The hub's own accounts, kept apart from native profiles: a profile never
+ * pins one, nothing here is selectable, and Team plans are only counted.
+ * Hidden while the machine has no hub configured.
+ */
+export function gatewaySection(machine: AccountsMachine, gateway: GatewayInventory | undefined): string {
+  if (!gateway || gateway.status === "off") return "";
+  const name = escapeHtml(machine.label);
+  const status = gateway.status === "ready" ? `<span class="status-chip status-chip--active">Ready</span>` : `<span class="status-chip status-chip--blocked">Not ready</span>`;
+  const where = gateway.host ? ` on ${gateway.host === "loopback" ? "this machine" : "the tailnet"}` : "";
+  const reason = gateway.reason ? `<p class="accounts-readonly" data-testid="gateway-reason">${escapeHtml(gateway.reason)}. Gateway-routed workers start direct until it is ready.</p>` : "";
+  const team = gateway.team_accounts ? `<p class="accounts-readonly" data-testid="gateway-team">${gateway.team_accounts} Team account${gateway.team_accounts === 1 ? " is" : "s are"} on the hub and not listed. Cassy does not use Team; remove ${gateway.team_accounts === 1 ? "it" : "them"} in the hub dashboard.</p>` : "";
+  const inventory = gateway.inventory === "off" ? `<p class="accounts-observed">Hub accounts aren't listed: set <code>factory.gateway.dashboard</code> and <code>factory.gateway.dashboard_key_file</code> on ${name}.</p>`
+    : gateway.inventory === "unavailable" ? `<p class="accounts-observed" role="status">Couldn't read the hub dashboard${gateway.inventory_reason ? `: ${escapeHtml(gateway.inventory_reason)}` : ""}.</p>`
+    : gateway.accounts.length ? `<ul class="accounts-ledger">${gateway.accounts.map(account => {
+      const [label, tone] = HUB_STATE[account.state] ?? ["State unknown", "open"];
+      const window = account.recent_minutes ? ` in the last ${account.recent_minutes >= 120 ? `${Math.round(account.recent_minutes / 60)} hours` : `${account.recent_minutes} minutes`}` : " recently";
+      const activity = `${account.recent_requests} request${account.recent_requests === 1 ? "" : "s"}${window}${account.recent_failed ? ` · ${account.recent_failed} failed` : ""}`;
+      return `<li class="accounts-row accounts-hub-row" data-hub-state="${escapeHtml(account.state)}">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "lane" })}<div class="accounts-card-body"><div class="accounts-identity"><strong>${escapeHtml(account.label)}</strong></div><p class="accounts-where">On the hub · ${escapeHtml(HARNESS_NAME[account.provider as keyof typeof HARNESS_NAME] ?? account.provider)}</p><p class="accounts-state"><span class="status-chip status-chip--${tone}">${label}</span></p><p class="accounts-observed">${activity}</p></div></li>`;
+    }).join("")}</ul>` : `<p class="accounts-observed">No accounts on the hub.</p>`;
+  return `<section class="accounts-provider-group accounts-gateway" data-testid="accounts-gateway" aria-label="Home gateway on ${name}"><h4 class="accounts-provider">Home gateway${where} ${status}</h4><p class="accounts-cleanup-lead">These hub accounts serve gateway-routed workers. A native profile above doesn't pin one; the hub picks per request. Read-only here; per-request detail lives in the hub dashboard on ${name}.</p>${reason}${team}${inventory}</section>`;
+}
+
 /** Body-mounted modal: shell redraws do not destroy edits or confirmations. */
 export class AccountsSheet {
   private dialog?: HTMLDialogElement;
   private loads = new AbortController();
   private catalogs = new Map<string, AccountsCatalog>();
+  private gateways = new Map<string, GatewayInventory>();
   private pending = false;
   private edit?: { machine: AccountsMachine; account: AccountRow; operation: AccountOperation } | { machine: AccountsMachine; cleanup: AccountRow[] };
   /** One editor, moved into the card (or cleanup banner) it acts on. */
@@ -63,7 +91,7 @@ export class AccountsSheet {
   open(): void {
     const dialog = this.ensureDialog();
     this.loads.abort(); this.loads = new AbortController(); this.generation++;
-    this.usageChecks.reset(); this.clearEditor(); this.catalogs.clear();
+    this.usageChecks.reset(); this.clearEditor(); this.catalogs.clear(); this.gateways.clear();
     this.notice("");
     const machines = this.host.machines();
     this.$(".accounts-machines").innerHTML = machines.length ? machines.map(machine => `<section data-machine="${escapeHtml(machine.id)}" aria-label="${escapeHtml(machine.label)}"><h3 class="accounts-machine">${escapeHtml(machine.label)}</h3><div class="accounts-machine-body"><p role="status">Loading accounts…</p></div></section>`).join("") : '<p>No paired machines. Pair a machine to see its accounts.</p>';
@@ -165,6 +193,12 @@ export class AccountsSheet {
     if (!body) return;
     if (!machine.scopes.includes("machine-read")) { body.innerHTML = '<p>Account listing needs machine read access. Update this machine’s pairing.</p>'; return; }
     body.innerHTML = '<p role="status">Loading accounts…</p>';
+    void this.host.gateway(machine.id, signal).then(inventory => {
+      if (signal.aborted || generation !== this.generation) return;
+      this.gateways.set(machine.id, inventory);
+      const catalog = this.catalogs.get(machine.id), current = this.machineBody(machine.id);
+      if (catalog && current) this.render(machine, current, catalog);
+    }, () => undefined);
     try {
       const catalog = await this.host.list(machine.id, signal);
       if (signal.aborted || generation !== this.generation) return;
@@ -189,7 +223,7 @@ export class AccountsSheet {
       return accounts.length ? `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${label} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts)).join("")}</ul></section>` : "";
     }).join("");
     const stale = cleanup.length ? `<section class="accounts-provider-group accounts-cleanup" aria-label="Needs cleanup on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">Needs cleanup · ${cleanup.length}</h4><p class="accounts-cleanup-lead">Stale logins and duplicates of another account. Remove the copy you no longer use; the account it duplicates stays.</p><ul class="accounts-ledger">${cleanup.map(account => this.card(machine, account, manage, catalog.accounts)).join("")}</ul></section>` : "";
-    return `<p class="accounts-machine-summary">${summary}</p>${banner}${manage ? "" : this.grantCallout(machine)}${groups}${stale}`;
+    return `<p class="accounts-machine-summary">${summary}</p>${banner}${manage ? "" : this.grantCallout(machine)}${groups}${stale}${gatewaySection(machine, this.gateways.get(machine.id))}`;
   }
 
   /** DESIGN.md: read-only pairings see the actions and exactly how to unlock them. */

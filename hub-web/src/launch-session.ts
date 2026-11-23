@@ -53,7 +53,11 @@ export interface BrowseEntry {
 
 export interface BrowseListing { root: BrowseRoot; path: string; entries: BrowseEntry[]; truncated: boolean }
 
-export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string }
+export type WorkerRoute = "direct" | "gateway";
+export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string; routing?: WorkerRoute }
+
+/** New Session's worker route for the chosen project (GET /v1/launch/profiles `gateway`). Never an address or key. */
+export interface GatewayRouteOption { available: boolean; reason?: string; preselected: WorkerRoute; clients: string[] }
 
 /** One account profile a CLI can run as (GET /v1/launch/profiles, cas-7b52). */
 export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string; windows?: AccountWindow[]; usage_observed_at?: string | null }
@@ -61,7 +65,23 @@ export interface LaunchProfile { name: string; logged_in: boolean; is_default: b
 /** One CLI's accounts. A missing CLI is installed=false with no error; a failed check keeps installed=true and names the error. */
 export interface CliProfiles { installed: boolean; profiles: LaunchProfile[]; error?: string }
 
-export type LaunchProfiles = Partial<Record<SupervisorCli, CliProfiles>>;
+export type LaunchProfiles = Partial<Record<SupervisorCli, CliProfiles>> & { gateway?: GatewayRouteOption | null };
+
+/**
+ * The route step, or hidden when the machine's hub predates routing or no
+ * project is chosen. It names exactly which roles the choice moves.
+ */
+export function routeStep(option: GatewayRouteOption | null | undefined, chosen: WorkerRoute | undefined, machine: string): { kind: "hidden" } | { kind: "choice"; route: WorkerRoute; gateway: boolean; scope: string; note?: string } {
+  if (!option) return { kind: "hidden" };
+  const route: WorkerRoute = option.available ? chosen ?? option.preselected : "direct";
+  const routed = option.clients.map(supervisorCliLabel);
+  const workers = routed.length ? `${routed.join(" and ")} workers` : "No workers";
+  const scope = `Home gateway moves ${workers}. The supervisor and other workers stay direct.`;
+  const note = !option.available ? `The home gateway isn't ready on ${machine}${option.reason ? `: ${option.reason}` : ""}.`
+    : route === "gateway" ? "Workers keep the account below for hooks and sessions; the hub picks which of its accounts serves each request. If the hub isn't ready when a worker starts, that worker starts direct and says so."
+    : undefined;
+  return { kind: "choice", route, gateway: option.available, scope, note };
+}
 
 /** The supervisors that run as a chosen account; Grok has none. */
 const ACCOUNT_CLIS: readonly SupervisorCli[] = ["claude", "codex"];
@@ -108,10 +128,11 @@ export function accountStep(cli: SupervisorCli, profiles: { status: string; data
 }
 
 /** "Start cas-src with Claude (support@…) and 2 workers on soundwave." */
-export function launchSummary(input: { verb: string; project: string; cli: SupervisorCli; account?: string; workers?: number; machine: string; end: string }): string {
+export function launchSummary(input: { verb: string; project: string; cli: SupervisorCli; account?: string; workers?: number; machine: string; end: string; route?: WorkerRoute }): string {
   const who = `${supervisorCliLabel(input.cli)}${input.account ? ` (${input.account})` : ""}`;
   const crew = input.workers ? ` and ${input.workers} ${input.workers === 1 ? "worker" : "workers"}` : "";
-  return `${input.verb} ${input.project} with ${who}${crew} on ${input.machine}${input.end}`;
+  const via = input.route === "gateway" ? ", workers via the home gateway," : "";
+  return `${input.verb} ${input.project} with ${who}${crew}${via} on ${input.machine}${input.end}`;
 }
 
 export type LaunchResult =
@@ -248,6 +269,10 @@ export function launchErrorCopy(result: { status: number; code?: string; detail?
     return { title: `The ${name} account ${profile} isn't logged in on ${machine}.`, advice: `Run this on ${machine}, or pick another account, then start again.`, command: accountLoginCommand(cli as SupervisorCli, profile) };
   }
   switch (result.code) {
+    case "gateway_unavailable":
+      return { title: `The home gateway isn't ready on ${machine}.`, advice: "Choose Direct, or start the hub on the machine, then start again." };
+    case "invalid_routing":
+      return { title: `${machine} doesn't know that worker route.`, advice: "Choose Direct, or update Cassy on the machine." };
     case "invalid_profile":
       return { title: `That ${name} account isn't on ${machine} any more.`, advice: "The account list has been refreshed. Pick another account, then start again." };
     case "cli_missing":
@@ -314,6 +339,7 @@ export function launchSheetMarkup(): string {
       <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Which assistant runs the supervisor.</small></fieldset>
       <fieldset class="launch-account" hidden><legend>Account</legend><div class="launch-account-body" data-launch-accounts></div></fieldset>
       <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="None" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">Up to 16. None starts the supervisor alone.</small></label>
+      <fieldset class="launch-route" aria-describedby="launch-route-scope" hidden><legend>Worker route</legend><div class="launch-cli-options"><label class="launch-cli-option"><input type="radio" name="launch-route" value="direct"><span>Direct</span></label><label class="launch-cli-option"><input type="radio" name="launch-route" value="gateway"><span>Home gateway</span></label></div><small id="launch-route-scope" class="field-hint"></small><small class="field-hint launch-route-note" role="status" hidden></small></fieldset>
       </div>
       <p class="launch-invalid" role="alert" hidden></p>
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
@@ -355,6 +381,8 @@ export class LaunchSheet {
   private cliChosen = false;
   private profiles: Load<LaunchProfiles> = { status: "idle" };
   private account: string | undefined;
+  /** An explicit route choice; otherwise the project's own preselection. */
+  private route: WorkerRoute | undefined;
   private profilesGeneration = 0;
   private readonly usageChecks: AccountUsageChecks;
   private loads = new AbortController();
@@ -394,6 +422,7 @@ export class LaunchSheet {
     // count or filter left from the last launch must never ride along
     // unseen (cas-0f51 QA F01).
     this.cliChosen = false;
+    this.route = undefined;
     this.query = "";
     (this.$("input[name=launch-workers]") as HTMLInputElement).value = "";
     this.$(".launch-invalid").hidden = true;
@@ -453,6 +482,7 @@ export class LaunchSheet {
       if (target.name === "launch-machine") { this.selectMachine(target.value); return; }
       if (target.name === "launch-cli") { this.cli = target.value as SupervisorCli; this.cliChosen = true; this.account = this.defaultAccountFor(this.cli); this.renderAccounts(); this.syncChecked(); this.syncActions(); return; }
       if (target.name === "launch-account") { this.account = target.value; this.syncChecked(); this.syncActions(); return; }
+      if (target.name === "launch-route") { this.route = target.value as WorkerRoute; this.renderRoute(); this.syncChecked(); this.syncActions(); return; }
       if (target.name === "launch-project") { this.choose(target as HTMLInputElement); return; }
     });
     dialog.addEventListener("input", (event) => {
@@ -555,6 +585,7 @@ export class LaunchSheet {
     const entry = this.profiles.status === "ready" ? this.profiles.data[this.cli] : undefined;
     if (!entry?.profiles.some((profile) => profile.name === this.account && profile.logged_in)) this.account = this.defaultAccountFor(this.cli);
     this.renderAccounts();
+    this.renderRoute();
     this.syncChecked();
     this.syncActions();
   }
@@ -569,6 +600,35 @@ export class LaunchSheet {
     const step = this.step();
     if (step.kind !== "list") return undefined;
     return step.entry.profiles.some((profile) => profile.name === this.account && profile.logged_in) ? this.account : undefined;
+  }
+
+  private routeStep(): ReturnType<typeof routeStep> {
+    const option = this.profiles.status === "ready" && this.selection ? this.profiles.data.gateway : undefined;
+    return routeStep(option, this.route, this.machine()?.label ?? "the machine");
+  }
+
+  private renderRoute(): void {
+    const fieldset = this.dialog?.querySelector<HTMLElement>(".launch-route");
+    if (!fieldset) return;
+    const step = this.routeStep();
+    fieldset.hidden = step.kind === "hidden";
+    if (step.kind === "hidden") return;
+    for (const input of fieldset.querySelectorAll<HTMLInputElement>("input[name=launch-route]")) {
+      input.checked = input.value === step.route;
+      input.disabled = input.value === "gateway" && !step.gateway;
+      input.closest("label")?.classList.toggle("is-disabled", input.disabled);
+    }
+    fieldset.querySelector<HTMLElement>("#launch-route-scope")!.textContent = step.scope;
+    const note = fieldset.querySelector<HTMLElement>(".launch-route-note")!;
+    note.hidden = !step.note;
+    note.textContent = step.note ?? "";
+    this.syncChecked();
+  }
+
+  /** The route to pin: sent only to a hub that offered the choice. */
+  private chosenRoute(): WorkerRoute | undefined {
+    const step = this.routeStep();
+    return step.kind === "choice" ? step.route : undefined;
   }
 
   private renderAccounts(): void {
@@ -823,7 +883,7 @@ export class LaunchSheet {
     start.setAttribute("aria-disabled", String(!ready));
     const workers = parseWorkers((this.$("input[name=launch-workers]") as HTMLInputElement).value);
     summary.textContent = this.selection && machine
-      ? launchSummary({ verb: "Start", project: this.selection.name, cli: this.cli, account: this.chosenAccount(), workers: workers.ok ? workers.workers : undefined, machine: machine.label, end: "." })
+      ? launchSummary({ verb: "Start", project: this.selection.name, cli: this.cli, account: this.chosenAccount(), workers: workers.ok ? workers.workers : undefined, machine: machine.label, end: ".", route: this.chosenRoute() })
       : "Choose a project to start.";
   }
 
@@ -847,8 +907,9 @@ export class LaunchSheet {
     const selection = this.selection;
     const cli = this.cli;
     const profile = this.chosenAccount();
-    const request: LaunchRequest = { target: selection.target, supervisor_cli: cli, ...(workers.workers === undefined ? {} : { workers: workers.workers }), ...(profile ? { profile } : {}) };
-    this.showStarting(launchSummary({ verb: "Starting", project: selection.name, cli, account: profile, workers: workers.workers, machine: machine.label, end: "…" }), `Asking ${machine.label} to start it.`);
+    const routing = this.chosenRoute();
+    const request: LaunchRequest = { target: selection.target, supervisor_cli: cli, ...(workers.workers === undefined ? {} : { workers: workers.workers }), ...(profile ? { profile } : {}), ...(routing ? { routing } : {}) };
+    this.showStarting(launchSummary({ verb: "Starting", project: selection.name, cli, account: profile, workers: workers.workers, machine: machine.label, end: "…", route: routing }), `Asking ${machine.label} to start it.`);
     let result: LaunchResult;
     try {
       result = await this.host.launch(machine.id, request);
@@ -865,7 +926,7 @@ export class LaunchSheet {
       }
       this.showError(launchErrorCopy(result, cli, machine.label, profile), result.detail);
       // An account that vanished or logged out: Back shows the list as it is now.
-      if (result.code === "invalid_profile" || result.code === "not_logged_in") void this.loadProfiles(machine.id);
+      if (result.code === "invalid_profile" || result.code === "not_logged_in" || result.code === "gateway_unavailable") void this.loadProfiles(machine.id);
       return;
     }
     countUsage("session.launch");

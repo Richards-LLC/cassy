@@ -2432,6 +2432,14 @@ async fn retarget_empty_branch_rebind_then_start_gh1673() {
             assert_eq!(start.assignee, WORKER);
             assert!(task.deliverables.factory_branch_anchor.is_none());
             assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), target_tip);
+            // cas-db91 (GH #1698): close judges the rebound lane, not the original.
+            // The approved empty replacement has no commits and is unpushed, so G-81
+            // refuses it by name, where the original lane would be named instead.
+            assert_eq!(close_measured_factory_branch(repo, &f.task(id), WORKER).trim_start_matches("origin/"), replacement);
+            let MergeRealityOutcome::Refuse(message) = check_close_merge_reality(repo, &f.task(id), WORKER, "new-target") else {
+                panic!("G-81 must judge the empty rebound lane");
+            };
+            assert!(message.contains(&replacement), "{message}");
         }
         assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "{obstruction}");
     }
@@ -2586,6 +2594,56 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
         let shown = call(&f.worker, serde_json::json!({"action":"show", "id":id, "full":full})).await;
         assert!(shown.contains(&format!("Recorded source branch: {LANE}")), "{shown}");
         assert!(shown.contains(&format!("Parked branch: {replacement}")), "{shown}");
+    }
+}
+
+/// cas-db91 (GH #1698): after a supervisor rebinds a task to its rebuilt
+/// `-r2` lane, close measures `-r2`, whether its tip is local or only on
+/// origin, never the old per-task lane that still carries the first build.
+/// G-81 judges the same lane. The empty rebind is covered through the real
+/// handler in `retarget_empty_branch_rebind_then_start_gh1673`.
+#[tokio::test]
+async fn rebound_r2_lane_is_the_close_measured_branch_cas_db91() {
+    for remote_only in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+        let id = "cas-1698";
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        std::fs::write(checkout.join("first.rs"), "pub fn first() {}\n").unwrap();
+        git(&checkout, &["add", "first.rs"]);
+        git(&checkout, &["commit", "-q", "-m", "fix(cas-1698): first build"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        let rebuilt = format!("{lane}-r2");
+        git(&checkout, &["checkout", "-q", "-b", &rebuilt, "main"]);
+        std::fs::write(checkout.join("rebuilt.rs"), "pub fn rebuilt() {}\n").unwrap();
+        git(&checkout, &["add", "rebuilt.rs"]);
+        git(&checkout, &["commit", "-q", "-m", "fix(cas-1698): rebuilt delivery"]);
+        git(&checkout, &["push", "-q", "origin", &rebuilt]);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"rebind_branch", "id":id, "branch":rebuilt, "reason":"Bind the rebuilt delivery",
+        })).unwrap())).await;
+        assert!(rebound.is_ok(), "{rebound:?}");
+        if remote_only {
+            git(&checkout, &["checkout", "-q", "--detach"]);
+            git(repo, &["branch", "-D", &rebuilt]);
+        }
+        assert_eq!(close_measured_factory_branch(repo, &f.task(id), WORKER).trim_start_matches("origin/"),
+            rebuilt, "remote_only={remote_only}");
+        // G-81 judges that same lane: a published rebuilt tip proceeds.
+        let reality = check_close_merge_reality(repo, &f.task(id), WORKER, "main");
+        assert!(matches!(reality, MergeRealityOutcome::Proceed), "remote_only={remote_only}");
     }
 }
 

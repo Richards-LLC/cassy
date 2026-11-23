@@ -1421,7 +1421,7 @@ impl CiTransport for GhCiTransport {
         let fresh = |cached: &[u8]| {
             let same = serde_json::from_slice::<serde_json::Value>(cached)
                 .is_ok_and(|entry| entry["signature"] == signature.as_str());
-            if same { OUTSIDE_LISTING_RUNS_TTL } else { Duration::ZERO }
+            if same { crate::gh_budget::jittered(OUTSIDE_LISTING_RUNS_TTL, &key) } else { Duration::ZERO }
         };
         let bytes = crate::gh_budget::shared_read_by(&key, fresh, || {
             let answer = self.gh_bytes(&[
@@ -1546,9 +1546,11 @@ impl CiTransport for GhCiTransport {
     }
 }
 
-/// Branches asked in one request. 150 lookups of 20 PRs are 3,000 of GitHub's
-/// 500,000 nodes and well inside the command-line limit, so a project's whole
-/// parked set is one read; only a larger one takes another.
+/// Branches asked in one request, so a poll reads at most one request per 150
+/// watched branches. A query must stay bounded: 150 lookups of 20 PRs are 3,000
+/// of GitHub's 500,000 nodes and well inside the command-line limit, so a
+/// project's whole parked set (111 today) is one read; only a larger one takes
+/// another.
 const DELIVERY_PR_BATCH: usize = 150;
 
 fn merge_group_pr_number(branch: &str) -> Option<u64> {
@@ -2849,10 +2851,13 @@ esac
             completed: Default::default(), recent: Default::default(),
         }, &deliveries).unwrap();
 
-        for polled in 1..=POLLS {
+        let mut per_poll = Vec::new();
+        for _ in 0..POLLS {
+            let before = calls();
             assert!(poll().is_empty());
-            assert_eq!(calls(), polled, "one PR read a poll for {PARKED} parked deliveries, the first included");
+            per_poll.push(calls() - before);
         }
+        assert_eq!(per_poll, [1; POLLS], "PR reads per poll for {PARKED} parked deliveries, the first included");
 
         let lane = deliveries[7].branch.clone();
         std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "OPEN")).unwrap();
@@ -2861,6 +2866,12 @@ esac
         std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "MERGED")).unwrap();
         assert_eq!(poll().iter().map(|o| o.merge_commit.as_deref()).collect::<Vec<_>>(), [Some("merge-tip")]);
         assert_eq!(calls(), POLLS + 2, "a PR's opening and its merge are each seen on the next poll, still one read");
+
+        // Run lists cached together do not expire together, and none outlives its lifetime.
+        let expiry = |sha: &str| crate::gh_budget::jittered(OUTSIDE_LISTING_RUNS_TTL, &format!("runs org/repo {sha}"));
+        let (a, b) = (expiry(&format!("{:040x}", 1)), expiry(&format!("{:040x}", 2)));
+        assert_ne!(a, b);
+        assert!(a.max(b) <= OUTSIDE_LISTING_RUNS_TTL && a.min(b) >= OUTSIDE_LISTING_RUNS_TTL.mul_f64(0.9));
     }
 
     #[test]

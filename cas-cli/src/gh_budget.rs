@@ -233,6 +233,15 @@ pub(crate) fn check_runs_ttl(bytes: &[u8]) -> Duration {
     Duration::from_secs(if finished { 600 } else { 60 })
 }
 
+/// A shared answer's lifetime less up to a tenth, by a fixed share of its key
+/// (cas-a9eb): answers cached in one poll expire spread over that tenth, not
+/// together in one later poll. It only shortens, so no refresh comes after
+/// `ttl`, and a zero lifetime stays zero.
+pub(crate) fn jittered(ttl: Duration, key: &str) -> Duration {
+    let share = key.bytes().fold(0u32, |hash, byte| hash.wrapping_mul(31).wrapping_add(u32::from(byte))) % 100;
+    ttl.mul_f64(1.0 - f64::from(share) / 1000.0)
+}
+
 /// The shared key of one commit's check-runs answer, for every reader.
 pub(crate) fn check_runs_key(repo: &str, sha: &str) -> String {
     format!("check-runs {repo} {sha}")

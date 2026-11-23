@@ -37,7 +37,7 @@ impl CasService {
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
         let (root, from, summary) = (self.inner.cas_root.clone(), sender.clone(), summary.to_string());
         let delivery_label = label.clone();
-        let sent = tokio::task::spawn_blocking(move || -> Result<peer_mailbox::SendReceipt,String> {
+        let sent = crate::mcp::tools::service::mutation_receipt::spawn_blocking(move || -> Result<peer_mailbox::SendReceipt,String> {
             let queue = crate::store::open_prompt_queue_store(&root).map_err(|e| e.to_string())?;
             let response = reply.map(|id| -> Result<String,String> {
                 let row = queue.queued_prompt(id).map_err(|e| e.to_string())?.ok_or("Reply message is absent")?;
@@ -91,7 +91,7 @@ impl CasService {
         let body = peer_mailbox::attach_message_intent(&body, intent, false)
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
         let (sender, target, summary) = (sender.clone(), target.to_string(), summary.to_string());
-        let sent = tokio::task::spawn_blocking(move || -> Result<Option<(String, peer_mailbox::SendReceipt)>, String> {
+        let sent = crate::mcp::tools::service::mutation_receipt::spawn_blocking(move || -> Result<Option<(String, peer_mailbox::SendReceipt)>, String> {
             let directory = peer_mailbox::WorkerDirectory::load(&root, &sender.id)?;
             let Some(to) = directory.resolve(&target)? else { return Ok(None) };
             if !directory.matches_local(&sender) { return Err("worker sender registration is not live or does not match Cloud identity".into()); }
@@ -280,7 +280,7 @@ impl CasService {
                 summary.to_string(),
             );
             let (successor, note) = redirect.unzip();
-            let reply = tokio::task::spawn_blocking(move || {
+            let reply = crate::mcp::tools::service::mutation_receipt::spawn_blocking(move || {
                 let queue = crate::store::open_prompt_queue_store(&cas_root)
                     .map_err(|error| format!("could not open the prompt queue: {error}"))?;
                 peer_mailbox::reply_to_peer_row(
@@ -440,7 +440,7 @@ impl CasService {
             summary.to_string(),
         );
         let to = peer.clone();
-        let receipt = tokio::task::spawn_blocking(move || {
+        let receipt = crate::mcp::tools::service::mutation_receipt::spawn_blocking(move || {
             peer_mailbox::send_to_peer(&cas_root, &sender_id, &to, &body, Some(&summary), None)
         })
         .await
@@ -608,7 +608,7 @@ impl CasService {
         let body = peer_mailbox::attach_message_intent(message, kind, false)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         let (sender_id, summary_text, to) = (sender.id.clone(), summary.to_string(), peer.clone());
-        let receipt = tokio::task::spawn_blocking(move || {
+        let receipt = crate::mcp::tools::service::mutation_receipt::spawn_blocking(move || {
             peer_mailbox::send_to_user_peer(
                 &cas_root,
                 &sender_id,

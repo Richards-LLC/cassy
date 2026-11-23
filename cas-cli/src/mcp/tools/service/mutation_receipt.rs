@@ -108,11 +108,40 @@ where
     .await
 }
 
+/// Run synchronous work on the blocking pool with this request's receipt in
+/// scope, so a message write inside it can record its commit (cas-cd0f).
+pub(crate) fn spawn_blocking<F, T>(work: F) -> tokio::task::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let receipt = current();
+    tokio::task::spawn_blocking(move || match receipt {
+        Some(receipt) => CURRENT.sync_scope(receipt, work),
+        None => work(),
+    })
+}
+
 pub(crate) fn message_committed(id: i64) {
     if let Some(receipt) = current() {
         let _ = receipt.commit.set(Commit {
             description: format!("message enqueue committed; notification_id: {id}; query message_status before retrying"),
             notification_id: Some(id),
+        });
+    }
+}
+
+/// cas-cd0f: a message written somewhere other than the local prompt queue
+/// (a peer outbox row, an external inbox notification), named by `reference`.
+/// Every message write records its commit before any later fallible step, so
+/// a send that errors without one wrote nothing.
+pub(crate) fn message_ref_committed(reference: &str) {
+    if let Some(receipt) = current()
+        && receipt.tool == "coordination"
+    {
+        let _ = receipt.commit.set(Commit {
+            description: format!("message {reference} committed; do not resend"),
+            notification_id: None,
         });
     }
 }

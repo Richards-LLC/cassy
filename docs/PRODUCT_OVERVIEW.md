@@ -836,6 +836,172 @@ If owner publication fails after the park, the outcome records that failure and 
   proof. Missing metadata, untested changes and unsuccessful checks still
   block close; project-specific CI names are supported.
 
+The director's 10-minute "CI unknown" merge decision applies only when CI could exist for the delivery. When every GitHub Actions workflow at the delivery tip provably skips a push to the factory branch (for example, pull-request-only workflows), the director raises no CI-unknown decision for that delivery. Unreadable workflows, an empty workflow set and filters it cannot evaluate still count as covered, so genuinely missing CI keeps its single bounded alert and clears once CI posts.
+
+Contained historical deliveries close under an operator recovery decision. The operator runs `cas task recovery-decision --scope <epic-id> --note "..."` once per epic from their own terminal; agent contexts and agent shells are refused, and the record lives under `.cas/operator/`. The command prints and records what the decision waives for that epic's contained, measured non-Tier-2 deliveries: a `reviewed-drop:` reason for G-56 (the named target commits must still cover every dropped path), the G-64 independent QA pass for the cited commit, and the G-70 missing pre-merge approval. A live registered supervisor closes each delivery with `operator_decision=<id>` and `commit_receipt=<containment commit>`, and never with `supervisor_override`. The close records the decision ID, scope and commit, creates no pre-merge approval and dispatches no post-merge review. G-164 refuses an unknown or foreign decision, a combined override and any delivery outside those conditions.
+
+### Slow task response recovery
+
+When a committed task operation answers before its follow-up finishes, the MCP response identifies the action and task and includes a bounded notes request. Start responses confirm assignment acceptance and direct callers to START CONTEXT and close checks once follow-up finishes. Close responses continue to describe close follow-up.
+
+A task show/get or notes read that reaches its response deadline includes pagination guidance and a structured recovery request with full=false, offset and limit. Notes writes retain mutation uncertainty/commit semantics and do not receive read-only retry advice.
+
+Legacy MCP callers without a factory session use the same live-supervisor lookup as unscoped lifecycle callers. This compatibility lives in the shared snapshot resolver so direct message routing and store wrappers agree. Explicit factory sessions retain owner availability, competing-name and foreign-session protections.
+
+A burst of directed messages to the supervisor is delivered as one turn. While the batch waits for its last delivery claim, it keeps every message it holds. A later queue refresh cannot send one of those messages on its own.
+
+A release train's supervisor notices (cut ready, post-merge close recovery) go only to the train's owner. A supervisor that does not own the train receives none of them, whether the owner runs on the same machine or another, and focusing the epic does not change that.
+
+A task start, queued or direct, never moves a worker's checkout while it is busy. A start that would switch, cut or reset the checkout waits with code G-165 while the worker has a live detached run or uncommitted changes. A queued start proceeds on a later queue pass once the checkout is clear. Journey runs, worker pre-push rows and foreground capped checks register a run bound to their own process, so they hold the checkout for their whole life. A start that leaves the checkout as it is, such as resuming on the task's own branch, is not held.
+
+A task close that outlives its MCP response budget returns progress with a durable continuation ID. The task's final outcome note uses the same identity, so workers can observe a delayed park or refusal without repeating the mutation. Only a checked close or park reports a committed disposition; a parked delivery still awaits its merge verdict.
+
+The director's "CI unknown" merge decision names its evidence. It quotes the exact GitHub check-runs query for the delivery tip and why the answer was not settled, for example skipped test checks or only a deployment preview reported. The conclusions themselves are unchanged.
+
+- **Worker OS sandbox** - on macOS, a Claude worker's Bash tool runs in Claude Code's sandbox with a profile Cassy generates at launch:
+  - **Writable:** the worktree, the artifact and scratch roots, the operator's effective write roots and the capped runner's `CAS_ROOT` directories.
+  - **Git:** the worktree's own git directory, objects, `factory/*` refs and remote-tracking refs. The shared `.git` directory is never writable as a whole, and its `config`, `hooks` and worktree config are denied.
+  - **Denied:** writes to protected secret files such as `.env`, keys and certificates.
+  - **Network:** GitHub, crates.io and the npm registry.
+
+  In shadow mode (`factory.claude.worker_sandbox=shadow`, the default), the text guards the sandbox replaces count would-deny facts for sandboxed Bash calls instead of refusing them. `cas gates report` shows these in its `shadowed` column. Write and Edit tools, Linux workers and supervisors keep the guards; `off` launches workers without the sandbox.
+
+Worker registration proves the harness connected, while a native transcript turn proves it took its first prompt. The daemon watches registered Claude launches through the five-minute first-prompt grace. A timeout records a failed spawn and sends a critical notice with the promised task and recovery steps. A confirmed PTY teardown releases the preassignment; uncertain teardown preserves the binding for recovery.
+
+The local quarantine ledger hides rows whose home project cannot be established, and a decision applies to the row that existed when it was taken. Because the ledger is keyed by bare task id, an entry older than a local task stamped with this project's identity is stale: pull applies that task's peer updates, its queued pushes are kept, and it stays on the board. Rows that already existed when they were quarantined, and ids whose local row belongs to another project or has no origin, remain quarantined.
+
+Commander sends are taken in turn per conversation. A Send made while an earlier Send on the same conversation is still being held waits behind it instead of being dropped, so a quick second message during a network outage is held with the first and both are delivered once, in order, when the network recovers. A turn ends as soon as its message is held, before it is flushed to the supervisor.
+
+A named Commander journey prepares its source-bound snapshot before starting Playwright's webServer clock. Memory admission can wait normally; refusal reports NOT_STARTED with reason memory_admission and exit code 75, without claiming a journey failure. Ready snapshots are verified before serving, while fixture-only and registered-hub configurations avoid local snapshot builds.
+
+Watchdog notices that concern one task name that task in their header. When the supervisor's inbox delivers such a notice after the task has closed or been cancelled, it marks the notice stale instead of showing it, so finished work never prompts a recovery step.
+
+Park evidence summaries stay below sixteen KiB per note. Full publication details live in the task's evidence-sync report; large manifests are published as verified artifacts and restored by the reviewing machine. Automatic evidence scans skip dependency and repository metadata trees, while small and legacy inline manifests remain readable.
+
+### Task-bound QA metadata
+
+Task QA predictions read the registry and product overview from the assigned worker checkout, including linked worktrees sharing a primary Cassy store. The checkout must share Git repository identity with the task's effective work target. Tasks without a worker checkout use the resolved target repository; a checkout from another repository produces a diagnostic instead of supplying unrelated metadata.
+
+Task show provides current registry/impact context independently of historical creation notes, with structured QA impact on full reads. Task start recomputes prediction for its response and saved start advisories. Finding label validation and priority normalization use the same task-bound main journey declarations; an unrelated primary-checkout journey still fails validation. Metadata is read locally without changing the registry, checkout or historical notes.
+
+An integrated delivery can end in a merge whose two parents carry the same tree. Content proof recovers the task's work from their common base instead of treating an empty merge delta as an empty delivery. Exact-anchor integration and later unrelated target changes preserve this proof; missing or reverted content and foreign task ownership still refuse.
+
+### Retained worker publication counts
+
+Factory GC reports, epic status and startup retained-worktree diagnostics distinguish `ahead_of_own_remote` from `on_no_remote`. The former counts commits ahead of the same worker branch on the selected push remote (origin when configured, otherwise the first remote); the latter counts commits absent from all remote-tracking refs. A missing own tracking ref reads `missing`, an unsuccessful probe reads `unknown`, and a repository without remotes reads `no_remote` with a separate `ahead_of_local_target` count. Reports use local tracking refs without fetching or modifying the checkout.
+
+A checkout remains visible when its own remote is behind even if all its commits are already published on another remote branch. Clean checkouts with no local work remain absent; a missing own remote is never presented as zero commits ahead.
+
+A parked worker receives an informational, quiet receipt when its approved PR
+merges. The receipt records the task and merge commit without asking for another
+close. Cassy's merge/verdict path owns finalization; missing approval and timeout
+recovery remain addressed to the supervisor who owns that delivery.
+
+Cassy bug reports search the selected component tracker before filing. Task deduplication requires component ownership: a matching remote work target, or a local task in the component's source project or explicitly configured tracker project. Product tasks mentioning the same refusal remain unchanged; genuine component matches receive the new evidence.
+
+A worker's own pending reminder for its in-progress task is a declared wait. Stall detection skips the worker while that reminder is pending, the same way idle detection already did, and restarts its nudge-then-escalate ladder once the reminder has fired. A parked delivery (awaiting merge) or a blocked task is never treated as stalled.
+
+Each MCP backend records its PID and version when its daemon starts. That record is the only proof of the live server's version for `worker_status`, the post-install stale-server notice and Commander's Reload Cassy. The write takes its database lock up front, so another factory process writing at the same moment, for example during a reconnect or a launch burst, delays the record instead of discarding it.
+
+A delivery merge grants publication authority over its source delivery, not
+unrelated work already on the local target. Fresh origin evidence under the
+target lock detects unrelated unpublished target history and refuses with its
+exact commit list. That work requires a separate publication decision; the merge
+preserves source, local target and origin. Ordinary and transactional publication
+use the fence, while equal and behind targets keep their existing merge path.
+The delivery's own ancestry and its single integration merge are authorized.
+Typed receipt failures persist before network reads, and detached candidate
+validation preserves concurrent writers before a reviewed publication is refused.
+
+Worker task admission reconciles stale leases against terminal task state. A cancelled or closed predecessor cannot prevent the next assigned task from starting, including during queue repair. Unfinished assignments and claims still enforce one active task per worker.
+
+An explicit `spawn_workers branch=` request checks the first assigned task's effective target before queueing. Disagreements identify both branches and leave the task and queue unchanged. Supervisors correct the task through the existing target update operation, then retry; launch briefs do not grant target authority. Correctly targeted replacements start from their declared target while foreign-commit protection remains in force.
+
+An unparked task with an untouched source cannot silently change to an integration target that excludes its recorded start base. Cassy refuses the ordinary edit and provides explicit recovery: the assigned worker first starts an Open task on its old lane, then the supervisor corrects the target and approves a clean replacement branch from the new target. The original lane stays preserved. Nonempty or rewritten deliveries keep their recorded boundary and existing recovery; dirty-work and commit-attribution protections remain in force.
+
+Task read offsets are UTF-8 byte cursors for show, get and notes. Task list
+rejects a supplied offset instead of silently returning its first page again;
+list callers select results with filters and a limit.
+
+Release membership reconciles lane CI that completed after an Advisory merge.
+The release preview checks the immutable delivery anchor using the normal lane
+CI classifier, accepting successful documentation checks with classified code
+skips. It retains merge containment checks and leaves the historical admission
+unchanged. Pending, failed, missing, and different-anchor CI cannot authorize
+release membership.
+
+A supervisor can approve a clean replacement task branch with a recovery suffix
+after retiring a delivery's proof scope. Blocked recovery distinguishes retained
+branch history and commit capture from active review or merge authority. The
+worker resumes, publishes the fresh branch and parks normally; the old local and
+origin refs remain intact, and the prior anchor stays in the audit history.
+
+A team task push rejected for a stale revision is recovered by one pull. The pull adopts the cloud's current revision and rebuilds the queued push from the local row, including when the local row is a parked or closed delivery that outranks the cloud's older Open state. A pull blocked by a store veto or a row owned by another project still leaves the push parked as an explicit conflict.
+
+A train-merge queue is held by its recorded supervisor only while that session is live. When the train's owner has changed and the prior supervisor has ended, the current train owner's train_merge adopts the queue, settles entries already merged and resumes it. A live prior owner still holds the queue, and only the current train owner may adopt it.
+
+Lane CI attributes failures against the newest target commit already contained in the delivery. A worker's later train merge therefore updates the comparison point instead of leaving inherited train failures blamed on that delivery. An unavailable target can still fall back to the recorded ancestor; genuine delivery-caused failures remain red.
+
+A close retry that completes its checks and evidence publication at the same parked tip confirms that durable park with a COMMITTED continuation while follow-up runs. It preserves the existing anchor and delivery cycle. A close still waiting for required pre-park evidence publication remains in progress; this confirmation does not bypass that review fence.
+
+A worker can shut down after close follow-up finishes: the continuation releases its ownership lock before signaling that its work is idle.
+
+After a supervisor approves blocked supplemental work in the same reviewed scope, the worker resumes directly with task start. An existing delivery or verification proof stays intact; progress notes carry supplemental findings. Changing that reviewed scope still requires the supervisor to recover its proof cycle first.
+
+Reminder admission tolerates transient write contention from other factory processes. A `coordination action=remind` request retries a held write lock within the store's bounded write budget and records the reminder exactly once; persistent contention is refused with no reminder stored.
+
+Push-branch delivery authority comes from the worker's pushed, parked anchor.
+An active task or missing anchor cannot authorize integration, even when a
+supervisor explicitly names it and CI is advisory. Clean, dirty and retired
+workers all use the live origin proof for that immutable anchor before Git can
+merge it. A local-only rebase remains on the worker, preserving the target.
+Local-merge tasks keep their local delivery policy; already-integrated receipts
+can still report containment without merging unfinished work.
+
+Approved completion receipts require the same live source-ref check before
+fresh integration. Receipt recovery can proceed without that ref only after
+live origin containment proves the delivery is already published.
+
+Lane CI records each own/ring invocation and replays it at the delivery head before building the base. This preserves archive identity, selection and partition while avoiding contamination from base dependencies in the shared target directory. Repeated delivery failures that pass at base are caused; failures that pass the identical head invocation remain unattributed and red. Older receipts without replay metadata and empty replays stay unresolved.
+
+A merge retry after a failed pre-merge candidate preparation reports that failure again. The retry resolves the same source, target and context as the first attempt, and each failed attempt sends its own failure notice to the supervisor, so a held merge never waits on a background preparation that has already ended. A successful preparation still reports one ready notice, and publication still requires the exact review.
+
+A coordination send that outlives its response deadline is never left without an identifier. It keeps running under a `send-` continuation id returned with `mutation_outcome=IN_PROGRESS`; `message_status id=<continuation id>` answers IN_PROGRESS, COMMITTED with the notification id, NOT_COMMITTED only when the send returned a refusal before any write, or UNKNOWN when no write was confirmed, and a `send_outcome` notice delivers the final outcome to the sender.
+
+### Revalidating an already-landed task
+
+When a supervisor reopens a task whose delivery already landed, the next cycle may only confirm that landed work on the current tree. That cycle can close with `no_delivery=true`. The prior cycle's retained commits are exempt only when every one of them is on the integration target. The new cycle must add no commit that names the task after its recorded start. Anything else keeps the ordinary close contract. Verification still applies. While the close waits for its verdict, the worker can start their next queued task, and Cassy resumes the close on the verdict.
+
+A replacement worker on a reassigned task reaches a bound lane without a supervisor override. When the predecessor's branch is untouched, start binds the replacement's own branch automatically. When the predecessor committed work, that branch is kept, the replacement keeps working and delivers, and the supervisor's `rebind_branch` then binds the replacement's branch.
+
+A QA ledger written on another machine keeps passing the evidence check after its evidence directory is restored. A capture cited by the writing machine's absolute artifacts path is found at the same place under the local task directory; it must still sit inside the ledger directory, and the ledger file is never rewritten.
+
+Historical integrated-delivery recovery accepts the prescribed supervisor
+command when the receipt resolves to the task's exact recorded anchor already
+contained in its declared target. A completed reviewer ERROR, either legacy or
+bound to the resolved dispatch, does not trap that recovery in G-70. The audit
+records the supervisor, receipt, target and original error; the original verdict
+and dispatch remain intact, and the new record is a verification skip rather
+than a pre-merge approval. Pending or rejected reviews retain their authority.
+
+Literal supervisor messages resolve the worker's live session owner from one registry snapshot. Unavailable or competing owners return structured reasons and supervisor status, session and heartbeat details. Same-name restart ordering and legitimate sessionless fallback remain supported, while metadata cannot borrow an explicitly different factory's supervisor.
+
+A factory worker owns two kinds of branch: `factory/<name>` and `factory/<name>-<task-id>`. The tool guard and the installed pre-commit and pre-push hooks all apply this one rule, from the branch name alone. A branch's owner is never guessed from its name: a refusal names another worker only when that worker is registered. When the branch isn't yours, the refusal prints how to save your edits and switch back. Registration keeps worker namespaces exclusive: a worker name cannot extend another worker's name across a hyphen (`ab-owner` beside `ab` is refused), while `eager-panda-2` and `eager-panda-27` both register. Supervisors own no factory branches and are exempt.
+
+`transfer adopt_branch` adopts the delivery a task actually holds, never anything past it. It works when the receiver already sits on one of the task's branches. It also works when the receiver is at a newer train tip with no work of its own, and after a review return has moved the task's anchor into history.
+
+Finding label updates that claim main reach without a declared live main journey emit gate `G-161`. The existing `finding_main_journey_required` rule data and preservation of task fields remain unchanged.
+
+- **Worker OS sandbox, per task** - a sandboxed worker's Bash writes reach only its current tasks' artifact directories and its own checkout's scratch, never a sibling task's evidence. The profile is fixed at launch, so starting a task it does not cover relaunches the worker with a new profile; the task stays started and the relaunched worker resumes it.
+
+A recorded capacity wait (an admission refusal with its scheduled retry, fenced to the worker's current task lease) counts as a worker wait, like a running build. The director withholds idle and detached-exit notices for it; the capacity-wait escalation after a long wait and notices for real check failures are unchanged.
+
+A worker with a spawn or recycle still in flight in the durable spawn queue is not idle. The director withholds its idle and pending-delivery notices until the replacement registers, then resumes the normal one-notice-per-episode behaviour.
+
+The recorded start boundary decides which branch close measures. After a rebind, the rebound lane is the close-measured branch whether its tip is local, only on origin, or not yet committed, and the merge-reality check judges that same lane. The old per-task branch is never measured in its place.
+
+Spawn keeps worker namespaces exclusive across machines too. A new worker name is refused (`WORKER_NAME_OVERLAPS`) when it would share a `factory/` namespace with a registered worker or with an existing local or origin `factory/*` branch. A name's own task branches never block it. `cas factory` applies the same check to its initial names, including `--worker-spec` names, and workers added later from the GUI or WebSocket go through it before they are bound or launched. It stops when the registry cannot be read. Generated names, including the daemon's fallback names, skip such candidates, and overflow minion names read `kevin2`, not `kevin-2`. `cas doctor` reports any overlap that already exists in a `worker names` row, with the way back, and changes nothing.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -983,6 +1149,28 @@ Every delivery park publishes its cited local evidence for the reviewing machine
 On ordinary deliveries, local QA artifacts that the close reason does not cite remain optional for publication, preserving log-only and evidence-waiver parks. Routed deliveries retain their required ledger evidence.
 
 Train owners can answer a peer-machine verifier's `supervisor_call` without moving train ownership. Read the public question in task notes, then use `verification action=add` with its task, dispatch, `status=supervisor_call` and answer in `summary`. Cassy queues an authenticated authorization to the dispatch's builder supervisor; that supervisor records the identical payload and the independent verifier continues. The authorization does not grant a final verdict, merge or close permission. Changed questions, deliveries, responders and train owners require fresh authorization.
+
+Cross-machine and in-factory messages report delays honestly. A supervisor's peer message that the peer still has not received two minutes after Cloud accepted it alerts the sender once, with the Cloud message id to check. A message to a worker that is being recycled waits for the worker's successor instead of being abandoned. A lifecycle event queued late says how late it was queued. An idle notice never names a task the worker received after the idle state was detected.
+
+A directed message to a recipient that is mid tool call, such as a worker's blocker to its supervisor, waits until the call ends. The daemon offers a wake again every 10–30 seconds, and the recipient's next tool-call boundary shows the message. Each re-offer claims the message briefly. Releasing that claim, whether by parking behind the busy recipient, by a token release or by a restart sweep, signals the recipient's inbox again. A tool boundary that checked during the claim therefore still reads the message at the next boundary.
+
+Personal and team Cloud pulls can reconcile an owner's older close over a receiver's stale Blocked or AwaitingMerge status when both records identify the same approved, merged delivery cycle, anchor and target. This projection retains the receiver's newer body and notes while dependency gates observe the closed blocker. Later body-only refreshes retain their configured conflict policy. Reconciliation respects explicit rework, changed cycles and targets, LocalWins policy, and the store's atomic mutation and live-delivery guards.
+
+Commander relay delivery rechecks a prepared claim on the store lane before handing it to the pane. Inbox reads and explicit acknowledgements that happen while the claim waits retire that prepared delivery without inventing a transport or confirmation receipt. Unobserved successor messages and fresh messages still reach the pane.
+
+A builder receiving request_changes can complete a corrective delivery and re-park it through team sync. When the owner retains an Open replica with a newer bookkeeping clock, reconciliation requires the owner's exact latest request_changes audit followed by the builder's canonical park, with the same delivery cycle, recorded start, target and assignee. The shared park reconciliation retains newer owner body and notes while preserving ordinary Open and rework holds. Train publication and exact pushed-anchor checks remain unchanged.
+
+A live supervisor can hold a parked delivery that waits on an external review, such as a product owner's GitHub approval. The hold names an owner, a reason and a deadline of at most 7 days. Cassy stamps the supervisor and the parked anchor and records the owner and reason in the task notes. Until the deadline, the progress watchdog leaves that delivery out of its stall count, so it neither wakes the supervisor nor pages the operator for it. A lapsed deadline or a re-park at another anchor makes the delivery actionable again, and genuinely stalled work still escalates. Workers cannot set the hold.
+
+Task transfer reports when a receiver belongs to another machine, including a live worker found through the existing scoped peer roster. The receiving machine's supervisor must perform adoption in that worker's own checkout. Peer discovery is read-only and does not register the receiver locally or change assignment, lease or branch state. Local transfer and adoption retain their existing validation.
+
+A delayed lifecycle message names a recorded hold as its cause only for the time that hold covers. Queue rows record when their first hold began, and a repeated decline keeps that start. When the hold began more than nine minutes after the message was queued, the label states how long the earlier wait went unrecorded instead of crediting the late hold with the whole delay. Operator drafts in the supervisor composer stay protected as before.
+
+Child verifiers receive local paths for cited parent epic plan and sequence artifacts. The receiver resolves each reference within the parent task's project scope and downloads verified bytes into that parent's evidence directory. Missing, revoked, foreign or corrupt proof stops preparation with an explicit artifact error. A bare artifact ID grants no access, and an added parent proof reference invalidates the candidate context.
+
+Personal and team Cloud pulls reconcile a peer's completed park over an older InProgress or Blocked lifecycle whose row clock advanced through local bookkeeping. The park must match the recorded start, assignee, delivery cycle and target, include its canonical park audit, and bind the recorded branch to a full commit anchor. The receiver retains its newer body and notes. Train ownership, verification, remote park admission and exact pushed-anchor checks continue to govern publication.
+
+Automatic verification resolves a delivery's committed artifact references through the existing Cloud fetch path before starting its review command. Each download is task-scoped, checked against its published size and SHA-256, and placed under the reviewing machine's project namespace. Structured review inputs name the artifact ID and local path. Unavailable or corrupt evidence holds verifier startup with the artifact ID and Cloud error, leaving the same dispatch available for retry.
 
 ## Authoritative Sources
 

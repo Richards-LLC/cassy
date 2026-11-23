@@ -732,14 +732,28 @@ impl PromptQueueTyper<'_> {
         let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: source_age.unwrap_or_default(), human_mentions: Vec::new() };
         let mut prompt = managed_violet_activity_envelope(&channel, &channel, kind, &item, source_age);
         let delivery_id = crate::prompt_revalidation::xml_attribute_value(&delivery.id);
+        // GH #2242: a reply intent is registered on the claimed thread's
+        // resource, never the delivery, so the wake names that resource and
+        // the claim ref that returns its generation.
+        let resource_id = field(&target["resource_id"])
+            .and_then(|id| uuid::Uuid::parse_str(&id).ok())
+            .map(|id| id.to_string());
+        let permalink = field(&target["permalink"])
+            .filter(|link| link.starts_with("https://") && !link.contains(char::is_whitespace))
+            .map(|link| crate::prompt_revalidation::xml_attribute_value(&link));
         let identity = match &delivery.occurrence_id {
             Some(occurrence_id) => {
-                let reply_hint = if mention {
-                    "For a reply to this claimed mention, pass this occurrence_id to coordination reply_intent; never use the Slack message timestamp.\n"
-                } else {
-                    ""
+                let resource = resource_id.as_deref().map(|id| format!(" resource_id={id}")).unwrap_or_default();
+                let reply_hint = match (mention, &resource_id, &permalink) {
+                    (true, Some(resource_id), Some(permalink)) => format!(
+                        "To reply to this mention: factory action=claim external_ref={permalink} \n\
+                         returns the thread's generation; then factory action=reply_intent resource_id={resource_id} \
+                         expected_generation=<that generation> occurrence_id={occurrence_id} \n\
+                         Never pass delivery_id or a Slack timestamp as an id.\n"),
+                    (true, ..) => "For a reply to this claimed mention, pass this occurrence_id to factory action=reply_intent; never use delivery_id or the Slack message timestamp.\n".to_string(),
+                    _ => String::new(),
                 };
-                format!("Claimed delivery_id={delivery_id} occurrence_id={occurrence_id}\n{reply_hint}")
+                format!("Claimed delivery_id={delivery_id} occurrence_id={occurrence_id}{resource}\n{reply_hint}")
             }
             None => format!("Claimed delivery_id={delivery_id}\n"),
         };

@@ -1155,6 +1155,43 @@ fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
     assert!(held < Duration::from_secs(1), "QueueSelect held the writer {held:?}");
 }
 
+/// cas-1d2a (soundwave gabber, Nov 21): with Commander connected every
+/// selection took a second QueueSelect writer hop to read operator replies and
+/// adopt notices (two uncached store opens), whether or not any existed. An
+/// idle selection takes one hop; a pending notice brings the second back.
+#[test]
+fn an_idle_selection_with_commander_connected_skips_the_operator_writer_hop_cas_1d2a() {
+    let (_root, cas_dir) = project();
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    let connected = |cas_dir: &Path| QueueSelectRequest {
+        operator_replies: true,
+        adopt_operator_notices: true,
+        ..request(cas_dir)
+    };
+    let hops = |writer: &TestWriter| writer.ran().iter().map(|(label, _)| *label).collect::<Vec<_>>();
+
+    jobs.submit_select(connected(&cas_dir), super::super::queue_and_events::run_queue_select);
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    jobs.take_selection().expect("the idle selection lands");
+    assert_eq!(hops(&writer), ["QueueSelect"], "nothing to read or adopt: no operator hop");
+
+    crate::store::open_supervisor_queue_store(&cas_dir).unwrap()
+        .notify(
+            "operator",
+            "supervisor_notice",
+            r#"{"kind":"blocker","detail":"a PR was ejected","summary":"PR ejected"}"#,
+            cas_store::NotificationPriority::High,
+        )
+        .unwrap();
+    jobs.submit_select(connected(&cas_dir), super::super::queue_and_events::run_queue_select);
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    jobs.take_selection().expect("the selection with a pending notice lands");
+    assert_eq!(hops(&writer), ["QueueSelect", "QueueSelect", "QueueSelect"], "a pending notice brings the operator hop back");
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    assert!(queue.peek_all(10).unwrap().iter().any(|row| row.target == "operator"), "the notice was adopted");
+}
+
 /// cas-4272 review L3, cas-9594c: a queued Retry stamp holds its row out of
 /// delivery without holding QueueSelect; a selection submitted before the
 /// stamp landed skips the row.
@@ -1264,14 +1301,21 @@ fn a_carried_batch_keeps_its_passenger_out_of_a_fresh_selection() {
     assert_eq!(initial.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
     let facts = initial.facts.remove(&lead.id).unwrap();
     assert_eq!(facts.message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
+    let mut delayed = QueueSelection {
+        rows: facts.message_batch.clone(),
+        facts: HashMap::from([(passenger.id, initial.facts.remove(&passenger.id).unwrap())]),
+        ..initial
+    };
     let writer = TestWriter::start(true);
     let mut jobs = jobs_on(&writer);
     for row in [&lead, &passenger] {
         assert!(!jobs.claim_resolved(&cas_dir, "s", row.id, "lead", "lead"));
     }
     jobs.carry_claimed_row(lead.clone(), facts);
-    let fresh = passenger.clone();
-    jobs.submit_select(request(&cas_dir), move |_, _| Ok(QueueSelection { rows: vec![fresh], ..Default::default() }));
+    jobs.submit_select(request(&cas_dir), move |_, generation| {
+        delayed.generation = generation;
+        Ok(delayed)
+    });
     settle(&mut jobs, |jobs| !jobs.select_in_flight());
     let selection = jobs.take_selection().unwrap();
     assert!(selection.rows.is_empty(), "the carry owns its passenger: {:?}",
@@ -1283,8 +1327,10 @@ fn a_carried_batch_keeps_its_passenger_out_of_a_fresh_selection() {
     let batch = jobs.take_selection().expect("the carried batch comes back");
     assert_eq!(batch.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
     assert_eq!(batch.facts[&lead.id].message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
-    assert!(matches!(jobs.claim_for_inject(&cas_dir, "s", passenger.id, "lead", "lead"),
-        ClaimStep::Claimed(_)), "the passenger's claim is still the batch's");
+    for row in [&lead, &passenger] {
+        assert!(matches!(jobs.claim_for_inject(&cas_dir, "s", row.id, "lead", "lead"),
+            ClaimStep::Claimed(_)), "all batch tokens are ready before consuming the leader");
+    }
 }
 
 

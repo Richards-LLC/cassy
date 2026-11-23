@@ -711,7 +711,6 @@ impl ReminderStore for SqliteReminderStore {
         cross_session: bool,
         task_id: Option<&str>,
     ) -> Result<i64> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let trigger_at_str = trigger_at.map(|dt| dt.to_rfc3339());
         let trigger_filter_str = trigger_filter.map(|f| f.to_string());
@@ -729,27 +728,32 @@ impl ReminderStore for SqliteReminderStore {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        conn.execute(
-            "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id, origin_session_id, cross_session, task_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                owner_id,
-                message,
-                trigger_type.to_string(),
-                trigger_at_str,
-                trigger_event,
-                trigger_filter_str,
-                ttl_secs,
-                now,
-                resolved_target,
-                session_id,
-                origin_session_id,
-                cross_session,
-                task_id,
-            ],
-        )?;
-
-        Ok(conn.last_insert_rowid())
+        // GH #2218: admission retries a foreign write lock on the pooled
+        // budget (releasing the process mutex between attempts) instead of
+        // failing after one busy window. The INSERT runs once, inside the
+        // opened transaction, so a retry can never duplicate the reminder.
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            tx.execute(
+                "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id, origin_session_id, cross_session, task_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    owner_id,
+                    message,
+                    trigger_type.to_string(),
+                    trigger_at_str,
+                    trigger_event,
+                    trigger_filter_str,
+                    ttl_secs,
+                    now,
+                    resolved_target,
+                    session_id,
+                    origin_session_id,
+                    cross_session,
+                    task_id,
+                ],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
     }
 
     fn list_pending(&self, owner_id: &str) -> Result<Vec<Reminder>> {
@@ -1084,6 +1088,40 @@ mod tests {
         // Self-reminder: target defaults to owner
         assert_eq!(pending[0].owner_id, "supervisor-1");
         assert_eq!(pending[0].target_id, "supervisor-1");
+    }
+
+    /// GH #2218: a task-bound reminder requested while another factory
+    /// connection holds the write lock longer than one busy window is
+    /// admitted exactly once after the lock clears; a lock held through the
+    /// whole retry budget is refused and leaves no row.
+    #[test]
+    fn task_bound_create_outlasts_one_busy_window_and_refuses_on_exhaustion() {
+        let (temp, store) = create_test_store();
+        let create = |store: &SqliteReminderStore| {
+            store.create_with_scope(
+                "worker-1", None, "check the package run", ReminderTriggerType::Time,
+                Some(Utc::now() + chrono::Duration::seconds(90)), None, None, 3600,
+                None, Some("session-1"), false, Some("cas-c17f"),
+            )
+        };
+        // One busy window shorter than the foreign writer's hold.
+        store.conn.lock().unwrap().busy_timeout(Duration::from_millis(20)).unwrap();
+        let holder = Connection::open(temp.path().join("cas.db")).unwrap();
+        holder.execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;").unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            holder.execute_batch("COMMIT").unwrap();
+            holder
+        });
+        create(&store).expect("transient contention must not lose the reminder");
+        let holder = releaser.join().unwrap();
+        assert_eq!(store.list_for_task("cas-c17f").unwrap().len(), 1);
+
+        crate::shared_db::set_pooled_write_budget_for_tests(Duration::from_millis(200));
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        create(&store).expect_err("a lock held through the budget must be refused");
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(store.list_for_task("cas-c17f").unwrap().len(), 1, "no row on refusal");
     }
 
     /// GH #1208: a durable (TTL 0) event reminder can be expired by id; an

@@ -136,17 +136,22 @@ fn reconcile_restarted_factory_supervisor(
 /// `eager-panda-2`) the names cannot share a branch and are allowed.
 /// Only workers commit on `factory/` branches, so supervisors and primaries
 /// (`kevin-supervisor` beside worker `kevin`) cannot collide and are not checked.
+/// The N1 rule itself: `longer` is `shorter` plus `-` plus a non-empty rest.
+/// Spawn naming and `cas doctor` apply the same predicate (cas-dc08).
+pub fn factory_name_extends(longer: &str, shorter: &str) -> bool {
+    !shorter.is_empty()
+        && longer
+            .strip_prefix(shorter)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|rest| !rest.is_empty())
+}
+
 fn ensure_factory_namespace_free(conn: &Connection, id: &str, name: &str, role: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() || role != "worker" {
         return Ok(());
     }
-    let extends = |longer: &str, shorter: &str| {
-        longer
-            .strip_prefix(shorter)
-            .and_then(|rest| rest.strip_prefix('-'))
-            .is_some_and(|rest| !rest.is_empty())
-    };
+    let extends = factory_name_extends;
     let mut statement = conn.prepare(
         "SELECT name FROM agents WHERE id != ?1 AND role = 'worker'",
     )?;

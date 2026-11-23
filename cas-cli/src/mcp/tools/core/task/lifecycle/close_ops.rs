@@ -8058,7 +8058,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         self.cas_task_close_with_dispositions(params, completion_receipt,
             external_verification_receipt, negative_result, None,
-            inline_external_ref, inline_execution_note).await
+            inline_external_ref, inline_execution_note, None).await
     }
 
     pub async fn cas_task_close_with_dispositions(
@@ -8070,12 +8070,13 @@ impl CasCore {
         evidence_only: Option<EvidenceOnlyCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
+        operator_decision: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let id = req.id.clone();
         let mut close = crate::async_runtime::heap_future(|| {
             self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
                 external_verification_receipt, negative_result, evidence_only,
-                inline_external_ref, inline_execution_note)
+                inline_external_ref, inline_execution_note, operator_decision)
         });
         // This operation is thread-local: scope each poll, never an await
         // that could resume on another executor thread.
@@ -8110,6 +8111,7 @@ impl CasCore {
     // gate-audit[tags_from]: registry_upkeep.rs#finish
     // gate-audit[no_delivery]: selector Chooses the separately measured non-delivery disposition; does not approve a delivered-code bypass.
     // gate-audit[skip_reason]: selector Derived verification disposition; only actual waived gates contribute override codes.
+    // gate-audit[operator_qa_waiver]: bypass G-64 The operator's recorded recovery decision (GH #2270) waives independent QA for its scope's measured non-Tier-2 contained delivery; the waiver is tagged and noted.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
@@ -8119,6 +8121,7 @@ impl CasCore {
         evidence_only: Option<EvidenceOnlyCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
+        operator_decision: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         #[cfg(test)]
         crate::async_runtime::stack_probe::mark("close_body");
@@ -8239,6 +8242,30 @@ impl CasCore {
         ) {
             return Ok(Self::tool_error(message));
         }
+        // gate[G-164 close-after-merge integrity]: Operator recovery decision for a contained historical delivery
+        // GH #2270: the operator's recorded batch decision, not a per-task
+        // override, authorizes this recovery. The containment proof runs later.
+        let operator_recovery = match operator_decision.as_deref() {
+            None => None,
+            Some(id) => {
+                let refusal = |why: String| Self::tool_error(crate::gates::tag("G-164", format!(
+                    "OPERATOR RECOVERY DECISION REJECTED: {why}. The operator records one decision per epic with `cas task recovery-decision --scope <epic-id> --note \"...\"`; a live registered supervisor then closes each contained delivery with operator_decision=<id> commit_receipt=<containment commit> and no supervisor_override."
+                )));
+                if supervisor_override {
+                    return Ok(refusal("operator_decision replaces supervisor_override and cannot be combined with it".into()));
+                }
+                if self.resolve_live_supervisor_authority().is_err() {
+                    return Ok(refusal("only a live registered supervisor may cite an operator recovery decision".into()));
+                }
+                if req.commit_receipt.is_none() {
+                    return Ok(refusal("cite the containment commit with commit_receipt".into()));
+                }
+                match crate::recovery_decision::authorize(&self.cas_root, task_store.as_ref(), &task.id, id) {
+                    Ok(decision) => Some(decision),
+                    Err(why) => return Ok(refusal(why)),
+                }
+            }
+        };
 
 
         // This is a declaration for one attempt, never a sticky methodology
@@ -9035,7 +9062,11 @@ impl CasCore {
                 &lease_history,
                 task_commit_identity.clone(),
             );
-            if supervisor_override {
+            // GH #2270: an operator recovery decision authorizes only a
+            // reviewed drop; the drop proof itself still runs.
+            if supervisor_override || operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-56"))
+                && req.reason.as_deref().is_some_and(|reason| reviewed_delivery_drop_reason(Some(reason)).is_some())
+            {
                 window.supervisor_override_reason = req.reason.clone();
             }
             (Some(window), has_recorded_boundary)
@@ -9785,6 +9816,12 @@ impl CasCore {
             }
         }
 
+        // GH #2270: the operator decision covers only measured non-Tier-2
+        // deliveries; an unmeasurable tier keeps every check.
+        let operator_recovery_below_tier_two = operator_recovery.is_some()
+            && super::review_tier::tier_for_delivery(&task, &close_project_root).is_some_and(|decision| {
+                decision.tier != super::review_tier::VerificationTier::Adversarial
+            });
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             // Renew the explicit review before handing this delivery to merge.
@@ -10257,12 +10294,18 @@ impl CasCore {
             // its reason waives the pass for the delivered commit, exactly as
             // it waives the implementer's evidence gate.
             // cas-5ea7: a passed fast-lane receipt is this delivery's QA walk.
+            // GH #2270: the operator's recovery decision for this epic is the
+            // same waiver for a contained historical delivery (D1: no per-task
+            // review), recorded against the cited commit. Tier 2 keeps its QA,
+            // and a delivery whose tier cannot be measured is treated as Tier 2.
+            let operator_qa_waiver = operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-64"))
+                && operator_recovery_below_tier_two;
             match if fast_lane_receipt_passed { super::qa_dispatch::QaCloseGate::Clear } else { self.independent_qa_close_gate(
                 &task,
                 &close_project_root,
                 &resolved_parent_branch,
                 req.commit_receipt.as_deref(),
-                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+                (supervisor_override || operator_qa_waiver).then(|| req.reason.as_deref().unwrap_or("")),
             ) } {
                 super::qa_dispatch::QaCloseGate::Clear => {}
                 super::qa_dispatch::QaCloseGate::Refuse(refusal) => {
@@ -10677,7 +10720,44 @@ impl CasCore {
                     ))));
                 }
 
+                // GH #2270, GH #2244: a historical factory delivery whose commit is
+                // already on its target can never gain a pre-merge verdict. The
+                // operator's recorded decision for its epic, cited with that
+                // containment commit, authorizes the close; the content gate above
+                // has already proven (or reviewed the drop of) its tree effect.
+                // Tier 2 keeps its retained adversarial review. The cited commit
+                // may be the containing merge, so the recorded delivery anchor
+                // itself must also be on the target.
+                let contained_recovery = (operator_recovery.as_ref().is_some_and(|decision| decision.waives("G-70"))
+                    && operator_recovery_below_tier_two && !is_epic
+                    && !in_cassy_merge_close()
+                    && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor|
+                        commit_is_merged_into_parent(&close_project_root, anchor, &resolved_parent_branch))
+                    && self.resolve_live_supervisor_authority().is_ok())
+                .then_some(req.commit_receipt.as_deref())
+                .flatten()
+                .and_then(|receipt| resolve_task_commit_receipt_sha(&close_project_root, receipt).ok())
+                .filter(|sha| commit_is_merged_into_parent(&close_project_root, sha, &resolved_parent_branch));
+
+                if operator_recovery.is_some() && contained_recovery.is_none()
+                    && latest.is_ok()
+                    && !matches!(&latest, Ok(Some(v)) if matches!(v.status,
+                        VerificationStatus::Approved | VerificationStatus::Skipped | VerificationStatus::Rejected))
+                {
+                    return Ok(Self::tool_error(crate::gates::tag("G-164", format!(
+                        "OPERATOR RECOVERY DECISION REJECTED: task {} is not a contained historical delivery the decision can close. It needs a non-Tier-2 factory delivery whose recorded anchor and cited commit_receipt are both on {resolved_parent_branch}.",
+                        task.id
+                    ))));
+                }
                 match latest {
+                    Ok(None) | Ok(Some(_)) if contained_recovery.is_some() => {
+                        close_notes.record(&mut task, &format!(
+                            "DECISION: operator recovery decision {} ({}) closed integrated historical delivery {}, contained in {resolved_parent_branch}; no pre-merge approval existed and none was created.",
+                            operator_recovery.as_ref().map(|decision| decision.id.as_str()).unwrap_or_default(),
+                            operator_recovery.as_ref().map(|decision| decision.scope.as_str()).unwrap_or_default(),
+                            contained_recovery.as_deref().unwrap_or_default()
+                        ));
+                    }
                     Ok(Some(v))
                         if (v.status == VerificationStatus::Approved
                             || v.status == VerificationStatus::Skipped)
@@ -12397,12 +12477,11 @@ impl CasCore {
                 // cas-7efe: single close-time resolver, not a bare "main".
                 if !integrated_delivery {
                     // gate[G-81 park integrity]: Merge reality check (zero commits, never pushed)
-                    match check_factory_branch_merge_reality_with_delivery_mode(
+                    match check_close_merge_reality(
                         &close_project_root,
+                        &task,
                         assignee,
                         &resolved_parent_branch,
-                        task.delivery_mode,
-                        Some(&task.id),
                     ) {
                         MergeRealityOutcome::Proceed => {}
                         MergeRealityOutcome::Refuse(msg) => {
@@ -16920,13 +16999,22 @@ fn anchored_delivery_content_gate_unbounded(
                  Restore the missing delivery content on the assigned factory branch, \
                  commit it, and retry close. If the content was intentionally superseded, \
                  a live registered supervisor may close with supervisor_override=true \
-                 reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\". \
+                 (or operator_decision=<id> under an operator recovery decision) and \
+                 reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\"{}. \
                  Each named commit must differ from the anchor, be reachable on the \
                  target, and change dropped paths to their final target state. The \
                  commit may predate the anchor. The resolved commits, paths, and \
                  review are recorded.",
                 paths.join(", "),
                 dropped_line_samples(repo_path, anchor, parent_branch, &paths),
+                // A concrete candidate: the latest target commit that changed
+                // the dropped paths. The supervisor still reviews it.
+                git_stdout_lines(repo_path, &[&["log", "-1", "--format=%H", parent_branch, "--"][..],
+                    &paths.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
+                    .ok().and_then(|lines| lines.into_iter().next())
+                    .filter(|sha| !sha.is_empty() && sha.as_str() != anchor)
+                    .map(|sha| format!(", for example reason=\"reviewed-drop: {sha} -- <why>\""))
+                    .unwrap_or_default(),
             ))))
         }
         DeliveryContentPresence::Unknown { reason } => {
@@ -17556,7 +17644,14 @@ pub(crate) fn resolve_close_delivery_branch(
             return Ok(delivery.branch);
         }
     }
-    if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
+    // cas-db91 (GH #1698): a lane bound by rebind (e.g. `-r2`) before its
+    // first commit is still this task's lane. The per-task name may hold the
+    // earlier build; never fall back to it while the recorded start exists.
+    if let Some(delivery) = task_attribution::validated_started_delivery(repo_path, task)?
+        && (!delivery.commits.is_empty()
+            || task.deliverables.factory_branch_start.as_ref()
+                .is_some_and(|start| start.branch != format!("factory/{assignee}")))
+    {
         return Ok(delivery.branch);
     }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
@@ -19613,39 +19708,41 @@ pub(crate) fn check_factory_branch_merge_reality(
 ) -> MergeRealityOutcome {
     check_factory_branch_merge_reality_with_delivery_mode(
         repo_path,
-        assignee,
+        &format!("factory/{assignee}"),
         parent_branch,
         cas_types::DeliveryMode::PushBranch,
         None,
     )
 }
 
-/// `task_id` names the task in the emitted retry command; `None` renders a
-/// `<task-id>` placeholder.
+/// cas-db91 (GH #1698): G-81 judges the lane every other close probe resolves,
+/// so a lane bound by rebind (e.g. `-r2`) is measured, not the earlier build.
+pub(crate) fn check_close_merge_reality(
+    repo_path: &std::path::Path,
+    task: &Task,
+    assignee: &str,
+    parent_branch: &str,
+) -> MergeRealityOutcome {
+    let measured = close_measured_factory_branch(repo_path, task, assignee);
+    check_factory_branch_merge_reality_with_delivery_mode(
+        repo_path,
+        measured.strip_prefix("origin/").unwrap_or(&measured),
+        parent_branch,
+        task.delivery_mode,
+        Some(&task.id),
+    )
+}
+
+/// `factory_branch` is the lane the close resolved for this task (the caller
+/// strips `origin/`); `task_id` names the task in the emitted retry command,
+/// and `None` renders a `<task-id>` placeholder.
 pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     repo_path: &std::path::Path,
-    assignee: &str,
+    factory_branch: &str,
     parent_branch: &str,
     delivery_mode: cas_types::DeliveryMode,
     task_id: Option<&str>,
 ) -> MergeRealityOutcome {
-    // cas-8606: a per-task delivery lives on `factory/<assignee>-<task>`, not
-    // on the worker's base branch. Measuring `factory/<assignee>` refused
-    // every merged, verified per-task delivery whose worker never pushed its
-    // base branch (it sits at the epic tip with no commits of its own).
-    // `worker_task_branch_ref` answers `origin/<branch>` when only the pushed
-    // copy remains; that is a published delivery, so the local-ref check
-    // below lets it through.
-    let factory_branch = task_id
-        .and_then(|task_id| worker_task_branch_ref(repo_path, assignee, task_id))
-        .map(|branch| {
-            branch
-                .strip_prefix("origin/")
-                .map(str::to_string)
-                .unwrap_or(branch)
-        })
-        .unwrap_or_else(|| format!("factory/{assignee}"));
-
     // Branch absent locally → push+merge+prune path; treat as merged.
     if !git_ref_exists(repo_path, &factory_branch) {
         return MergeRealityOutcome::Proceed;
@@ -48850,7 +48947,7 @@ mod merge_reality_tests {
         git(special.path(), &["branch", "-m", "factory/test-worker", "factory/test{a,b}!e"]);
         git(special.path(), &["branch", "epic/quote"]);
         let special_outcome = check_factory_branch_merge_reality_with_delivery_mode(
-            special.path(), "test{a,b}!e", "epic/quote",
+            special.path(), "factory/test{a,b}!e", "epic/quote",
             cas_types::DeliveryMode::PushBranch, Some("cas-dc1b"));
         let MergeRealityOutcome::Refuse(special_message) = special_outcome else {
             panic!("expected real merge-reality refusal");
@@ -48861,7 +48958,7 @@ mod merge_reality_tests {
         git(dir.path(), &["branch", "epic/wave-a"]);
         let outcome = check_factory_branch_merge_reality_with_delivery_mode(
             dir.path(),
-            "test-worker",
+            "factory/test-worker",
             "epic/wave-a",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-dc1b"),
@@ -48936,7 +49033,7 @@ mod merge_reality_tests {
 
         let own = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker-cas-8606",
             "main",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-8606"),
@@ -48950,7 +49047,7 @@ mod merge_reality_tests {
         git(p, &["branch", "-D", "factory/test-worker-cas-8606"]);
         let pruned = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker-cas-8606",
             "main",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-8606"),
@@ -48961,7 +49058,7 @@ mod merge_reality_tests {
         // branch, so the cas-762e wrong-branch guard keeps its bite.
         let base = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker",
             "main",
             cas_types::DeliveryMode::PushBranch,
             Some("cas-other"),
@@ -49064,7 +49161,7 @@ mod merge_reality_tests {
 
         let outcome = check_factory_branch_merge_reality_with_delivery_mode(
             p,
-            "test-worker",
+            "factory/test-worker",
             "main",
             cas_types::DeliveryMode::LocalMerge,
             None,

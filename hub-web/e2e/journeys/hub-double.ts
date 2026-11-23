@@ -1474,7 +1474,7 @@ export class HubDouble {
       const row = this.sessionsFor(machineId).find((candidate) => candidate.name === session);
       if (request.command === "standby" && request.confirmed && row) {
         row.standby = true;
-        ws.send(JSON.stringify({ SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "standby", phase: "observed", detail: "Standby", output: "", interactive: false } } }));
+        ws.send(JSON.stringify({ SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "standby", phase: "observed", detail: "Standby", output: "", interactive: false } } }));
       }
     }
     if (message.SendMessage) {

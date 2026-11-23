@@ -1577,25 +1577,68 @@ fn runner_config(dir: &Path, runner: &str) -> Option<PathBuf> {
         })
 }
 
+/// A runner config's listing: the canonical test files it selects, or `None`
+/// when the runner could not list them.
+type Listing = Option<BTreeSet<PathBuf>>;
+
+thread_local! {
+    static LISTINGS: std::cell::RefCell<Option<BTreeMap<(&'static str, PathBuf, PathBuf), Listing>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// GH #2331: run `work` with each runner config listed, and each package's
+/// import graph read, at most once. A close asks which config owns every
+/// changed file, often several times per file, and each separate listing loads
+/// the whole config again: cas-9fcc's park made about 1013 Playwright
+/// listings in a 464 s judgement. Both are forgotten when `work` returns, so a
+/// later close sees files written since.
+pub(crate) fn with_listing_cache<T>(work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            if self.0 { LISTINGS.with(|cache| cache.borrow_mut().take()); }
+        }
+    }
+    let _reset = Reset(LISTINGS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.is_none().then(|| cache.replace(BTreeMap::new())).is_some()
+    }));
+    importers::with_graph_cache(work)
+}
+
+/// `list()` once per runner, directory and config while a cache is active;
+/// `None` when no cache is active, so the caller asks about its one file.
+fn cached_listing(runner: &'static str, dir: &Path, config: &Path, list: impl FnOnce() -> Listing) -> Option<Listing> {
+    let key = (runner, dir.to_path_buf(), config.to_path_buf());
+    if let Some(listing) = LISTINGS.with(|cache| cache.borrow().as_ref().map(|cache| cache.get(&key).cloned())) {
+        return Some(listing.unwrap_or_else(|| {
+            let listing = list();
+            LISTINGS.with(|cache| cache.borrow_mut().as_mut().map(|cache| cache.insert(key, listing.clone())));
+            listing
+        }));
+    }
+    None
+}
+
 /// Whether the local Jest, run with `config`, lists `spec`: Jest's own
 /// discovery (`roots`, `projects`, `testMatch`, `testRegex`) decides ownership.
 fn jest_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> bool {
-    let Ok(jest) = runner_path(repo, dir, "jest") else { return false };
-    let Ok(output) = Command::new(jest)
-        .current_dir(dir)
-        .env("CI", "1")
-        .arg("--config")
-        .arg(config)
-        .args(["--listTests", "--json"])
-        .output()
-    else {
-        return false;
+    let list = || -> Listing {
+        let jest = runner_path(repo, dir, "jest").ok()?;
+        let output = Command::new(jest)
+            .current_dir(dir)
+            .env("CI", "1")
+            .arg("--config")
+            .arg(config)
+            .args(["--listTests", "--json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        let listed = serde_json::from_slice::<Vec<String>>(&output.stdout).ok()?;
+        Some(listed.iter().filter_map(|path| Path::new(path).canonicalize().ok()).collect())
     };
-    let (Ok(listed), Ok(spec)) = (serde_json::from_slice::<Vec<String>>(&output.stdout), spec.canonicalize()) else {
-        return false;
-    };
-    output.status.success()
-        && listed.iter().any(|path| Path::new(path).canonicalize().is_ok_and(|path| path == spec))
+    let listing = cached_listing("jest", dir, config, list).unwrap_or_else(list);
+    spec.canonicalize().is_ok_and(|spec| listing.is_some_and(|listed| listed.contains(&spec)))
 }
 
 /// The repository-relative Jest config that lists `path`, when Jest can be asked.
@@ -1616,7 +1659,37 @@ fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path
         suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
             || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(lists))
     }
+    fn files(suite: &Value, root: &Path, listed: &mut BTreeSet<PathBuf>) {
+        for spec in suite.get("specs").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(file) = spec.get("file").and_then(Value::as_str)
+                && let Ok(file) = root.join(file).canonicalize() { listed.insert(file); }
+        }
+        for child in suite.get("suites").and_then(Value::as_array).into_iter().flatten() { files(child, root, listed); }
+    }
     let Ok(playwright) = runner_path(repo, dir, "playwright") else { return false };
+    // GH #2331: one listing of the whole config answers for every spec in a
+    // close. A config that throws while loading (it needs an environment this
+    // host lacks) prints no report and lists no spec, whatever the filter. A
+    // test file that fails to load fails only the listings that include it,
+    // so that config falls back to asking per spec.
+    let whole = || -> Listing {
+        let output = Command::new(&playwright).current_dir(dir).env("CI", "1")
+            .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"]).output().ok()?;
+        let Ok(report) = serde_json::from_slice::<Value>(&output.stdout) else { return Some(BTreeSet::new()) };
+        let only_no_tests = report.get("errors").and_then(Value::as_array).is_some_and(|errors| errors.iter()
+            .all(|error| error.get("message").and_then(Value::as_str).is_some_and(|message| message.starts_with("Error: No tests found"))));
+        if !output.status.success() && !only_no_tests { return None; }
+        let Some(root) = report.get("config").and_then(|config| config.get("rootDir")).and_then(Value::as_str) else {
+            return Some(BTreeSet::new());
+        };
+        let root = Path::new(root).to_path_buf();
+        let mut listed = BTreeSet::new();
+        files(&report, &root, &mut listed);
+        Some(listed)
+    };
+    if let Some(Some(listed)) = cached_listing("playwright", dir, config, whole) {
+        return spec.canonicalize().is_ok_and(|spec| listed.contains(&spec));
+    }
     let Ok(output) = Command::new(playwright).current_dir(dir).env("CI", "1")
         .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"])
         .arg(regex::escape(&spec.to_string_lossy())).output()
@@ -3241,7 +3314,7 @@ process.exit(ok ? 0 : 1);
 const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
 const config = path.resolve(at('--config')), settings = require(config), root = path.join(path.dirname(config), settings.testDir);
-const pattern = new RegExp(a[a.length - 1]), repeats = listing ? 1 : Number(at('--repeat-each'));
+const last = a[a.length - 1], pattern = last.startsWith('--') ? /(?:)/ : new RegExp(last), repeats = listing ? 1 : Number(at('--repeat-each'));
 const testMatch = settings.testMatch ?? '**/*.@(spec|test).?(c|m)[jt]s?(x)', suffix = settings.testMatch ? testMatch.replace('**/*', '') : '.spec.ts';
 const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith(suffix)).map((f) => path.join(root, f)) : [];
 const listed = files.filter((file) => pattern.test(file)), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
@@ -3268,6 +3341,7 @@ const report = {
   errors: listed.length ? [] : [{ message: noTests, stack: noTests }],
   stats: { startTime, duration: 1, expected: listing ? 0 : listed.length * repeats, skipped: listing ? listed.length : 0, unexpected: 0, flaky: 0 },
 };
+if (listing && fs.existsSync(path.join(path.dirname(config), '.count-listings'))) fs.appendFileSync(path.join(path.dirname(config), '.listings'), `${config}\n`);
 if (listing) console.log(JSON.stringify(report));
 else fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
 process.exit(listed.length ? 0 : 1);
@@ -3277,6 +3351,8 @@ process.exit(listed.length ? 0 : 1);
     /// fixture, so the spec never names `@playwright/test`; beside a Vitest
     /// config the walk dropped Playwright and G-61 prescribed Vitest, which
     /// cannot run them. The Playwright config that lists the spec decides.
+    /// GH #2331: cas-9fcc's park asked those configs about every changed
+    /// file, 1013 listings in 414 s; within one close each config lists once.
     #[test]
     fn spec_importing_a_local_fixture_is_prescribed_playwright_gh2294() {
         let repo = tempfile::tempdir().unwrap();
@@ -3289,6 +3365,9 @@ process.exit(listed.length ? 0 : 1);
         write("hub-web/vitest.config.ts", "export default {};");
         // hub-web's journeys project: testDir ./e2e/journeys, testMatch **/*.journey.ts.
         write("hub-web/playwright.config.js", "module.exports = { testDir: 'e2e/journeys', testMatch: '**/*.journey.ts' };");
+        write("hub-web/playwright.responsive.config.js", "module.exports = { testDir: 'e2e/responsive', testMatch: '**/*.journey.ts' };");
+        write("hub-web/e2e/responsive/wide.journey.ts", "import { test } from '@playwright/test';\ntest('wide', async () => {});\n");
+        write("hub-web/.count-listings", "");
         write("hub-web/node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(repo.path().join("hub-web/node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3305,11 +3384,16 @@ process.exit(listed.length ? 0 : 1);
 
         let mut tests: Vec<Identity> = journeys.iter().map(|journey| id(journey, "journey")).collect();
         tests.push(id(unit, "catalog"));
+        let listings = || std::fs::read_to_string(repo.path().join("hub-web/.listings")).unwrap_or_default().lines().count();
         let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests);
         assert_eq!(prescribed, [
             format!("`cas factory worker-check --cas-root /cas -- playwright {}`", journeys.join(" ")),
             format!("`cas factory worker-check --cas-root /cas -- vitest {unit}`"),
         ]);
+        let uncached = listings();
+        let cached = with_listing_cache(|| super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests));
+        assert_eq!(cached, prescribed, "the cache changes no answer");
+        assert_eq!(listings() - uncached, 2, "one listing per config, not per file ({uncached} without the cache)");
     }
 
     /// GH #2195: tests/e2e specs belong to playwright.hermetic.config.js, but

@@ -1538,9 +1538,11 @@ raise SystemExit(1 if failed else 0)
         // GH #2221: the changed catalogue also owes its importing spec a whole-file run.
         assert_eq!(scopes, [widened::Scope::File(specs[0].into()), package.clone()]);
         let covering = widened::covering(&repo, &head, &paths, &scopes);
-        assert_eq!(covering.get(&package).map(Vec::as_slice), Some(&specs.map(String::from)[..]));
+        let found = covering.get(&package).unwrap();
+        assert_eq!(found.specs, specs.map(String::from));
+        assert!(found.unresolved.is_empty(), "every changed input is read by a covering spec");
         // Every prescribed package command targets exactly the covering specs.
-        let commands = widened::commands(root.path(), &repo, &paths, &[package], &covering);
+        let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
         assert!(!commands.is_empty());
         for command in &commands {
             let (_, args) = command.split_once(" -- ").unwrap();
@@ -1548,15 +1550,39 @@ raise SystemExit(1 if failed else 0)
         }
         let g61 = |head: &str| park_refusals(root.path(), &repo, &task, &paths, head, "main", None).iter()
             .any(|reply| crate::gates::codes_in(reply).contains(&"G-61"));
-        let pass = |spec: &str| widened::record(root.path(), &repo, &head, widened::Proof {
+        let pass = |at: &str, spec: &str| widened::record(root.path(), &repo, at, widened::Proof {
             runner: "jest".into(), scope: widened::Scope::File(spec.into()), reason: "widened:no static changed-test selection".into(),
         }, 1).unwrap();
         assert!(g61(&head));
-        pass(specs[0]);
-        pass(specs[1]);
+        pass(&head, specs[0]);
+        pass(&head, specs[1]);
         assert!(g61(&head), "two of three covering specs must not prove the package");
-        pass(specs[2]);
+        pass(&head, specs[2]);
         assert!(!g61(&head));
+
+        // A mixed package: the same inputs plus seed data that no spec reads.
+        // The covering specs say nothing about it, so their passes do not
+        // prove the package; the refusal names the input and keeps the
+        // package's own proof as the way out.
+        let unread = "apps/backend/prisma/seeds/seed.sql";
+        write(unread, "INSERT INTO a VALUES (1);\n");
+        git(&["add", "."]); git(&["commit", "-qm", "seed data no spec reads"]);
+        let mixed = git(&["rev-parse", "HEAD"]);
+        let paths: Vec<String> = paths.into_iter().chain([unread.to_string()]).collect();
+        let (_, scopes) = stability::requirements(&repo, &mixed, "main", &paths, None).unwrap();
+        let covering = widened::covering(&repo, &mixed, &paths, &scopes);
+        let found = covering.get(&package).unwrap();
+        assert_eq!((found.specs.as_slice(), found.unresolved.as_slice()), (&specs.map(String::from)[..], &[unread.to_string()][..]));
+        for spec in specs { pass(&mixed, spec); }
+        let refusals = park_refusals(root.path(), &repo, &task, &paths, &mixed, "main", None);
+        assert!(refusals.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61") && reply.contains(unread)), "{refusals:?}");
+        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &mixed), &scopes, &covering), [package.clone()]);
+        let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
+        assert!(commands.iter().any(|command| command.contains(unread)));
+        for command in &commands {
+            let args = command.split_once(" -- ").map_or("", |(_, args)| args);
+            assert!(specs.iter().all(|spec| !args.contains(spec)), "{command}: a covering spec is not the package's proof");
+        }
     }
 
     /// Framework boundary: implement the import-graph selection predicate,

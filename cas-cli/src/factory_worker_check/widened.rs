@@ -59,35 +59,48 @@ fn package(repo: &Path, path: &str) -> Scope {
     Scope::Package(directory.strip_prefix(repo).unwrap_or(Path::new("")).to_string_lossy().into())
 }
 
-/// GH #2224, #2266: the test files covering each widened package's changed
-/// inputs that no runner takes as a target (a JSON catalogue, a SQL migration, a
-/// fixture). A package without a resolved covering spec is absent.
-pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scope]) -> BTreeMap<Scope, Vec<String>> {
+/// What resolved for one widened package's changed inputs (GH #2224, #2266).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Covering {
+    /// The test files that read at least one input, in path order.
+    pub specs: Vec<String>,
+    /// The inputs no spec reads: their proof is the package's own.
+    pub unresolved: Vec<String>,
+}
+
+/// The test files covering each widened package's changed inputs that no
+/// runner takes as a target (a JSON catalogue, a SQL migration, a fixture),
+/// with the inputs nothing covers. A package no spec covers at all is absent.
+pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scope]) -> BTreeMap<Scope, Covering> {
     scopes.iter().filter_map(|scope| {
         let Scope::Package(directory) = scope else { return None };
         let inputs: Vec<&str> = paths.iter().map(String::as_str)
             .filter(|path| &package(repo, path) == scope).collect();
-        let specs = javascript::covering_specs(repo, head, directory, &inputs).ok()?;
-        (!specs.is_empty()).then(|| (scope.clone(), specs))
+        let resolved = javascript::covering_specs(repo, head, directory, &inputs).ok()?;
+        let specs: BTreeSet<String> = resolved.values().flatten().cloned().collect();
+        let unresolved = resolved.iter().filter(|(_, specs)| specs.is_empty()).map(|(input, _)| input.clone()).collect();
+        (!specs.is_empty()).then(|| (scope.clone(), Covering { specs: specs.into_iter().collect(), unresolved }))
     }).collect()
 }
 
 /// A widened scope is proven by its own pass or, for a package, by a
-/// whole-file pass of every spec that covers its inputs.
-pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &BTreeMap<Scope, Vec<String>>) -> Vec<Scope> {
+/// whole-file pass of every spec that covers its inputs, provided those specs
+/// cover every input: a spec reading one input says nothing about another.
+pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &BTreeMap<Scope, Covering>) -> Vec<Scope> {
     // Records already carry an ancestor's run only when no proof input changed
     // since it (cas-3080), so a documentation-only descendant keeps it.
     let proven = |scope: &Scope| passing.records().iter().any(|(_, _, test)|
         test.widened.as_ref().is_some_and(|proof| &proof.scope == scope));
     scopes.iter().filter(|scope| !proven(scope) && !covering.get(*scope)
-        .is_some_and(|specs| specs.iter().all(|spec| proven(&Scope::File(spec.clone())))))
+        .is_some_and(|found| found.unresolved.is_empty() && found.specs.iter().all(|spec| proven(&Scope::File(spec.clone())))))
         .cloned().collect()
 }
 
 pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &[Scope],
-    covering: &BTreeMap<Scope, Vec<String>>) -> Vec<String> {
+    covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     scopes.iter().flat_map(|scope| {
-        if let Some(specs) = covering.get(scope) {
+        let found = covering.get(scope);
+        if let Some(Covering { specs, unresolved }) = found && unresolved.is_empty() {
             return specs.iter().find_map(|spec| javascript::runner_hint(repo, spec)).map(|runner| vec![runner])
                 .unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"]).into_iter()
                 .map(|runner| format!("cas factory worker-check --cas-root {} -- {runner} {}", cas_root.display(), specs.join(" ")))
@@ -107,11 +120,19 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
         let path = paths.iter().filter(|path| javascript::javascript(path))
             .find(|path| &self::scope(repo, path) == scope).map(String::as_str)
             .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None });
-        let Some(path) = path else {
-            return vec![format!("one capped run of a changed JavaScript file in {scope:?}: `cas factory worker-check --cas-root {} -- <runner> <changed .js/.ts file>`", cas_root.display())];
+        // The inputs nothing covers: some specs read the other inputs, but
+        // their passes do not stand in for the whole package.
+        let unresolved: Vec<&str> = match found {
+            Some(found) => found.unresolved.iter().map(String::as_str).collect(),
+            None => paths.iter().map(String::as_str).filter(|input| &self::package(repo, input) == scope).collect(),
         };
-        javascript::runner_hint(repo, path).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"])
-            .into_iter().map(|runner| format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())).collect()
+        let named = if unresolved.is_empty() { String::new() } else { format!("no spec reads {}; ", unresolved.join(", ")) };
+        let Some(path) = path else {
+            return vec![format!("{named}the package needs one capped run of a changed JavaScript file in {scope:?}: `cas factory worker-check --cas-root {} -- <runner> <changed .js/.ts file>`", cas_root.display())];
+        };
+        let note = (!named.is_empty() && found.is_some()).then(|| format!("{}the covering specs' passes do not prove the package; run the whole package instead", named));
+        note.into_iter().chain(javascript::runner_hint(repo, path).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"])
+            .into_iter().map(|runner| format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display()))).collect()
     }).collect()
 }
 

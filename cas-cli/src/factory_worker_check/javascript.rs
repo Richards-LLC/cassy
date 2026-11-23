@@ -302,25 +302,29 @@ pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec
     Ok(specs)
 }
 
-/// GH #2224, #2266: the test files under `package` at `head` that read one of
-/// the changed `inputs` through a relative literal: the input itself (a JSON
+/// GH #2224, #2266: for each changed `input` under `package`, the test files
+/// at `head` that read it through a relative literal: the input itself (a JSON
 /// catalogue), a module import without its extension (a fixture), or a
 /// directory holding it inside the package (Prisma migrations). An input read
-/// any other way has no covering spec here.
-pub(super) fn covering_specs(repo: &Path, head: &str, package: &str, inputs: &[&str]) -> Result<Vec<String>> {
+/// any other way has no covering spec here and maps to an empty list.
+pub(super) fn covering_specs(repo: &Path, head: &str, package: &str, inputs: &[&str]) -> Result<BTreeMap<String, Vec<String>>> {
     let listed = super::git(repo, &["ls-tree", "-r", "--name-only", head, "--", if package.is_empty() { "." } else { package }])?;
-    let mut covering = Vec::new();
+    let mut covering: BTreeMap<String, Vec<String>> = inputs.iter().map(|input| ((*input).to_owned(), Vec::new())).collect();
     for spec in listed.lines().filter(|path| javascript(path) && test_match(path, runner_hint(repo, path))) {
         let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
-        let reads = |resolved: &Path, input: &Path| {
-            let inside = resolved.starts_with(package) && resolved != Path::new(package) && !Path::new(spec).starts_with(resolved);
-            resolved == input
-                || (javascript(&input.to_string_lossy()) && (input.with_extension("") == resolved
-                    || input.parent() == Some(resolved) && input.file_stem().is_some_and(|stem| stem == "index")))
-                || (inside && input.starts_with(resolved))
-        };
-        if relative_literals(spec, &source)?.iter().any(|resolved| inputs.iter().any(|input| reads(resolved, Path::new(input)))) {
-            covering.push(spec.to_owned());
+        let literals = relative_literals(spec, &source)?;
+        for input in inputs {
+            let input_path = Path::new(input);
+            let reads = |resolved: &Path| {
+                let inside = resolved.starts_with(package) && resolved != Path::new(package) && !Path::new(spec).starts_with(resolved);
+                resolved == input_path
+                    || (javascript(input) && (input_path.with_extension("") == resolved
+                        || input_path.parent() == Some(resolved) && input_path.file_stem().is_some_and(|stem| stem == "index")))
+                    || (inside && input_path.starts_with(resolved))
+            };
+            if literals.iter().any(|resolved| reads(resolved)) {
+                covering.entry((*input).to_owned()).or_default().push(spec.to_owned());
+            }
         }
     }
     Ok(covering)

@@ -733,7 +733,26 @@ fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) 
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
 #[track_caller]
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
-    gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary)
+    // cas-0bc1: every parked delivery's tip was read again by each merge alert
+    // and admission lookup, 988 core calls an hour. One answer per commit for
+    // every reader on the machine; a failure is never kept.
+    let shared = crate::gh_budget::shared_read_by(
+        &crate::gh_budget::check_runs_key(repo, sha),
+        crate::gh_budget::check_runs_ttl,
+        || {
+            let output = gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary);
+            if output.success { Ok(output.stdout) } else { Err(output) }
+        },
+    );
+    match shared {
+        Ok(stdout) => GhApiOutput {
+            success: true,
+            status: "exit status: 0".to_string(),
+            stdout,
+            stderr: Vec::new(),
+        },
+        Err(failed) => failed,
+    }
 }
 
 #[track_caller]

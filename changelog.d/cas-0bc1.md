@@ -1,0 +1,3 @@
+### Fixed — Factory CI watch
+
+- **Cassy no longer spends the shared GitHub quota on standing CI polls** — Was: every pending CI wake and every parked delivery asked GitHub about its commit on every 30 s poll, and the merge alert and merge admission re-read each commit's checks every time. About 4,600 of the 5,000 core calls an hour went to them, so the quota ran out twice on Nov 22 and merges could not check CI. Now: one list of the newest runs per poll answers every commit with a run still going, a finished commit's run list is re-read when its runs change or after 5 minutes, and a commit's checks are shared by all readers on the machine (a minute while any is unfinished, ten minutes once all finished, dropped as soon as the CI watch sees a new run or attempt).

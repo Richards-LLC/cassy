@@ -1705,6 +1705,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             )
             .unwrap();
             let mut task = Task::new("cas-381f-auto".into(), "Automatic verifier fixture".into());
+            // This fixture has a local-only target and no publication remote.
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
             task.status = cas_types::TaskStatus::AwaitingMerge;
             task.depth = cas_types::TaskDepth::Deep;
             task.assignee = Some("worker".into());

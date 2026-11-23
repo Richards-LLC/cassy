@@ -31,6 +31,8 @@ mod composer_upload;
 mod secret_request;
 #[path = "account_routes.rs"]
 mod account_routes;
+#[path = "gateway_accounts.rs"]
+mod gateway_accounts;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
 #[path = "command_receipts.rs"]
@@ -209,6 +211,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/v1/accounts", get(account_routes::list::<R>).options(preflight::<R>))
         .route("/v1/accounts/usage", get(account_routes::check_usage::<R>).options(preflight::<R>))
+        .route("/v1/accounts/gateway", get(account_routes::gateway::<R>).options(preflight::<R>))
         .route("/v1/accounts/operations", post(account_routes::operate::<R>).options(preflight::<R>))
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route(
@@ -788,22 +791,36 @@ async fn launch_profiles<R: SessionReadModel>(
         None
     };
     let claude_root = project_cas_root.clone();
-    let (claude, codex, grok) = tokio::join!(
+    let gateway_root = project_cas_root.clone();
+    let (claude, codex, grok, gateway) = tokio::join!(
         tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Claude, claude_root.as_deref())),
         tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Codex, project_cas_root.as_deref())),
         tokio::task::spawn_blocking(|| {
             super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).map(|_| Vec::new())
         }),
+        // New Session's worker route for this project; absent without a target.
+        tokio::task::spawn_blocking(move || gateway_root.map(|root| gateway_route_option(&root))),
     );
     with_cors(
         Json(serde_json::json!({
             "claude": profile_envelope(claude),
             "codex": profile_envelope(codex),
             "grok": profile_envelope(grok),
+            "gateway": gateway.ok().flatten(),
         }))
         .into_response(),
         &headers,
     )
+}
+
+/// The gateway choice New Session offers, with any readiness reason made
+/// home-relative so no absolute path crosses the wire.
+fn gateway_route_option(project_cas_root: &std::path::Path) -> cas_mux::gateway::SessionRouteOption {
+    let mut option = cas_mux::gateway::session_route_option(project_cas_root);
+    if let (Some(reason), Some(home)) = (option.reason.as_mut(), dirs::home_dir()) {
+        *reason = reason.replace(&home.display().to_string(), "~");
+    }
+    option
 }
 
 #[derive(Serialize)]
@@ -1071,6 +1088,9 @@ struct LaunchSessionRequest {
     workers: Option<u8>,
     name: Option<String>,
     profile: Option<String>,
+    /// Worker route pinned for this session: `direct` or `gateway`. Absent
+    /// keeps the project's own setting.
+    routing: Option<String>,
 }
 
 async fn launch_session<R: SessionReadModel>(
@@ -2063,6 +2083,22 @@ fn launch_session_blocking(
         }
     };
     let project_cas_root = root.join(".cas");
+    match request.routing.as_deref() {
+        None | Some("direct") => {}
+        Some("gateway") => {
+            let option = gateway_route_option(&project_cas_root);
+            if !option.available {
+                return launch_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "gateway_unavailable",
+                    option.reason.as_deref().unwrap_or("the home gateway is not ready"),
+                );
+            }
+        }
+        Some(_) => {
+            return launch_error(StatusCode::BAD_REQUEST, "invalid_routing", "routing must be direct or gateway");
+        }
+    }
     let chosen_profile = if let Some(profile) = request.profile.as_deref() {
         let profiles = match super::launch_env::profiles_for_project(supervisor_cli, Some(&project_cas_root)) {
             Ok(profiles) => profiles,
@@ -2143,7 +2179,7 @@ fn launch_session_blocking(
     }
     pending.remove(&root);
 
-    let environment = match super::launch_env::resolve_for_project(supervisor_cli, Some(&chosen_profile), Some(&project_cas_root)) {
+    let mut environment = match super::launch_env::resolve_for_project(supervisor_cli, Some(&chosen_profile), Some(&project_cas_root)) {
         Ok(environment) => environment,
         Err(error) => {
             let code = match error {
@@ -2157,6 +2193,10 @@ fn launch_session_blocking(
             return launch_error(StatusCode::UNPROCESSABLE_ENTITY, code, &error.to_string());
         }
     };
+    // The daemon and every worker it spawns read this pin, never a later config edit.
+    if let Some(routing) = request.routing.as_deref() {
+        environment.set.push((cas_mux::gateway::ROUTE_ENV.into(), routing.into()));
+    }
     let name = request
         .name
         .unwrap_or_else(|| crate::ui::factory::generate_session_name(None));

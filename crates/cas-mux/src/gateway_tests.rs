@@ -188,3 +188,24 @@ fn only_loopback_and_tailnet_endpoints_are_accepted() {
         assert!(validate_endpoint(refused).is_err(), "{refused}");
     }
 }
+
+/// Commander pins a session's route on its daemon, so the project setting
+/// read at each spawn can neither turn a direct session on nor a gateway one off.
+#[test]
+fn session_pin_overrides_the_project_setting_in_both_directions() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let hub = "endpoint = \"http://127.0.0.1:8317\"\nkey_file = \"/k\"\n";
+    for (project, pin, routed) in [
+        (true, Some("direct"), false),
+        (false, Some("gateway"), true),
+        (true, None, true),
+        (false, None, false),
+    ] {
+        write_config(&cas_root, &format!("enabled = {project}\n{hub}"));
+        let settings = load(Some(&cas_root), pin);
+        assert_eq!(settings.enabled, routed, "project={project} pin={pin:?}");
+        assert_eq!(settings.endpoint.is_some(), routed, "project={project} pin={pin:?}");
+    }
+}

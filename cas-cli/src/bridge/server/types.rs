@@ -303,6 +303,40 @@ pub(crate) struct AgentSummaryJson {
     /// their precondition, so a stop aimed at an old generation is stale.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) generation: Option<String>,
+    /// A worker's effective model route, from its recorded transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) route: Option<WorkerRouteJson>,
+}
+
+/// `gateway`, `direct`, or `fallback` (gateway chosen, started direct) with
+/// its reason. Never the hub address.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct WorkerRouteJson {
+    pub(crate) kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+}
+
+impl WorkerRouteJson {
+    /// Parses `worker_transport`: `gateway <endpoint>` or
+    /// `direct (gateway fallback: <reason>)`. No transport means the gateway
+    /// was off, so the worker runs direct.
+    pub(crate) fn from_transport(transport: Option<&str>) -> Self {
+        let transport = transport.map(str::trim).unwrap_or_default();
+        if transport.starts_with("gateway") {
+            return Self { kind: "gateway", reason: None };
+        }
+        match transport.strip_prefix("direct (gateway fallback: ").and_then(|rest| rest.strip_suffix(')')) {
+            Some(reason) => {
+                let reason = match dirs::home_dir() {
+                    Some(home) => reason.replace(&home.display().to_string(), "~"),
+                    None => reason.to_string(),
+                };
+                Self { kind: "fallback", reason: Some(reason) }
+            }
+            None => Self { kind: "direct", reason: None },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

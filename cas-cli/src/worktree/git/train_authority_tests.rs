@@ -821,6 +821,50 @@ fn train_transfer_operator_recovery_requires_h41_and_exact_scope_cas_6456() {
     core.train_owner_transfer_checked(&tasks.get(&train.id).unwrap(), &accept, &checks).unwrap();
     assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some(successor.id.as_str()));
     assert_eq!(fixture.target(), raw);
+
+    // Design v3 N4: after another exact-SHA adoption, the current owner may
+    // abort recovery directly, without manufacturing a successor transfer.
+    let accepted = Snapshot::read(&fixture.left, &train.id).unwrap();
+    let raw = fixture.candidate(&fixture.right, "abort-recovery-raw-writer");
+    command(&fixture.right, &["push", "origin", &format!("{raw}:refs/heads/{}", accepted.record.target)], None).unwrap();
+    request.action = Action::AdoptTarget;
+    request.expected_authority = accepted.tip.clone();
+    request.expected_generation = accepted.record.generation.clone();
+    request.expected_target = raw.clone();
+    core.train_owner_recover_checked(&train.id, &request, &operator, &checks).unwrap();
+    let adopted = Snapshot::read(&fixture.left, &train.id).unwrap();
+    assert_eq!(adopted.record.phase, Phase::RecoveryHeld);
+    assert!(adopted.record.transfer.is_none());
+    let abort = TrainOwnerTransferRequest { operation: TransferAction::Abort,
+        expected_authority: adopted.tip.clone(), expected_generation: adopted.record.generation.clone(),
+        transfer_id: "abort-recovery".into(), request_id: uuid::Uuid::new_v4().to_string(),
+        reason: "resume adopted target under current owner".into(), successor: None };
+    let current = tasks.get(&train.id).unwrap();
+    for stale in [
+        TrainOwnerTransferRequest { expected_authority: accepted.tip, ..abort.clone() },
+        TrainOwnerTransferRequest { expected_generation: accepted.record.generation, ..abort.clone() },
+        TrainOwnerTransferRequest { operation: TransferAction::Quiesce, ..abort.clone() },
+    ] {
+        assert!(core.train_owner_transfer_checked(&current, &stale, &checks).is_err());
+        assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, adopted.tip);
+    }
+    checks.pending.set(true);
+    let error = core.train_owner_transfer_checked(&current, &abort, &checks).unwrap_err();
+    assert_eq!(error.split(':').next(), Some("TRAIN_TRANSFER_EXTERNAL_PUBLICATION_PENDING"));
+    assert_eq!(Snapshot::read(&fixture.left, &train.id).unwrap().tip, adopted.tip);
+    checks.pending.set(false);
+    let before = checks.reads.get();
+    core.train_owner_transfer_checked(&current, &abort, &checks).unwrap();
+    assert!(checks.reads.get() >= before + 2);
+    let aborted = Snapshot::read(&fixture.right, &train.id).unwrap();
+    assert_eq!(aborted.record.phase, Phase::Active);
+    assert_eq!(aborted.record.identity, adopted.record.identity);
+    assert_ne!(aborted.record.generation, adopted.record.generation);
+    assert_eq!(aborted.record.epoch, adopted.record.epoch + 1);
+    assert!(aborted.record.transfer.is_none());
+    assert_eq!(aborted.record.target_sha, raw);
+    assert_eq!(fixture.target(), raw);
+    assert_eq!(tasks.get(&train.id).unwrap().epic_verification_owner.as_deref(), Some(successor.id.as_str()));
 }
 
 #[derive(Default)]

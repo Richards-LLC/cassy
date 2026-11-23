@@ -2545,7 +2545,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 if uncertain {
                     let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                     widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into() });
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into(), configs: Default::default() });
                 }
                 tests
             },
@@ -2556,7 +2556,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
                 let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                 widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}") });
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}"), configs: Default::default() });
                 Vec::new()
             }
         }
@@ -5197,7 +5197,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             runner:"nextest".into(), tests:vec![identity.clone()], consecutive_passes:5, elapsed_ms:42,
         }).unwrap();
         widened::record(&producer_root, &producer, &head, widened::Proof {
-            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(),
+            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(), configs: Default::default(),
         }, 1).unwrap();
         record_passing_test_with_log_for_tests(&producer_root, &producer, &head, "fixture", "test(owned)");
         let mut task = cas_types::Task::new("cas-portable".into(), "Portable proof".into());

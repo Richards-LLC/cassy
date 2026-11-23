@@ -49,7 +49,9 @@ const HUB_STATE: Record<string, [string, string]> = { active: ["Active", "active
  * Hidden while the machine has no hub configured.
  */
 export function gatewaySection(machine: AccountsMachine, gateway: GatewayInventory | undefined): string {
-  if (!gateway || gateway.status === "off") return "";
+  // Only a known hub answer draws the section; anything else (an older hub's
+  // empty body, a proxy page) leaves the native ledger exactly as it was.
+  if (!gateway || (gateway.status !== "ready" && gateway.status !== "unavailable") || !Array.isArray(gateway.accounts)) return "";
   const name = escapeHtml(machine.label);
   const status = gateway.status === "ready" ? `<span class="status-chip status-chip--active">Ready</span>` : `<span class="status-chip status-chip--blocked">Not ready</span>`;
   const where = gateway.host ? ` on ${gateway.host === "loopback" ? "this machine" : "the tailnet"}` : "";

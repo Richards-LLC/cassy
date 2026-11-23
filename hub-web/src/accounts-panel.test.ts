@@ -180,10 +180,12 @@ it.each(["claude", "codex"] as const)("rechecks %s usage without management or s
 it("lists hub accounts apart from native profiles, read-only, and only when the machine has a hub", async () => {
   const hub: GatewayInventory = { status: "unavailable", reason: "hub unreachable", host: "loopback", inventory: "ok", team_accounts: 1,
     accounts: [{ provider: "claude", label: "hel***@example.test", state: "active", recent_requests: 6, recent_failed: 1, recent_minutes: 200 }, { provider: "codex", label: "pro***@example.test", state: "disabled", recent_requests: 0, recent_failed: 0 }] };
-  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, false], [async () => ({ ...hub, status: "off" as const, accounts: [] }), false], [async () => hub, true]] as const) {
+  // An older hub's catch-all `{}` must not take the native ledger down with it (lane CI HUB-J13).
+  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, false], [async () => ({}) as GatewayInventory, false], [async () => ({ ...hub, status: "off" as const, accounts: [] }), false], [async () => hub, true]] as const) {
     setup(true, row, undefined, gateway);
     await settle();
     await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.querySelector('.accounts-row[data-login-state="stale_login"]')).not.toBeNull();
     const section = document.querySelector<HTMLElement>('[data-testid="accounts-gateway"]');
     expect(Boolean(section)).toBe(shown);
     if (section) {

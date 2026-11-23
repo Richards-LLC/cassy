@@ -615,7 +615,9 @@ pub(super) fn read_worker_wait(
         read.ci = "unpushed";
         return Some((worker.clone(), read));
     }
-    read.ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(tip, repo);
+    read.ci = crate::mcp::tools::core::workflow::standing_ci_reads(|| {
+        crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(tip, repo)
+    });
     // Do not borrow a running old tip if the worker committed during the probe.
     if resolve(&branch).as_deref() != Some(tip) { return None; }
     read.waiting = read.ci == "pending";
@@ -638,7 +640,9 @@ fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&
         _ => return None,
     };
     let tip = evidence.factory_tip.clone();
-    let (ci, ci_source) = crate::mcp::tools::core::workflow::delivery_tip_ci_reading(&tip, repo);
+    let (ci, ci_source) = crate::mcp::tools::core::workflow::standing_ci_reads(|| {
+        crate::mcp::tools::core::workflow::delivery_tip_ci_reading(&tip, repo)
+    });
     // cas-e48d: the target can gain this delivery while GitHub answers the
     // CI probe. Refresh containment too, so a completed-CI relay cannot quote
     // the pre-CI target. This remains one bounded exact-target check on the
@@ -708,7 +712,9 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
         return None;
     }
     let ci = known.map(|known| known.ci)
-        .unwrap_or_else(|| crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo));
+        .unwrap_or_else(|| crate::mcp::tools::core::workflow::standing_ci_reads(|| {
+            crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo)
+        }));
     // Re-fetch the target after CI, just as the parked delivery path does.
     let evidence = match fresh_merge_alert_tip_evidence(
         repo, task_id, &branch, &target, Some(&tip),

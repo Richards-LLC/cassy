@@ -5,28 +5,36 @@ use super::*;
 pub(crate) enum Scope {
     File(String),
     /// The runner's dependency graph, rooted at this source file, rather than a
-    /// package pass that may execute thousands of unrelated tests.
+    /// package pass that may execute thousands of unrelated tests. A Playwright
+    /// or `node:test` helper's graph is the tests importing it (GH #2146, #2200).
     Related(String),
     Package(String),
     Crate(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Proof {
     pub runner: String,
     pub scope: Scope,
     #[serde(default)]
     pub reason: String,
+    /// Playwright specs this run executed, each with the repository-relative
+    /// config it ran under (GH #2146). A helper's `Related` proof names every
+    /// importing spec; a spec's own `File` proof names itself.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub configs: BTreeMap<String, String>,
 }
 
 pub(super) fn valid(proof: &Proof) -> bool {
     let relative = |path: &str| !Path::new(path).is_absolute()
         && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)));
     matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
+        && (proof.configs.is_empty() || proof.runner == "playwright")
+        && proof.configs.iter().all(|(spec, config)| !spec.is_empty() && relative(spec) && !config.is_empty() && relative(config))
         && match &proof.scope {
             Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
-            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest") && !path.is_empty() && relative(path),
+            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest" | "playwright" | "node") && !path.is_empty() && relative(path),
             Scope::Package(path) => proof.runner != "nextest" && relative(path),
         }
 }
@@ -35,7 +43,9 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) {
         let runner = javascript::runner_hint(repo, path);
         if javascript::test_match(path, runner) { return Scope::File(path.into()); }
-        if matches!(runner, Some("jest" | "vitest")) { return Scope::Related(path.into()); }
+        if matches!(runner, Some("jest" | "vitest")) || javascript::related_tests(repo, path).is_some() {
+            return Scope::Related(path.into());
+        }
     }
     package(repo, path)
 }
@@ -89,11 +99,25 @@ pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scop
 pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &BTreeMap<Scope, Covering>) -> Vec<Scope> {
     // Records already carry an ancestor's run only when no proof input changed
     // since it (cas-3080), so a documentation-only descendant keeps it.
-    let proven = |scope: &Scope| passing.records().iter().any(|(_, _, test)|
-        test.widened.as_ref().is_some_and(|proof| &proof.scope == scope));
-    scopes.iter().filter(|scope| !proven(scope) && !covering.get(*scope)
-        .is_some_and(|found| found.unresolved.is_empty() && found.specs.iter().all(|spec| proven(&Scope::File(spec.clone())))))
-        .cloned().collect()
+    let recorded = |wanted: &Scope| passing.records().iter()
+        .filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| &proof.scope == wanted);
+    // GH #2146: a Playwright helper holds no tests. Every spec importing it
+    // must have run, each under its recorded config, whether through the
+    // helper's own run or through that spec's own run.
+    let ran = |spec: &str| passing.records().iter().filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof|
+        proof.runner == "playwright" && proof.configs.contains_key(spec)
+            && (proof.scope == Scope::File(spec.into()) || matches!(&proof.scope, Scope::Related(_))));
+    scopes.iter().filter(|scope| {
+        if let Scope::Related(helper) = scope {
+            let consumers = javascript::related_tests(passing.repo, helper)
+                .filter(|(runner, _)| *runner == "playwright").map(|(_, specs)| specs).unwrap_or_default();
+            if !consumers.is_empty() { return !consumers.iter().all(|spec| ran(spec)); }
+        }
+        // GH #2224, #2266: a package is also proven by whole-file passes of the
+        // specs covering its inputs, once they cover every input.
+        !recorded(scope) && !covering.get(*scope)
+            .is_some_and(|found| found.unresolved.is_empty() && found.specs.iter().all(|spec| recorded(&Scope::File(spec.clone()))))
+    }).cloned().collect()
 }
 
 pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &[Scope],
@@ -110,7 +134,9 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
             return vec![format!("cas factory worker-check --cas-root {} -- nextest run -p {package} --lib -E 'test({package})'", cas_root.display())];
         }
         if let Scope::Related(path) = scope {
-            let runner = if javascript::runner_hint(repo, path) == Some("vitest") {
+            let runner = if let Some((runner, _)) = javascript::related_tests(repo, path) {
+                if runner == "node" { "node --test" } else { runner }
+            } else if javascript::runner_hint(repo, path) == Some("vitest") {
                 "vitest related --run"
             } else { "jest --findRelatedTests" };
             return vec![format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())];

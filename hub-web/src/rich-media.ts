@@ -107,7 +107,7 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
       if (mime.startsWith("image/")) {
         const image = document.createElement("img"); image.alt = file.name; image.width = viewport.classList.contains("rich-thumbnail") ? 48 : 640; image.height = viewport.classList.contains("rich-thumbnail") ? 48 : 360; image.loading = "lazy"; image.decoding = "async"; image.referrerPolicy = "no-referrer"; media = image;
       } else {
-        const player = document.createElement(mime.startsWith("video/") ? "video" : "audio"); player.controls = true; player.preload = "none";
+        const player = document.createElement(mime.startsWith("video/") ? "video" : "audio"); player.controls = true; player.preload = "none"; player.setAttribute("aria-label", file.name);
         player.addEventListener("play", () => { wantedPlayback = true; });
         player.addEventListener("pause", () => { if (!player.error) wantedPlayback = false; });
         const restore = resume; resume = undefined;

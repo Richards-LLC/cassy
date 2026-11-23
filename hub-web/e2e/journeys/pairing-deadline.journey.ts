@@ -1,6 +1,11 @@
-import type { Route } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS } from "./world";
+
+// The pairing dialog is named by its step's heading.
+const pairDialog = (page: Page) => page.getByRole("dialog", { name: /^(Pair a machine|Machine authorized)$/ });
+// A row is named "<project> on <machine>, …"; the row's own controls are not.
+const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
 
 test("HUB-J1 approved pairing health check has a deadline and keeps its invitation (cas-2b3a5)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], relay: { machine: "atlas", claimAfter: 1, authorizeAfter: 1 } });
@@ -11,7 +16,7 @@ test("HUB-J1 approved pairing health check has a deadline and keeps its invitati
     return route.fallback();
   });
   await journey.open();
-  const dialog = page.locator("#pair-dialog");
+  const dialog = pairDialog(page);
   await page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }).click();
   await dialog.getByRole("button", { name: "Create pairing code" }).click();
   await journey.stage("The approved browser probe finishes even when it is held", async () => {
@@ -28,7 +33,7 @@ test("HUB-J1 approved pairing health check has a deadline and keeps its invitati
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden(); expect(hub.exchanges).toHaveLength(1);
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toBeVisible();
+    await expect(conversationRow(page)).toBeVisible();
   });
 });
 
@@ -40,7 +45,7 @@ test("HUB-J2 unanswered pairing exchange times out safely and can be retried (ca
     if (blocked) { held = route; return; }
     return route.fallback();
   });
-  const dialog = page.locator("#pair-dialog");
+  const dialog = pairDialog(page);
   const token = "q3VbXo8Zt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRaQ";
   await page.goto(`./#pair=${token}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=machine:read,session:read,pane:read`);
   await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
@@ -73,13 +78,13 @@ test("HUB-J2 unanswered pairing exchange times out safely and can be retried (ca
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
     expect(hub.exchanges).toHaveLength(1);
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toBeVisible();
+    await expect(conversationRow(page)).toBeVisible();
   });
 });
 
 test("HUB-J1 one relay request keeps its deadline across polls and a new request gets a fresh one (cas-fa56)", journeyPart, async ({ page, journey }) => {
   await journey.hub({ machines: [ATLAS], relay: { machine: "atlas", claimAfter: 2, authorizeAfter: 1000 } });
-  const dialog = page.locator("#pair-dialog");
+  const dialog = pairDialog(page);
   const relayDeadline = async (path: string): Promise<string> => {
     const response = await page.waitForResponse((candidate) => new URL(candidate.url()).pathname.endsWith(path));
     return String((await response.json()).expires_at);

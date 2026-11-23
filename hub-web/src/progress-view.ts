@@ -32,7 +32,7 @@ export interface TrainActivity { readonly building: number; readonly parked: num
 
 /** The release header reads producer counts verbatim, never infers merges from closure. */
 export function releaseHeader(document: Document, epic: ReleaseEpic | undefined, activity?: TrainActivity): HTMLElement {
-  const header = document.createElement("header"); header.className = "release-progress";
+  const header = document.createElement("header"); header.className = "release-progress"; header.dataset.testid = "release-progress";
   if (!epic) {
     const evidence = document.createElement("p"); evidence.className = "release-meta";
     evidence.textContent = "No release train for this supervisor";

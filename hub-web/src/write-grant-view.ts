@@ -49,6 +49,7 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   const { state, on } = context;
   const panel = document.createElement("div");
   panel.className = "fleet-ops-panel write-grant";
+  panel.dataset.testid = "write-grant";
   panel.setAttribute("role", "group");
   // cas-4cf2: the visible title is the accessible name; a phone sheet names
   // its close button for the panel. cas-68d0 F01: an h3 under the rail's h2,
@@ -61,6 +62,7 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   title.textContent = WRITE_ACCESS_TITLE;
   const lead = document.createElement("p");
   lead.className = "write-grant-lead";
+  lead.dataset.testid = "write-grant-lead";
   lead.textContent = "Lets the agents on one task write to a folder outside their worktree until the task closes.";
   panel.append(title);
   if (context.where) {
@@ -148,6 +150,7 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
     line.className = `write-grant-result fleet-ops-note fleet-ops-note--${state.result.tone === "ok" ? "ok" : "error"}`;
     // cas-5020: a status line, never a focus target; focus goes to a control.
     line.setAttribute("role", "status");
+    line.setAttribute("aria-label", "Write access result");
     // cas-06e8: the task id never breaks at its hyphen.
     const at = state.result.task ? state.result.text.indexOf(state.result.task) : -1;
     if (at < 0) line.textContent = state.result.text;

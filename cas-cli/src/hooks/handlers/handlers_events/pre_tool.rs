@@ -477,6 +477,60 @@ fn verifier_rust_build_denial(what: &str, cas_root: Option<&Path>) -> String {
     )
 }
 
+/// cas-3751a: text guards replaced by the worker OS sandbox (capability-guard
+/// stage A). While a Claude worker runs under the generated sandbox profile in
+/// shadow mode, these only record a would-deny for the Bash tool, where the
+/// OS enforces the same boundary. Write, Edit and other harness tools run
+/// outside the sandbox, so the guards keep refusing them.
+pub(crate) const SANDBOX_SHADOWED_GUARDS: [&str; 8] =
+    ["H-11", "H-12", "H-14", "H-16", "H-22", "H-28", "H-29", "H-33"];
+
+/// The harness process's sandbox mode, set only by the Claude worker launch
+/// that applies the generated profile. A tool call cannot change it: hooks
+/// inherit the harness environment, not the sandboxed shell's.
+fn worker_sandbox_shadow(input: &HookInput, tool_name: &str) -> bool {
+    tool_name == "Bash"
+        && std::env::var("CAS_WORKER_SANDBOX").is_ok_and(|mode| mode == "shadow")
+        && crate::harness_policy::is_factory_agent(input)
+        && !crate::harness_policy::is_supervisor(input)
+}
+
+/// H-33 is shadowed only for a secret file the generated profile itself
+/// denies: one of its names, inside the worker checkout. Other protected
+/// names and paths keep the text guard.
+fn sandbox_denies_secret(path: &str) -> bool {
+    let path = Path::new(path);
+    std::env::var_os("CAS_CLONE_PATH").is_some_and(|worktree| path.starts_with(worktree))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(cas_mux::worker_sandbox::secret_write_denied)
+}
+
+/// Record a stage-A guard's would-deny instead of refusing. Returns `true`
+/// when the refusal is shadowed and the call should proceed.
+fn shadowed_by_sandbox(input: &HookInput, tool_name: &str, cas_root: Option<&Path>, reason: &str) -> bool {
+    if !worker_sandbox_shadow(input, tool_name) {
+        return false;
+    }
+    let Some(code) = crate::gates::codes_in(reason)
+        .into_iter()
+        .find(|code| SANDBOX_SHADOWED_GUARDS.contains(code))
+    else {
+        return false;
+    };
+    if let Some(root) = cas_root {
+        let recorded = crate::store::open_event_store(root)
+            .map_err(anyhow::Error::from)
+            .and_then(|store| crate::gates::facts::record_shadowed(store.as_ref(), code, reason));
+        if let Err(error) = recorded {
+            tracing::warn!(%error, code, "could not record sandbox shadow fact");
+        }
+    }
+    tracing::info!(code, "worker sandbox shadow: text guard would deny; OS sandbox enforces");
+    true
+}
+
 /// Pure admission selection; safe before logging, DB discovery or telemetry.
 pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
     crate::harness_policy::is_worker(input)
@@ -585,13 +639,16 @@ fn handle_pre_tool_use_checked(
                     .map(|reason| crate::gates::tag("H-11", reason))
                     .or_else(|| role_env_tampering_denial(command).map(|reason| crate::gates::tag("H-12", reason)))
             })
+        && !shadowed_by_sandbox(input, tool_name, cas_root, &reason)
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
     // cas-0d4f0: no agent writes a Cassy config file directly, for every role.
     // gate[H-14 pre-tool]: Cassy config file direct write
-    if let Some(reason) = cas_config_file_write_denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-14", reason)));
+    if let Some(reason) = cas_config_file_write_denial(input).map(|reason| crate::gates::tag("H-14", reason))
+        && !shadowed_by_sandbox(input, tool_name, cas_root, &reason)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
     // cas-803f: a supervisor in a long foreground Bash call cannot hear the
@@ -635,6 +692,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .is_some_and(worker_command_pattern_kill)
+        && !shadowed_by_sandbox(input, tool_name, cas_root, &crate::gates::tag("H-16", "FACTORY PROCESS SIGNAL"))
     {
         return Ok(HookOutput::with_pre_tool_permission(
             "deny",
@@ -862,7 +920,10 @@ fn handle_pre_tool_use_checked(
                         if let Some(root) = cas_root {
                             log_factory_git_scope_rejection(root, input, &target, cmd);
                         }
-                        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-22", deny_msg)));
+                        let reason = crate::gates::tag("H-22", deny_msg);
+                        if !shadowed_by_sandbox(input, tool_name, cas_root, &reason) {
+                            return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                        }
                     }
                 }
             }
@@ -982,16 +1043,16 @@ fn handle_pre_tool_use_checked(
             crate::harness_policy::is_supervisor(input),
             Some(&worktree_root),
         ) {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &crate::gates::tag("H-28", factory_workspace_contract_denial(
-                    input,
-                    &violation,
-                    artifacts_root.as_deref(),
-                    None,
-                    Some(&worktree_root),
-                )),
+            let reason = crate::gates::tag("H-28", factory_workspace_contract_denial(
+                input,
+                &violation,
+                artifacts_root.as_deref(),
+                None,
+                Some(&worktree_root),
             ));
+            if !shadowed_by_sandbox(input, tool_name, None, &reason) {
+                return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+            }
         }
     }
 
@@ -1094,18 +1155,18 @@ fn handle_pre_tool_use_checked(
             }
             FactoryWriteDecision::Denied(violation) => {
                 log_factory_workspace_rejection(cas_root, input, &violation);
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    &crate::gates::tag("H-29", factory_workspace_contract_denial_with_roots(
-                        input,
-                        &violation,
-                        artifacts_root.as_deref(),
-                        scratch_root.as_deref(),
-                        Some(&worktree_root),
-                        &write_policy,
-                        &write_task_ids,
-                    )),
+                let reason = crate::gates::tag("H-29", factory_workspace_contract_denial_with_roots(
+                    input,
+                    &violation,
+                    artifacts_root.as_deref(),
+                    scratch_root.as_deref(),
+                    Some(&worktree_root),
+                    &write_policy,
+                    &write_task_ids,
                 ));
+                if !shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason) {
+                    return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                }
             }
         }
     }
@@ -1472,10 +1533,10 @@ fn handle_pre_tool_use_checked(
             // Block access to protected files (e.g., .env files)
             for pattern in &protection.files {
                 if path.ends_with(pattern) || path.contains(&format!("/{pattern}")) {
-                    return Ok(HookOutput::with_pre_tool_permission(
-                        "deny",
-                        &crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets")),
-                    ));
+                    let reason = crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets"));
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
+                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                    }
                 }
             }
 
@@ -1485,10 +1546,10 @@ fn handle_pre_tool_use_checked(
             }
             for pattern in &protection.patterns {
                 if path.ends_with(pattern) || path.contains(pattern) {
-                    return Ok(HookOutput::with_pre_tool_permission(
-                        "deny",
-                        &crate::gates::tag("H-33", "Protected file: may contain credentials or private keys"),
-                    ));
+                    let reason = crate::gates::tag("H-33", "Protected file: may contain credentials or private keys");
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
+                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                    }
                 }
             }
         }
@@ -9464,6 +9525,43 @@ mod workspace_contract_tests {
                 "with a policy file the edit is judged: {command}"
             );
         }
+    }
+
+    /// cas-3751a: under the worker OS sandbox (shadow mode) a stage-A guard
+    /// lets a worker's Bash call through and counts the would-deny, because the
+    /// OS enforces the same write boundary. Harness file tools run outside the
+    /// sandbox, so the same write through `Write` is still refused, and a
+    /// worker without the sandbox marker is refused as before.
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_shadow_logs_stage_a_denials_for_bash_only_cas_3751a() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("p");
+        let bash = bash_input(&format!("touch {}", target.display()), project.path());
+        let write = HookInput {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": target, "content": "x" })),
+            ..bash_input("", project.path())
+        };
+        let decide = |input: &HookInput| {
+            let output = handle_pre_tool_use_inner(input, Some(&root), None, project.path()).unwrap();
+            crate::gates::facts::hook_denial(&output).map(crate::gates::codes_in)
+        };
+
+        assert_eq!(decide(&bash), Some(vec!["H-29"]), "unsandboxed worker keeps the guard");
+        env.set("CAS_WORKER_SANDBOX", "shadow");
+        assert_eq!(decide(&bash), None, "sandboxed Bash is shadowed");
+        assert_eq!(decide(&write), Some(vec!["H-29"]), "harness Write is not sandboxed");
+
+        let store = crate::store::open_event_store(&root).unwrap();
+        let counts = crate::gates::facts::summarize(store.as_ref(), chrono::Utc::now() - chrono::Duration::hours(1)).unwrap();
+        assert_eq!(counts.get("H-29").map(|count| count.shadowed), Some(1));
     }
 
     #[test]

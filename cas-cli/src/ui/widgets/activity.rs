@@ -337,7 +337,8 @@ fn event_category_style(event_type: &EventType, styles: &crate::ui::theme::Style
         | EventType::AuditTrailGap
         | EventType::GateRefused
         | EventType::GateOverridden
-        | EventType::GateFalsePositive => {
+        | EventType::GateFalsePositive
+        | EventType::GateShadowed => {
             styles.text_error
         }
         EventType::WorkerFileEdited | EventType::WorkerGitCommit | EventType::WorkerActivity => styles.text_accent,

@@ -2305,6 +2305,120 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
         cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }
 
+/// GH #2270 setup: `surface`'s delivery parks inside epic `cas-ep2270` with
+/// no reusable verdict (its earlier verifier errored). The operator records
+/// one decision for that epic and one for another epic.
+async fn parked_in_decided_epic(
+    env: &mut TestEnvGuard,
+    surface: &str,
+) -> (Recovery, CasCore, crate::recovery_decision::RecoveryDecision, crate::recovery_decision::RecoveryDecision) {
+    let f = fixture_with_surface(env, surface, false);
+    let cas_dir = f.dir.path().join(".cas");
+    let mut config = crate::config::Config::load(&cas_dir).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&cas_dir).unwrap();
+    let mut parked = close(&f).await;
+    let tasks = open_task_store(&cas_dir).unwrap();
+    // The recorded lane start makes the delivered tier measurable.
+    parked.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: parked.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(),
+        base_sha: git(f.dir.path(), &["merge-base", "main", &f.final_tip]),
+    });
+    tasks.update(&parked).unwrap();
+    for epic in ["cas-ep2270", "cas-epother"] {
+        let mut task = Task::new(epic.into(), format!("{epic} train"));
+        task.task_type = TaskType::Epic;
+        tasks.add(&task).unwrap();
+    }
+    tasks.add_dependency(&cas_types::Dependency::new(
+        TASK.into(), "cas-ep2270".into(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    let now = chrono::Utc::now();
+    let decision = crate::recovery_decision::record(&cas_dir, tasks.as_ref(), "cas-ep2270", "close contained history", now).unwrap();
+    let foreign = crate::recovery_decision::record(&cas_dir, tasks.as_ref(), "cas-epother", "other train", now).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(cas_dir, None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let mut errored = cas_types::Verification::new("ver-errored".into(), TASK.into());
+    errored.status = VerificationStatus::Error;
+    supervisor.open_verification_store().unwrap().add(&errored).unwrap();
+    (f, supervisor, decision, foreign)
+}
+
+async fn decision_close(supervisor: &CasCore, id: &str, receipt: &str, reason: String, override_: bool) -> String {
+    text(supervisor.cas_task_close_with_dispositions(
+        Parameters(TaskCloseRequest {
+            no_delivery: None,
+            id: TASK.into(),
+            reason: Some(reason),
+            commit_receipt: Some(receipt.into()),
+            supervisor_override: override_.then_some(true),
+            stranded_branch_override: None,
+            search_manifest: None,
+        }),
+        None, None, None, None, None, None, Some(id.into()),
+    ).await.unwrap())
+}
+
+/// GH #2270: a contained delivery landed by git, and a later target commit
+/// superseded one of its paths. The operator's one recorded decision for the
+/// epic authorizes the close; each close cites that decision and its
+/// containment commit, with no supervisor_override. A missing, foreign or
+/// overridden decision, an unintegrated delivery and an unreviewed drop
+/// still refuse.
+#[tokio::test]
+async fn operator_decision_recovers_contained_delivery_with_reviewed_drop_gh2270() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, supervisor, decision, foreign) = parked_in_decided_epic(&mut env, "footer.css").await;
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let closed_now = || tasks.get(TASK).unwrap().status == TaskStatus::Closed;
+    // A target commit cited before the delivery itself lands authorizes nothing.
+    let base = git(repo, &["rev-parse", "main"]);
+    let unintegrated = decision_close(&supervisor, &decision.id, &base, format!("reviewed-drop: {base} -- early"), false).await;
+    assert!(!closed_now(), "{unintegrated}");
+    // The merge fact lands, but a target-side resolution replaces its footer.
+    git(repo, &["merge", "--no-ff", "-s", "ours", BRANCH, "-m", "land delivery by git"]);
+    std::fs::write(repo.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+    git(repo, &["add", "footer.css"]);
+    git(repo, &["commit", "-qm", "supersede footer spacing"]);
+    let replacement = git(repo, &["rev-parse", "HEAD"]);
+    let drop = format!("reviewed-drop: {replacement} -- later footer spacing supersedes it");
+    for (id, override_) in [("ord-missing", false), (foreign.id.as_str(), false), (decision.id.as_str(), true)] {
+        let refused = decision_close(&supervisor, id, &f.final_tip, drop.clone(), override_).await;
+        assert!(crate::gates::codes_in(&refused).contains(&"G-164"), "{id} {override_}: {refused}");
+        assert!(!closed_now());
+    }
+    let unreviewed = decision_close(&supervisor, &decision.id, &f.final_tip, "Reviewed the integrated historical delivery".into(), false).await;
+    assert!(crate::gates::codes_in(&unreviewed).contains(&"G-56"), "{unreviewed}");
+    // The refusal carries a copyable reason naming the superseding commit.
+    assert!(unreviewed.contains(&format!("reviewed-drop: {replacement} --")), "{unreviewed}");
+    assert!(!closed_now());
+    let closed = decision_close(&supervisor, &decision.id, &f.final_tip, drop, false).await;
+    let task = tasks.get(TASK).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed, "{closed}");
+    for cited in [&decision.id, &replacement, &f.final_tip] {
+        assert!(task.notes.contains(cited.as_str()), "{cited}: {}", task.notes);
+    }
+    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().is_none(),
+        "recovery opens no post-merge review");
+}
+
+/// GH #2270: a Tier 2 (guard) delivery keeps its independent QA even when
+/// contained and covered by the operator's decision for its epic.
+#[tokio::test]
+async fn operator_decision_keeps_tier_two_independent_qa_gh2270() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, supervisor, decision, _) = parked_in_decided_epic(&mut env, "cas-cli/src/hooks/guard.rs").await;
+    git(f.dir.path(), &["merge", "-q", "--no-ff", BRANCH, "-m", "land guard delivery by git"]);
+    let refused = decision_close(&supervisor, &decision.id, &f.final_tip, "contained guard delivery".into(), false).await;
+    assert!(crate::gates::codes_in(&refused).contains(&"G-64"), "{refused}");
+    let task = open_task_store(&f.dir.path().join(".cas")).unwrap().get(TASK).unwrap();
+    assert_ne!(task.status, TaskStatus::Closed);
+}
+
 /// Point the fixture task's recorded start at `base` on the worker lane,
 /// with no parked or anchored delivery yet.
 fn start_on_lane(tasks: &dyn cas_store::TaskStore, base: &str) -> Task {

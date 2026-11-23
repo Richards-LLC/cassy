@@ -2643,7 +2643,7 @@ mod tests {
             scope_summary: "bounded repair".into(), artifact_path: None,
         };
         let request = || serde_json::from_value(serde_json::json!({"id": task.id, "reason": "Corrected delivery; proof deferred to merge queue"})).unwrap();
-        let result = core.cas_task_close_with_dispositions(Parameters(request()), Some(serde_json::to_string(&input).unwrap()), None, None, None, None, None).await;
+        let result = core.cas_task_close_with_dispositions(Parameters(request()), Some(serde_json::to_string(&input).unwrap()), None, None, None, None, None, None).await;
         assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_none(), "unchanged source minted a review: {result:?}");
         let error = result.expect_err("same source must fail at the dispatch boundary");
         assert_eq!(error.data.as_ref().unwrap()["reason"], "premerge_repair_requires_new_commit");
@@ -2685,7 +2685,7 @@ mod tests {
         }
         input.commit_sha = corrected.clone();
         let request = serde_json::from_value(serde_json::json!({"id": task.id, "reason": "Corrected delivery; proof deferred to merge queue"})).unwrap();
-        let result = core.cas_task_close_with_dispositions(Parameters(request), Some(serde_json::to_string(&input).unwrap()), None, None, None, None, None).await.unwrap();
+        let result = core.cas_task_close_with_dispositions(Parameters(request), Some(serde_json::to_string(&input).unwrap()), None, None, None, None, None, None).await.unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
         let (receipt, delivery) = cas_store::get_latest_worker_delivery(&root, &task.id).unwrap().unwrap();
         assert_eq!(receipt.commit_sha, corrected);

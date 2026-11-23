@@ -3426,7 +3426,11 @@ missing or not an ancestor. The plan logs both bases separately.
 `Scoped Validation — impact own tests` builds the selection and runs the changed
 modules' unit tests, edited integration suites, directly changed crates and
 explicit file-reading contracts first; up to three `impact ring` shards run the
-rest from its archive after own tests pass. Agent/config roots `.claude/`,
+rest from its archive after own tests pass. The plan's `own` expression is lane
+CI's (regex and `or` included); the plan also logs `Worker proof`, one admitted
+named-filter `worker-check` command per package and harness covering each own
+part, and `lane CI only` for parts no named filter can express, such as a whole
+crate or integration binary (GH #2140). Agent/config roots `.claude/`,
 `.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
 workflow inputs use their existing script/CI contract tier plus Rust test
 functions with matching file literals, including local helper/constant reads.

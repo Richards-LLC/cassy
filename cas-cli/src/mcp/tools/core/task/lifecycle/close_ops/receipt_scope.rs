@@ -1487,6 +1487,60 @@ raise SystemExit(1 if failed else 0)
         assert!(failures.is_empty(), "{failures:?}");
     }
 
+    /// Framework boundary: implement the import-graph selection predicate,
+    /// report unrelated failures and report an empty selection as empty.
+    #[cfg(unix)]
+    const FIXTURE_RUNNER: &str = r#"#!/usr/bin/env python3
+import json, pathlib, re, sys
+a = sys.argv[1:]
+test_root = pathlib.Path.cwd()
+if '--config' in a:
+    config = pathlib.Path(a[a.index('--config') + 1])
+    configured_root = re.search(r"\broot:\s*['\"]([^'\"]+)", config.read_text())
+    if configured_root: test_root = config.parent / configured_root[1]
+specs = sorted(test_root.rglob('*.spec.ts'))
+if '--listTests' in a:
+    print(json.dumps([str(p) for p in specs]))
+    sys.exit(0)
+def depends(spec, target, seen=None):
+    seen = set() if seen is None else seen
+    if spec in seen: return False
+    seen.add(spec)
+    if spec == target: return True
+    for name in re.findall(r"from\s+['\"]([^'\"]+)", spec.read_text()):
+        dependency = (spec.parent / name).resolve()
+        if not dependency.suffix: dependency = dependency.with_suffix('.ts')
+        if dependency.is_file() and depends(dependency, target, seen): return True
+    return False
+if '--findRelatedTests' in a:
+    target = pathlib.Path(a[a.index('--findRelatedTests') + 1]).resolve()
+    specs = [p for p in specs if depends(p, target)]
+elif 'related' in a:
+    target = (test_root / a[-1]).resolve()
+    specs = [p for p in specs if depends(p, target)]
+elif '--runTestsByPath' in a:
+    target = pathlib.Path(a[a.index('--runTestsByPath') + 1]).resolve()
+    specs = [p for p in specs if p == target]
+def assertions(p):
+    # Real Jest registers one test per expanded it.each row, titled by its interpolation.
+    status = 'failed' if 'throw 0' in p.read_text() else 'passed'
+    names = []
+    for table, title in re.findall(r"it\.each\(\[(.*?)\]\)\('([^']*)'", p.read_text()):
+        for row in re.findall(r"\{([^}]*)\}", table):
+            name = title
+            for key, value in re.findall(r"(\w+):\s*'([^']*)'", row):
+                name = name.replace('$' + key, value)
+            names.append(name)
+    return [{'fullName': name, 'status': status} for name in names or ['claims']]
+results = [{'name': str(p), 'status': 'failed' if 'throw 0' in p.read_text() else 'passed',
+    'assertionResults': assertions(p)} for p in specs]
+ok = bool(results) and all(r['status'] == 'passed' for r in results)
+pathlib.Path(a[a.index('--outputFile') + 1]).write_text(json.dumps({'success': ok, 'testResults': results}))
+pathlib.Path('target').mkdir(exist_ok=True)
+with pathlib.Path('target/executed.jsonl').open('a') as out: out.write(json.dumps([str(p) for p in specs]) + '\n')
+sys.exit(0 if ok else 1)
+"#;
+
     /// Source advice, native related selection and the park reader share one
     /// fixture; each runner must exclude an unrelated failure in its package.
     #[cfg(unix)]
@@ -1526,47 +1580,7 @@ raise SystemExit(1 if failed else 0)
         // The consuming spec is elsewhere; a sibling-name heuristic cannot find it.
         write(&consumer, &consumer_source);
         write(&format!("{package}/{test_dir}/unrelated.spec.ts"), "it('unrelated', () => { throw 0; });\n");
-        // Framework boundary: implement the import-graph selection predicate,
-        // report unrelated failures and report an empty selection as empty.
-        write(&format!("{package}/node_modules/.bin/{runner}"), r#"#!/usr/bin/env python3
-import json, pathlib, re, sys
-a = sys.argv[1:]
-test_root = pathlib.Path.cwd()
-if '--config' in a:
-    config = pathlib.Path(a[a.index('--config') + 1])
-    configured_root = re.search(r"\broot:\s*['\"]([^'\"]+)", config.read_text())
-    if configured_root: test_root = config.parent / configured_root[1]
-specs = sorted(test_root.rglob('*.spec.ts'))
-if '--listTests' in a:
-    print(json.dumps([str(p) for p in specs]))
-    sys.exit(0)
-def depends(spec, target, seen=None):
-    seen = set() if seen is None else seen
-    if spec in seen: return False
-    seen.add(spec)
-    if spec == target: return True
-    for name in re.findall(r"from\s+['\"]([^'\"]+)", spec.read_text()):
-        dependency = (spec.parent / name).resolve()
-        if not dependency.suffix: dependency = dependency.with_suffix('.ts')
-        if dependency.is_file() and depends(dependency, target, seen): return True
-    return False
-if '--findRelatedTests' in a:
-    target = pathlib.Path(a[a.index('--findRelatedTests') + 1]).resolve()
-    specs = [p for p in specs if depends(p, target)]
-elif 'related' in a:
-    target = (test_root / a[-1]).resolve()
-    specs = [p for p in specs if depends(p, target)]
-elif '--runTestsByPath' in a:
-    target = pathlib.Path(a[a.index('--runTestsByPath') + 1]).resolve()
-    specs = [p for p in specs if p == target]
-results = [{'name': str(p), 'status': 'failed' if 'throw 0' in p.read_text() else 'passed',
-    'assertionResults': [{'fullName': 'claims', 'status': 'failed' if 'throw 0' in p.read_text() else 'passed'}]} for p in specs]
-ok = bool(results) and all(r['status'] == 'passed' for r in results)
-pathlib.Path(a[a.index('--outputFile') + 1]).write_text(json.dumps({'success': ok, 'testResults': results}))
-pathlib.Path('target').mkdir(exist_ok=True)
-with pathlib.Path('target/executed.jsonl').open('a') as out: out.write(json.dumps([str(p) for p in specs]) + '\n')
-sys.exit(0 if ok else 1)
-"#);
+        write(&format!("{package}/node_modules/.bin/{runner}"), FIXTURE_RUNNER);
         std::fs::set_permissions(repo.join(format!("{package}/node_modules/.bin/{runner}")), std::fs::Permissions::from_mode(0o755)).unwrap();
         git(&["init", "-q", "-b", "main"]);
         git(&["add", "."]); git(&["commit", "-qm", "base"]);
@@ -1619,6 +1633,64 @@ sys.exit(0 if ok else 1)
     fn jest_source_related_tests_command_and_park_receipt_gh2257() {
         source_related_tests_fixture("jest", "apps/backend/src/conversations/v2/make-it-mine-request.ts",
             "export function value(it: { claim: () => number }) { return it.claim(); }\n");
+    }
+
+    /// GH #2252: an unclassifiable test helper widens to its package, beside a
+    /// changed Prisma schema that sorts first. Every focused command the
+    /// refusal prints must be one worker-check accepts; running it satisfies park.
+    #[cfg(unix)]
+    #[test]
+    fn jest_package_scope_command_runs_and_proves_gh2252() {
+        use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().canonicalize().unwrap().join("worktrees/worker");
+        let write = |path: &str, body: &str| {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        };
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&repo)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let schema = "apps/backend/prisma/schema.prisma";
+        write(".gitignore", "node_modules/\ntarget/\n");
+        let helper = "apps/backend/test/caption-cases.ts";
+        // Both runners declared and no config: no single runner owns the helper.
+        write("apps/backend/package.json", r#"{"devDependencies":{"jest":"29","vitest":"3"}}"#);
+        write(schema, "model Post { id Int @id }\n");
+        write(helper, "export const check = (name: string) => it(name, () => {});\n");
+        write("apps/backend/src/comparison.spec.ts", "it.each([{ delivery: 'spoken' }, { delivery: 'text_on_screen' }])('ignores caption-only edits for $delivery', () => {});\n");
+        write("apps/backend/node_modules/.bin/jest", FIXTURE_RUNNER);
+        std::fs::set_permissions(repo.join("apps/backend/node_modules/.bin/jest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]); git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
+        write(schema, "model Post { id Int @id\n  caption String }\n");
+        write(helper, "export const check = (name: string) => it(name, async () => {});\n");
+        git(&["commit", "-qam", "change schema and helper"]);
+        std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = vec![schema.to_owned(), helper.to_owned()];
+        let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [widened::Scope::Package("apps/backend".into())]);
+        let commands = widened::commands(root.path(), &repo, &paths, &scopes);
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let (_, command) = command.split_once(" -- ").unwrap();
+            let args = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            assert!(crate::factory_worker_check::allowed_args(&args), "{command}");
+            if args[0] == "jest" { javascript::execute(root.path(), &args, &repo, &[]).unwrap(); }
+        }
+        assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes).is_empty());
     }
 
     #[cfg(unix)]

@@ -208,3 +208,15 @@ pub(crate) fn reconcile_unpublished(repo: &Path, train: &str, id: &str) -> Resul
     let proof = checks.verify_unpublished(&snapshot, snapshot.external_operation(id)?)?;
     snapshot.settle_unpublished_external(repo, id, &proof).map(drop)
 }
+
+pub(crate) fn is_enrolled(repo: &Path, branch: &str, known_train: Option<&str>) -> Result<bool, String> {
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    if let Some(train) = known_train {
+        let snapshot = Snapshot::read(repo, train)?;
+        if snapshot.record.target != branch {
+            return Err("TRAIN_TRANSFER_CONFLICT: recorded train target differs".into());
+        }
+        return Ok(true);
+    }
+    crate::worktree::git::train_authority::fencing(repo, branch).map(|snapshot| snapshot.is_some())
+}

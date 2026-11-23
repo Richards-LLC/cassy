@@ -33,6 +33,20 @@ if [[ -z "$shipped" ]]; then
 fi
 [[ "$shipped" != *$'\n'* ]] || { echo 'Ambiguous release epic; no branches deleted' >&2; exit 1; }
 git check-ref-format "refs/heads/$shipped" >/dev/null
+# The immutable cut identifies an enrolled train even if someone removed its
+# authority ref. Require that exact authority rather than treating an empty
+# namespace listing as permission to delete the train.
+recorded_train="$(
+    while read -r cut; do
+        [[ "$(git show -s --format=%s "$cut")" == "release: v$version" ]] || continue
+        git show -s --format=%B "$cut" | sed -n 's/^Release-Train: //p'
+    done < <(git log --format=%H --grep="^Release-Version: ${version//./[.]}$" "$released") | sort -u
+)"
+train_args=()
+if [[ -n "$recorded_train" ]]; then
+    [[ "$recorded_train" =~ ^cas-[a-zA-Z0-9]+$ ]] || { echo 'Invalid or ambiguous recorded train; deletion held' >&2; exit 1; }
+    train_args=(--train "$recorded_train")
+fi
 merged="$(git for-each-ref --merged="$released" --format='%(objectname) %(refname)' \
     "refs/remotes/origin/$shipped")"
 while read -r sha ref; do
@@ -41,7 +55,7 @@ while read -r sha ref; do
     branch="refs/heads/${ref#refs/remotes/origin/}"
     # Enrollment survives merged/terminal tasks. An unreadable authority or
     # unsupported helper holds cleanup; train retirement is a separate action.
-    enrolled="$("${CAS_BIN:-cas}" factory train publication is-enrolled --branch "$branch")"
+    enrolled="$("${CAS_BIN:-cas}" factory train publication is-enrolled --branch "$branch" "${train_args[@]}")"
     case "$enrolled" in
         true) printf 'Preserved enrolled train %s\n' "$branch"; continue ;;
         false) ;;

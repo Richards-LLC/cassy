@@ -628,6 +628,9 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     let accepted = Snapshot::read(&fixture.left, &train.id).unwrap();
     assert_eq!(accepted.record.identity, successor_identity);
     assert_eq!(receipt["authority"], accepted.tip);
+    assert!(crate::train_owner::publication::is_enrolled(&fixture.left, &target, Some(&train.id)).unwrap());
+    assert!(crate::train_owner::publication::is_enrolled(&fixture.left, &format!("refs/heads/{target}"), None).unwrap());
+    assert!(crate::train_owner::publication::is_enrolled(&fixture.left, "epic/other", Some(&train.id)).is_err());
     assert_eq!(accepted.record.audit.as_ref().unwrap()["request_id"], request.request_id);
     assert_eq!(accepted.record.audit.as_ref().unwrap()["actor"], successor.id);
     assert_ne!(accepted.record.generation, original.record.generation);
@@ -675,6 +678,7 @@ fn train_transfer_service_authenticates_accept_and_rechecks_provider_cas_6456() 
     assert!(crate::train_owner::authority(&root, &local).is_err());
     assert!(crate::train_owner::local_owner_fence(&root, &fixture.left, &target).is_err());
     assert!(crate::train_owner::publication_fence(&core, &fixture.left, &target).is_err());
+    assert!(crate::train_owner::publication::is_enrolled(&fixture.left, &target, Some(&train.id)).is_err());
     local.labels.retain(|label| label != crate::train_owner::ENROLLED);
     assert!(crate::train_owner::authority(&root, &local).unwrap().is_none());
     let unavailable = fixture.left.join("missing-origin.git");
@@ -692,6 +696,9 @@ fn train_transfer_operator_recovery_requires_h41_and_exact_scope_cas_6456() {
             "cas", "factory", "train", "publication", operation, "--train", "cas-6456", "--operation", "operation",
         ]).is_ok());
     }
+    assert!(<crate::cli::Cli as clap::Parser>::try_parse_from([
+        "cas", "factory", "train", "publication", "is-enrolled", "--branch", "epic/train", "--train", "cas-6456",
+    ]).is_ok());
     // Exercise the actual CLI grammar; there is no operator identity/override argument.
     for operation in ["force", "adopt-target"] {
         let mut args = vec!["cas", "factory", "train", "owner-transfer", "cas-6456", operation,

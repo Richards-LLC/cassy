@@ -62,7 +62,11 @@ struct OperationArgs {
     #[arg(long)] operation: String,
 }
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
-struct BranchQuery { #[arg(long)] branch: String }
+struct BranchQuery {
+    #[arg(long)] branch: String,
+    /// Immutable release metadata may name a previously enrolled authority.
+    #[arg(long)] train: Option<String>,
+}
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 struct TagQuery { #[arg(long)] tag: String }
 
@@ -86,8 +90,7 @@ pub(super) fn execute(args: &PublicationArgs, root: Option<&Path>) -> anyhow::Re
         PublicationCommand::DisarmPr(args) => publication::disarm_pr(owner.as_ref().ok_or_else(|| anyhow::anyhow!("authenticated owner store required"))?, &repo, &args.train, &args.operation),
         PublicationCommand::ReconcileUnpublished(args) => publication::reconcile_unpublished(&repo, &args.train, &args.operation),
         PublicationCommand::IsEnrolled(args) => {
-            let enrolled = crate::worktree::git::train_authority::Snapshot::all(&repo).map_err(anyhow::Error::msg)?
-                .iter().any(|snapshot| snapshot.record.target == args.branch.trim_start_matches("refs/heads/"));
+            let enrolled = publication::is_enrolled(&repo, &args.branch, args.train.as_deref()).map_err(anyhow::Error::msg)?;
             println!("{enrolled}");
             Ok(())
         }

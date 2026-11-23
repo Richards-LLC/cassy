@@ -1396,14 +1396,19 @@ fn refresh_epic_base_from_parent(
     let branch = epic_branch
         .strip_prefix("refs/heads/")
         .unwrap_or(epic_branch);
-    // A verified namespace without authority refs needs no second origin
-    // read. Otherwise refuse enrolled or unknown publication before moving
-    // the local base: a refused spawn must retain its published checkout.
-    if !matches!(publication,
-        EpicBasePublication::Published { authority_refs: false }
-        | EpicBasePublication::Unpublished { authority_refs: false })
-    {
-        crate::worktree::git::train_authority::refuse_unfenced(repo_root, branch)?;
+    // Refuse a train fence before any local move. A verified namespace with
+    // no authority needs no second origin read. During an ordinary epic's
+    // offline fallback, the last observed fence still holds; release-train
+    // projections separately require fresh authority before reaching here.
+    match publication {
+        EpicBasePublication::Published { authority_refs: true }
+        | EpicBasePublication::Unpublished { authority_refs: true } => {
+            crate::worktree::git::train_authority::refuse_unfenced(repo_root, branch)?;
+        }
+        EpicBasePublication::Unverified => {
+            crate::worktree::git::train_authority::refuse_observed_unfenced(repo_root, branch)?;
+        }
+        _ => {}
     }
 
     // A ref update is invisible to any checkout that has this branch out:
@@ -2722,7 +2727,8 @@ impl WorkerSpawnContext {
                 }
                 if managed_epic {
                     if let Some(epic) = &recorded_epic
-                        && epic.labels.iter().any(|label| label == crate::train_owner::ENROLLED)
+                        && (crate::mcp::tools::core::task::release_train::is_release_train(epic)
+                            || epic.labels.iter().any(|label| label == crate::train_owner::ENROLLED))
                     {
                         // The projection also holds a missing origin/authority;
                         // the Git namespace alone cannot prove unenrollment.

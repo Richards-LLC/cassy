@@ -43,7 +43,11 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) {
         let runner = javascript::runner_hint(repo, path);
         if javascript::test_match(path, runner) { return Scope::File(path.into()); }
-        if matches!(runner, Some("jest" | "vitest")) || javascript::related_tests(repo, path).is_some() {
+        // GH #2352: vitest cannot transform a `.vue` file its config has no Vue
+        // plugin for, so `vitest related` would crash; that component proves
+        // through its package run, or through the specs that import it.
+        let unloadable = path.ends_with(".vue") && runner == Some("vitest") && !javascript::vitest_loads_vue(repo, path);
+        if (matches!(runner, Some("jest" | "vitest")) && !unloadable) || javascript::related_tests(repo, path).is_some() {
             return Scope::Related(path.into());
         }
     }
@@ -202,6 +206,37 @@ pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GH #2352: vitest cannot transform a `.vue` file without a Vue plugin, so
+    /// `vitest related --run <file>.vue` crashes and no receipt can satisfy it.
+    /// Such a component proves through its package run, and every command
+    /// prescribed for it resolves back to that scope; a config with the plugin
+    /// keeps the related-spec proof.
+    #[test]
+    fn vue_source_without_a_vue_plugin_is_proven_by_its_package_gh2352() {
+        let repo = tempfile::tempdir().unwrap();
+        for (project, config) in [
+            ("plain", "export default {};\n"),
+            ("vue", "import vue from '@vitejs/plugin-vue';\nexport default { plugins: [vue()] };\n"),
+        ] {
+            std::fs::create_dir_all(repo.path().join(project).join("components")).unwrap();
+            std::fs::write(repo.path().join(project).join("package.json"), "{}").unwrap();
+            std::fs::write(repo.path().join(project).join("vitest.config.ts"), config).unwrap();
+            std::fs::write(repo.path().join(project).join("components/Foo.vue"), "<template><p /></template>\n").unwrap();
+        }
+        let (plain, vue) = ("plain/components/Foo.vue", "vue/components/Foo.vue");
+        assert_eq!(scope(repo.path(), vue), Scope::Related(vue.into()));
+        let scopes = [scope(repo.path(), plain)];
+        assert_eq!(scopes, [Scope::Package("plain".into())]);
+        let commands = commands(Path::new("/cas"), repo.path(), &[plain.to_string()], &scopes, &Default::default());
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let files = javascript::invocation(&args).map(|run| run.files).unwrap_or_default();
+            assert_eq!(files, [plain], "{command}");
+            assert!(files.iter().all(|file| scope(repo.path(), file) == scopes[0]), "{command}");
+        }
+    }
 
     /// GH #2266: a migration rename beside a fixture edit widens the package;
     /// with no covering spec resolved, every prescribed command is one the

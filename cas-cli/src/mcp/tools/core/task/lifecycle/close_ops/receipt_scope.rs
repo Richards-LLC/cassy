@@ -1802,14 +1802,13 @@ sys.exit(0 if ok else 1)
         let package = source.split('/').take(2).collect::<Vec<_>>().join("/");
         let (test_dir, parent) = if runner == "vitest" { ("app/test", "../../") } else { ("test", "../") };
         let consumer = format!("{package}/{test_dir}/consumer.spec.ts");
-        let binding = if source.ends_with(".vue") { "value" } else { "{ value }" };
-        let consumer_source = format!("import {binding} from '{parent}{}';\nit('claims', () => {{ void value; }});\n", source.strip_prefix(&format!("{package}/")).unwrap());
+        let consumer_source = format!("import {{ value }} from '{parent}{}';\nit('claims', () => {{ void value; }});\n", source.strip_prefix(&format!("{package}/")).unwrap());
         write(".gitignore", "node_modules/\ntarget/\n");
         write(&format!("{package}/package.json"), &format!(r#"{{"devDependencies":{{"{runner}":"3"}}}}"#));
         write(&format!("{package}/{runner}.config.js"), if runner == "vitest" {
             "module.exports = { root: 'app' };\n"
         } else { "module.exports = {};\n" });
-        write(source, if source.ends_with(".vue") { "<template><div>one</div></template>\n" } else { "export const value = 1;\n" });
+        write(source, "export const value = 1;\n");
         // The consuming spec is elsewhere; a sibling-name heuristic cannot find it.
         write(&consumer, &consumer_source);
         write(&format!("{package}/{test_dir}/unrelated.spec.ts"), "it('unrelated', () => { throw 0; });\n");
@@ -1924,13 +1923,6 @@ sys.exit(0 if ok else 1)
             if args[0] == "jest" { javascript::execute(root.path(), &args, &repo, &[]).unwrap(); }
         }
         assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes, &Default::default()).is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn vitest_vue_related_tests_command_and_park_receipt_gh2265() {
-        source_related_tests_fixture("vitest", "apps/frontend/app/src/components/chat/ChatLinkPreview.vue",
-            "<script setup lang=\"ts\">const value = 2;</script><template>{{ value }}</template>\n");
     }
 
     #[cfg(unix)]

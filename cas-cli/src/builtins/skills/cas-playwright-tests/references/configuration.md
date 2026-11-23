@@ -8,6 +8,7 @@ metadata:
 ## Contents
 
 - [One configuration](#one-configuration)
+- [Personas and gated lanes](#personas-and-gated-lanes)
 - [Network and target policy](#network-and-target-policy)
 - [Honest reports](#honest-reports)
 - [Evidence fixtures](#evidence-fixtures)
@@ -30,6 +31,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   failOnFlakyTests: true,
+  build: { external: ['**/*.mjs'] }, // helper .mjs loads as native ESM
   reporter: [
     ['failures'],
     ['json', { outputFile: 'artifacts/results.json' }],
@@ -45,13 +47,44 @@ export default defineConfig({
       dependencies: ['setup'], use: { storageState: 'playwright/.auth/qa.json',
         trace: { mode: 'on', snapshots: { dom: true, aria: true, screen: true } },
         video: 'on' } },
-    { name: 'smoke', testMatch: 'tests/smoke/**/*.spec.ts',
-      dependencies: ['setup'], use: { storageState: 'playwright/.auth/qa.json' } },
   ],
 });
 ```
 
-The shared qa.json example is read-only role state; mutating projects select per-run/worker account state through their fixture. Select hermetic on PRs; select live smoke explicitly after a reviewed staging deploy. Default fixtures are test-scoped; setup writes state with real sign-in, not a page shared across tests. Add a project per role where required. Ignore auth files in Git and restrict artifact access.
+The shared qa.json example is read-only role state; mutating projects select per-run/worker account state through their fixture. Select hermetic on PRs. Default fixtures are test-scoped; setup writes state with real sign-in, not a page shared across tests. Ignore auth files in Git and restrict artifact access.
+
+Specs that import helper `.mjs` need `build.external`: on Node with `module.registerHooks` (22.15+), Playwright compiles each required `.mjs` as CommonJS, so a top-level `import.meta` throws and the file loads zero tests. Externals load through native `require(esm)`, which accepts synchronous ESM only (no top-level await). Fix the config rather than pinning an older Node. Guard it with `playwright test --list` on the current Node: exit 0 and a non-zero test count.
+
+## Personas and gated lanes
+
+Generate one project per signed-in persona from a list that the setup project also reads, so the two cannot drift. Route specs by a title tag and gate costly or target-bound tags with environment variables:
+
+```ts
+// tests/config/personas.ts, imported by auth.setup.ts and the config
+export const PERSONAS = ['creator', 'admin'] as const;
+export const statePath = (p: string) => `playwright/.auth/${p}.json`;
+
+// playwright.config.ts
+const gated = [
+  ...(process.env.E2E_LIVE === '1' ? [] : [/@live\b/]),          // spends real money
+  ...(process.env.TEST_ENV === 'staging' ? [] : [/@staging\b/]), // needs deployed staging
+];
+projects: [
+  // setup as above; every other existing project adds grepInvert: [...gated, /@as-/]
+  ...PERSONAS.map((p) => ({ name: `as-${p}`, testMatch: 'tests/hermetic/**/*.spec.ts',
+    dependencies: ['setup'], grep: new RegExp(`@as-${p}\\b`), grepInvert: gated,
+    use: { storageState: statePath(p) } })),
+],
+
+// spec: the page is already signed in as creator
+test('creator publishes a draft @as-creator', async ({ page }) => { /* … */ });
+```
+
+- Each test gets a fresh signed-in context, and the report names the persona (`[as-admin] › …`). A missing persona secret fails setup; a missing state file fails that project.
+- Write tags in the title string, not the `{ tag: [...] }` option. Playwright appends option tags to the text `--grep` matches, so Cassy's changed-test stability run, which selects one test with an anchored title grep, finds zero tests and the delivery cannot park (GH #2349, open).
+- Project-level `grepInvert` and `testIgnore` replace the top-level ones, so spread the shared lists into every project.
+- The environment variable is the only switch. Run a paid lane with `E2E_LIVE=1 npx playwright test --grep @live` and post-deploy smoke with `TEST_ENV=staging npx playwright test --grep @staging`. A command-line `--grep-invert @live` is opt-out, so a whole-package or agent run that forgets it spends money.
+- Prove the gate with `--list` with and without the variable: zero tests, then N.
 
 ## Network and target policy
 

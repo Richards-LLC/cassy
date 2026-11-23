@@ -1,0 +1,3 @@
+title: Divergent unparked target migrations require a valid explicit start binding before new work
+tasks: [cas-9122]
+journeys: [FACTORY-SPAWN, FACTORY-CLOSE]

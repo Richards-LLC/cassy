@@ -1,0 +1,10 @@
+title: Lane attribution blames merged train failures on the delivery
+statement: >-
+  Failure attribution uses the newest target commit contained in the lane,
+  rather than its stale task start base. Train failures merged after task
+  start remain inherited, while unmerged target commits are excluded and
+  delivery-caused failures remain red. A valid recorded ancestor is a fallback
+  only when the target cannot be resolved.
+tasks: [cas-b36f]
+journeys: [FACTORY-CLOSE]
+invariants: []

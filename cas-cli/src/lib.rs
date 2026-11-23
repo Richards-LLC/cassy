@@ -62,6 +62,7 @@ pub(crate) mod factory_candidate_queue;
 pub mod factory_ci_retry;
 pub(crate) mod factory_delivery_wake;
 pub(crate) mod factory_worker_check;
+pub(crate) mod worker_sandbox_profile;
 pub(crate) mod factory_capacity_wait;
 pub(crate) mod factory_worker_runs;
 pub mod factory_context_reset;

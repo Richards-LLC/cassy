@@ -2437,6 +2437,108 @@ async fn retarget_empty_branch_rebind_then_start_gh1673() {
     }
 }
 
+/// GH #2157: reject a divergent base migration before the worker resets its
+/// old lane, then execute the supported recovery and park its scoped delivery.
+#[tokio::test]
+async fn divergent_unparked_retarget_has_executable_recovery_gh2157() {
+    let mut env = TestEnvGuard::temp_home();
+    for obstruction in ["open", "clean", "dirty", "foreign"] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let fork = git(repo, &["rev-parse", "main"]);
+        std::fs::write(repo.join("old.md"), "old integration history\n").unwrap();
+        git(repo, &["add", "old.md"]);
+        git(repo, &["commit", "-qm", "old integration"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-9122";
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        if obstruction == "open" {
+            call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "status":"open"})).await;
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+            assert!(f.task(id).deliverables.factory_branch_start.is_some());
+        }
+        if obstruction == "dirty" {
+            std::fs::write(checkout.join("local.txt"), "unsaved work\n").unwrap();
+        } else if obstruction == "foreign" {
+            std::fs::write(checkout.join("foreign.txt"), "another task\n").unwrap();
+            git(&checkout, &["add", "foreign.txt"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-dead): foreign work"]);
+        }
+        let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "develop", &fork]);
+        std::fs::write(repo.join("new.md"), "new integration history\n").unwrap();
+        git(repo, &["add", "new.md"]);
+        git(repo, &["commit", "-qm", "new integration"]);
+        git(repo, &["push", "-q", "origin", "develop"]);
+        let target_tip = git(repo, &["rev-parse", "HEAD"]);
+        let before = f.task(id);
+        let result = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"update", "id":id, "target_branch":"develop",
+            "reason":"Supervisor authorizes resetting the clean lane onto develop",
+        })).unwrap())).await;
+        let recovery = if obstruction == "foreign" {
+            // Nonempty retargets keep the old boundary and rely on explicit
+            // rebind attribution; a metadata edit must not erase that work.
+            result.unwrap();
+            assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
+            serde_json::json!({
+                "branch":format!("{lane}-retarget"), "base":"origin/develop",
+                "rebind":{"action":"rebind_branch", "id":id, "branch":format!("{lane}-retarget"),
+                    "reason":"Approve replacement without discarding foreign delivery"},
+            })
+        } else {
+            assert!(result.is_err(), "divergent target must not leave a stale start: {result:?}");
+            let error = result.unwrap_err();
+            assert_eq!(error.data.as_ref().unwrap()["rule_id"], "unparked_target_base_migration");
+            assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
+                serde_json::to_value(&before.deliverables).unwrap());
+            error.data.as_ref().unwrap()["recovery"].clone()
+        };
+        if let Some(start) = recovery.get("start") {
+            call(&f.worker, start.clone()).await;
+            assert_eq!(f.task(id).status, TaskStatus::InProgress);
+        }
+        if let Some(target_update) = recovery.get("target_update") {
+            call(&f.supervisor, target_update.clone()).await;
+        }
+        let replacement = recovery["branch"].as_str().unwrap();
+        git(&checkout, &["checkout", "-q", "-b", replacement, recovery["base"].as_str().unwrap()]);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(recovery["rebind"].clone()).unwrap())).await;
+        if matches!(obstruction, "dirty" | "foreign") {
+            assert!(rebound.is_err(), "{obstruction}: {rebound:?}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start, before.deliverables.factory_branch_start);
+            if obstruction == "dirty" {
+                assert_eq!(std::fs::read(checkout.join("local.txt")).unwrap(), b"unsaved work\n");
+            }
+        } else {
+            rebound.unwrap();
+            call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            let start = f.task(id).deliverables.factory_branch_start.unwrap();
+            assert_eq!(start.base_sha, target_tip);
+            assert_eq!(start.work_target.target_branch, "develop");
+            std::fs::write(checkout.join("README.md"), "Scoped documentation delivery\n").unwrap();
+            git(&checkout, &["add", "README.md"]);
+            git(&checkout, &["commit", "-qm", "docs(cas-9122): scoped delivery"]);
+            git(&checkout, &["push", "-q", "origin", replacement]);
+            let closed = call(&f.worker, serde_json::json!({
+                "action":"close", "id":id, "reason":"Scoped documentation verified",
+            })).await;
+            assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{closed}");
+        }
+        assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "old lane must be retained");
+    }
+}
+
 /// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {

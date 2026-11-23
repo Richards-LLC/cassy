@@ -1995,10 +1995,19 @@ impl SqlitePromptQueueStore {
                         let holding = Self::holding_detail_on_conn(tx, prompt.id)?;
                         // cas-acb6e (GH #2231): a hold recorded late explains
                         // only the time after it began, not the whole delay.
-                        let started = envelope.occurrence.min(prompt.created_at);
+                        // GH #1731 §2: a row queued long after its occurrence
+                        // was late before the queue held it; that is a known
+                        // cause, and the queue's own wait starts at enqueue.
+                        let enqueue_lag_secs = (prompt.created_at - envelope.occurrence).num_seconds().max(0);
+                        let enqueued_late = enqueue_lag_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS;
+                        let started = if enqueued_late {
+                            prompt.created_at
+                        } else {
+                            envelope.occurrence.min(prompt.created_at)
+                        };
                         let unrecorded_secs = Self::holding_since_on_conn(tx, prompt.id)?
                             .map_or(0, |since| (since - started).num_seconds().max(0));
-                        let cause = holding.as_deref().map(|detail| {
+                        let held = holding.as_deref().map(|detail| {
                             let text = detail.split_whitespace().collect::<Vec<_>>().join(" ");
                             let mut bounded = text.chars().take(160).collect::<String>();
                             if text.chars().count() > 160 { bounded.push('…'); }
@@ -2007,7 +2016,17 @@ impl SqlitePromptQueueStore {
                             } else {
                                 format!("held: {bounded}")
                             }
-                        }).unwrap_or_else(|| "cause unrecorded".into());
+                        });
+                        let queued_wait_secs = (now - prompt.created_at).num_seconds().max(0);
+                        let cause = match (enqueued_late, held) {
+                            (false, held) => held.unwrap_or_else(|| "cause unrecorded".into()),
+                            (true, Some(held)) => format!("queued {}m after it happened; {held}", enqueue_lag_secs / 60),
+                            (true, None) if queued_wait_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS => format!(
+                                "queued {}m after it happened; then cause unrecorded for {}m",
+                                enqueue_lag_secs / 60, queued_wait_secs / 60,
+                            ),
+                            (true, None) => format!("queued {}m after it happened", enqueue_lag_secs / 60),
+                        };
                         let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
                         summary.push_str(&format!(" [delayed {}m; {cause}]", age_secs / 60));
                     }
@@ -11589,6 +11608,44 @@ mod tests {
             assert_eq!(json["holding_detail"], serde_json::json!(detail));
         }
         assert_ne!(summaries[0], summaries[4], "a hold recorded 29 minutes late must be labelled differently");
+    }
+
+    /// GH #1731 §2: `task_started (17:10:32Z) [delayed 15m; cause unrecorded]`.
+    /// A row queued long after its occurrence carries that known cause; only
+    /// a row that waited in the queue with no hold stays unexplained.
+    #[test]
+    fn late_enqueued_lifecycle_digest_names_its_enqueue_delay_gh_1731() {
+        let mut summaries = Vec::new();
+        for enqueued_late in [false, true] {
+            let (temp, store) = create_test_store();
+            use crate::AgentStore;
+            let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role(
+                "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            supervisor.factory_session = Some("session".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-ccef".into(), "relay target".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            let occurrence = Utc::now() - chrono::Duration::minutes(15);
+            let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, occurrence.to_rfc3339());
+            let EnqueueIdempotentResult::Created(id) = store.enqueue_idempotent("lifecycle:1", "supervisor", &body, Some("session"), Some("task_started: cas-ccef"), None, "started-1", Some(&QueueOrigin::Daemon)).unwrap() else { panic!("new relay") };
+            if !enqueued_late {
+                store.conn.lock().unwrap().execute(
+                    "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                    params![occurrence.to_rfc3339(), id],
+                ).unwrap();
+            }
+            let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+            assert_eq!(surfaced.len(), 1);
+            assert!(surfaced[0].summary.is_some());
+            summaries.push(surfaced[0].summary.clone());
+        }
+        assert_ne!(summaries[0], summaries[1], "a late enqueue is a recorded cause, not an unexplained wait");
     }
 
     #[test]

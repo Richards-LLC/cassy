@@ -136,7 +136,10 @@ fn candidate_preparation_notice(
             Ok(candidate) => ("premerge_candidate_ready", format!("{}:{}:{}:{}", task.id,
                 candidate.source_sha, candidate.target_sha, candidate.context_digest),
                 format!("Candidate ready for {}. Retry {retry}. The immutable candidate is cached; publication still requires its exact review.", task.id)),
-            Err(error) => ("premerge_candidate_failed", key.to_string(), format!(
+            // Each failed attempt is its own occurrence: a retry resolves the
+            // same build key, and the idempotent queue dropped every failure
+            // after the first, so the held retry never resolved (GH #2106).
+            Err(error) => ("premerge_candidate_failed", format!("{key}:{}", uuid::Uuid::new_v4()), format!(
                 "Candidate preparation failed for {}: {}. Resolve the failure, then retry {retry}.", task.id,
                 crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error.to_string()))),
         };
@@ -2817,6 +2820,47 @@ mod tests {
         release.join().unwrap();
         let _ = first.join().unwrap();
         assert_eq!(candidate.unwrap().target_sha, moved, "the retry joined the stale-target build");
+    }
+
+    /// GH #2106: a retry after a failed candidate preparation builds again and
+    /// fails again, but its notice reused the first failure's key, so the queue
+    /// dropped it and the retry's "continues in the background" never resolved.
+    #[test]
+    fn each_failed_candidate_retry_reports_its_failure_gh2106() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("candidate-owner".into());
+        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+            "candidate-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        let mut task = Task::new("cas-c998".into(), "Failing candidate".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        core.open_task_store().unwrap().add(&task).unwrap();
+        // The retry resolves the same source, target and context: one build key.
+        let key = format!("failing-candidate:{}", root.display());
+        for _ in 0..2 {
+            let (release, gate) = mpsc::channel::<()>();
+            let (notice_core, notice_task, notice_key) = (core.clone(), task.clone(), key.clone());
+            let preparation = bounded_candidate_preparation(key.clone(), Duration::ZERO,
+                move || { let _ = gate.recv(); Err(fail("reference-history exited 128")) },
+                move |result| candidate_preparation_notice(&notice_core, &notice_task,
+                    "factory/w", &notice_key, result),
+            );
+            let CandidatePreparation::Pending(Some(job)) = preparation else {
+                panic!("expected the merge to hold on a background build");
+            };
+            release.send(()).unwrap();
+            job.join().unwrap();
+        }
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
+        let failed = rows.iter().filter(|row|
+            row.summary.as_deref() == Some("premerge_candidate_failed")).count();
+        assert_eq!(failed, 2, "each failed attempt reports its own failure");
     }
 
     #[test]

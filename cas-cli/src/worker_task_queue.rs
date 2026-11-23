@@ -678,8 +678,11 @@ impl CasCore {
             // cas-2d41: a worker whose MCP server predates the installed
             // build takes the same boundary restart, so a release reaches it
             // between tasks without an operator recycle.
+            // cas-f157: a sandboxed worker's profile grants only its launch
+            // tasks, so it takes the same boundary restart.
             queue.context_reset_from = if self.load_config().factory().restart_worker_between_tasks
                 || crate::factory_binary_skew::agent_mcp_is_older(&self.cas_root, &worker.name)
+                || worker.metadata.contains_key(crate::worker_sandbox_profile::SANDBOX_TASKS_METADATA)
             {
                 predecessor.map(|_| conversation_generation(&worker))
             } else {

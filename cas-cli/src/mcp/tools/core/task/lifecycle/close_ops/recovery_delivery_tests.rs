@@ -2829,6 +2829,10 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     git(&f.worker_path, &["reset", "--hard", &f.final_tip]);
     let merged = git(repo, &["rev-parse", "main"]);
     git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    let origin = repo.join(".git/contained-origin.git");
+    git(repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(repo, &["push", "-q", "origin", "main", BRANCH]);
     let mut task = tasks.get(TASK).unwrap();
     task.status = TaskStatus::AwaitingMerge;
     task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
@@ -2914,11 +2918,11 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
         // Missing integration refuses without discarding the original Error.
         git(repo, &["reset", "--hard", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);
-        git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+        git(repo, &["push", "-q", "--force", "origin", "main"]);
         let _ = supervisor.cas_task_close(replay()).await;
         assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed);
         git(repo, &["reset", "--hard", &merged]);
-        git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+        git(repo, &["push", "-q", "--force", "origin", "main"]);
         let output = text(supervisor.cas_task_close(replay()).await.unwrap());
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{history}: {output}");
         let latest = verifications.get_latest_for_task(TASK).unwrap().unwrap();
@@ -2943,11 +2947,11 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     })).unwrap());
     // A source that is merely parked cannot take this post-integration path.
     git(repo, &["update-ref", "refs/heads/main", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);
-    git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+    git(repo, &["push", "-q", "--force", "origin", "main"]);
     assert!(supervisor.cas_verification_add(review()).await.is_err());
     assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
     git(repo, &["reset", "--hard", &merged]);
-    git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    git(repo, &["push", "-q", "--force", "origin", "main"]);
     // A prior verdict is substantive review history, not a missing review.
     let verifications = supervisor.open_verification_store().unwrap();
     let mut prior = cas_types::Verification::new("ver-prior-review".into(), TASK.into());
@@ -3479,4 +3483,27 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
             assert!(!notices.iter().any(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed"));
         }
     }
+}
+
+/// GH #2310: the train belongs to a supervisor on another machine. G-113 refuses
+/// this supervisor's close, so the reconcile pass neither attempts it nor sends
+/// the post-merge recovery notice that quoted that refusal.
+#[tokio::test]
+async fn reconcile_leaves_a_peer_owned_trains_delivery_to_its_owner_gh2310() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, _supervisor, tasks) = parked_for(&mut env, "develop").await;
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let mut train = Task::new("cas-train-2310".into(), "Peer-owned train".into());
+    train.task_type = cas_types::TaskType::Epic;
+    train.epic_verification_owner = Some("peer-supervisor-id".into());
+    tasks.add(&train).unwrap();
+    tasks.add_dependency(&cas_types::Dependency::new(
+        TASK.into(), train.id.clone(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    merge_into(repo, "develop", BRANCH, "Merge pull request #43 from factory/recovered-worker");
+    crate::factory_delivery_wake::reconcile_contained(&root, "reconcile-fixture").await.unwrap();
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    assert!(tasks.get(TASK).unwrap().deliverables.green_merge_commit.is_none());
+    assert!(crate::store::open_supervisor_queue_store(&root).unwrap().peek("supervisor-session", 10).unwrap().is_empty());
 }

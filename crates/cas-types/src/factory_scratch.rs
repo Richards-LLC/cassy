@@ -107,6 +107,18 @@ pub fn worker_target_dir(scratch_root: Option<&Path>, worktree: &Path) -> PathBu
     }
 }
 
+/// Private temporary directory for one checkout under a temporary root:
+/// `<root>/t/<first 16 hex digits of sha256(canonical checkout)>`. Short
+/// enough to leave room for Unix socket filenames; the capped runner creates
+/// it and the worker sandbox grants exactly this directory.
+pub fn checkout_tmp_dir(root: &Path, worktree: &Path) -> PathBuf {
+    let checkout = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    let key = format!("{:x}", Sha256::digest(checkout.as_os_str().as_encoded_bytes()));
+    root.join("t").join(&key[..16])
+}
+
 /// Parse a configured value: only an absolute path relocates anything.
 pub fn parse_scratch_root(value: Option<&str>) -> Option<PathBuf> {
     let value = value.map(str::trim).filter(|value| !value.is_empty())?;

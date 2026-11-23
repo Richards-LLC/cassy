@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **A worker busy in a long first turn is no longer reaped as a failed boot** — Cassy gives a registered Claude worker five minutes to take its first prompt, and it looked for that prompt only in the last quarter megabyte of the worker's transcript. A worker that opened with large reads grew the transcript past that window within seconds, so the check saw no turn and removed a worker that was visibly running tool calls, with its worktree. Now any turn start, assistant output or turn end written since the launch counts, so a progressing worker survives. A worker that never takes its first prompt is still reaped after the same five minutes (GH #2338).

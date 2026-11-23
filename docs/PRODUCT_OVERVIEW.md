@@ -1002,6 +1002,10 @@ The recorded start boundary decides which branch close measures. After a rebind,
 
 Spawn keeps worker namespaces exclusive across machines too. A new worker name is refused (`WORKER_NAME_OVERLAPS`) when it would share a `factory/` namespace with a registered worker or with an existing local or origin `factory/*` branch. A name's own task branches never block it. `cas factory` applies the same check to its initial names, including `--worker-spec` names, and workers added later from the GUI or WebSocket go through it before they are bound or launched. It stops when the registry cannot be read. Generated names, including the daemon's fallback names, skip such candidates, and overflow minion names read `kevin2`, not `kevin-2`. `cas doctor` reports any overlap that already exists in a `worker names` row, with the way back, and changes nothing.
 
+A changed Playwright helper with no tests of its own is proved through the specs that import it. Worker-check runs each importing spec under the Playwright config that lists it, and park accepts the helper only when every importing spec has a passing capped run at the tip. A spec run on its own under its config counts the same way, and so does its ordinary five-pass stability run when that run covered every test of the spec; a partial selection, a missing spec or an unrelated spec does not.
+
+Park evidence publication is limited to declared evidence: top-level files in the task evidence directory, LEDGER.md and the paths its rows cite (read exactly as the ledger gate reads an evidence cell, including absolute and other-machine paths), files the close reason cites, and the `qa/` bundle and `terminal-qa/` receipt trees Cassy's verifier reads. Nested files nothing cites are listed in the evidence report as "uncited; not published" and are never uploaded, so a source snapshot or raw capture tree kept beside the proof cannot flood the task with artifact notes or exhaust the close deadline. Routed builds still require their ledger citations, and a cited file that is missing still refuses the park.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -1171,6 +1175,8 @@ Child verifiers receive local paths for cited parent epic plan and sequence arti
 Personal and team Cloud pulls reconcile a peer's completed park over an older InProgress or Blocked lifecycle whose row clock advanced through local bookkeeping. The park must match the recorded start, assignee, delivery cycle and target, include its canonical park audit, and bind the recorded branch to a full commit anchor. The receiver retains its newer body and notes. Train ownership, verification, remote park admission and exact pushed-anchor checks continue to govern publication.
 
 Automatic verification resolves a delivery's committed artifact references through the existing Cloud fetch path before starting its review command. Each download is task-scoped, checked against its published size and SHA-256, and placed under the reviewing machine's project namespace. Structured review inputs name the artifact ID and local path. Unavailable or corrupt evidence holds verifier startup with the artifact ID and Cloud error, leaving the same dispatch available for retry.
+
+Commander's live regions and controls carry accessible names: the conversation's connection chip ("Connection"), message status, notices, the command palette ("Commands"), pairing status, fleet progress and results, and the outage banner. Screen readers can therefore tell each announcement apart. Elements that journey tests check, but that have no meaningful role, carry stable `data-testid` attributes. The Commander journey suite finds the interface by role, accessible name and test id.
 
 ## Authoritative Sources
 

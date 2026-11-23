@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.49.0] - 2026-11-23
+
+### Fixed — Focused proof for data, migration and fixture changes
+
+- **Package proof names the specs that read the change, and accepts their runs** — Was: a delivery that renamed a Prisma migration, edited a JSON catalogue or edited a test fixture widened to a package proof. The park then printed `worker-check -- jest <file>.sql|.json`, which the capped runner always refuses. Passing runs of the specs that read those files did not count. Now: the gate finds the test files in that package that read a changed input through a relative path: the JSON file itself, the fixture module, or the migrations directory. It prints one runnable `worker-check` command for exactly those specs and accepts their whole-file passes at the delivered tip as the package proof. The specs' passes count only when every changed input in the package is read by one of them; if any input is read by no spec, the package keeps its own proof requirement and the gate names the unread inputs. When no spec reads the input that way, the gate names a changed JavaScript file to run, or describes the run it needs, never a command that cannot run.
+
+### Fixed — Factory park
+
+- **A lane that changes hub-web source parks with its source proof alone** — Was: the pre-push drift gate made the lane commit the rebuilt `hub-web/dist` bundles, and park then demanded a widened related-tests receipt for each changed bundle, which run no tests and could never earn one, so the lane could neither push without them nor park with them (GH #2329). Now: generated `hub-web/dist` files owe no proof and never widen; the `hub-web/src` files they were built from keep their normal proof.
+
+### Fixed — Factory close proof
+
+- **Tests built only for another OS are proven on that OS** — Was: park asked
+  for five local capped passes of a changed `#[cfg(target_os = "linux")]` test
+  on a macOS worker (and of a macOS-only test on Linux), where the capped
+  runner selects no tests, so the delivery could never park (GH #2320). Now:
+  park reads the test's `target_os` gate, from the function, its modules or
+  its file. Lane CI's Rust test job passing at the delivered tip proves a test
+  that builds on Linux (a lint-only green does not), and a test for any other
+  OS needs five passes recorded on that OS, which park now reads from the
+  receipts synced on the task. The refusal says which, and never asks for a
+  local run.
+
+### Fixed — Rebound delivery branches
+
+- **Close checks name the rebound branch even before its first commit** — After a supervisor rebinds a task to a new lane (for example `factory/<worker>-<task>-r2`), the close checks printed at task start, the publication check and every other close gate now measure that lane, even while it is still empty. Before, an empty rebound lane fell back to the old per-task branch that still held the earlier build (GH #1698).
+
+### Fixed — Factory
+
+- **New worker names can't take another worker's branches** — Was: spawn checked only the store on its own machine, so a custom name such as `swift` could be picked while origin already held `factory/swift-falcon-7`, and the name generator could hand out a name that registration then refused. Overflow minion names such as `kevin-2` also overlapped `kevin`. Now: spawn refuses a name that would share a `factory/` namespace with a registered worker or an existing local or origin branch (`WORKER_NAME_OVERLAPS`), and the generators skip such names. A name's own task branches never block it. Overflow minion names read `kevin2`. `cas factory` checks the final initial names, including `--worker-spec` names, and the daemon's fallback generation skips overlapping names. Workers added later from the GUI or WebSocket are checked the same way before they are bound or launched: a supplied overlapping name is refused and a generated one is redrawn. An unreadable name registry stops the launch or spawn.
+- **`cas doctor` reports overlapping worker names** — Was: an overlap that slipped in from another machine or an older store went unnoticed. Now: a `worker names` row lists each one with the way back. It reports only and changes nothing.
+- **Branch owners are named the same way everywhere** — Was: the SessionStart warning stayed quiet on another worker's `factory/` branch, a CI-retry wake named the raw branch remainder as the worker, and branch-only merges inferred only `cas-` task ids. Now: all three use the shared ownership rule. The warning fires on any factory branch that isn't yours, the wake names the registered owner (or says `unregistered`), and any task prefix is inferred.
+
 ## [4.48.0] - 2026-11-23
 
 ### Fixed — Message delivery honesty (GH #1731)

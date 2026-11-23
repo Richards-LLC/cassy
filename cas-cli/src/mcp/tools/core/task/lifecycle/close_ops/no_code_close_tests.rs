@@ -2435,8 +2435,8 @@ async fn retarget_empty_branch_rebind_then_start_gh1673() {
             // cas-db91 (GH #1698): close judges the rebound lane, not the original.
             // The approved empty replacement has no commits and is unpushed, so G-81
             // refuses it by name, where the original lane would be named instead.
-            assert_eq!(close_measured_factory_branch(repo, &task, WORKER).trim_start_matches("origin/"), replacement);
-            let MergeRealityOutcome::Refuse(message) = check_close_merge_reality(repo, &task, WORKER, "new-target") else {
+            assert_eq!(close_measured_factory_branch(repo, &f.task(id), WORKER).trim_start_matches("origin/"), replacement);
+            let MergeRealityOutcome::Refuse(message) = check_close_merge_reality(repo, &f.task(id), WORKER, "new-target") else {
                 panic!("G-81 must judge the empty rebound lane");
             };
             assert!(message.contains(&replacement), "{message}");

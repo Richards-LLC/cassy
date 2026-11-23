@@ -38,6 +38,11 @@ impl Identity {
                     chars.next();
                     pattern.push_str(".*");
                 }
+                // Jest's `$#` is the row index of an object table (GH #2225).
+                ('$', Some('#')) => {
+                    chars.next();
+                    pattern.push_str(".*");
+                }
                 ('$', Some(next)) if next.is_ascii_alphabetic() || next == '_' => {
                     while chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) {
                         chars.next();

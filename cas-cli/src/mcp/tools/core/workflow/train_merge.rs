@@ -173,6 +173,15 @@ fn write_queue(path: &Path, queue: &Queue) -> Result<()> {
     Ok(())
 }
 
+/// GH #2316: the queue's recorded supervisor holds it only while that session
+/// is live. The caller is already the current train owner, so an ended prior
+/// owner's generation is adopted rather than held forever.
+fn held_by_prior_owner(root: &Path, actor: &cas_types::Agent, queue: &Queue, generation: &str) -> bool {
+    let continues = crate::cloud::peer_mailbox::owns_recipient(root, actor, &queue.supervisor)
+        && (queue.owner_generation.is_empty() || queue.owner_generation == generation);
+    !continues && crate::cloud::peer_mailbox::supervisor_is_live(root, &queue.supervisor)
+}
+
 /// Checked before preparing a candidate and again under the normal target
 /// lock. The queue creates its reservation under that same lock, so a single
 /// merge already in flight cannot slip between reservation and publication.
@@ -209,8 +218,7 @@ pub(crate) fn admit(
         let actor = core.resolve_live_supervisor_authority()
             .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-113", format!("train owner authority unavailable: {error:?}"))))?;
         let generation = crate::factory_session_scope::require_train_owner(root, &epic, &actor).map_err(anyhow::Error::msg)?;
-        ensure!(crate::cloud::peer_mailbox::owns_recipient(root, &actor, &queue.supervisor)
-            && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
+        ensure!(!held_by_prior_owner(root, &actor, &queue, &generation),
             crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
         ensure!(
             permit == Some(queue.id.as_str())
@@ -344,8 +352,7 @@ impl CasCore {
         let path = path(&self.cas_root, &repo, &target)?;
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
             ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
-            ensure!(crate::cloud::peer_mailbox::owns_recipient(&self.cas_root, &actor, &queue.supervisor)
-                && (queue.owner_generation.is_empty() || queue.owner_generation == generation),
+            ensure!(!held_by_prior_owner(&self.cas_root, &actor, &queue, &generation),
                 crate::gates::tag("G-113", "train merge owner generation changed; the prior queue remains held"));
             if queue.reclaim_advancement() { save(&path, &mut queue)?; }
             queue.supervisor = actor.id.clone();
@@ -468,7 +475,7 @@ impl CasCore {
         save(&path, &mut queue)?;
         // GH #2169: every queued delivery's review starts now, outside the publication lock.
         drop(target_lock);
-        start_queued_reviews(self, &queue, &*tasks, 0);
+        start_queued_reviews(self, &queue, &*tasks, 0, || true);
         let receipt = format!("{}{}", queue.render(), crate::ops::fleet::auto_focus_epic(&self.cas_root, session, train));
         Ok(if queue.ci_override.is_some() { crate::gates::override_tag("G-114", receipt) } else { receipt })
     }
@@ -598,6 +605,13 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     Ok(git.is_ancestor(&entry.sha, &target))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs before each later entry's review starts, standing in for a
+    /// candidate preparation slow enough to outlast the lease (GH #2311).
+    static PREFETCH_PROBE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// GH #2169: only publication is ordered. Every delivery from `from` on gets
 /// its candidate and verifier through the same preparation the head uses.
 /// Enqueue starts reviews immediately; active appends leave them to the daemon,
@@ -605,8 +619,20 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
 /// later entry's reviewed files is re-reviewed by that preparation (G-104) when
 /// the entry reaches the head. A hold on its own dispatch is the expected
 /// answer here; any other refusal surfaces again when the entry is the head.
-fn start_queued_reviews(core: &CasCore, queue: &Queue, tasks: &dyn crate::store::TaskStore, from: usize) {
+///
+/// GH #2311: each preparation takes about a minute, so the daemon renews its
+/// advancement lease before every entry and stops once it is lost.
+fn start_queued_reviews(
+    core: &CasCore,
+    queue: &Queue,
+    tasks: &dyn crate::store::TaskStore,
+    from: usize,
+    mut leased: impl FnMut() -> bool,
+) {
     for entry in queue.entries.iter().skip(from) {
+        #[cfg(test)]
+        PREFETCH_PROBE.with_borrow_mut(|probe| if let Some(probe) = probe { probe() });
+        if !leased() { return; }
         let Ok(task) = tasks.get(&entry.task) else { continue };
         if task.status != TaskStatus::AwaitingMerge
             || task.deliverables.factory_branch_anchor.as_deref() != Some(&entry.sha)
@@ -688,10 +714,6 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             if !queue.active() {
                 break;
             }
-            start_queued_reviews(&core, &queue, &*tasks, queue.next + 1);
-            let Some(current) = driver.current()? else { break };
-            queue = current;
-            if !queue.active() { break; }
             if let Err(error) = crate::train_ci::guard(
                 &core,
                 &queue.train,
@@ -764,6 +786,13 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             });
             save(&path, &mut queue)?;
             break;
+        }
+        // GH #2311: the head has taken its step this pass, so reviews behind
+        // it start only now, while the lease lasts; they still run while the
+        // head waits for its own verdict or CI.
+        if queue.active() {
+            start_queued_reviews(&core, &queue, &*tasks, queue.next + 1,
+                || driver.current().ok().flatten().is_some_and(|current| current.active()));
         }
         if !queue.active() {
             let agents = core
@@ -983,6 +1012,41 @@ mod tests {
         assert!(held.is_err() || held.unwrap().is_error == Some(true));
         let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap()).unwrap().unwrap();
         assert_eq!(queue.supervisor, "supervisor");
+    }
+
+    /// GH #2316: a train handed to a new live owner is held only by a live
+    /// prior owner. Once that session ends, the current owner adopts the queue.
+    #[tokio::test]
+    async fn ended_prior_owner_queue_is_adopted_by_current_train_owner_gh_2316() {
+        let fixture = Fixture::new();
+        fixture.start().await;
+        let agents = fixture.core.open_agent_store().unwrap();
+        let mut successor = Agent::new("supervisor-2".into(), "supervisor-2".into());
+        successor.role = AgentRole::Supervisor;
+        successor.factory_session = Some("queue-session".into());
+        agents.register(&successor).unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut epic = tasks.get("cas-train").unwrap();
+        epic.epic_verification_owner = Some("supervisor-2".into());
+        tasks.update(&epic).unwrap();
+        let takeover = || {
+            let core = CasCore::with_daemon(fixture.root.clone(), None, None);
+            core.set_agent_id_for_testing("supervisor-2".into());
+            core.train_merge("cas-train", Some(&fixture.ids), false, None)
+        };
+        let queue = || read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap()).unwrap().unwrap();
+
+        let held = takeover().unwrap_err().to_string();
+        assert!(held.contains("[G-113]"), "{held}");
+        assert_eq!(queue().supervisor, "supervisor");
+
+        let mut prior = agents.get("supervisor").unwrap();
+        prior.status = cas_types::AgentStatus::Shutdown;
+        agents.update(&prior).unwrap();
+        takeover().unwrap();
+        let adopted = queue();
+        assert_eq!(adopted.supervisor, "supervisor-2");
+        assert_eq!(adopted.entries.len(), fixture.ids.len());
     }
 
     #[tokio::test]
@@ -1310,6 +1374,46 @@ mod tests {
                 assert!(git.is_ancestor(sha, "origin/epic/train"), "{holder}: {sha}");
             }
         }
+    }
+
+    /// GH #2311: later entries' reviews took longer than the advancement
+    /// lease, so every pass lost it before reaching the head. The head must
+    /// publish first, and prefetch must stop at the lost lease.
+    #[tokio::test]
+    async fn head_advances_when_prefetch_outlasts_the_lease_gh_2311() {
+        let mut fixture = Fixture::build(false);
+        fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        std::fs::write(fixture.root.join("config.toml"),
+            "[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        for id in &fixture.ids[1..] {
+            let mut task = tasks.get(id).unwrap();
+            task.depth = TaskDepth::Deep;
+            tasks.update(&task).unwrap();
+        }
+        fixture.start_with(&fixture.ids[..1]).await;
+        fixture.start_with(&fixture.ids[1..]).await;
+        let queue_path = path(&fixture.root, fixture._repo.path(), "epic/train").unwrap();
+        let probes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (seen, expired) = (probes.clone(), queue_path.clone());
+        PREFETCH_PROBE.set(Some(Box::new(move || {
+            seen.set(seen.get() + 1);
+            let mut queue: serde_json::Value = serde_json::from_slice(&std::fs::read(&expired).unwrap()).unwrap();
+            queue["advancement"]["expires_at"] = serde_json::json!(chrono::Utc::now() - chrono::Duration::seconds(1));
+            std::fs::write(&expired, serde_json::to_vec(&queue).unwrap()).unwrap();
+        })));
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        PREFETCH_PROBE.set(None);
+
+        let queue = read(&queue_path).unwrap().unwrap();
+        let git = GitOperations::new(fixture._repo.path().to_path_buf());
+        assert!(git.is_ancestor(&fixture.shas[0], "origin/epic/train"), "head starved: {}", queue.render());
+        assert_eq!(queue.next, 1, "{}", queue.render());
+        assert!(cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[1]).unwrap().is_some());
+        // One prefetch step found the lease gone and started nothing more.
+        assert_eq!(probes.get(), 1);
+        assert!(cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[2]).unwrap().is_none());
     }
 
     #[tokio::test]

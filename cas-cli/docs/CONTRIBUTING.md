@@ -3407,13 +3407,19 @@ Slim lanes omit broad Rust tests for factory pushes, but run the train's
 impact selection (`scripts/ci-test-impact.py`) for the delivery's range on hosted
 runners (cas-2e1b). Selection compares the pushed head with its merge-base with
 the live target, as resolved by the classifier. Content merged in from the
-train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
-is used only for failure attribution, falling back to the inferred base when
-missing or not an ancestor. The plan logs both bases separately.
+train is excluded. Failure attribution uses that same merge-base: the newest
+target commit already contained in the delivery, including train merges after
+task start. The recorded start base in `refs/cas/delivery-base/<branch>` is a
+fallback only when the target cannot be resolved and the record is an ancestor
+of HEAD. The plan logs selection and attribution bases separately.
 `Scoped Validation — impact own tests` builds the selection and runs the changed
 modules' unit tests, edited integration suites, directly changed crates and
 explicit file-reading contracts first; up to three `impact ring` shards run the
-rest from its archive after own tests pass. Agent/config roots `.claude/`,
+rest from its archive after own tests pass. The plan's `own` expression is lane
+CI's (regex and `or` included); the plan also logs `Worker proof`, one admitted
+named-filter `worker-check` command per package and harness covering each own
+part, and `lane CI only` for parts no named filter can express, such as a whole
+crate or integration binary (GH #2140). Agent/config roots `.claude/`,
 `.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
 workflow inputs use their existing script/CI contract tier plus Rust test
 functions with matching file literals, including local helper/constant reads.

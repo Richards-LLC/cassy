@@ -2662,6 +2662,14 @@ impl DirectorEventDetector {
                     (age_secs >= effective_threshold as i64).then_some(age_secs)
                 });
 
+                // cas-6de2e (GH #1728): the worker's own pending reminder for
+                // this task is a declared wait, not a stall. Clear the ladder so
+                // it starts fresh if the worker is still quiet once it fires.
+                if worker_has_pending_reminder(data, &resolved_name, Some(task_id), now_utc) {
+                    self.stall_nudged.remove(&agent.id);
+                    self.stall_escalated.remove(&agent.id);
+                    continue;
+                }
                 if has_fresh_heartbeat {
                     if let Some(elapsed) = stalled_elapsed_secs {
                         // cas-728b / cas-ab80: confirm against transcript
@@ -3303,6 +3311,47 @@ pub(crate) fn pick_best_open_branch_epic<'a>(
                 // Deterministic final tiebreak: greatest lex ID wins.
                 .then_with(|| a.id.cmp(&b.id))
         })
+}
+
+const UNBOUND_REMINDER_HORIZON: chrono::Duration = chrono::Duration::minutes(10);
+
+/// A self-reminder is a promised wake, not a stalled worker. Old-task,
+/// cancelled, fired and expired reminders cannot hide the current idle signal.
+/// An unbound reminder covers only a near wake/expiry, never a distant promise.
+pub(crate) fn worker_has_pending_reminder(
+    data: &DirectorData,
+    worker: &str,
+    task: Option<&str>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
+    let owns = |id: &str| id == agent.id || id == agent.name;
+    data.reminders.iter().any(|reminder| {
+        // cas-c53a: the store's TTL anchor, used by both checks below: a time
+        // reminder counts from its due time, an event reminder from creation.
+        let ttl_start = match reminder.trigger_type {
+            cas_store::ReminderTriggerType::Time => reminder.trigger_at.unwrap_or(reminder.created_at),
+            cas_store::ReminderTriggerType::Event => reminder.created_at,
+        };
+        let horizon = UNBOUND_REMINDER_HORIZON.num_seconds();
+        let bound_or_soon = match reminder.task_id.as_deref() {
+            Some(id) => Some(id) == task,
+            None => match reminder.trigger_type {
+                cas_store::ReminderTriggerType::Time => reminder.trigger_at.is_some_and(|due| {
+                    (-horizon..=horizon).contains(&due.signed_duration_since(now).num_seconds())
+                }),
+                cas_store::ReminderTriggerType::Event => reminder.ttl_secs > 0 &&
+                    (0..=horizon).contains(&reminder.ttl_secs.saturating_sub(
+                        now.signed_duration_since(ttl_start).num_seconds(),
+                    )),
+            },
+        };
+        reminder.status == cas_store::ReminderStatus::Pending
+            && owns(&reminder.owner_id) && owns(&reminder.target_id)
+            && reminder.origin_session_id.as_deref().is_none_or(owns)
+            && bound_or_soon
+            && (reminder.ttl_secs == 0 || now.signed_duration_since(ttl_start).num_seconds() <= reminder.ttl_secs)
+    })
 }
 
 #[cfg(test)]

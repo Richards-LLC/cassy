@@ -1711,6 +1711,7 @@ impl FactoryApp {
         let DeliveryInputs {
             qa_progress,
             answered_blocked_workers,
+            recycling_workers,
             data: loaded_data,
             blocks_deps,
             idle_liveness,
@@ -1782,8 +1783,10 @@ impl FactoryApp {
                 // gate, and revalidation then rebinds it to the worker's live
                 // lease, so a held worker kept getting "pending delivery"
                 // relays until release_worker.
+                // cas-fcd5b (GH #1693): a worker being recycled is not idle;
+                // its replacement starts a fresh episode once it registers.
                 if let DirectorEvent::WorkerIdle { worker, .. } = event
-                    && self.event_detector.is_worker_held(worker)
+                    && (self.event_detector.is_worker_held(worker) || recycling_workers.contains(worker))
                 {
                     return None;
                 }
@@ -1806,7 +1809,7 @@ impl FactoryApp {
                         DirectorEvent::WorkerIdle { active_task, .. } => active_task.as_ref(),
                         _ => None,
                     };
-                    if merge_alert::worker_has_pending_reminder(
+                    if crate::ui::factory::director::worker_has_pending_reminder(
                         &unfiltered_data, worker, active.map(|task| task.task_id.as_str()), merge_now,
                     ) || worker_waits.get(worker).is_some_and(|read| {
                         active.is_some_and(|task| task.task_id == read.task) && read.waiting

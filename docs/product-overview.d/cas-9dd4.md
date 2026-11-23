@@ -1,0 +1,3 @@
+## Primary Journeys
+
+A live supervisor can hold a parked delivery that waits on an external review, such as a product owner's GitHub approval. The hold names an owner, a reason and a deadline of at most 7 days. Cassy stamps the supervisor and the parked anchor and records the owner and reason in the task notes. Until the deadline, the progress watchdog leaves that delivery out of its stall count, so it neither wakes the supervisor nor pages the operator for it. A lapsed deadline or a re-park at another anchor makes the delivery actionable again, and genuinely stalled work still escalates. Workers cannot set the hold.

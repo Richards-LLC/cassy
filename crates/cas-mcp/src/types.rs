@@ -385,7 +385,7 @@ pub struct TaskRequest {
     /// provide a non-empty close reason; the accepted decision is logged on
     /// the task.
     #[schemars(
-        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization). Needs a live registered supervisor and a reason. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
+        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization). Live registered supervisor and a reason; supersession needs reviewed-drop: (see refusal)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,
@@ -495,6 +495,13 @@ pub struct TaskRequest {
     )]
     #[serde(default)]
     pub external_verification_receipt: Option<String>,
+
+    /// Operator recovery decision ID for a contained historical delivery.
+    #[schemars(
+        description = "close: operator recovery-decision ID."
+    )]
+    #[serde(default)]
+    pub operator_decision: Option<String>,
 
     /// Include dependencies (for show)
     #[schemars(description = "Include dependency information")]

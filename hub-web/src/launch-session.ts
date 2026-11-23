@@ -78,7 +78,7 @@ export function routeStep(option: GatewayRouteOption | null | undefined, chosen:
   const workers = routed.length ? `${routed.join(" and ")} workers` : "No workers";
   const scope = `Home gateway moves ${workers}. The supervisor and other workers stay direct.`;
   const note = !option.available ? `The home gateway isn't ready on ${machine}${option.reason ? `: ${option.reason}` : ""}.`
-    : route === "gateway" ? "Workers keep the account below for hooks and sessions; the hub picks which of its accounts serves each request. If the hub isn't ready when a worker starts, that worker starts direct and says so."
+    : route === "gateway" ? "Workers keep their own account for hooks and sessions; the hub picks which of its accounts serves each request. If the hub isn't ready when a worker starts, that worker starts direct and says so."
     : undefined;
   return { kind: "choice", route, gateway: option.available, scope, note };
 }

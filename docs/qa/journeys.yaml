@@ -4733,6 +4733,7 @@ journeys:
   - hub-web/src/accounts-panel.css
   - hub-web/src/accounts-model.ts
   - hub-web/src/account-usage-check.ts
+  - hub-web/src/account-meters.ts
   - cas-cli/src/hub/accounts.rs
   - cas-cli/src/hub/account_routes.rs
   - hub-web/src/launch-session.ts

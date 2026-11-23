@@ -624,6 +624,28 @@ fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathB
         .map_err(anyhow::Error::msg)
 }
 
+/// The path a close-reason token cites. Backtick-quoted text is the path
+/// verbatim. Prose can wrap an unquoted one, "(target/x.log)." or
+/// "…/LEDGER.md.", so trailing prose punctuation is dropped one character at a
+/// time and the longest form that exists wins: a literal file `x.log!` is never
+/// read as its sibling `x.log`. When no form exists the fully stripped path is
+/// the one reported missing (cas-df37).
+fn cited_token(token: &str, quoted: bool, exists: impl Fn(&str) -> bool) -> &str {
+    fn value(text: &str) -> &str {
+        text.split_once('=').map_or(text, |(_, value)| value)
+    }
+    if quoted {
+        return value(token);
+    }
+    let wrapper = |c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\'');
+    let mut cited = token.trim_start_matches(wrapper);
+    let stripped = cited.trim_end_matches(|c: char| wrapper(c) || matches!(c, '.' | ':' | '!' | '?')).len();
+    while cited.len() > stripped && !exists(value(cited)) {
+        cited = &cited[..cited.len() - 1]; // only ASCII punctuation lies past `stripped`
+    }
+    value(cited)
+}
+
 /// Publish close-reason citations for a reviewer on either machine. Routed
 /// builds additionally require their ledger evidence and strict restoration;
 /// uncited ordinary QA captures remain best effort (cas-dae1, cas-2de9).
@@ -651,14 +673,19 @@ pub(crate) fn publish_routed_evidence(
     for (index, segment) in task.deliverables.parked_close_reason.as_deref().unwrap_or_default().split('`').enumerate() {
         let tokens = if index % 2 == 1 { vec![segment] } else { segment.split_whitespace().collect() };
         for token in tokens {
-            let token = token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\''));
-            let token = token.split_once('=').map_or(token, |(_, value)| value);
-            let expanded = crate::qa_evidence::expand_home(token);
-            let path = if expanded.is_absolute() { expanded } else { proof_repo.join(expanded) };
-            if !path.starts_with(proof_repo.join("target"))
-                && !path.starts_with(&dir)
-                && !token.contains("/.cas/artifacts/") && !token.starts_with(".cas/artifacts/")
-            { continue; }
+            let resolve = |text: &str| {
+                let expanded = crate::qa_evidence::expand_home(text);
+                if expanded.is_absolute() { expanded } else { proof_repo.join(expanded) }
+            };
+            let in_evidence = |text: &str, path: &Path| path.starts_with(proof_repo.join("target"))
+                || path.starts_with(&dir)
+                || text.contains("/.cas/artifacts/") || text.starts_with(".cas/artifacts/");
+            let token = cited_token(token, index % 2 == 1, |text| {
+                let path = resolve(text);
+                in_evidence(text, &path) && path.exists()
+            });
+            let path = resolve(token);
+            if !in_evidence(token, &path) { continue; }
             // Directory mentions are context, but a missing cited file must
             // not silently disappear from the peer's proof (cas-dae1).
             if path.is_dir() { continue; }
@@ -1262,33 +1289,48 @@ mod tests {
     async fn ordinary_park_publishes_cited_worktree_evidence_cas_dae1() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let server = MockServer::start().await;
-        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "artifact_id": "cloud-log", "upload_url": format!("{}/blob", server.uri()), "required_headers": {}
-            }))).expect(1).mount(&server).await;
-        Mock::given(method("PUT")).and(path("/blob"))
-            .and(wiremock::matchers::body_bytes(b"test: PASS fixture\n".to_vec()))
-            .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
-        Mock::given(method("POST")).and(path("/api/artifacts/cloud-log/complete"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
-            .expect(1).mount(&server).await;
+        // The second file is a literal name ending in prose punctuation, beside
+        // a different file of the stripped name that must never be read.
+        let cited: [(&str, &[u8]); 2] = [("runner.log", b"test: PASS fixture\n"), ("proof.log!", b"literal\n")];
+        for (index, (leaf, bytes)) in cited.iter().enumerate() {
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(wiremock::matchers::body_partial_json(serde_json::json!({"name": leaf})))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"), "upload_url": format!("{}/blob/{index}", server.uri()),
+                    "required_headers": {}
+                }))).expect(1).mount(&server).await;
+            Mock::given(method("PUT")).and(path(format!("/blob/{index}")))
+                .and(wiremock::matchers::body_bytes(bytes.to_vec()))
+                .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("/api/artifacts/cloud-{index}/complete")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+                .expect(1).mount(&server).await;
+        }
         let task = cas_types::Task::new("cas-dae1-fixture".into(), "ordinary park".into());
         let mut owner = PeerReviewer::new(&server.uri(), task);
         env.set("CAS_ROOT", &owner.root);
         let log = owner.repo.join("target/runner.log");
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-        std::fs::write(&log, "test: PASS fixture\n").unwrap();
+        for (leaf, bytes) in cited.iter().chain([&("proof.log", b"sibling\n" as &[u8])]) {
+            std::fs::write(owner.repo.join("target").join(leaf), bytes).unwrap();
+        }
         std::fs::create_dir_all(owner.evidence_dir()).unwrap();
-        owner.task.deliverables.parked_close_reason = Some(format!("VERIFIED `{}`", log.display()));
+        // cas-df37: prose punctuation around a cited path is not part of it,
+        // but a quoted path is verbatim and an existing exact path wins.
+        owner.task.deliverables.parked_close_reason = Some(format!(
+            "VERIFIED (target/runner.log). Log: {}. Also `target/proof.log!` and (target/proof.log!).", log.display()));
         tokio::task::spawn_blocking(move || {
             publish_routed_evidence(&owner.root, &owner.task, &owner.repo).unwrap();
             let records = SqliteArtifactStore::open(&owner.root).unwrap().list_for_task(&owner.task.id).unwrap();
-            assert_eq!(records.len(), 1);
-            validate(&records[0], &owner.task.id).unwrap();
-            assert_eq!(records[0].name, "runner.log");
-            assert_eq!(records[0].sha256, digest_file(&log).unwrap().0);
+            let mut names: Vec<&str> = records.iter().map(|record| record.name.as_str()).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["proof.log!", "runner.log"]);
+            for record in &records {
+                validate(record, &owner.task.id).unwrap();
+                assert_eq!(record.sha256, digest_file(&owner.repo.join("target").join(&record.name)).unwrap().0);
+            }
             let task = crate::store::open_task_store(&owner.root).unwrap().get(&owner.task.id).unwrap();
-            assert!(from_notes(&task.notes, &records[0].id, &task.id).unwrap().is_some());
+            assert!(records.iter().all(|record| from_notes(&task.notes, &record.id, &task.id).unwrap().is_some()));
             // Ordinary evidence is listed by task-relative path, but only a
             // routed build's manifest is strict: no new admission requirement.
             let manifest = task.notes.lines().find_map(|line| {

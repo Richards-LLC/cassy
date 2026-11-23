@@ -2346,6 +2346,420 @@ bug_families:
     tasks: [cas-3874]
     journeys: []
     invariants: []
+  blocked-supplemental-proof-resume:
+    title: Blocked supplemental work resumes without invalidating its existing delivery proof
+    tasks: [cas-bd3d]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+  bounded-evidence-sync-notes:
+    title: Evidence file counts cannot inflate synced task notes or silently truncate peer restoration
+    tasks: [cas-591f]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  close-deadline-continuation:
+    title: Slow task closes return durable progress without transport failure
+    statement: >-
+      A retained close returns a non-error structured IN_PROGRESS result until its
+      checked disposition commits, then COMMITTED. Both responses identify the
+      persisted continuation. Releasing delayed preflight, evidence or follow-up
+      records one correlated final outcome without repeating the close. A successful
+      park is classified by this request's receipt, including a legacy error reply.
+    tasks: [cas-23c1]
+    journeys: [FACTORY-CLOSE]
+  commander-polled-relay-claim:
+    title: A polled Commander message does not become a later pane turn
+    statement: >-
+      A successor receives rerouted Commander mail through the real queue relay.
+      If its supported inbox poll or explicit acknowledgement handles a message
+      after the relay prepared a transport claim, the pane never receives that
+      body again. Unread and fresh control messages still arrive, and inbox-read
+      provenance never becomes an inferred acknowledgement or observed wake.
+    tasks: [cas-4f19]
+    journeys: []
+    invariants: []
+  commander-second-send-queued-during-hold:
+    title: A Commander Send made while an earlier one is still being held is queued, not dropped
+    statement: >-
+      A second Send made before the first submission has finished holding its
+      message waits behind it on the same thread instead of returning silently with
+      its text left in the composer. Both messages are held through the outage and
+      delivered once, in order, when the network recovers. A Send on another thread
+      or a Retry keeps its own turn.
+    tasks: [cas-400a2]
+    journeys: [HUB-J12]
+    invariants: []
+  divergent-unparked-target-migration:
+    title: Divergent unparked target migrations require a valid explicit start binding before new work
+    tasks: [cas-9122]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+  ended-owner-train-queue-adoption:
+    title: An ended supervisor's held train-merge queue no longer blocks the current train owner
+    statement: >-
+      After a train changes owner, the current live owner's train_merge adopts a
+      queue whose recorded supervisor has ended, settling merged entries and
+      continuing. A live prior supervisor still holds the queue, and a caller who
+      is not the current train owner is still refused.
+    tasks: [cas-b2b0]
+    journeys: [FACTORY-MERGE]
+    invariants: []
+  historical-g70-error-recovery:
+    title: Prescribed historical recovery after a reviewer error
+    statement: >-
+      A live registered supervisor can replay the exact G-70 recovery command for
+      an already-integrated recorded delivery after a legacy or resolved typed
+      reviewer ERROR. The recovery records a skip and retains the error/dispatch
+      audit, without manufacturing pre-merge approval. Missing integration or an
+      unauthorized caller cannot use the recovery.
+    tasks: [cas-e705]
+    journeys: []
+    invariants: []
+  idle-relay-retargeted-to-new-assignment:
+    title: Stale idle relay names the worker's newer assignment
+    statement: >-
+      An idle relay detected on one task never names a task the worker received
+      afterwards, whose idle basis would be the previous task's completion. A
+      plain idle premise is withdrawn; a merge-required alert for a task that is
+      still parked stays about that task.
+    tasks: [cas-02a5]
+    journeys: []
+    invariants: []
+  integrated-same-tree-delivery:
+    title: Integrated exact-anchor and same-tree content remains attributable
+    statement: >-
+      A fast-forwarded exact anchor and a duplicate-content same-tree merge retain
+      their ancestor delivery, including deleted paths. Recover task-owned content
+      from the common base when both parents match the parked tree. An unrelated
+      target advance does not erase delivery, while missing, reverted or foreign
+      content still refuses G-56.
+    tasks: [cas-5cf0]
+    journeys: []
+    invariants: []
+  lane-attribution-contained-target:
+    title: Lane attribution blames merged train failures on the delivery
+    statement: >-
+      Failure attribution uses the newest target commit contained in the lane,
+      rather than its stale task start base. Train failures merged after task
+      start remain inherited, while unmerged target commits are excluded and
+      delivery-caused failures remain red. A valid recorded ancestor is a fallback
+      only when the target cannot be resolved.
+    tasks: [cas-b36f]
+    journeys: [FACTORY-CLOSE]
+    invariants: []
+  lane-attribution-shared-target:
+    title: Lane attribution preserves the original head invocation
+    statement: >-
+      Deterministic delivery failures remain caused when a base build would overwrite
+      shared target dependencies. Replay the recorded archive or build arguments,
+      filter and partition before the base build. An identical-invocation flake stays
+      unattributed and red; missing invocation metadata or an empty head replay stays
+      unresolved.
+    tasks: [cas-c53a1]
+    journeys: []
+    invariants: []
+  ledger-foreign-artifacts-root:
+    title: A ledger written on another machine passes the evidence check once its files are restored
+    statement: A LEDGER.md row may cite its capture by the writing machine's absolute artifacts path, such as a prowl /Users path. The evidence-path check maps that path to the same file under the local task directory and still refuses anything outside the ledger directory.
+    found: soundwave refused parked prowl deliveries at merge with G-52, "PASS capture is missing, unreadable or outside the ledger directory".
+    tasks: [cas-ddc4]
+    journeys: [FACTORY-QA-RECEIPT]
+  local-merge-batch-review-admission:
+    title: Batch QA does not authorize unreviewed local delivery integration
+    statement: >-
+      A parked local_merge delivery requiring review must keep its local target
+      unchanged and dispatch the candidate verifier before integration, including
+      in qa.mode=batch. Approval releases the reviewed delivery; rejection keeps
+      the target unchanged. Repeating the approved merge reuses its review and
+      cannot create a second merge.
+    tasks: [cas-73312]
+    journeys: []
+    invariants: []
+  merged-delivery-worker-reclose:
+    title: Merged delivery receipts owe no worker re-close
+    statement: >-
+      An approved delivery PR merge records its immutable receipt once and sends a
+      quiet informational receipt to the owning worker. No worker close action is
+      requested. Missing or pending approval and delayed finalization remain routed
+      to the delivery-owning supervisor, without waking an unrelated watcher.
+    tasks: [cas-602b]
+    journeys: []
+    invariants: []
+  misleading-lifecycle-delay-cause:
+    title: Delayed lifecycle message credits a late hold with the whole delay
+    statement: >-
+      A lifecycle message delayed past the delivery window names its recorded hold
+      as the cause only from the time that hold began. A hold first recorded long
+      after queueing, such as a composer or prior-inject decline stamped seconds
+      before delivery, must not label an earlier unrecorded wait as that hold, and
+      a repeated decline must not move the hold's start. A message queued long
+      after its occurrence names that enqueue delay instead of "cause unrecorded".
+    tasks: [cas-acb6e, cas-02a5]
+    journeys: []
+    invariants: []
+  named-journey-memory-admission:
+    title: Named journey admission happens before the server clock
+    statement: >-
+      Named and responsive journey startup prepares the canonical source-bound
+      snapshot before the webServer deadline. Memory refusal yields typed
+      NOT_STARTED with reason memory_admission and code 75 without executing a test.
+      A ready snapshot executes the selected test; fixture and registered-hub
+      configurations do not build an unrelated local snapshot.
+    tasks: [cas-4aed]
+    journeys: []
+    invariants: []
+  peer-artifacts-before-verification:
+    title: Peer artifacts are readable before automatic verification starts
+    statement: >-
+      A no-code close and a candidate review both fetch the task's committed
+      artifacts by ID from Cloud into the receiver's namespace before preparing
+      the verifier command. SHA-256 and size must match the publication. Missing
+      Cloud bytes and checksum failures refuse startup with the artifact ID and
+      Cloud error. An imported metadata row cannot stand in for deleted bytes.
+    tasks: [cas-f6ca]
+    journeys: []
+    invariants: []
+  peer-message-silent-cloud-hold:
+    title: Accepted peer message held in Cloud with no signal to the sender
+    statement: >-
+      A supervisor's peer message that Cassy Cloud accepted but the peer has not
+      received two minutes later alerts the sender once with its Cloud message id.
+      A delivered message and a message still inside the threshold raise nothing.
+    tasks: [cas-02a5]
+    journeys: []
+    invariants: []
+  peer-parent-plan-artifacts:
+    title: Peer child review restores authenticated parent plan proof
+    statement: >-
+      A child verifier receives verified local paths for its parent epic's cited
+      plan and sequence artifacts, using the receiver's parent-task namespace.
+      Trusted publication notes can cross stores without the publisher's database
+      or cache. A bare ID, foreign project or task, revoked artifact, missing bytes
+      or checksum mismatch cannot reach verifier preparation. New parent proof
+      references invalidate the candidate context.
+    tasks: [cas-b972]
+    journeys: []
+    invariants: []
+  peer-park-before-owner-merge:
+    title: Peer park reaches owner merge admission
+    statement: >-
+      Cloud pulls preserve a completed same-execution peer park even when the
+      train owner's later bookkeeping advances its row clock. G96 sees the
+      recorded branch and anchor without manual task-state repair. Changed
+      bindings, explicit rework, declined anchors, foreign identity and LocalWins
+      remain protected; publication still requires the train owner and exact
+      pushed anchor.
+    tasks: [cas-dfc2]
+    journeys: []
+    invariants: []
+  peer-terminal-dependency-admission:
+    title: Peer receipted terminal state reaches dependency gates
+    statement: >-
+      Cloud pull projects a same-delivery approved merged close over a stale
+      Blocked or AwaitingMerge record even when the receiver's body clock is
+      newer. G21 observes the close without removing the dependency. Newer body
+      and notes survive; open work, unmerged evidence, foreign identity, changed
+      cycles, anchors or targets, explicit rework and LocalWins remain protected.
+    tasks: [cas-223c]
+    journeys: []
+    invariants: []
+  premerge-candidate-retry-failure-notice:
+    title: Each failed pre-merge candidate retry reports its own failure
+    statement: >-
+      A worktree_merge retry after a failed candidate preparation builds again and
+      fails again. Each failed attempt sends its own premerge_candidate_failed
+      notice, so a held retry never stalls silently on a candidate preparation
+      that continues in the background. A successful preparation still reports one
+      ready notice per source, target and context.
+    tasks: [cas-c998]
+    journeys: [FACTORY-MERGE]
+    invariants: []
+  reconnected-mcp-start-epoch:
+    title: A reconnected MCP's startup epoch survives a concurrent writer so status and Reload Cassy name the same live server
+    statement: >-
+      A replacement MCP backend records its PID and version once at daemon start,
+      and that epoch is the only proof of the live server's version. Another
+      factory process writing at the same moment must delay the record, not
+      discard it. Status and Reload Cassy then select the same PID, version and
+      factory session. Same-PID, unversioned or unrelated epochs never authorize
+      a reload (GH #2183).
+    found: GH #2183
+    tasks: [cas-72dc]
+    journeys: [HUB-J27]
+    invariants: [HUB-J27-CARD-RELOAD]
+  recycle-window-mail-abandon:
+    title: Mail to a recycling worker is abandoned before its successor launches
+    statement: >-
+      A message whose inject fails while its worker is between recycle shutdown
+      and relaunch stays queued for the successor. Only a target with no current
+      roster entry, no pane and no pending replacement is abandoned, with the
+      supervisor told.
+    tasks: [cas-02a5]
+    journeys: []
+    invariants: []
+  release-cleanup-recorded-train:
+    title: Release cleanup preserves the open next train
+    statement: >-
+      Post-publication branch cleanup uses the released version's committed cut
+      record. Only its recorded epic branch is eligible; another open train equal
+      to main survives. Missing or ambiguous records and concurrent branch advances
+      cannot authorize deletion. The actual workflow step is replayed against a
+      disposable local bare remote, with no live branch mutation.
+    tasks: [cas-e17a1]
+    journeys: [CLI-RELEASE]
+    invariants: []
+  release-late-advisory-ci:
+    title: Release membership recognizes late green lane CI
+    statement: >-
+      A docs delivery merged under Advisory admission can join a release when its
+      exact-anchor lane checks later succeed, including Docs Lint with classified
+      code-job skips. Pending or failed anchor checks and green checks at another
+      commit retain LANE_CI_MISSING. Preview does not change task state; apply closes
+      the original delivery without reopening it or creating another merge.
+    tasks: [cas-a8f3]
+    journeys: [CLI-RELEASE]
+    invariants: []
+  remote-transfer-receiver-refusal:
+    title: Remote transfer refuses before local mutation
+    statement: >-
+      A locally cached remote receiver or a worker known only to the scoped peer
+      roster produces TRANSFER_RECEIVER_ON_OTHER_MACHINE with its owning machine
+      and the action for that machine's supervisor. No receiver is imported and
+      no task, lease or checkout changes, including supervisor force-transfer.
+      Local adoption keeps its existing validation.
+    tasks: [cas-9eb3]
+    journeys: []
+    invariants: []
+  replacement-launch-target-mismatch:
+    title: Replacement launch branch disagrees with the persisted task target
+    statement: >-
+      An explicit structured spawn branch must agree with the task's effective
+      target before queueing. A stale inherited epic lane cannot silently override
+      that request. Target corrections use the supported task update operation;
+      brief prose grants no delivery authority. A correctly targeted clean
+      replacement starts, and foreign commits retain their G-10 protection.
+    tasks: [cas-8758]
+    journeys: [FACTORY-SPAWN]
+    invariants: []
+  request-changes-repark-propagation:
+    title: Corrective park reaches the owner after request_changes
+    statement: >-
+      A real request_changes and builder re-park round trip through independent
+      stores, production syncing writers, CloudSyncer push/pull and a stateful
+      HTTP backend. The owner may retain a newer bookkeeping clock, but imports
+      the completed same-cycle park only after its exact latest review decision
+      was acknowledged before that canonical park. Missing acknowledgement,
+      reversed ordering, newer owner review and ordinary Open tasks stay held.
+    tasks: [cas-6725]
+    journeys: []
+    invariants: []
+  retargeted-blocked-delivery-rebind:
+    title: Retargeted and pre-park Blocked deliveries can recover on a fresh branch
+    statement: >-
+      An approved proof-scope retarget or a refused first park can retain branch
+      receipts without an active park. A live supervisor can bind a clean task-r2
+      replacement, after which the worker starts, publishes and parks normally.
+      Pending review and active park controls still refuse; historical local and
+      origin refs and anchors remain preserved.
+    tasks: [cas-adfc2]
+    journeys: []
+    invariants: []
+  revision-conflict-rebase-after-local-lifecycle-win:
+    title: A rejected team task push is rebased by one pull when the local lifecycle outranks the cloud row
+    statement: >-
+      After a revision_conflict rejection, one pull adopts the cloud revision and
+      rebuilds the queued payload even when the pull keeps a local parked or closed
+      delivery over the cloud's older Open row. The next push is accepted without
+      manual queue surgery. Store vetoes and rows owned by another project stay
+      explicit conflicts.
+    tasks: [cas-af0d]
+    journeys: [FACTORY-MERGE]
+    invariants: []
+  same-tip-repark-receipt:
+    title: Checked same-tip re-parks retain their committed disposition during delayed follow-up
+    statement: >-
+      After close gates and required evidence publication pass, an unchanged
+      persisted AwaitingMerge snapshot confirms this request with COMMITTED even
+      when remaining follow-up crosses the response budget. The anchor and cycle
+      stay unchanged and the continuation records one final outcome. A changed
+      snapshot or work still before required publication cannot borrow this receipt.
+      A completed continuation releases its worker guard before advertising idle,
+      so shutdown does not race the final ownership release.
+    tasks: [cas-b780]
+    journeys: [FACTORY-CLOSE]
+  sessionless-mcp-supervisor-compatibility:
+    title: Direct snapshot supervisor resolution preserves legacy None callers without changing named-session isolation
+    tasks: [cas-1841]
+    journeys: [FACTORY-SUPERVISE, FACTORY-CLOSE]
+  stale-quarantine-live-local-task:
+    title: A stale quarantine entry for a later local task no longer blocks its sync
+    statement: >-
+      The quarantine ledger is keyed by bare task id and a decision applies to the
+      row that existed when it was taken. An entry older than a local task stamped
+      with this project's identity is ignored by pull, push and the board, so peer
+      parks and status updates apply and queued pushes survive. Rows that already
+      existed when quarantined, and ids with a foreign or unattributed local row,
+      stay quarantined.
+    tasks: [cas-3d8b]
+    journeys: [FACTORY-MERGE]
+    invariants: []
+  task-list-offset:
+    title: Task list rejects an unsupported byte cursor
+    statement: >-
+      The unified task service rejects a supplied list offset with INVALID_PARAMS
+      rather than replaying the first page. A disposable inventory above one hundred
+      tasks retains ordinary limit selection. Show and notes byte pages still
+      reconstruct the full response exactly, including Unicode boundaries.
+    tasks: [cas-91db]
+    journeys: []
+    invariants: []
+  terminal-worker-lease-start:
+    title: Terminal predecessor leases cannot block the next assigned worker task
+    tasks: [cas-7b09e]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+  unparked-source-publication:
+    title: Worker merge requires a pushed parked source
+    statement: >-
+      A push_branch worker delivery cannot integrate an InProgress local rebase,
+      including legacy tasks with no recorded start binding. Pushed active tasks
+      must park first, and a parked local anchor absent from origin cannot merge.
+      Refusal preserves worker and target refs. A valid pushed parked anchor still
+      integrates through immutable source proof, including approved transactional
+      completion receipts; local_merge and already-integrated
+      receipt recovery retain their own policies.
+    tasks: [cas-c2335]
+    journeys: []
+    invariants: []
+  unpublished-target-merge-publication:
+    title: Delivery merge preserves unpublished target history
+    statement: >-
+      An unrelated local-ahead target commit cannot silently ride out with a worker
+      delivery. Refusal names local-only commits and fetched origin, preserving
+      local/remote target and source. Equal and behind ordinary targets still
+      merge; transactional execution and local-merge reconciliation cannot publish
+      unrelated target work. The delivery's own ancestry and single integration
+      merge remain authorized. Typed source-drift failure precedes origin reads;
+      detached reviewed validation preserves concurrent writers before refusal.
+    tasks: [cas-76da]
+    journeys: []
+    invariants: []
+  worker-branch-namespace-ownership:
+    title: Worker locked out of, or sharing, its own factory branch namespace
+    statement: >-
+      A worker owns factory/<name> and factory/<name>-<task-id> and nothing else.
+      The tool guard and the installed commit and push hooks decide ownership
+      from the branch name with one shared rule, so a worker on its own per-task
+      branch is never refused. Registration keeps worker namespaces exclusive: a
+      worker name that extends another worker's name across a hyphen is refused,
+      so no branch has two owners. Supervisors are exempt, and names without a
+      hyphen boundary (eager-panda-2, eager-panda-27) both register.
+    tasks: [cas-ea31]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+    invariants: []
+  worker-first-prompt-timeout:
+    title: Registered workers without a first turn retain a bounded startup watch and report task-bound launch failure
+    tasks: [cas-3b23]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  worker-supervisor-registry-consistency:
+    title: Worker supervisor selection and diagnostics share liveness and reject unavailable ambiguous or foreign session owners
+    tasks: [cas-e901]
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

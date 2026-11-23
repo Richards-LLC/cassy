@@ -9,7 +9,7 @@
 - `contrib/`, `homebrew/` — shell integrations and package formulas.
 - `docs/`, `site/` — architecture, design, QA and release documents; website and system PDF.
 - `fixtures/`, `migration/` — retrieval fixtures and historical Cloud migration scripts.
-- `ops/`, `scripts/` — service units, host installation, proof runners and release tooling.
+- `ops/`, `scripts/` — service units, host installation, proof runners and release tooling; `scripts/worker-run.sh` holds a worker checkout for a proof run, `scripts/cleanup-merged-epics.sh` deletes only the released epic.
 - `.cargo/`, `.config/` — Cargo settings and nextest profiles.
 - `.claude/`, `.codex/` — harness instructions, projections and repository navigation.
 - `.githooks/`, `.github/` — Git policy hooks, CI workflows and issue templates.
@@ -42,10 +42,12 @@
 - `cas-cli/src/accounts.rs`, `cas-cli/src/account_registry/`, `cas-cli/src/account_selection.rs` — account inventory, discovery and recommendations.
 - `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs`, `cas-cli/src/cli/account_picker.rs` — account mutations, links and selection.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/agent_model.rs` — harness launches and model observations.
+- `cas-cli/src/worker_sandbox_profile.rs`, `crates/cas-mux/src/worker_sandbox.rs` — macOS Claude worker sandbox profile generation and launch; bypass corpus in `crates/cas-mux/src/worker_sandbox_corpus.json`.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update.rs`, `cas-cli/src/ops/` — diagnostics, upgrades and operational commands.
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` — exact-SHA prechecks and dispatch recovery.
 - `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters; shared default-train election in `cas-cli/src/mcp/tools/core/task/release_train.rs` uses origin history and cut admission markers.
 - `cas-cli/src/cli/release_notice_failure.rs`, `cas-cli/src/issue_reconcile.rs` — exhausted release notices and issue reconciliation.
+- `cas-cli/src/recovery_decision.rs`, `cas-cli/src/cli/task_cmd.rs` — operator recovery decisions for contained historical deliveries (`cas task recovery-decision`).
 - `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch and shared schemas; pre-tool admission in `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs`; long foreground supervisor Bash refusal in `handlers_events/supervisor_foreground.rs`.
 - `cas-cli/src/config/`, `cas-cli/src/harness_policy.rs` — runtime settings and harness policy projections.
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/knowledge/`, `cas-cli/src/extraction/` — composed retrieval, distillation and extraction.
@@ -80,6 +82,7 @@
 - `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_target_cache/` — build admission, capacity and target ownership.
 - `cas-cli/src/supervisor_auto_clear.rs`, `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_message_wakes.rs` — continuity and typed wakes.
 - `cas-cli/src/supervisor_notices.rs`, `cas-cli/src/peer_ask_gate.rs`, `cas-cli/src/cloud/peer_mailbox/` — durable notices and explicitly scoped peer merge holds; `peer_mailbox/train_parks.rs` holds immutable worker park claims admitted by the sole train owner.
+- `cas-cli/src/hub/command_receipts.rs`, `cas-cli/src/store/supervisor_commands.rs` — durable Commander command receipts and queued supervisor commands.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` — train guards, proof and retries.
 - `cas-cli/src/worktree/git/`, `cas-cli/src/worktree/retained.rs`, `scripts/cas-merge-drivers.py` — Git operations, rescue refs and shared merge drivers.
 - `cas-cli/src/git_evidence/` — shared bounded ref, ancestry, tree and delivery measurement probes.

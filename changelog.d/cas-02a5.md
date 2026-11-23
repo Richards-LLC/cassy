@@ -1,6 +1,0 @@
-### Fixed — Message delivery honesty (GH #1731)
-
-- **Mail survives a worker recycle** — A message whose delivery failed while its worker was between recycle shutdown and relaunch was abandoned, so the successor started its task without the brief. The message now stays queued for the successor. A message to a worker with no successor coming is still abandoned, and the supervisor is told.
-- **A late lifecycle event names its known cause** — An event queued long after it happened, such as a `task_started` queued 15 minutes late, was labelled "cause unrecorded". The label now says how late it was queued and explains only the time it then waited in the queue.
-- **No idle notice about a task the worker just received** — An idle notice detected on one task was delivered after the worker got its next assignment, and named the new task. That notice is now withdrawn. A merge-required alert for a task that is still parked is kept, and still names that parked task.
-- **Senders learn when a peer has not received their message** — Cassy Cloud's "queued" receipt read as sent, even while the peer had not received the message for ten minutes. Two minutes after Cloud accepts a supervisor's peer message, Cassy checks its delivery status once, and alerts the sender if the peer still has not received it.

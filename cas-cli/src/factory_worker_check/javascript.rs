@@ -1222,7 +1222,7 @@ fn percent_title(title: &str, index: usize, row: Node<'_>, source: &str) -> Opti
 
 /// Each `$key` is the row object's value as Vitest displays it (strings in
 /// single quotes, `0` as `+0`, a missing key as `undefined`).
-fn dollar_title(title: &str, row: Node<'_>, source: &str) -> Option<String> {
+fn dollar_title(pattern: &str, row: Node<'_>, source: &str) -> Option<String> {
     if row.kind() != "object" {
         return None;
     }
@@ -1244,7 +1244,7 @@ fn dollar_title(title: &str, row: Node<'_>, source: &str) -> Option<String> {
         }
     }
     let mut name = String::new();
-    let mut rest = title;
+    let mut rest = pattern;
     while let Some(at) = rest.find('$') {
         name.push_str(&rest[..at]);
         let tail = &rest[at + 1..];

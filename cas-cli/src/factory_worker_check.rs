@@ -1128,8 +1128,13 @@ pub(crate) struct PassingTests<'a> {
     head: &'a str,
     target: Option<&'a str>,
     synced: &'a [cas_types::PortableTestReceipt],
-    records: std::sync::OnceLock<Vec<(String, Option<String>, TestReceipt)>>,
+    records: std::sync::OnceLock<(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>)>,
 }
+
+/// An earlier receipt the carry refused at this head: its tested head, the
+/// receipt, and the changed proof inputs that voided it (`None` when the
+/// range to the head is unreadable, e.g. not an ancestor).
+type Voided = (String, TestReceipt, Option<Vec<String>>);
 
 impl<'a> PassingTests<'a> {
     pub(crate) fn new(cas_root: &'a Path, repo: &'a Path, head: &'a str) -> Self {
@@ -1180,8 +1185,17 @@ impl<'a> PassingTests<'a> {
     }
 
     fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
+        &self.classified().0
+    }
+
+    /// Earlier receipts this head could not carry, with the reason (GH #2288).
+    fn voided(&self) -> &[Voided] {
+        &self.classified().1
+    }
+
+    fn classified(&self) -> &(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>) {
         self.records.get_or_init(|| {
-            let mut records = passing_test_records(self.cas_root, self.repo, self.head, self.target);
+            let (mut records, voided) = passing_test_records(self.cas_root, self.repo, self.head, self.target);
             for synced in self.synced {
                 let Ok(stability) = synced.stability.clone().map(serde_json::from_value::<stability::Proof>).transpose() else { continue };
                 let Ok(widened) = synced.widened.clone().map(serde_json::from_value::<widened::Proof>).transpose() else { continue };
@@ -1219,7 +1233,7 @@ impl<'a> PassingTests<'a> {
                     }));
                 }
             }
-            records
+            (records, voided)
         })
     }
 
@@ -1291,22 +1305,23 @@ pub(crate) fn passing_test_packages_against(
 /// documentation-only delivery commit while keeping proof tied to its tested
 /// tree. Builtin Markdown and reference history use CI's contract/doc-hygiene
 /// proof instead of invalidating Rust receipts. With a target, commits already
-/// on it are not part of the range.
+/// on it are not part of the range. Also returns the ancestor receipts it
+/// refused and why.
 fn passing_test_records(
     cas_root: &Path,
     repo: &Path,
     head: &str,
     target: Option<&str>,
-) -> Vec<(String, Option<String>, TestReceipt)> {
+) -> (Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>) {
     let Ok(repo) = repo.canonicalize() else {
-        return Vec::new();
+        return Default::default();
     };
     let path = receipt_path(cas_root, &repo, head);
     let Some(directory) = path.parent() else {
-        return Vec::new();
+        return Default::default();
     };
     let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
+        return Default::default();
     };
     let mut entries = entries.flatten().collect::<Vec<_>>();
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -1348,18 +1363,25 @@ fn passing_test_records(
     let proof_inputs = delivered_tree_proof_inputs(&repo, head, &changed_paths)
         .unwrap_or_else(|| changed_paths.clone());
 
+    let mut voided = Vec::new();
     for (receipt_head, package, test) in ancestors {
         let key = (package.clone(), test.harness.clone(), test.filter.clone());
+        if exact.contains_key(&key) {
+            continue;
+        }
         let Some(changes) = ranges.get(&receipt_head).and_then(Option::as_ref) else {
+            voided.push((receipt_head, test, None));
             continue;
         };
-        if exact.contains_key(&key) || changes.iter().any(|path| {
+        let inputs = changes.iter().filter(|path| {
             // cas-23b1: embedded builtin docs have their own contract checks;
             // every other proof input still invalidates the Rust receipt.
             let builtin_doc = path.starts_with("cas-cli/src/builtins/")
-                && (path.ends_with(".md") || path == "cas-cli/src/builtins/reference-history.json");
-            !builtin_doc && proof_inputs.contains(path)
-        }) {
+                && (path.ends_with(".md") || *path == "cas-cli/src/builtins/reference-history.json");
+            !builtin_doc && proof_inputs.contains(*path)
+        }).cloned().collect::<BTreeSet<_>>();
+        if !inputs.is_empty() {
+            voided.push((receipt_head, test, Some(inputs.into_iter().collect())));
             continue;
         }
         match exact.entry(key) {
@@ -1375,10 +1397,11 @@ fn passing_test_records(
         }
     }
 
-    exact
+    let records = exact
         .into_iter()
         .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
-        .collect()
+        .collect();
+    (records, voided)
 }
 
 fn read_passing_test_record(
@@ -1648,6 +1671,15 @@ fn is_test_or_build_input_path(path: &str) -> bool {
     )
 }
 
+/// GH #2288: the per-task changelog, product-overview and bug-family fragments
+/// the close gate asks for. Release tooling owns their checks, so one counts
+/// as a Rust proof input only when a Rust source names it, never by extension.
+fn close_doc_fragment(path: &str) -> bool {
+    ["changelog.d/", "docs/product-overview.d/", "docs/qa/bug-families/"].iter()
+        .any(|dir| path.strip_prefix(dir).is_some_and(|name| !name.contains('/')))
+        && [".md", ".yaml", ".yml"].iter().any(|extension| path.ends_with(extension))
+}
+
 /// Read the delivered tree once per close and batch its Rust sources once.
 fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<String>) -> Option<BTreeSet<String>> {
     if changed.is_empty() { return Some(BTreeSet::new()); }
@@ -1659,7 +1691,9 @@ fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<Strin
     let registry = crate::qa_registry::DEFAULT_PATH;
     let bug_family = |path: &str| path != registry && crate::qa_registry::is_registry_input(registry, path);
     let external = changed.iter().filter(|path| {
-        if (!bug_family(path) && is_test_or_build_input_path(path)) || tree.is_workspace_crate_path(path) {
+        if !close_doc_fragment(path)
+            && ((!bug_family(path) && is_test_or_build_input_path(path)) || tree.is_workspace_crate_path(path))
+        {
             inputs.insert((*path).clone()); false
         } else { true }
     }).cloned().collect::<Vec<_>>();
@@ -2160,7 +2194,9 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
     };
     matches!(key, "HOME" | "CARGO_HOME" | "RUSTUP_HOME" | "CI"
         | "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
-        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL")
+        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL"
+        // cas-3751a: the sandbox-runtime binary the worker sandbox corpus test runs through.
+        | "CAS_SRT_BIN")
         .then_some((key, value))
 }
 
@@ -2303,6 +2339,11 @@ exit "$code"
     if let Some(id) = run { command.arg("--completion-id").arg(id); }
     command.arg("--").args(args);
     command
+}
+
+/// This process's stdout when it is a regular file (a foreground check's log).
+pub(crate) fn stdout_log_path() -> Option<PathBuf> {
+    detached_log_path().filter(|path| path.is_file())
 }
 
 /// Resolve the actual redirected file, rather than interpreting shell text.
@@ -3806,6 +3847,56 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         );
     }
 
+    /// GH #2288: cas-e705's five-pass proof was refused at a descendant that
+    /// added only the documentation fragments the close gate itself asks for.
+    /// A fragment a Rust source names is still an input, and the refusal
+    /// names the receipt and the path that voided it.
+    #[test]
+    fn stability_proof_carries_across_close_doc_fragments_gh_2288() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let write = |path: &str, body: &str| {
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), body).unwrap();
+        };
+        let embedded = "docs/qa/bug-families/embedded.yaml";
+        write("cas-cli/Cargo.toml", "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n");
+        write("cas-cli/src/lib.rs", &format!("const FAMILY: &str = include_str!(\"../../{embedded}\");\n#[test] fn keeper() {{}}\n"));
+        write(embedded, "tasks: [cas-old]\n");
+        fixture_commit_as(&repo, "keeper");
+        let tested = fixture_head(&repo);
+        let keeper = stability::Identity::exact("cas-cli/src/lib.rs", "keeper");
+        stability::record(&root, &repo, &tested, stability::Proof {
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        }).unwrap();
+
+        write("changelog.d/cas-e705.md", "### Fixed\n\n- Recovery.\n");
+        write("docs/product-overview.d/cas-e705.md", "Recovery.\n");
+        write("docs/qa/bug-families/historical-g70-error-recovery.yaml", "tasks: [cas-e705]\n");
+        fixture_commit_as(&repo, "docs(cas-e705): fragments");
+        let documented = fixture_head(&repo);
+        assert!(stability::missing(&PassingTests::new(&root, &repo, &documented), &[keeper.clone()]).is_empty());
+
+        write(embedded, "tasks: [cas-new]\n");
+        fixture_commit_as(&repo, "docs: embedded family");
+        let voided = fixture_head(&repo);
+        // A proof at a commit the tip does not descend from never carries.
+        git(&repo, &["checkout", "--detach", &tested]).unwrap();
+        write("notes.txt", "sibling\n");
+        fixture_commit_as(&repo, "sibling");
+        let sibling = fixture_head(&repo);
+        stability::record(&root, &repo, &sibling, stability::Proof {
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        }).unwrap();
+        let passing = PassingTests::new(&root, &repo, &voided);
+        assert_eq!(stability::missing(&passing, &[keeper.clone()]), [keeper.clone()]);
+        let mut refused = vec![(tested, Some(vec![embedded.to_owned()])), (sibling, None)];
+        refused.sort();
+        assert_eq!(stability::invalidated(&passing, &[keeper]), refused);
+    }
+
     #[test]
     fn ancestor_test_receipt_git_processes_are_bounded_by_close_cas_27f8() {
         let dir = tempfile::tempdir().unwrap();
@@ -5151,7 +5242,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         head: &str,
     ) -> Vec<(String, String, String, u64)> {
         // cas-7b2d: inspect receipt data independently of display provenance.
-        passing_test_records(root, repo, head, None)
+        passing_test_records(root, repo, head, None).0
             .into_iter()
             .map(|(head, package, test)| (head, package.expect("fixture records a Rust package"), test.filter, test.count))
             .collect()

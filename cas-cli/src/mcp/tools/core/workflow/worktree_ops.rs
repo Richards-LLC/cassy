@@ -438,29 +438,53 @@ pub(crate) fn delivery_ci_pending(root: Option<&Path>, branch: &str, target: &st
 /// lookup errors and any unfinished check all defer it, even if another
 /// check is already red. Do not borrow an older code commit's green result.
 pub(crate) fn delivery_tip_ci_conclusion(sha: &str, cwd: &Path) -> &'static str {
-    delivery_tip_ci_answer(sha, cwd).unwrap_or("unknown")
+    delivery_tip_ci_reading(sha, cwd).0
 }
 
-fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Option<&'static str> {
+/// cas-2421 (GH #2051): the conclusion plus, for "unknown", the check-runs
+/// query it read and why that answer was not settled.
+pub(crate) fn delivery_tip_ci_reading(sha: &str, cwd: &Path) -> (&'static str, String) {
+    match delivery_tip_ci_answer(sha, cwd) {
+        Ok(conclusion) => (conclusion, String::new()),
+        Err(reason) => ("unknown", reason),
+    }
+}
+
+fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Result<&'static str, String> {
     let binary = crate::github_repo::gh_binary();
-    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT).ok()?;
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT)?;
+    let query = format!("repos/{}/commits/{sha}/check-runs", repo.canonical);
     let output = fetch_branch_ci(sha, cwd, &repo.canonical, &binary);
-    if !output.success { return None; }
-    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let runs = parsed.get("check_runs")?.as_array()?;
-    if runs.is_empty() { return None; }
+    let observed = |reason: String| format!("{query}: {reason}");
+    if !output.success {
+        return Err(observed(format!("lookup failed ({}): {}", output.status, first_stderr_line(&output.stderr))));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| observed(format!("invalid JSON: {error}")))?;
+    let runs = parsed.get("check_runs").and_then(serde_json::Value::as_array)
+        .ok_or_else(|| observed("response omitted check_runs".into()))?;
+    if runs.is_empty() { return Err(observed("no check runs for this commit".into())); }
     if runs.iter().any(|run| matches!(run.get("status").and_then(serde_json::Value::as_str),
         Some("queued" | "in_progress" | "requested" | "waiting" | "pending"))) {
-        return Some("pending");
+        return Ok("pending");
     }
     if runs.iter().any(|run| {
         run.get("status").and_then(serde_json::Value::as_str) != Some("completed")
             || run.get("conclusion").and_then(serde_json::Value::as_str).is_none()
-    }) { return None; }
+    }) { return Err(observed("a check run has no completed conclusion".into())); }
     match classify_branch_ci_response("", sha, output) {
-        BranchCiState::Green { .. } => Some("success"),
-        BranchCiState::Red { .. } => Some("failure"),
-        _ => None,
+        BranchCiState::Green { .. } => Ok("success"),
+        BranchCiState::Red { .. } => Ok("failure"),
+        BranchCiState::NoChecks { reason, .. }
+        | BranchCiState::Unknown { reason, .. }
+        | BranchCiState::MissingCommit { reason, .. }
+        | BranchCiState::UnvalidatedCode { reason, .. }
+        | BranchCiState::CodeValidationUnconfirmed { reason, .. } => Err(observed(reason)),
+        BranchCiState::GhFailure { status, stderr, .. } => Err(observed(format!("lookup failed ({status}): {stderr}"))),
+        // Every run completed: only cancelled runs or a classifier with no
+        // test jobs remain, which has stayed unknown rather than pending.
+        BranchCiState::Pending { .. } | BranchCiState::CodePending { .. } =>
+            Err(observed("completed runs hold no test verdict (cancelled or classifier only)".into())),
     }
 }
 
@@ -2076,6 +2100,21 @@ fn requested_merge_source_tip(repo: &Path, branch: &str, origin_only: bool) -> R
         }))
 }
 
+/// An approved receipt still needs its immutable source published before integration.
+fn verify_pushed_delivery_anchor(repo: &Path, branch: &str, anchor: &str) -> Result<(), String> {
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let anchor = git.resolve_commit(anchor).unwrap_or_else(|| anchor.to_string());
+    let pushed = requested_merge_source_tip(repo, branch, true)
+        .map_err(|error| format!("Cannot verify pushed delivery {branch}: {error}"))?;
+    if pushed.as_deref() != Some(anchor.as_str()) {
+        return Err(format!(
+            "PARKED DELIVERY NOT PUSHED: {branch} must be pushed at parked anchor {anchor}; live origin is {}. No merge was attempted.",
+            pushed.as_deref().unwrap_or("missing"),
+        ));
+    }
+    Ok(())
+}
+
 /// cas-7ce6: the branch that holds a parked task's reviewed `anchor`.
 ///
 /// - `Ok(None)`: merge `source` as asked.
@@ -2325,13 +2364,30 @@ impl CasCore {
         parent_branch: &str,
         task: &cas_types::Task,
     ) -> Result<Option<String>, String> {
+        if task.task_type != cas_types::TaskType::Epic
+            && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+            && (matches!(task.status, cas_types::TaskStatus::Open | cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked)
+                || task.deliverables.factory_branch_anchor.as_deref().is_none_or(|anchor| anchor.trim().is_empty()))
+        {
+            return Err(format!(
+                "DELIVERY NOT PARKED: push_branch task {} requires its pushed, parked anchor before merging. Have the worker push its validated delivery and park it with task action=close, then retry worktree_merge. No merge was attempted.", task.id,
+            ));
+        }
         let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
             return Ok(None);
         };
         let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let check_pushed = |selected: Option<String>, anchor: &str| {
+            if task.task_type != cas_types::TaskType::Epic
+                && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+            {
+                verify_pushed_delivery_anchor(repo, selected.as_deref().unwrap_or(source), anchor)?;
+            }
+            Ok(selected)
+        };
         let original = parked_merge_source(&git, source, &task.id, anchor);
         if original.is_ok() || task.status != cas_types::TaskStatus::AwaitingMerge {
-            return original;
+            return original.and_then(|selected| check_pushed(selected, anchor));
         }
         let Some(tip) = git.resolve_commit(source) else {
             return original;
@@ -2351,6 +2407,7 @@ impl CasCore {
         if !unchanged {
             return original;
         }
+        check_pushed(None, &tip)?;
         self.advance_awaiting_merge_anchor(task_store, task, repo, parent_branch, Some(&tip))
             .map_err(|error| format!("Cannot advance parked delivery anchor: {error}"))?;
         let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload parked delivery anchor: {error}"))?;
@@ -5435,6 +5492,16 @@ impl CasCore {
                     return fail(state, code, detail.to_string());
                 }
             };
+            if !scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
+                // Only live published containment can resume without the source ref.
+                let published = preflight != DeliveryMergePreflight::Execute
+                    && requested_merge_source_tip(&cwd, &receipt.target_branch, true).ok().flatten()
+                        .is_some_and(|tip| manager.git().is_ancestor(&receipt.commit_sha, &tip));
+                if !published {
+                    verify_pushed_delivery_anchor(&cwd, &receipt.source_branch, &receipt.commit_sha)
+                        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-97", message)))?;
+                }
+            }
             if preflight == DeliveryMergePreflight::Execute {
                 cas_store::transition_worker_delivery(
                     &cas_root,
@@ -6729,8 +6796,7 @@ impl CasCore {
         let push_note = match (task_id, merge_commit.as_deref()) {
             (Some(task_id), Some(merge_sha))
                 if transactional_delivery.is_none() && push_outcome.is_published() => {
-                // cas-46ea: an unparked task merged from its pushed lane tip
-                // closes the same way as a parked one.
+                // Close the published delivery using its existing park receipt.
                 if let Some(head) = fast_lane_head.as_deref()
                     && ci_admission == cas_types::MergeCiAdmission::Green
                 {
@@ -9067,6 +9133,13 @@ mod cas_7ce6_parked_merge_source_tests {
         (repo, anchor)
     }
 
+    fn publish_origin(path: &Path) {
+        let origin = path.join(".git/fixture-origin.git");
+        git(path, &["init", "--bare", "-q", origin.to_str().unwrap()]);
+        git(path, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(path, &["push", "-q", "--all", "origin"]);
+    }
+
     fn rebased_lane() -> (tempfile::TempDir, cas_types::Task, String) {
         let (repo, _) = stacked_lane();
         let path = repo.path();
@@ -9076,6 +9149,7 @@ mod cas_7ce6_parked_merge_source_tests {
         git(path, &["checkout", "-q", "factory/w"]);
         git(path, &["rebase", "main"]);
         let tip = git(path, &["rev-parse", "HEAD"]);
+        publish_origin(path);
         let mut task = cas_types::Task::new("cas-park".into(), "parked rebase".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some("w".into());
@@ -9091,7 +9165,7 @@ mod cas_7ce6_parked_merge_source_tests {
         for shape in ["target-sync", "worker-on-next-task", "new-task-commit", "foreign-parent", "anchor-on-side", "unpushed"] {
             let (repo, anchor) = stacked_lane();
             let path = repo.path();
-            git(path, &["remote", "add", "origin", "unused-fixture-origin"]);
+            publish_origin(path);
             git(path, &["checkout", "-q", "main"]);
             commit(path, "target-update");
             git(path, &["update-ref", "refs/remotes/origin/main", "main"]);
@@ -9112,8 +9186,9 @@ mod cas_7ce6_parked_merge_source_tests {
                 git(path, &["merge", "--no-ff", "-m", "merge epic into parked delivery", target]);
             }
             let tip = git(path, &["rev-parse", "factory/w"]);
-            git(path, &["update-ref", "refs/remotes/origin/factory/w",
-                if shape == "unpushed" { &anchor } else { &tip }]);
+            if shape != "unpushed" {
+                git(path, &["push", "-q", "origin", "factory/w"]);
+            }
             let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
             task.status = cas_types::TaskStatus::AwaitingMerge;
             task.assignee = Some("w".into());
@@ -9202,6 +9277,7 @@ mod cas_7ce6_parked_merge_source_tests {
         let (repo, mut task, tip) = rebased_lane();
         let branch = "factory/w-cas-park";
         git(repo.path(), &["branch", branch, &tip]);
+        git(repo.path(), &["push", "-q", "origin", branch]);
         task.deliverables.parked_branch = Some(branch.into());
         let git_ops = GitOperations::new(repo.path().to_path_buf());
         let old_anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
@@ -9302,7 +9378,7 @@ mod cas_7ce6_parked_merge_source_tests {
             let ops = GitOperations::new(path.to_path_buf());
             // Parked A is published; B is local-only. Include the incident's
             // target-sync merge, which must not be rebound as a same-patch rebase.
-            git(path, &["update-ref", "refs/remotes/origin/factory/w", &anchor]);
+            publish_origin(path);
             let tip = if local_sync {
                 git(path, &["checkout", "-q", "main"]);
                 commit(path, "target-update");
@@ -9324,6 +9400,7 @@ mod cas_7ce6_parked_merge_source_tests {
             assert!(refusal.contains(&tip), "{refusal}");
             assert_eq!(git(path, &["rev-parse", "main"]), before);
             git(path, &["branch", "factory/w-cas-park", &anchor]);
+            git(path, &["push", "-q", "origin", "factory/w-cas-park"]);
             let source = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
                 .unwrap().expect("an exact delivery branch remains usable");
             assert_eq!(git(path, &["rev-parse", &source]), anchor);

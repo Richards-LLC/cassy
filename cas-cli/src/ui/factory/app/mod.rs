@@ -1809,7 +1809,7 @@ impl FactoryApp {
                         DirectorEvent::WorkerIdle { active_task, .. } => active_task.as_ref(),
                         _ => None,
                     };
-                    if merge_alert::worker_has_pending_reminder(
+                    if crate::ui::factory::director::worker_has_pending_reminder(
                         &unfiltered_data, worker, active.map(|task| task.task_id.as_str()), merge_now,
                     ) || worker_waits.get(worker).is_some_and(|read| {
                         active.is_some_and(|task| task.task_id == read.task) && read.waiting
@@ -1945,8 +1945,10 @@ impl FactoryApp {
                         } else {
                             "CI failed. Supervisor decision needed: request changes, or explicitly review and override red CI before merging."
                         };
+                        let source = if ready.ci_source.is_empty() { String::new() }
+                            else { format!("\nCI read: {}", ready.ci_source) };
                         let text = format!(
-                            "{decision}\nTask {} on {} at {}.\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
+                            "{decision}\nTask {} on {} at {}.{source}\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
                             ready.evidence.task_id, ready.evidence.factory_branch, ready.tip,
                             ready.evidence.unmerged_count, ready.evidence.checked_epic_ref,
                             ready.evidence.epic_sha, ready.evidence.task_id,

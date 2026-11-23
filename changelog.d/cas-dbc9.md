@@ -1,0 +1,4 @@
+### Fixed — Transferred task delivery branch
+
+- **A transferred task binds the new worker's branch at park, with no manual rebind** — After a supervisor transfers a task, the new worker's fresh branch does not yet hold the previous worker's commits, so start keeps the old branch as the task's source. When the new worker merges the old branch, finishes and parks, Cassy now applies the same safe succession check that start uses (every earlier tip must be contained) and binds the task to the branch that was actually pushed. The supervisor no longer needs `task action=rebind_branch` for each transfer (GH #1437).
+- **Park after `transfer adopt_branch=true` records the pushed tip** — A park that followed a branch adoption recorded the adoption point (for example the train tip) as the delivery instead of the commit the worker pushed. The binding above retires that adoption point to history, so the park records the pushed tip (GH #2312).

@@ -4120,8 +4120,8 @@ impl CasCore {
         ) && current != start.branch {
             source_readback.push_str(&format!(
                 "WARNING: checkout branch {current} differs from recorded source branch {}.\n\
-                 Keep working on {current}: commit and push your delivery, then ask the supervisor to use {prefix}task action=rebind_branch id={} (a rebind needs that pushed task commit); repeated start does not rebind.\n",
-                start.branch, task.id,
+                 Keep working on {current}: merge {} into it before park; start and park bind it once it inherits every prior tip. Otherwise commit and push your delivery, then ask the supervisor to use {prefix}task action=rebind_branch id={} (a rebind needs that pushed task commit); repeated start does not rebind.\n",
+                start.branch, start.branch, task.id,
                 prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
             ));
         }

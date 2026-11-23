@@ -805,7 +805,7 @@ esac
         git(&root, &["commit", "-qm", "work"]);
         git(&root, &["checkout", "-q", "main"]);
         crate::train_owner::publication::publish_branch(Some(&core), &root, &lane, &crate::worktree::GitOperations::new(root.clone()).resolve_commit(&lane).unwrap(), "origin").unwrap();
-        crate::mcp::tools::core::workflow::release_freeze::freeze(&root, &frozen.id, "operator", None).unwrap();
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&core.cas_root, &frozen.id, "operator", None).unwrap();
         let aimed: TaskCreateRequest = serde_json::from_value(serde_json::json!({
             "title": "Tune beta renderer colours", "task_type": "task", "priority": 2, "risk": "none",
             "epic": frozen.id,

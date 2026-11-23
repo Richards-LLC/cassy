@@ -108,7 +108,11 @@ async function legacyRefusalHoldsBothSends(page: Page, journey: { stage(name: st
     if (slowJournal) await holdJournalWrites(page);
     await sendNow(page, "First on legacy");
     await sendNow(page, "Second before the refusal");
-    if (slowJournal) await releaseJournalWrites(page);
+    if (slowJournal) {
+      await releaseJournalWrites(page);
+      // The refusal's deadline starts when the first message reaches the hub.
+      await hub.waitFor(() => hub.upstreamRefusals.length > 0);
+    }
     // A deliberate negative window: the wire refusal must NOT arrive early.
     await clock.advance(1_499);
     await expect(held).toHaveCount(0);

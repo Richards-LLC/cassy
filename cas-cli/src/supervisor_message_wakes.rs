@@ -144,9 +144,13 @@ pub(crate) fn is_ask(prompt: &str) -> bool {
 /// sender-pair cap never holds them. It bounds status chatter only.
 /// cas-922d: nor does the burst debounce delay them, and a local worker's
 /// kind counts as a peer's does.
+/// cas-eea8: ready handoffs and merge requests also need immediate action.
 fn waking_kind(prompt: &str) -> bool {
     use crate::cloud::peer_mailbox::PeerMessageKind::{Answer, Ask, Blocker};
     prompt.contains("<cas-blocker ")
+        || crate::prompt_revalidation::parse_worker_action_envelope(prompt)
+            .is_some_and(|action| action.kind == crate::prompt_revalidation::WorkerActionKind::Ready)
+        || crate::prompt_revalidation::parse_merge_request_envelope(prompt).is_some()
         || prompt.contains(&format!("{WAKING_KIND_TAG}ask\"/>"))
         || prompt.contains(&format!("{WAKING_KIND_TAG}answer\"/>"))
         || crate::cloud::peer_mailbox::parse_envelope(prompt)
@@ -779,20 +783,20 @@ mod tests {
                 "lifecycle-wake:test", "supervisor", "<ci-red-run>Review CI</ci-red-run>",
                 Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
             ).unwrap().id();
-            // cas-922d: a blocker skips the debounce, so it would make the
-            // batch due and leave nothing to park in the park-failure case.
+            // Blockers and merge requests skip the debounce, so either would
+            // make the batch due and leave nothing to park in this failure case.
             let blocker = (failure != "park").then(|| enqueue(&cas, &peer,
                 &crate::prompt_revalidation::attach_blocker_envelope(
                     "A decision is required", &peer.name, None,
                 )));
-            let merge = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
+            let merge = (failure != "park").then(|| enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
                 "Please merge the delivery", &crate::prompt_revalidation::MergeRequestEnvelope {
                     task_id: "cas-bc4d".into(), branch_tip: "delivery".into(),
                     target_branch: "epic/test".into(), target_branch_tip: "base".into(),
                     anchor_tip: None, commits_not_on_target_base: 1, pr_number: None,
                     source_freshness_unavailable: None,
                 },
-            ));
+            )));
             match failure {
                 "config" => std::fs::write(cas.join("config.toml"), "[factory\n").unwrap(),
                 "ledger" => {
@@ -826,7 +830,7 @@ mod tests {
                 warn_batching_failure(&cas, &anyhow::anyhow!("still unavailable"), later + Duration::from_secs(1));
                 selected
             });
-            for id in [Some(ordinary), Some(lifecycle), blocker, Some(merge)].into_iter().flatten() {
+            for id in [Some(ordinary), Some(lifecycle), blocker, merge].into_iter().flatten() {
                 assert!(selected.rows.iter().any(|row| row.id == id),
                     "{failure}: batching failure must not lose selected row #{id}");
                 assert!(selected.facts[&id].message_batch.is_empty());

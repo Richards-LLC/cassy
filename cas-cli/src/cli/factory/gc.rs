@@ -165,7 +165,11 @@ mod tests {
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
         };
         let mut source_kept = Vec::new();
-        for name in ["dead", "unpushed", "live", "cited", "unknown", "active"] {
+        // Retention cites a worktree by substring of its worker name. These
+        // names must not be spellable in hex: a managed review's path embeds
+        // the fixture commit sha, and a sha containing "dead" once cited the
+        // dead worker's worktree and kept it (GH lane CI run 45090261301).
+        for name in ["retired", "unpushed", "live", "cited", "unknown", "active"] {
             let path = roots[0].join("worktrees").join(name);
             std::fs::create_dir_all(&path).unwrap();
             git(&path, &["init", "-b", &format!("factory/{name}")]);
@@ -199,7 +203,7 @@ mod tests {
                 expired.push(target);
             } else {
                 expired.push(target);
-                if name == "dead" { expired.push(path); } else { source_kept.push(path); }
+                if name == "retired" { expired.push(path); } else { source_kept.push(path); }
             }
         }
         // Cross-project live citation through a terminal task must be transitive.

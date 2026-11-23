@@ -35,6 +35,40 @@ fn branch_update_work_target(
     }
 }
 
+/// A plain target edit cannot authorize replacing an untouched divergent base.
+/// Keep the old lane until the supervisor explicitly binds its replacement.
+fn divergent_unparked_target(
+    cas_root: &std::path::Path,
+    task: &Task,
+    target: &cas_types::WorkTarget,
+) -> Option<String> {
+    let start = task.deliverables.factory_branch_start.as_ref()?;
+    if !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked)
+        || crate::qa_pass::is_no_code(task)
+        || start.work_target == *target
+        || start.work_target.repo_selector != target.repo_selector
+        || task.deliverables.parked_branch.is_some()
+        || task.deliverables.factory_branch_anchor.is_some()
+    { return None; }
+    let context = super::repo_context::resolve_repo_context(cas_root, target).ok()?;
+    // Nonempty or rewritten deliveries retain their start and use the existing
+    // explicit rebind checks. Only a known untouched source needs this refusal.
+    let source_tips: Vec<_> = ["refs/heads", "refs/remotes/origin"].into_iter()
+        .filter_map(|namespace| crate::git_evidence::resolve_branch_sha(
+            &context.repo_root, &format!("{namespace}/{}", start.branch),
+        ))
+        .collect();
+    if source_tips.is_empty() || source_tips.iter().any(|tip| tip != &start.base_sha) {
+        return None;
+    }
+    let reference = super::lifecycle::close_ops::preferred_diff_target_ref_for_delivery(
+        &context.repo_root, &target.target_branch, task.delivery_mode,
+    );
+    let tip = crate::git_evidence::resolve_branch_sha(&context.repo_root, &reference)?;
+    (!crate::git_evidence::git_commit_is_ancestor(&context.repo_root, &start.base_sha, &tip))
+        .then_some(reference)
+}
+
 /// GH #1919: G-100 asks the supervisor to retarget unfinished work to the
 /// next train. When the corrected target is another open train's lane and the
 /// task's parent is a different train, the parent moves with the target, so
@@ -709,7 +743,40 @@ fn set_execution_state_patch_field(
         .insert(field.to_string(), value);
 }
 
+/// The longest a parked delivery may be held before the watchdog chases it again.
+const MERGE_HOLD_MAX_DAYS: i64 = 7;
+
 impl CasCore {
+    /// GH #2278: validate a supervisor's `merge_hold` request (owner, reason,
+    /// until) and return the stored hold, with an audit note on the task.
+    fn stamp_merge_hold(&self, task: &mut Task, requested: &serde_json::Value) -> Result<serde_json::Value, McpError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Requested { owner: String, reason: String, until: chrono::DateTime<chrono::Utc> }
+        let reject = |detail: String| Self::error(ErrorCode::INVALID_PARAMS, format!("MERGE HOLD REJECTED: {detail}"));
+        let supervisor = self.resolve_live_supervisor_authority()
+            .map_err(|_| reject("only a live registered supervisor may hold a parked delivery.".into()))?;
+        let anchor = task.deliverables.factory_branch_anchor.clone()
+            .filter(|anchor| task.status == TaskStatus::AwaitingMerge && crate::factory_delivery_wake::full_sha(anchor))
+            .ok_or_else(|| reject(format!("task {} is {}, not a parked delivery with a recorded anchor.", task.id, task.status)))?;
+        let Requested { owner, reason, until } = serde_json::from_value(requested.clone())
+            .map_err(|error| reject(format!("merge_hold takes owner, reason and until (RFC3339): {error}.")))?;
+        let now = chrono::Utc::now();
+        if until <= now || until > now + chrono::Duration::days(MERGE_HOLD_MAX_DAYS) {
+            return Err(reject(format!("until must be later than now and within {MERGE_HOLD_MAX_DAYS} days.")));
+        }
+        let hold = cas_types::TaskMergeHold {
+            owner: owner.trim().to_string(), reason: reason.trim().to_string(), until,
+            supervisor: supervisor.name.clone(), anchor,
+        };
+        let note = format!(
+            "[{}] ✅ DECISION merge hold for external review: owner {}; until {}; recorded by {}. Reason: {}",
+            now.format("%Y-%m-%d %H:%M"), hold.owner, until.to_rfc3339(), hold.supervisor, hold.reason,
+        );
+        task.notes = if task.notes.is_empty() { note } else { format!("{}\n\n{note}", task.notes) };
+        serde_json::to_value(hold).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))
+    }
+
     /// Validate a typed review reference without granting any authority.
     pub(crate) fn normalize_review_dispatch_id(&self, value: Option<&str>) -> Result<Option<String>, McpError> {
         let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -1049,6 +1116,15 @@ impl CasCore {
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .map(ToOwned::to_owned);
+        // GH #2278: only a live supervisor holds a parked delivery for an
+        // external review; Cassy stamps who recorded it and for which anchor.
+        let state_patch = match state_patch {
+            Some(mut patch) if patch.get("merge_hold").is_some_and(|hold| !hold.is_null()) => {
+                patch["merge_hold"] = self.stamp_merge_hold(&mut task, &patch["merge_hold"])?;
+                Some(patch)
+            }
+            other => other,
+        };
         let mut execution_state_patch = state_patch.clone();
         if merged_into.is_some() && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some() || req.status.is_some()) {
             return Err(McpError { code: ErrorCode::INVALID_PARAMS,
@@ -1839,22 +1915,26 @@ impl CasCore {
                 }
             }
         }
+        let main_journeys = (req.labels.is_some() || req.priority.is_some())
+            .then(|| crate::finding_triage::main_journeys_for_task(&self.cas_root, &task))
+            .unwrap_or_default();
         if req.labels.is_some()
-            && crate::finding_triage::has_undeclared_main_reach(&self.cas_root, &triaged_labels)
+            && crate::finding_triage::has_undeclared_main_reach(&main_journeys, &triaged_labels)
         {
+            // gate[G-161 update]: Finding main reach requires a declared live main journey
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-161", format!(
                     "FINDING UPDATE REJECTED: reach:main requires journey:<id> naming a declared live main journey in the project's QA registry. Add the journey axis before retrying; no task fields were changed. Priority remains P{}.",
                     task.priority.0,
-                )),
+                ))),
                 data: Some(serde_json::json!({
                     "rule_id": "finding_main_journey_required", "axis": "journey", "priority": task.priority.0,
                 })),
             });
         }
         let derived_priority = if req.priority.is_some() || req.labels.is_some() {
-            crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,
+            crate::finding_triage::normalize_labels(&main_journeys, &mut triaged_labels,
                 &format!("{}\n{}", task.notes, req.notes.as_deref().unwrap_or_default()))
         } else { None };
         if let Some((requested, derived)) = req.priority.zip(derived_priority)
@@ -2072,6 +2152,7 @@ impl CasCore {
         }
 
         if target_repo.is_some() || target_branch.is_some() {
+            let previous_target = task.deliverables.work_target.clone();
             if let Some(repo) = target_repo {
                 task.deliverables.work_target = super::repo_context::declare_work_target(
                     &self.cas_root,
@@ -2085,6 +2166,44 @@ impl CasCore {
                 })?;
             } else {
                 task.deliverables.work_target = branch_only_target;
+            }
+            if task.deliverables.work_target != previous_target
+                && let Some(target) = task.deliverables.work_target.as_ref()
+                && let Some(base) = divergent_unparked_target(&self.cas_root, &task, target)
+            {
+                let agents = self.open_agent_store()?;
+                let assignee = task.assignee.as_deref().unwrap_or_else(||
+                    &task.deliverables.factory_branch_start.as_ref().expect("validated start").assignee);
+                let worker = super::resolve_agent_identity(agents.as_ref(), assignee);
+                let name = worker.as_ref().map_or(assignee, |worker| worker.name.as_str());
+                let branch = format!("{}-retarget", crate::factory_isolation::worker_task_branch(name, &task.id));
+                let reason = "Approve divergent unparked target migration while preserving the old lane";
+                let target_update = serde_json::json!({
+                    "action":"update", "id":task.id, "proof_scope_fix":true,
+                    "target_branch":target.target_branch, "reason":reason,
+                });
+                let rebind = serde_json::json!({
+                    "action":"rebind_branch", "id":task.id, "branch":branch, "reason":reason,
+                });
+                let prefix = self.guidance_prefix();
+                let mut recovery = serde_json::json!({
+                    "target_update":target_update, "branch":branch, "base":base, "rebind":rebind,
+                });
+                let prepare = if task.status == TaskStatus::Open {
+                    recovery["start"] = serde_json::json!({"action":"start", "id":task.id});
+                    format!("The assigned worker first runs `{prefix}task action=start id={}` on the unchanged old lane. ", task.id)
+                } else { String::new() };
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(crate::gates::tag("G-151", format!(
+                        "WORK TARGET MIGRATION REQUIRED: task {} has a recorded start outside {base}. No task fields were changed. Preserve its old branch and any dirty or foreign work; do not reset it. {prepare}A live supervisor runs `{prefix}task action=update id={} proof_scope_fix=true target_branch={} reason=\"<approval>\"`. Create a clean replacement branch `{branch}` from `{base}`, then the supervisor runs `{prefix}task action=rebind_branch id={} branch={branch} reason=\"<approval>\"` before the worker starts again. Rebind refuses dirty work or an old lane with unpreserved delivery.",
+                        task.id, task.id, target.target_branch, task.id,
+                    ))),
+                    data: Some(serde_json::json!({
+                        "rule_id":"unparked_target_base_migration",
+                        "recovery":recovery,
+                    })),
+                });
             }
             // cas-7305: an explicit retarget off the parent epic's lane, such
             // as to trunk, is the task's own delivery authority, and
@@ -4511,5 +4630,71 @@ mod epic_move_work_target_tests {
 
         move_into(&core, &stale.id, "cas-c85e-epic").await;
         assert_eq!(branch_of(&store, &stale.id), "epic/live");
+    }
+}
+
+#[cfg(test)]
+mod merge_hold_tests {
+    use cas_types::{Agent, AgentRole, Task, TaskStatus};
+    use chrono::{Duration, Utc};
+
+    async fn update(core: &crate::mcp::CasCore, patch: serde_json::Value) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        core.cas_task_update_with_delivery_mode(
+            serde_json::from_value(serde_json::json!({"id": "cas-6f92"})).unwrap(),
+            None, None, false, None, Some(patch), None, None, false,
+        ).await
+    }
+
+    /// GH #2278: only a live supervisor holds a parked delivery, for a
+    /// bounded time. Cassy stamps the supervisor and the parked anchor and
+    /// records the owner and reason on the task.
+    #[tokio::test]
+    async fn only_a_supervisor_holds_a_parked_delivery_gh2278() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let lead = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let agents = lead.open_agent_store().unwrap();
+        let supervisor = Agent::new_with_role("hold-supervisor".into(), "lead-2278".into(), AgentRole::Supervisor);
+        let worker = Agent::new_with_role("hold-worker".into(), "worker-2278".into(), AgentRole::Worker);
+        agents.register(&supervisor).unwrap();
+        agents.register(&worker).unwrap();
+        let store = crate::store::open_task_store_local(&root).unwrap();
+        let anchor = "6f92".repeat(10);
+        let mut parked = Task::new("cas-6f92".into(), "Awaiting an external review".into());
+        (parked.status, parked.assignee) = (TaskStatus::AwaitingMerge, Some(worker.name.clone()));
+        parked.deliverables.factory_branch_anchor = Some(anchor.clone());
+        store.add(&parked).unwrap();
+        let until = Utc::now() + Duration::hours(12);
+        let hold = |until: chrono::DateTime<Utc>| serde_json::json!({"merge_hold": {"owner": "Ben", "reason": "GitHub review of prompt text", "until": until}});
+        let held = || store.get_execution_state("cas-6f92").unwrap().and_then(|state| state.get("merge_hold").cloned());
+
+        let assignee = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        assignee.set_agent_id_for_testing(worker.id.clone());
+        assert!(update(&assignee, hold(until)).await.is_err(), "a worker cannot hold its own delivery");
+        lead.set_agent_id_for_testing(supervisor.id.clone());
+        for until in [Utc::now() - Duration::minutes(1), Utc::now() + Duration::days(8)] {
+            assert!(update(&lead, hold(until)).await.is_err(), "unbounded or past deadline {until}");
+        }
+        let forged = serde_json::json!({"merge_hold": {"owner": "Ben", "reason": "r", "until": until, "anchor": anchor}});
+        assert!(update(&lead, forged).await.is_err(), "the anchor is stamped, never supplied");
+        assert!(held().is_none());
+
+        update(&lead, hold(until)).await.unwrap_or_else(|error| panic!("{}", error.message));
+        let stored: cas_types::TaskMergeHold = serde_json::from_value(held().unwrap()).unwrap();
+        assert_eq!(stored, cas_types::TaskMergeHold {
+            owner: "Ben".into(), reason: "GitHub review of prompt text".into(), until,
+            supervisor: supervisor.name.clone(), anchor,
+        });
+        let notes = store.get("cas-6f92").unwrap().notes;
+        assert!(notes.contains("Ben") && notes.contains("GitHub review of prompt text"), "{notes}");
+
+        // Only a parked delivery can be held.
+        let mut working = store.get("cas-6f92").unwrap();
+        working.status = TaskStatus::InProgress;
+        store.update(&working).unwrap();
+        update(&lead, serde_json::json!({"merge_hold": null})).await.unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(update(&lead, hold(until)).await.is_err());
+        assert!(held().is_none());
     }
 }

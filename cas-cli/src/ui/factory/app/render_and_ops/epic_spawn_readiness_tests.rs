@@ -1250,7 +1250,7 @@ fn cas_bfa1_round4_quarantined_epic_cannot_authorize_publication() {
 #[test]
 fn design_review_rechecks_queued_spawn_before_provisioning() {
     with_fixture(|fixture| {
-        let captured = fixture.app.snapshot_worker_spawn(Some("queued-worker"), true, Some("cas-round2-child")).unwrap();
+        let captured = fixture.app.snapshot_worker_spawn(Some("queued-worker"), true, Some("cas-round2-child"), crate::factory_isolation::WorkerNameRegistry::default()).unwrap();
         let tasks = open_task_store_cached(&fixture.root).unwrap();
         for index in 0..5 {
             let mut report = cas_types::Task::new(format!("queued-report-{index}"), format!("Stakeholder report {index}"));

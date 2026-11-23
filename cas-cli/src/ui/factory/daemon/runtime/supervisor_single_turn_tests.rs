@@ -3,6 +3,89 @@ use crate::ui::factory::daemon::FactoryDaemon;
 use cas_store::SurfacingSource;
 use std::time::{Duration, Instant};
 
+/// GH #2264: successor mail can be polled after a transport job took its
+/// claim but before the control loop uses the returned selection.
+#[tokio::test(flavor = "current_thread")]
+async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19() {
+    use rmcp::handler::server::wrapper::Parameters;
+    if !fixture_child("commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19") { return; }
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    for handling in ["unread", "polled", "acknowledged"] {
+        let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let name = daemon.app.supervisor_name().to_string();
+        let session = daemon.session_name.clone();
+        env.set("CAS_ROOT", &cas);
+        env.set("CAS_FACTORY_SESSION", &session);
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("fixture-device".into()), credential_id: Some("fixture-credential".into()),
+            device_label: Some("Fixture".into()), operator_label: Some("Operator".into()),
+            request_id: Some(format!("claim-{handling}")), scopes: vec!["message:send".into()],
+            operator_verified: true, ..Default::default()
+        };
+        let id = super::delivery::enqueue_commander_message(&cas, "ended-session", "ended-supervisor",
+            "COMMANDER-CLAIM-4F19", None, false, None, &attribution).unwrap().id();
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        assert_eq!(queue.retarget_operator_rows_to_successor("ended-supervisor", Some("ended-session"),
+            &name, Some(&session)).unwrap(), [id]);
+        daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+            cas.clone(), daemon.app.project_scope(),
+        );
+        daemon.queue_jobs.store(&cas).unwrap();
+        // Run the real selection AND readiness preparation. Stop at the
+        // asynchronous claim boundary, before any physical payload starts.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !daemon.queue_jobs.has_claim(id, &name) {
+                daemon.process_prompt_queue().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            assert!(!daemon.app.mux.has_pending_injects());
+            while !daemon.queue_jobs.claim_ready(id, &name) {
+                daemon.queue_jobs.apply_completions();
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("relay selection and claim complete before the inbox poll");
+        if handling != "unread" {
+            let core = crate::mcp::CasCore::with_daemon(cas.clone(), None, None);
+            core.set_agent_id_for_testing("single-sup".into());
+            #[cfg(feature = "mcp-proxy")]
+            let service = crate::mcp::CasService::new(core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let service = crate::mcp::CasService::new(core);
+            for action in if handling == "acknowledged" { vec!["inbox_poll", "message_ack"] } else { vec!["inbox_poll"] } {
+                let result = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+                    "action":action,"notification_id":id,
+                })).unwrap())).await.unwrap();
+                assert_ne!(result.is_error, Some(true), "{result:?}");
+            }
+            assert_eq!(queue.recipient_receipt(id, &name).unwrap(), Some(SurfacingSource::InboxPoll));
+        }
+        let control = super::delivery::enqueue_commander_message(&cas, &session, &name,
+            "COMMANDER-CONTROL-4F19", None, false, None,
+            &crate::ui::factory::protocol::MessageAttribution { request_id:Some(format!("control-{handling}")), ..attribution }).unwrap().id();
+        let typed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+                if typed.contains("COMMANDER-CONTROL-4F19") && typed.ends_with('\r')
+                    && !daemon.app.mux.has_pending_injects()
+                    && !daemon.queue_jobs.has_claim(id, &name) { break typed; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the unobserved control reaches the real consumer");
+        assert!(daemon.queue_jobs.drain_for_shutdown(&cas, Duration::from_secs(5)));
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(typed.contains("COMMANDER-CLAIM-4F19"), handling == "unread", "{handling}: {typed:?}; {report:?}");
+        if handling != "unread" {
+            assert_eq!(report.recipient_receipt, Some(SurfacingSource::InboxPoll));
+            assert_eq!(report.confirmation_source, if handling == "acknowledged" {
+                cas_store::ConfirmationSource::ExplicitAck
+            } else { cas_store::ConfirmationSource::Unconfirmed });
+        }
+        assert!(queue.message_delivery_report(control).unwrap().unwrap().delivered_at.is_some());
+    }
+}
+
 /// The real hub must reach the live composer while its local viewer reads history.
 #[tokio::test(flavor = "current_thread")]
 async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_reply() {
@@ -1437,6 +1520,116 @@ async fn cas_bc4d_staggered_arrivals_share_one_deadline_and_turn() {
     daemon.process_prompt_queue().await.unwrap();
     assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed,
         "no separate turn for staggered passengers");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
+    if !fixture_child("cas_1e7e2_directed_burst_debounces_into_one_body_turn") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // Both harnesses use the same body, claim and completion path.
+    for cli in [
+        cas_mux::SupervisorCli::Claude,
+        cas_mux::SupervisorCli::Codex,
+    ] {
+        let (root, mut daemon) = fixture_for(cli).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(cas.clone(), daemon.app.project_scope());
+            daemon.queue_jobs.store(&cas).unwrap();
+        }
+        let peer = cas_types::Agent::new_with_role(
+            "burst-peer".into(),
+            "peer".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas)
+            .unwrap()
+            .register(&peer)
+            .unwrap();
+        let bodies = [
+            "First field report",
+            "Second field report",
+            "Third field report",
+        ];
+        let ids: Vec<_> = bodies
+            .iter()
+            .map(|body| {
+                enqueue(
+                    &daemon,
+                    "peer",
+                    body,
+                    cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: peer.id.clone(),
+                    },
+                )
+            })
+            .collect();
+        let queue=crate::store::open_prompt_queue_store(&cas).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if ids.iter().all(|id|queue.message_delivery_report(*id).unwrap().unwrap().pending_detail.as_deref()==Some("directed supervisor message burst debounce")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("fresh burst reaches debounce without typing");
+        nothing_typed_or_relayed(&root, &daemon);
+        // Advance the durable queue clock, without sleeping for the debounce.
+        rusqlite::Connection::open(cas.join("cas.db"))
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+                [(chrono::Utc::now() - chrono::Duration::seconds(21)).to_rfc3339()],
+            )
+            .unwrap();
+        let typed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                settle_injected_writes(&mut daemon).await;
+                let text = std::fs::read_to_string(root.path().join("input")).unwrap();
+                if text.ends_with('\r') && ids.iter().all(|id|
+                    queue.message_delivery_report(*id).unwrap().unwrap().stage == cas_store::DeliveryStage::Delivered) {
+                    break text;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one submitted burst body");
+        assert_eq!(typed.matches('\r').count(), 1, "one turn: {typed:?}");
+        assert!(typed.contains("From: peer"),"coalesced bodies retain sender attribution: {typed:?}");
+        for body in bodies {
+            assert_eq!(typed.matches(body).count(), 1, "{typed:?}");
+        }
+        assert!(
+            teams_messages(&daemon).is_empty(),
+            "no duplicate Teams copy"
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        for id in &ids {
+            assert!(
+                typed.contains(&format!("[cas #{id} ")),
+                "each row retains its identity"
+            );
+            assert_eq!(
+                queue.message_delivery_report(*id).unwrap().unwrap().stage,
+                cas_store::DeliveryStage::Delivered
+            );
+        }
+        assert!(
+            crate::supervisor_message_wakes::report(&cas, daemon.app.supervisor_name())
+                .unwrap()
+                .contains("directed_message_wakes_last_hour: 1")
+        );
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("input")).unwrap(),
+            typed,
+            "no second turn for batch passengers"
+        );
+    }
 }
 
 /// cas-062b: on 2026-11-03 Daniel's Commander message waited 107 s for an

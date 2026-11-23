@@ -6,6 +6,9 @@ pub(crate) mod rust;
 
 pub(crate) const REQUIRED_PASSES: u32 = 5;
 
+/// The OS lane CI's Rust jobs run on (`.github/workflows/lane.yml` runners).
+pub(crate) const LANE_CI_OS: &str = "linux";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Identity {
     pub path: String,
@@ -35,6 +38,11 @@ impl Identity {
                     pattern.push('%');
                 }
                 ('%', Some('p' | 's' | 'd' | 'i' | 'f' | 'j' | 'o' | 'O' | '#' | '$')) => {
+                    chars.next();
+                    pattern.push_str(".*");
+                }
+                // Jest's `$#` is the row index of an object table (GH #2225).
+                ('$', Some('#')) => {
                     chars.next();
                     pattern.push_str(".*");
                 }
@@ -118,6 +126,19 @@ pub(crate) fn missing(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Ide
         .filter_map(|(_, _, test)| test.stability.as_ref())
         .filter(|proof| valid(proof)).flat_map(|proof| &proof.tests).collect::<BTreeSet<_>>();
     tests.iter().filter(|test| !covered.contains(*test)).cloned().collect()
+}
+
+/// GH #2288: earlier five-pass proofs for these tests that this tip could not
+/// carry, each with the changed proof inputs that voided it (`None`: its head
+/// is not an ancestor, or the range is unreadable).
+pub(crate) fn invalidated(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<(String, Option<Vec<String>>)> {
+    let mut refused = passing.voided().iter()
+        .filter(|(_, test, _)| test.stability.as_ref()
+            .is_some_and(|proof| valid(proof) && proof.tests.iter().any(|test| tests.contains(test))))
+        .map(|(head, _, inputs)| (head.clone(), inputs.clone())).collect::<Vec<_>>();
+    refused.sort();
+    refused.dedup();
+    refused
 }
 
 /// Snapshot only evidence the normal park consumer accepts at this tip.
@@ -204,7 +225,11 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
     let mut tests = BTreeSet::new();
     let mut widened = BTreeSet::new();
     let mut discovery = rust::Discovery::default();
-    for path in paths.iter().filter(|path| path.ends_with(".rs") || super::javascript::javascript(path)) {
+    // GH #2329: a generated bundle (hub-web/dist, which the C-37 drift gate makes
+    // a lane commit beside its source) runs no tests and owes no proof; the
+    // source it was built from keeps its own.
+    for path in paths.iter().filter(|path| (path.ends_with(".rs") || super::javascript::javascript(path))
+        && !super::append_only_or_generated(path)) {
         match required_with_discovery(repo, head, target, std::slice::from_ref(path), ranges, &mut discovery) {
             Ok(selected) => tests.extend(selected),
             Err(error) => {
@@ -215,6 +240,13 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
             }
         }
     }
+    // GH #2221: a changed JSON catalogue regenerates the tests of every spec
+    // importing it, though those specs have no changed line.
+    for data in paths.iter().filter(|path| path.ends_with(".json")) {
+        for spec in super::javascript::catalogue_specs(repo, head, data)? {
+            widened.insert(super::widened::Scope::File(spec));
+        }
+    }
     Ok((tests.into_iter().collect(), widened.into_iter().collect()))
 }
 
@@ -223,7 +255,8 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
 pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -> Vec<String> {
     let command = |runner: &str, files: &str| format!(
         "`cas factory worker-check --cas-root {} -- {runner} {files}`", cas_root.display());
-    // Files group by runner and, for Jest, by the config that lists them (GH #2058).
+    // Files group by runner and by the config that lists them: Jest (GH #2058),
+    // or a Playwright config other than the default (GH #2195).
     let mut known: BTreeMap<(&str, Option<String>), BTreeSet<&str>> = BTreeMap::new();
     let mut unknown = BTreeSet::new();
     let mut rust = false;
@@ -231,8 +264,11 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
         if test.path.ends_with(".rs") {
             rust = true;
         } else if let Some(runner) = super::javascript::runner_hint(repo, &test.path) {
-            let owner = (runner == "jest").then(|| super::javascript::jest_owner(repo, &test.path)).flatten()
-                .map(|config| config.display().to_string());
+            let owner = match runner {
+                "jest" => super::javascript::jest_owner(repo, &test.path),
+                "playwright" => super::javascript::playwright_owner(repo, &test.path),
+                _ => None,
+            }.map(|config| config.display().to_string());
             known.entry((runner, owner)).or_default().insert(test.path.as_str());
         } else {
             unknown.insert(test.path.as_str());

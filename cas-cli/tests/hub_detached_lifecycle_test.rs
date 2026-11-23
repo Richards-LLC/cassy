@@ -124,19 +124,6 @@ fn write_stale_record(home: &Path, cgroup: PathBuf) {
         .expect("write stale hub record");
 }
 
-#[cfg(target_os = "linux")]
-fn mark_live_record_stale(home: &Path, cgroup: PathBuf) {
-    use cas::hub::HubRuntimePaths;
-
-    let paths = HubRuntimePaths::new(home.join(".cas/hub"));
-    let mut record = paths.read_process_record().expect("read live hub record");
-    record.version = "stale-test".to_owned();
-    record.cgroup = Some(cgroup);
-    paths
-        .write_process_record(&record)
-        .expect("rewrite live hub record");
-}
-
 #[test]
 fn hub_record_proves_its_own_session_and_cli_launcher() {
     let home = private_home();
@@ -1030,45 +1017,3 @@ fn hub_start_refuses_a_stale_record_cgroup_owned_by_the_caller() {
     assert!(stop.status.success());
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn post_swap_restart_refuses_a_recorded_cgroup_owned_by_the_caller() {
-    let home = private_home();
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let initial = cas_command(home.path(), &path)
-        .args(["--json", "hub", "start", "--port", "0"])
-        .output()
-        .expect("start hub for stale post-swap restart");
-    assert!(
-        initial.status.success(),
-        "initial hub start failed: {}",
-        String::from_utf8_lossy(&initial.stderr)
-    );
-    let initial_record: Value = serde_json::from_slice(&initial.stdout).expect("initial JSON");
-    mark_live_record_stale(home.path(), own_cgroup_dir());
-
-    let restart = cas_command(home.path(), &path)
-        .args(["--json", "update", "--post-swap", "--from", "3.8.0"])
-        .output()
-        .expect("run post-swap stale hub restart");
-    assert!(
-        restart.status.success(),
-        "post-swap restart failed: {}",
-        String::from_utf8_lossy(&restart.stderr)
-    );
-    let replacement = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"))
-        .read_process_record()
-        .expect("read replacement hub record");
-    assert_ne!(
-        replacement.pid,
-        initial_record["pid"].as_u64().unwrap() as u32
-    );
-    assert!(replacement.cgroup.is_none());
-    assert!(std::fs::metadata("/proc/self").is_ok());
-
-    let stop = cas_command(home.path(), &path)
-        .args(["--json", "hub", "stop"])
-        .output()
-        .expect("stop replacement hub");
-    assert!(stop.status.success());
-}

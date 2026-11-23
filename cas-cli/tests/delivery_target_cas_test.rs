@@ -365,6 +365,8 @@ async fn arm_delivery_with_selector(
         .await
         .expect("verification add");
     assert!(get_text(&verification).contains("approved"));
+    // Review may precede publication; integration requires the approved source pushed.
+    run_git(&["push", "origin", &receipt.source_branch], &repo.root);
 
     DeliveryFixture {
         repo,
@@ -394,6 +396,9 @@ async fn run_merge(fixture: &DeliveryFixture) -> String {
 async fn open_release_train_refuses_trunk_even_with_allow_trunk() {
     let mut env = TestEnvGuard::temp_home();
     let fixture = arm_delivery("train-guard", "train-guard", &mut env).await;
+    // Keep the tracking cache at the anchor while the live source is absent.
+    run_git(&["update-ref", "-d", &format!("refs/heads/{}", fixture.receipt.source_branch)],
+        &fixture.repo.root.join(".git/test-origin.git"));
     env.set_current_dir(&fixture.repo.root);
     let tasks = open_task_store(&fixture.cas_root).unwrap();
     let mut train = Task::new("cas-train".into(), "Release train vNEXT".into());
@@ -450,6 +455,16 @@ async fn open_release_train_refuses_trunk_even_with_allow_trunk() {
     assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
     cut.status = TaskStatus::Closed;
     tasks.update(&cut).unwrap();
+    // Approval of an immutable completion receipt does not publish its source.
+    let origin = fixture.repo.root.join(".git/test-origin.git");
+    let local_before = git_stdout(&fixture.repo.root, &["for-each-ref"]);
+    let origin_before = git_stdout(&origin, &["for-each-ref"]);
+    let refused = run_merge(&fixture).await;
+    assert_eq!(git_stdout(&fixture.repo.root, &["for-each-ref"]), local_before, "{refused}");
+    assert_eq!(git_stdout(&origin, &["for-each-ref"]), origin_before, "{refused}");
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge, "{refused}");
+    assert!(cas::gates::codes_in(&refused).contains(&"G-97"), "{refused}");
+    run_git(&["push", "origin", &fixture.receipt.source_branch], &fixture.repo.root);
     let merged = run_merge(&fixture).await;
     assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"),
         "with no train open the existing merge must work: {merged}");
@@ -523,13 +538,16 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     std::fs::write(worker_path.join("delivered.txt"), "observed merge\n").unwrap();
     run_git(&["add", "delivered.txt"], &worker_path);
     run_git(&["commit", "-m", "observed delivery"], &worker_path);
+    run_git(&["push", "origin", "factory/cas8d38-worker"], &worker_path);
 
     let task_store = open_task_store(&cas_root).unwrap();
     let mut task = Task::new("cas-cas8d38-observed".to_string(), "Observed merge correction".to_string());
     task.task_type = TaskType::Task;
-    task.status = TaskStatus::InProgress;
+    task.status = TaskStatus::AwaitingMerge;
     task.depth = TaskDepth::Light;
     task.assignee = Some("cas8d38-worker".to_string());
+    task.deliverables.factory_branch_anchor = Some(git_stdout(&worker_path, &["rev-parse", "HEAD"]));
+    task.deliverables.parked_branch = Some("factory/cas8d38-worker".into());
     task.risk = vec![cas::types::TaskRisk::Platform];
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/cas8d38-observed".to_string(),
@@ -611,8 +629,6 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
     premerge_record_then_merge(&[
         // The worker cannot close while its candidate is still under review.
         ("worker-blocked", "success", Some("approved"), true),
-        // cas-46ea: merged from a pushed lane tip without a park.
-        ("unparked", "success", Some("approved"), true),
         ("green-approved", "success", Some("approved"), true),
         ("green-rejected", "success", Some("rejected"), false),
         ("advisory-no-checks", "no-checks", Some("approved"), true),
@@ -731,12 +747,9 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             registration.metadata.insert("clone_path".into(), worker_path.display().to_string());
             agents.update(&registration).unwrap();
         }
-        if row == "unparked" {
-            task.status = TaskStatus::Open;
-        }
         task_store.add(&task).unwrap();
 
-        if row == "fresh-branch" || row == "unparked" {
+        if row == "fresh-branch" {
             env.set("CAS_AGENT_ROLE", "worker");
             delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
                 "action": "start", "id": task.id,
@@ -790,18 +803,24 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
                 original.deliverables.factory_branch_start);
             env.set("CAS_AGENT_ROLE", "supervisor");
             let supervisor = delivery_service(&cas_root, &supervisor_id);
-            // A failed review keeps its parked delivery until request_changes.
+            // A live review protects the delivery until its review cycle is retired.
             let mut blocked = original.clone();
             blocked.status = TaskStatus::Blocked;
             blocked.deliverables.parked_branch = Some(format!("factory/{worker}"));
             blocked.deliverables.factory_branch_anchor = Some(original_tip.clone());
             task_store.update(&blocked).unwrap();
+            let review = cas_store::create_verification_dispatch(
+                &cas_root, &task.id, &worker_id, &supervisor_id,
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+            ).unwrap();
             let blocked_snapshot = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
             let refused = supervisor.task(Parameters(rebind())).await
-                .expect_err("a blocked parked delivery must be declined before rebinding");
-            assert!(refused.message.contains("request_changes"), "{refused}");
+                .expect_err("a delivery under live review must be declined before rebinding");
+            assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
             assert_eq!(serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(), blocked_snapshot,
                 "refusing a parked delivery must not mutate its recorded evidence");
+            cas_store::timeout_verification_dispatch(&cas_root, &task.id, review.deadline_at).unwrap();
+            cas_store::invalidate_verification_dispatch_for_new_cycle(&cas_root, &task.id).unwrap();
             task_store.update(&original).unwrap();
             run_git(&["commit", "--allow-empty", "-m", "cas-dead: foreign task work"], &worker_path);
             let refused = supervisor.task(Parameters(rebind())).await.expect_err("foreign work cannot be hidden by a new base");
@@ -822,17 +841,16 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         // The worker's own close parks the delivery and keeps its reason.
         let parked_reason = format!("PASS: delivered.txt for {row}");
         env.set("CAS_AGENT_ROLE", "worker");
-        let park = if row == "unparked" { String::new() } else { get_text(
+        let park = get_text(
             &delivery_service(&cas_root, &worker_id)
                 .task(Parameters(task_req(serde_json::json!({
                     "action": "close", "id": task.id, "reason": parked_reason,
                 }))))
                 .await
                 .expect("worker close"),
-        ) };
+        );
         let parked = task_store.get(&task.id).unwrap();
-        let parked_status = if row == "unparked" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
-        assert_eq!(parked.status, parked_status, "{row}: {park}");
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{row}: {park}");
         if row == "fresh-branch" {
             assert!(park.contains("MERGE REQUIRED"), "{park}");
             assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(delivery_branch.as_str()));
@@ -1185,11 +1203,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         assert_eq!(after_dispatch.id, dispatch.id, "publication reuses the pre-merge verdict");
         assert_eq!(after_dispatch.repository, dispatch.repository, "publication cannot replace the reviewed proof");
         if closes {
-            if row == "unparked" {
-                assert!(after_merge.close_reason.as_deref().is_some_and(|reason| reason.contains(&merge_sha)), "{row}: {:?}", after_merge.close_reason);
-            } else {
-                assert_eq!(after_merge.close_reason.as_deref(), Some(parked_reason.as_str()));
-            }
+            assert_eq!(after_merge.close_reason.as_deref(), Some(parked_reason.as_str()));
             assert_eq!(after_merge.assignee.as_deref(), Some(worker.as_str()), "{row}: attributed to the assignee");
         } else {
             assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "CI override stays a manual close: {row}: {merged}");
@@ -1212,11 +1226,6 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         assert!(
             !worker_prompts.iter().any(|p| p.contains("Retry task close")),
             "{row}: Cassy closes or reopens; the worker never re-closes: {worker_prompts:?}"
-        );
-        assert_eq!(
-            worker_prompts.iter().filter(|p| p.contains("Cassy parked it")).count(),
-            usize::from(row == "unparked"),
-            "{row}: a worker parked by the merge hears it once (cas-e9d6): {worker_prompts:?}"
         );
         if closes && admission == "advisory" {
             assert!(worker_prompts.iter().any(|p| p.contains("CI advisory (unconfirmed)")), "{worker_prompts:?}");

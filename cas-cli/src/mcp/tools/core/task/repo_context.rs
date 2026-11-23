@@ -610,6 +610,39 @@ pub(crate) fn effective_epic_ref(cas_root: &Path, branch: &str) -> String {
     .target_branch
 }
 
+/// Read project metadata from the task's assigned checkout, while repository
+/// identity and target selection still come from the durable work target.
+/// A worker from another repository must never supply this task's registry.
+pub(crate) fn resolve_task_metadata_repo(
+    cas_root: &Path,
+    task: &cas_types::Task,
+) -> Result<PathBuf, String> {
+    let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
+    let parent = store.get_parent_epic(&task.id).map_err(|error| error.to_string())?;
+    let target = effective_task_work_target(task, parent.as_ref());
+    let repo = if let Some(target) = target {
+        resolve_repo_context(cas_root, &target)?.repo_root
+    } else {
+        super::lifecycle::close_ops::resolve_close_gate_repo_root(cas_root)
+            .unwrap_or_else(|_| if cas_root.file_name().is_some_and(|name| name == ".cas") {
+                cas_root.parent().unwrap_or(cas_root).to_path_buf()
+            } else { cas_root.to_path_buf() })
+    };
+    let worker = crate::factory_worker_check::assigned_worker_checkout(cas_root, task).ok()
+        .or_else(|| task.worktree_id.as_deref().and_then(|id| {
+            crate::store::open_worktree_store(cas_root).ok()?.get(id).ok()
+                .filter(|worktree| worktree.removed_at.is_none() && worktree.path.is_dir())
+                .map(|worktree| worktree.path)
+        }));
+    let Some(worker) = worker else { return Ok(repo) };
+    let (_, expected_common) = git_layout(&repo)?;
+    let (checkout, actual_common) = git_checkout_layout(&worker)?;
+    if actual_common != expected_common {
+        return Err("task metadata checkout does not belong to its target repository".into());
+    }
+    Ok(checkout)
+}
+
 pub(crate) fn effective_task_work_target(
     task: &cas_types::Task,
     epic: Option<&cas_types::Task>,

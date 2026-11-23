@@ -48,6 +48,29 @@ async function sendNow(page: Page, text: string): Promise<void> {
   await page.getByRole("textbox", { name: "Your message" }).fill(text);
   await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
 }
+/** An open read-write transaction on the delivery journal's sends: later writers wait for it. */
+async function holdJournalWrites(page: Page): Promise<void> {
+  await page.evaluate(() => new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open("cas-commander-delivery-v1", 1);
+    request.onupgradeneeded = () => request.transaction?.abort();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("sends", "readwrite");
+      const sends = tx.objectStore("sends");
+      let held = true;
+      (window as unknown as { releaseJournal?: () => void }).releaseJournal = () => { held = false; };
+      // The transaction commits once it has no request left, so keep one pending.
+      const keepAlive = () => { if (held) sends.get("held").onsuccess = keepAlive; };
+      sends.get("held").onsuccess = () => { resolve(); keepAlive(); };
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => reject(tx.error);
+    };
+  }));
+}
+async function releaseJournalWrites(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as { releaseJournal?: () => void }).releaseJournal?.());
+}
 function sentTimes(hub: HubDouble, text: string): number { return hub.sends.filter(m => m.text === text).length; }
 
 async function connected(page: Page, multiplex = true, machines = [ATLAS]) {
@@ -76,12 +99,20 @@ async function accepted(page: Page, hub: HubDouble, text: string): Promise<void>
   expect((await next).text).toBe(text);
 }
 
-test("HUB-J12 network switch: delayed legacy refusal holds both sends in order", journeyPart, async ({ page, journey }) => {
+// `slowJournal` keeps the delivery journal busy while the two Sends are made, so
+// the second click lands while the first submission is still being held.
+async function legacyRefusalHoldsBothSends(page: Page, journey: { stage(name: string, body: () => Promise<void>): Promise<void> }, slowJournal: boolean): Promise<void> {
   await journey.stage("On a legacy socket, a second message sent before the refusal arrives waits too", async () => {
     const { hub, clock, header, held } = await connected(page, false);
     hub.upstreamLost(PELICAN, { refusalDelayMs: 1_500 });
+    if (slowJournal) await holdJournalWrites(page);
     await sendNow(page, "First on legacy");
     await sendNow(page, "Second before the refusal");
+    if (slowJournal) {
+      await releaseJournalWrites(page);
+      // The refusal's deadline starts when the first message reaches the hub.
+      await hub.waitFor(() => hub.upstreamRefusals.length > 0);
+    }
     // A deliberate negative window: the wire refusal must NOT arrive early.
     await clock.advance(1_499);
     await expect(held).toHaveCount(0);
@@ -108,6 +139,16 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
     await expect(page.getByRole("log").locator('.bub[data-state="delivered"] .conversation-delivery')).toBeVisible();
     await expect(page.locator("#message-status")).toBeHidden();
   });
+}
+
+test("HUB-J12 network switch: delayed legacy refusal holds both sends in order", journeyPart, async ({ page, journey }) => {
+  await legacyRefusalHoldsBothSends(page, journey, false);
+});
+
+// GH #2321: the original immediate second Send, made while the first was still
+// being held, was dropped and left in the composer.
+test("HUB-J12 network switch: a second send during a slow first send is held too", journeyPart, async ({ page, journey }) => {
+  await legacyRefusalHoldsBothSends(page, journey, true);
 });
 
 test("HUB-J12 network switch: half-open machine waits for four failed heartbeats then flushes once", journeyPart, async ({ page, journey }) => {

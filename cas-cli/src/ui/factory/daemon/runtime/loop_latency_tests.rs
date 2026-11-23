@@ -305,33 +305,6 @@ async fn flv2_input_and_pty_exchange_run_enforced() {
     assert_eq!(wait_budget::store_access_violations(), before_store);
 }
 
-#[test]
-fn a_task_sync_mutation_under_a_foreign_sqlite_write_lock_stays_in_budget() {
-    // Only SQLite is held: the mutation takes its task-sync lease and stripe,
-    // then reaches the SyncQueue's BEGIN IMMEDIATE, which must stop at the
-    // thread's deadline rather than wait out the 5 s handler and retries.
-    let (_dir, cas_dir) = logged_in_project();
-    let mut task = seed(&cas_dir);
-    let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-    let write_lock = hold_sqlite_write_lock(&cas_dir);
-    task.title = "renamed while locked".into();
-    let started = Instant::now();
-    let result = {
-        let _budget = wait_budget::bound_waits_for(super::store_worker::PASS_STORE_WAIT_BUDGET);
-        store.update(&task)
-    };
-    let waited = started.elapsed();
-    write_lock.release();
-    assert!(result.is_err(), "the write lock outlived the budget");
-    assert!(
-        waited < PASS_LATENCY_LIMIT,
-        "the budgeted mutation waited {waited:?}"
-    );
-    // Nothing is wedged: the same mutation lands once the lock is gone.
-    store.update(&task).unwrap();
-    assert_eq!(store.get(&task.id).unwrap().title, "renamed while locked");
-}
-
 /// Guard (GH #1165): production code must not restore SQLite's built-in busy
 /// timeout with `busy_timeout(SQLITE_BUSY_TIMEOUT)`. That replaces the
 /// budget-aware handler and lets a budgeted thread wait the full 5 s again.

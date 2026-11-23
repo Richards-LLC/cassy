@@ -29,9 +29,10 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &artifact.id)
             .map_err(|error| format!("Verifier artifact {} unavailable: {error:#}", artifact.id))?;
         artifacts.push(serde_json::json!({
-            "artifact_id":record.id, "path":path, "sha256":record.sha256,
+            "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
         }));
     }
+    artifacts.extend(materialize_parent_plan_artifacts(&core.cas_root, task)?);
     let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
         .and_then(|candidate| candidate.inherited_supervisor_call);
     let supervisor_calls = core.open_verification_store().map_err(|e| e.to_string())?
@@ -867,7 +868,12 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let bytes = b"peer design evidence\n";
-        for mode in ["good", "corrupt", "missing"] {
+        for (parent_scope, mode) in [
+            (false, "good"), (false, "corrupt"), (false, "missing"),
+            (true, "good"), (true, "corrupt"), (true, "missing"),
+            (true, "revoked"), (true, "foreign-artifact"),
+            (true, "foreign-project"), (true, "id-only"), (true, "unreferenced"),
+        ] {
             let server = MockServer::start().await;
             let (_dir, core, _owner, mut rows) = contention_fixture(&["cas-f6ca-fixture"]);
             env.set("CAS_ROOT", &core.cas_root);
@@ -876,20 +882,57 @@ mod tests {
                 "endpoint":server.uri(), "token":"fixture-token"
             }).to_string()).unwrap();
             let (mut task, dispatch) = rows.pop().unwrap();
+            let publisher_dir = tempfile::tempdir().unwrap();
+            let publisher = crate::store::init_cas_dir(publisher_dir.path()).unwrap();
+            let mut parent = Task::new("cas-peer-parent".into(), "Peer epic plan".into());
+            parent.task_type = cas_types::TaskType::Epic;
+            parent.design = if mode == "unreferenced" { String::new() } else {
+                format!("Plan: {}", if mode == "id-only" { "art-id-only" } else { "art-peer-plan" })
+            };
+            // Keep the identity with which contention_fixture created the
+            // child; changing the receiver's pin afterwards makes it foreign.
+            let project = crate::cloud::resolve_canonical_id(&core.cas_root).unwrap();
+            parent.origin_project = Some(if mode == "foreign-project" { "foreign".into() } else { project });
             let record = cas_store::PublishedArtifact {
-                id:"art-peer-plan".into(), task_id:task.id.clone(), name:"decision-brief.md".into(),
+                id:"art-peer-plan".into(), task_id:if parent_scope { parent.id.clone() } else { task.id.clone() }, name:"decision-brief.md".into(),
                 mime:"text/markdown".into(), size_bytes:bytes.len() as u64,
                 sha256:format!("{:x}", Sha256::digest(bytes)),
                 cloud_artifact_id:Some("cloud-peer-plan".into()), status:"committed".into(),
                 cloud_url:None, slack_permalink:None, created_at:"2026-11-21T15:00:00Z".into(), revocation:None,
             };
-            let note = format!("ARTIFACT_PROOF: {}", serde_json::to_string(&record).unwrap());
-            core.open_task_store().unwrap().append_trusted_note(&task.id, &note).unwrap();
+            if parent_scope {
+                // Only publication notes cross machines: the reviewer never
+                // shares the publisher's artifact database or cached bytes.
+                let publishing_tasks = crate::store::open_task_store(&publisher).unwrap();
+                publishing_tasks.add(&parent).unwrap();
+                let publishing_artifacts = cas_store::SqliteArtifactStore::open(&publisher).unwrap();
+                publishing_artifacts.record_local(&cas_store::NewArtifact {
+                    id:record.id.clone(), task_id:record.task_id.clone(), name:record.name.clone(),
+                    mime:record.mime.clone(), size_bytes:record.size_bytes, sha256:record.sha256.clone(),
+                }).unwrap();
+                publishing_artifacts.mark_uploaded(&record.id, record.cloud_artifact_id.as_deref().unwrap()).unwrap();
+                publishing_artifacts.mark_committed(&record.id, None).unwrap();
+                crate::artifacts::proof::record_published(&publisher, &record).unwrap();
+                let mut synced = publishing_tasks.get(&parent.id).unwrap();
+                let mut notes = std::mem::take(&mut synced.notes);
+                if mode == "foreign-artifact" {
+                    notes = notes.replace(&parent.id, "cas-unrelated-owner");
+                }
+                let receiving_tasks = core.open_task_store().unwrap();
+                receiving_tasks.add(&synced).unwrap();
+                receiving_tasks.append_trusted_note(&parent.id, &notes).unwrap();
+                receiving_tasks.add_dependency(&cas_types::Dependency::new(
+                    task.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,
+                )).unwrap();
+            } else {
+                let note = format!("ARTIFACT_PROOF: {}", serde_json::to_string(&record).unwrap());
+                core.open_task_store().unwrap().append_trusted_note(&task.id, &note).unwrap();
+            }
             task = core.open_task_store().unwrap().get(&task.id).unwrap();
             let expected = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
-                &core.cas_root, &task).unwrap().join("art-peer-plan-decision-brief.md");
+                &core.cas_root, if parent_scope { &parent } else { &task }).unwrap().join("art-peer-plan-decision-brief.md");
             assert!(!expected.exists());
-            let view = if mode == "missing" { ResponseTemplate::new(404) } else {
+            let view = if mode == "missing" { ResponseTemplate::new(404) } else if mode == "revoked" { ResponseTemplate::new(410) } else {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "artifact_id":"cloud-peer-plan", "url":format!("{}/blob",server.uri()), "size_bytes":bytes.len()
                 }))
@@ -913,16 +956,41 @@ mod tests {
                 handle.join().unwrap();
                 let prepared = received.try_recv().ok();
                 if mode == "good" {
-                    assert_eq!(prepared.unwrap().unwrap(), bytes, "attempt {attempt}");
+                    assert!(prepared.as_ref().is_some_and(|result| result.is_ok()),
+                        "parent={parent_scope} attempt={attempt}: {prepared:?}; notices={:?}",
+                        crate::store::open_prompt_queue_store(&core.cas_root).unwrap().peek_all(10).unwrap());
+                    assert_eq!(prepared.unwrap().unwrap(), bytes, "parent={parent_scope} attempt {attempt}");
                     assert!(cas_store::SqliteArtifactStore::open(&core.cas_root).unwrap().get(&record.id).unwrap().is_some());
+                    let input = std::fs::read_to_string(core.cas_root.join("prompt.txt")).unwrap();
+                    let inputs: serde_json::Value = input.lines()
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .find(|value: &serde_json::Value| value.get("artifacts").is_some()).unwrap();
+                    let reference = inputs["artifacts"].as_array().unwrap().iter()
+                        .find(|reference| reference["artifact_id"] == record.id).unwrap();
+                    assert_eq!(Path::new(reference["path"].as_str().unwrap()), expected);
+                    if parent_scope { assert_eq!(reference["task_id"], parent.id); }
                     std::fs::remove_file(&expected).unwrap();
+                    if parent_scope && attempt == 1 {
+                        let before = context_digest(&core.cas_root, &task).unwrap();
+                        let mut sequence = record.clone();
+                        sequence.id = "art-peer-sequence".into();
+                        sequence.cloud_artifact_id = Some("cloud-peer-sequence".into());
+                        core.open_task_store().unwrap().append_trusted_note(&parent.id, &format!(
+                            "Sequence art-peer-sequence\nARTIFACT_PROOF: {}", serde_json::to_string(&sequence).unwrap(),
+                        )).unwrap();
+                        assert_ne!(context_digest(&core.cas_root, &task).unwrap(), before,
+                            "new referenced parent proof invalidates the candidate context");
+                    }
+                } else if mode == "unreferenced" {
+                    assert!(prepared.is_some());
+                    assert!(!expected.exists());
+                    assert!(server.received_requests().await.unwrap().is_empty());
                 } else {
                     assert!(prepared.is_none(), "unverified bytes reached verifier preparation: {mode}");
                     assert!(!expected.exists());
-                    let prompts = crate::store::open_prompt_queue_store(&core.cas_root).unwrap().peek_all(10).unwrap();
-                    let body = format!("{prompts:?}");
-                    assert!(body.contains(&record.id));
-                    assert!(body.contains(if mode == "corrupt" { "artifact_checksum_mismatch" } else { "404" }));
+                    if matches!(mode, "foreign-project" | "foreign-artifact" | "id-only") {
+                        assert!(server.received_requests().await.unwrap().is_empty());
+                    }
                 }
                 assert_eq!(cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id).unwrap().state,
                     cas_types::VerificationDispatchState::Pending);
@@ -1637,6 +1705,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             )
             .unwrap();
             let mut task = Task::new("cas-381f-auto".into(), "Automatic verifier fixture".into());
+            // This fixture has a local-only target and no publication remote.
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
             task.status = cas_types::TaskStatus::AwaitingMerge;
             task.depth = cas_types::TaskDepth::Deep;
             task.assignee = Some("worker".into());

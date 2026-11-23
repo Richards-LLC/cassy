@@ -1128,8 +1128,13 @@ pub(crate) struct PassingTests<'a> {
     head: &'a str,
     target: Option<&'a str>,
     synced: &'a [cas_types::PortableTestReceipt],
-    records: std::sync::OnceLock<Vec<(String, Option<String>, TestReceipt)>>,
+    records: std::sync::OnceLock<(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>)>,
 }
+
+/// An earlier receipt the carry refused at this head: its tested head, the
+/// receipt, and the changed proof inputs that voided it (`None` when the
+/// range to the head is unreadable, e.g. not an ancestor).
+type Voided = (String, TestReceipt, Option<Vec<String>>);
 
 impl<'a> PassingTests<'a> {
     pub(crate) fn new(cas_root: &'a Path, repo: &'a Path, head: &'a str) -> Self {
@@ -1180,8 +1185,17 @@ impl<'a> PassingTests<'a> {
     }
 
     fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
+        &self.classified().0
+    }
+
+    /// Earlier receipts this head could not carry, with the reason (GH #2288).
+    fn voided(&self) -> &[Voided] {
+        &self.classified().1
+    }
+
+    fn classified(&self) -> &(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>) {
         self.records.get_or_init(|| {
-            let mut records = passing_test_records(self.cas_root, self.repo, self.head, self.target);
+            let (mut records, voided) = passing_test_records(self.cas_root, self.repo, self.head, self.target);
             for synced in self.synced {
                 let Ok(stability) = synced.stability.clone().map(serde_json::from_value::<stability::Proof>).transpose() else { continue };
                 let Ok(widened) = synced.widened.clone().map(serde_json::from_value::<widened::Proof>).transpose() else { continue };
@@ -1219,7 +1233,7 @@ impl<'a> PassingTests<'a> {
                     }));
                 }
             }
-            records
+            (records, voided)
         })
     }
 
@@ -1291,22 +1305,23 @@ pub(crate) fn passing_test_packages_against(
 /// documentation-only delivery commit while keeping proof tied to its tested
 /// tree. Builtin Markdown and reference history use CI's contract/doc-hygiene
 /// proof instead of invalidating Rust receipts. With a target, commits already
-/// on it are not part of the range.
+/// on it are not part of the range. Also returns the ancestor receipts it
+/// refused and why.
 fn passing_test_records(
     cas_root: &Path,
     repo: &Path,
     head: &str,
     target: Option<&str>,
-) -> Vec<(String, Option<String>, TestReceipt)> {
+) -> (Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>) {
     let Ok(repo) = repo.canonicalize() else {
-        return Vec::new();
+        return Default::default();
     };
     let path = receipt_path(cas_root, &repo, head);
     let Some(directory) = path.parent() else {
-        return Vec::new();
+        return Default::default();
     };
     let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
+        return Default::default();
     };
     let mut entries = entries.flatten().collect::<Vec<_>>();
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -1348,18 +1363,25 @@ fn passing_test_records(
     let proof_inputs = delivered_tree_proof_inputs(&repo, head, &changed_paths)
         .unwrap_or_else(|| changed_paths.clone());
 
+    let mut voided = Vec::new();
     for (receipt_head, package, test) in ancestors {
         let key = (package.clone(), test.harness.clone(), test.filter.clone());
+        if exact.contains_key(&key) {
+            continue;
+        }
         let Some(changes) = ranges.get(&receipt_head).and_then(Option::as_ref) else {
+            voided.push((receipt_head, test, None));
             continue;
         };
-        if exact.contains_key(&key) || changes.iter().any(|path| {
+        let inputs = changes.iter().filter(|path| {
             // cas-23b1: embedded builtin docs have their own contract checks;
             // every other proof input still invalidates the Rust receipt.
             let builtin_doc = path.starts_with("cas-cli/src/builtins/")
-                && (path.ends_with(".md") || path == "cas-cli/src/builtins/reference-history.json");
-            !builtin_doc && proof_inputs.contains(path)
-        }) {
+                && (path.ends_with(".md") || *path == "cas-cli/src/builtins/reference-history.json");
+            !builtin_doc && proof_inputs.contains(*path)
+        }).cloned().collect::<BTreeSet<_>>();
+        if !inputs.is_empty() {
+            voided.push((receipt_head, test, Some(inputs.into_iter().collect())));
             continue;
         }
         match exact.entry(key) {
@@ -1375,10 +1397,11 @@ fn passing_test_records(
         }
     }
 
-    exact
+    let records = exact
         .into_iter()
         .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
-        .collect()
+        .collect();
+    (records, voided)
 }
 
 fn read_passing_test_record(
@@ -1648,13 +1671,29 @@ fn is_test_or_build_input_path(path: &str) -> bool {
     )
 }
 
+/// GH #2288: the per-task changelog, product-overview and bug-family fragments
+/// the close gate asks for. Release tooling owns their checks, so one counts
+/// as a Rust proof input only when a Rust source names it, never by extension.
+fn close_doc_fragment(path: &str) -> bool {
+    ["changelog.d/", "docs/product-overview.d/", "docs/qa/bug-families/"].iter()
+        .any(|dir| path.strip_prefix(dir).is_some_and(|name| !name.contains('/')))
+        && [".md", ".yaml", ".yml"].iter().any(|extension| path.ends_with(extension))
+}
+
 /// Read the delivered tree once per close and batch its Rust sources once.
 fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<String>) -> Option<BTreeSet<String>> {
     if changed.is_empty() { return Some(BTreeSet::new()); }
     let tree = delivered_tree(repo, head)?;
     let mut inputs = BTreeSet::new();
+    // cas-3080/cas-d9c72: the bug-family fragment a close asks for is QA
+    // registry data, not a runner input. Its `.yaml` extension alone must not
+    // void tested-input proof; a Rust source naming it still does.
+    let registry = crate::qa_registry::DEFAULT_PATH;
+    let bug_family = |path: &str| path != registry && crate::qa_registry::is_registry_input(registry, path);
     let external = changed.iter().filter(|path| {
-        if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
+        if !close_doc_fragment(path)
+            && ((!bug_family(path) && is_test_or_build_input_path(path)) || tree.is_workspace_crate_path(path))
+        {
             inputs.insert((*path).clone()); false
         } else { true }
     }).cloned().collect::<Vec<_>>();
@@ -2155,7 +2194,9 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
     };
     matches!(key, "HOME" | "CARGO_HOME" | "RUSTUP_HOME" | "CI"
         | "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
-        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL")
+        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL"
+        // cas-3751a: the sandbox-runtime binary the worker sandbox corpus test runs through.
+        | "CAS_SRT_BIN")
         .then_some((key, value))
 }
 
@@ -2298,6 +2339,11 @@ exit "$code"
     if let Some(id) = run { command.arg("--completion-id").arg(id); }
     command.arg("--").args(args);
     command
+}
+
+/// This process's stdout when it is a regular file (a foreground check's log).
+pub(crate) fn stdout_log_path() -> Option<PathBuf> {
+    detached_log_path().filter(|path| path.is_file())
 }
 
 /// Resolve the actual redirected file, rather than interpreting shell text.
@@ -2499,7 +2545,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 if uncertain {
                     let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                     widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into() });
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into(), configs: Default::default() });
                 }
                 tests
             },
@@ -2510,7 +2556,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
                 let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                 widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}") });
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}"), configs: Default::default() });
                 Vec::new()
             }
         }
@@ -3493,6 +3539,7 @@ else:
         fake_cargo(&fake, r#"if [ -d /proc/self/fd ]; then
     [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 11
 fi
+[ -z "${CAS_GATE_AUDIT_SELECT_OUT:-}" ] || printf 0 > "$CAS_GATE_AUDIT_SELECT_OUT"
 printf '%s\n' "$*" >> target/invocations
 printf '\033[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\033[0m\n'"#);
         let scope = dir.path().join("scope");
@@ -3506,6 +3553,8 @@ exec "$@" > target/raw.log 2>&1"#);
         assert!(invocations.contains("serialized_factory_fields_have_registry_entries_cas_f7b9"), "{invocations}");
         assert!(invocations.lines().last().unwrap().ends_with("test(unrelated)"), "{invocations}");
         assert_eq!(invocations.lines().count(), 2);
+        assert!(invocations.lines().next().unwrap().contains("delivery_touches_audited_site"), "{invocations}");
+        assert!(!invocations.contains("test(gates::registry_tests)"), "probe answered 0: {invocations}");
         // cas-70b8: consume the ordinary runner's capture, without extracting
         // or rewriting its bytes, through the supervisor receipt handler.
         let head = fixture_head(&repo);
@@ -3567,7 +3616,8 @@ exec "$@" > target/raw.log 2>&1"#);
         }
         std::fs::remove_file(repo.join("cas-cli/tests/receipt.rs")).unwrap();
         fixture_commit_as(&repo, "remove admission probe");
-        fake_cargo(&fake, r#"case "$*" in
+        fake_cargo(&fake, r#"[ -z "${CAS_GATE_AUDIT_SELECT_OUT:-}" ] || printf 0 > "$CAS_GATE_AUDIT_SELECT_OUT"
+case "$*" in
     *test_support::*) printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n' ;;
     *) printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n' ;;
 esac"#);
@@ -3586,6 +3636,28 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert_eq!(std::fs::read(&selected).unwrap(), b"\x1b[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\x1b[0m\n", "failed retries must preserve earlier capture bytes");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+        // cas-19792: cas-978ed's unclassified bool parameter went red only in
+        // lane CI. The guard's run of the real selection probe
+        // (gates::registry_tests) reads the committed fixture diff; an audited
+        // change adds the registry scan to the ordinary guarded run.
+        env.set("CAS_TEST_SELECTION_PROBE", std::env::current_exe().unwrap());
+        fake_cargo(&fake, r#"if [ -n "${CAS_GATE_AUDIT_SELECT_OUT:-}" ]; then
+    "$CAS_TEST_SELECTION_PROBE" --exact gates::registry_tests::delivery_touches_audited_site >/dev/null 2>&1 || exit 12
+fi
+printf '%s\n' "$*" >> target/invocations
+printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
+        for (path, source, registry) in [
+            ("cas-cli/src/notes.rs", "pub fn notes() -> usize { 1 }\n", false),
+            ("cas-cli/src/merge.rs",
+             "pub fn merge(pushed_proof: bool) -> Result<(), String> { if pushed_proof { return Err(\"x\".into()); } Ok(()) }\n", true),
+        ] {
+            std::fs::write(repo.join(path), source).unwrap();
+            fixture_commit_as(&repo, path);
+            std::fs::remove_file(repo.join("target/invocations")).ok();
+            execute_at(&root, &args, &repo, &fake).unwrap();
+            let invocations = std::fs::read_to_string(repo.join("target/invocations")).unwrap();
+            assert_eq!(invocations.lines().nth(1).unwrap().ends_with("test(gates::registry_tests)"), registry, "{path}: {invocations}");
+        }
     }
 
     /// cas-2bdf: merging the moved target into a parked delivery voided its
@@ -3773,6 +3845,56 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
             )],
             "the delivered source refers to a different repo-relative path with the same basename"
         );
+    }
+
+    /// GH #2288: cas-e705's five-pass proof was refused at a descendant that
+    /// added only the documentation fragments the close gate itself asks for.
+    /// A fragment a Rust source names is still an input, and the refusal
+    /// names the receipt and the path that voided it.
+    #[test]
+    fn stability_proof_carries_across_close_doc_fragments_gh_2288() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let write = |path: &str, body: &str| {
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), body).unwrap();
+        };
+        let embedded = "docs/qa/bug-families/embedded.yaml";
+        write("cas-cli/Cargo.toml", "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n");
+        write("cas-cli/src/lib.rs", &format!("const FAMILY: &str = include_str!(\"../../{embedded}\");\n#[test] fn keeper() {{}}\n"));
+        write(embedded, "tasks: [cas-old]\n");
+        fixture_commit_as(&repo, "keeper");
+        let tested = fixture_head(&repo);
+        let keeper = stability::Identity::exact("cas-cli/src/lib.rs", "keeper");
+        stability::record(&root, &repo, &tested, stability::Proof {
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        }).unwrap();
+
+        write("changelog.d/cas-e705.md", "### Fixed\n\n- Recovery.\n");
+        write("docs/product-overview.d/cas-e705.md", "Recovery.\n");
+        write("docs/qa/bug-families/historical-g70-error-recovery.yaml", "tasks: [cas-e705]\n");
+        fixture_commit_as(&repo, "docs(cas-e705): fragments");
+        let documented = fixture_head(&repo);
+        assert!(stability::missing(&PassingTests::new(&root, &repo, &documented), &[keeper.clone()]).is_empty());
+
+        write(embedded, "tasks: [cas-new]\n");
+        fixture_commit_as(&repo, "docs: embedded family");
+        let voided = fixture_head(&repo);
+        // A proof at a commit the tip does not descend from never carries.
+        git(&repo, &["checkout", "--detach", &tested]).unwrap();
+        write("notes.txt", "sibling\n");
+        fixture_commit_as(&repo, "sibling");
+        let sibling = fixture_head(&repo);
+        stability::record(&root, &repo, &sibling, stability::Proof {
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        }).unwrap();
+        let passing = PassingTests::new(&root, &repo, &voided);
+        assert_eq!(stability::missing(&passing, &[keeper.clone()]), [keeper.clone()]);
+        let mut refused = vec![(tested, Some(vec![embedded.to_owned()])), (sibling, None)];
+        refused.sort();
+        assert_eq!(stability::invalidated(&passing, &[keeper]), refused);
     }
 
     #[test]
@@ -5075,7 +5197,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             runner:"nextest".into(), tests:vec![identity.clone()], consecutive_passes:5, elapsed_ms:42,
         }).unwrap();
         widened::record(&producer_root, &producer, &head, widened::Proof {
-            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(),
+            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(), configs: Default::default(),
         }, 1).unwrap();
         record_passing_test_with_log_for_tests(&producer_root, &producer, &head, "fixture", "test(owned)");
         let mut task = cas_types::Task::new("cas-portable".into(), "Portable proof".into());
@@ -5089,7 +5211,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let owner_root = dir.path().join("owner-store");
         let passing = PassingTests::new(&owner_root, &owner, &head).with_synced(&task.deliverables.test_receipts);
         assert!(stability::missing(&passing, &[identity.clone()]).is_empty());
-        assert!(widened::missing(&passing, &[scope.clone()]).is_empty());
+        assert!(widened::missing(&passing, &[scope.clone()], &Default::default()).is_empty());
         assert_eq!(passing.packages(), ["fixture"]);
         // Worker-authored proof is scoped to the immutable Git inputs, and
         // neither relative traversal nor fewer than five passes grants credit.
@@ -5111,7 +5233,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let refused = PassingTests::new(&owner_root, &owner, &new_head).with_synced(&rebound);
         assert!(refused.packages().is_empty());
         assert_eq!(stability::missing(&refused, &[identity.clone()]), [identity]);
-        assert_eq!(widened::missing(&refused, &[scope.clone()]), [scope]);
+        assert_eq!(widened::missing(&refused, &[scope.clone()], &Default::default()), [scope]);
     }
 
     fn passing_test_identities(
@@ -5120,7 +5242,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         head: &str,
     ) -> Vec<(String, String, String, u64)> {
         // cas-7b2d: inspect receipt data independently of display provenance.
-        passing_test_records(root, repo, head, None)
+        passing_test_records(root, repo, head, None).0
             .into_iter()
             .map(|(head, package, test)| (head, package.expect("fixture records a Rust package"), test.filter, test.count))
             .collect()

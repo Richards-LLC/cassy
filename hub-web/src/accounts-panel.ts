@@ -1,5 +1,5 @@
 import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
-import { fillMeters, lowPickNote, meterMarkup, readings } from "./account-meters";
+import { fillMeters, leastLeft, lowPickNote, meterMarkup, readings } from "./account-meters";
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
@@ -23,7 +23,7 @@ export interface AccountsHost {
 const ACTIONS: Record<AccountOperation, string> = { set_default: "Set default", rename: "Rename", disable: "Disable", enable: "Enable", remove: "Remove" };
 const CLEANUP_WORD = "clean up";
 /** Least capacity left across known windows; unknown sorts last. */
-const headroom = (row: AccountRow) => Math.min(...readings(row.windows, row.usage_observed_at, Date.now(), row.usage_source).map(reading => "left" in reading ? reading.left : -1));
+const headroom = (row: AccountRow) => leastLeft(readings(row.windows, row.usage_observed_at, Date.now(), row.usage_source)) ?? -1;
 /** The account New session preselects for a provider: its recommendation, else the logged-in default, else the first logged-in one. */
 function nextLaunch(rows: readonly AccountRow[]): AccountRow | undefined {
   const usable = rows.filter(row => row.login_state === "logged_in" && !row.disabled);
@@ -254,7 +254,7 @@ export class AccountsSheet {
     const lowTag = low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(low)}</span>` : "";
     // With a hub configured, a number that isn't the hub's says whose it is.
     const local = (checked && account.usage_source) || account.usage_source === "local" ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own read</span>` : "";
-    const sub = [nextTag, lowTag, flag, local, !next && account.is_default ? `<span class="accounts-sub">default</span>` : "", account.disabled ? `<span class="accounts-sub">disabled</span>` : "", account.location ? `<code class="accounts-sub" title="${escapeHtml(account.location)} on ${escapeHtml(machine.label)}">${escapeHtml(account.location)}</code>` : ""].filter(Boolean).join("");
+    const sub = [nextTag, lowTag, flag, local, account.is_default ? `<span class="accounts-sub">Default</span>` : "", account.disabled ? `<span class="accounts-sub">disabled</span>` : "", account.location ? `<code class="accounts-sub" title="${escapeHtml(account.location)} on ${escapeHtml(machine.label)}">${escapeHtml(account.location)}</code>` : ""].filter(Boolean).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];

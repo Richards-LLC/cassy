@@ -336,12 +336,12 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
       await expect(accountsEditor(dialog)).toBeHidden();
-      // The weekly meter at 38% used: its bar carries data-left="62".
-      await expect(dialog.getByTestId("accounts-meter").filter({ has: page.locator('[data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
+      // The weekly meter at 38% used carries data-left="62" and a 12-hour reset time.
+      await expect(dialog.locator('[data-testid="account-meter"][data-window="week"][data-left="62"]')).toContainText(/(AM|PM) [A-Z]/);
       const stale = dialog.getByRole("listitem").filter({ hasText: "old@example.test" });
       await expect(stale).toHaveAttribute("data-login-state", "stale_login");
       await expect(stale).toBeVisible();
-      await expect(dialog.getByRole("paragraph").filter({ hasText: "~/.claude-spare" })).toBeVisible();
+      await expect(dialog.getByRole("listitem").filter({ hasText: "hello@example.test" }).getByText("~/.claude-spare", { exact: true })).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (width === 390) {
         await page.mouse.move(200, 600);
@@ -440,10 +440,11 @@ test("HUB-J13 check native account usage before starting without switching", jou
       const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
       for (const provider of ["claude", "codex"]) {
         await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
-        const result = usageFor(dialog, `${provider}:main`);
-        await expect(result).toContainText(new RegExp("(?=[\\s\\S]*5h)(?=[\\s\\S]*23%)")); await expect(result).toContainText("44%");
-        await expect(result).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)")); await expect(result).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*11)(?=[\\s\\S]*00)"));
-        await expect(result).toContainText("Snapshot is stale");
+        // The check's windows land on the row's meters as "% left"; its reason reaches the status.
+        const row = dialog.locator(`[data-account-key="${provider}:main"]`);
+        await expect(row.locator('[data-testid="account-meter"][data-window="5h"]')).toHaveAttribute("data-left", "77");
+        await expect(row.locator('[data-testid="account-meter"][data-window="week"]')).toHaveAttribute("data-left", "56");
+        await expect(usageFor(dialog, `${provider}:main`)).toContainText("Snapshot is stale");
       }
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     });
@@ -453,7 +454,8 @@ test("HUB-J13 check native account usage before starting without switching", jou
       const dialog = page.getByRole("dialog", { name: "New session", exact: true });
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       await dialog.getByRole("button", { name: "Check usage for claude:support@petrastella.io", exact: true }).click();
-      await expect(usageFor(dialog, "claude:support@petrastella.io")).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)"));
+      const entry = dialog.locator(".launch-account-entry").filter({ has: page.locator('input[value="support@petrastella.io"]') });
+      await expect(entry.locator('[data-testid="account-meter"][data-window="5h"]')).toHaveAttribute("data-left", "77");
 
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       expect(hub.launches).toEqual([]);
@@ -488,7 +490,7 @@ test("HUB-J13 choose the home gateway for workers and read the hub's accounts", 
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 }); await page.emulateMedia({ colorScheme });
     await journey.stage(`Worker route in New session at ${width} ${colorScheme}`, async () => {
       await newSession(page).click();
-      const route = sheet.getByRole("group", { name: "Worker route" });
+      const route = sheet.getByTestId("launch-route");
       await expect(route).toBeHidden();
       await sheet.getByRole("radio", { name: /ledger-api/ }).click();
       await expect(route).toBeVisible();
@@ -515,7 +517,7 @@ test("HUB-J13 choose the home gateway for workers and read the hub's accounts", 
   await journey.stage("Start pins the gateway route for the session's workers", async () => {
     await newSession(page).click();
     await sheet.getByRole("radio", { name: /ledger-api/ }).click();
-    await sheet.getByRole("group", { name: "Worker route" }).getByRole("radio", { name: "Home gateway", exact: true }).click();
+    await sheet.getByTestId("launch-route").getByRole("radio", { name: "Home gateway", exact: true }).click();
     await sheet.getByRole("button", { name: "Start", exact: true }).click();
     await expect.poll(() => hub.launches.length).toBe(1);
     expect(hub.launches[0].body).toMatchObject({ target: target("p-ledger"), routing: "gateway" });

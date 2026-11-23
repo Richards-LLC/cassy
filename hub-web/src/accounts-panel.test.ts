@@ -113,15 +113,14 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   const { host, sheet } = setup(true, healthy);
   vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy, protectedMain] });
   sheet.open(); await settle();
+  // One ledger per provider: most headroom first, removable cleanup rows last.
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
-  expect(groups.map(group => group.querySelectorAll(".accounts-row").length)).toEqual([3, 1]);
-  expect(groups[1]!.querySelector<HTMLElement>(".accounts-identity strong")!.title).toBe(duplicate.key);
-  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-identity strong")].map(name => name.title)).toEqual([healthy.key, tight.key, protectedMain.key]);
+  expect(groups).toHaveLength(1);
+  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-name > strong")].map(name => name.title)).toEqual([healthy.key, tight.key, protectedMain.key, duplicate.key]);
   for (const line of document.querySelectorAll("[data-duplicate-of]")) expect(line.textContent).not.toContain(healthy.key);
-  expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
+  expect(groups[0]!.querySelector('[data-testid="account-meter"][data-tone="crit"]')).not.toBeNull();
   expect(groups[0]!.textContent).toContain("~/.claude-work");
-  expect(groups[0]!.textContent).toContain("62%");
-  expect(groups[1]!.textContent).toBeTruthy();
+  expect(groups[0]!.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-left")).toBe("62");
   click("[data-cleanup]");
   // The shared dialog form is a zero-intrinsic-width grid container; inside the banner's flex row it was squeezed to a sliver.
   const editor = document.querySelector(".accounts-editor")!;
@@ -151,7 +150,7 @@ it("formats reset and observation times locally in 12-hour form and clears expir
 it("shows the Codex alias and valid login help when identity metadata is unavailable", async () => {
   const { host } = setup(false, { ...row, key: "codex:work", provider: "codex", name: "work", display_name: "work", login_state: "unknown" });
   await settle();
-  expect(document.querySelector(".accounts-identity strong")!.textContent).toBe("work");
+  expect(document.querySelector(".accounts-name strong")!.textContent).toBe("work");
   expect(document.body.textContent).toContain("codex:work");
   click("[data-login]"); await settle();
   expect(host.copy).toHaveBeenCalledWith("cas codex login work");
@@ -160,17 +159,16 @@ it("shows the Codex alias and valid login help when identity metadata is unavail
 it.each(["claude", "codex"] as const)("rechecks %s usage without management or switching, with dated snapshots and retry", async provider => {
   const account = { ...row, key: `${provider}:spare`, provider, login_state: "logged_in" as const };
   const { host } = setup(false, account);
-  const check = vi.fn().mockResolvedValue({ checked_at: "2026-11-03T17:00:00Z", observed_at: "2026-11-03T16:00:00Z", source: "native snapshot", reason: "Snapshot is stale; open a session on this account to refresh.", windows: [{ name: "5h", used_percent: 23, resets_at: "2026-11-03T20:00:00Z" }, { name: "weekly", used_percent: 44, resets_at: "2026-11-08T16:57:00Z" }] });
+  const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+  const check = vi.fn().mockResolvedValue({ checked_at: at(0), observed_at: at(-10), source: "native snapshot", reason: "Snapshot is stale; open a session on this account to refresh.", windows: [{ name: "5h", used_percent: 23, resets_at: at(120) }, { name: "weekly", used_percent: 44, resets_at: at(3 * 1440) }] });
   Object.assign(host, { checkUsage: check });
   await settle();
-  const button = () => [...document.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === "Check usage")!;
-  expect(button()).toBeDefined(); button().click();
-  await vi.waitFor(() => expect(document.body.textContent).toMatch(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)")));
+  const button = () => document.querySelector<HTMLButtonElement>('[data-testid="account-refresh"]')!;
+  expect(button()).not.toBeNull(); button().click();
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="account-meter"][data-window="5h"]')?.getAttribute("data-left")).toBe("77"));
   expect(check).toHaveBeenCalledWith("linux", `${provider}:spare`, expect.any(AbortSignal));
-  expect(document.body.textContent).toMatch(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*11)(?=[\\s\\S]*00)"));
-  expect(document.body.textContent).toMatch(new RegExp("(?=[\\s\\S]*5h)(?=[\\s\\S]*23%)"));
-  expect(document.body.textContent).toContain("44%");
-  expect(document.body.textContent).toContain("Snapshot is stale");
+  expect(document.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-left")).toBe("56");
+  expect(document.querySelector('[data-testid="account-usage-status"]')!.textContent).toContain(check.mock.results[0] ? "Snapshot is stale" : "");
   expect(host.change).not.toHaveBeenCalled(); expect(host.changed).not.toHaveBeenCalled();
   check.mockRejectedValueOnce(Object.assign(new Error("GET usage failed (429)"), { status: 429 })); button().click();
   await vi.waitFor(() => expect(document.body.textContent).toBeTruthy());
@@ -181,20 +179,39 @@ it("lists hub accounts apart from native profiles, read-only, and only when the 
   const hub: GatewayInventory = { status: "unavailable", reason: "hub unreachable", host: "loopback", inventory: "ok", team_accounts: 1,
     accounts: [{ provider: "claude", label: "hel***@example.test", state: "active", recent_requests: 6, recent_failed: 1, recent_minutes: 200 }, { provider: "codex", label: "pro***@example.test", state: "disabled", recent_requests: 0, recent_failed: 0 }] };
   // An older hub's catch-all `{}` must not take the native ledger down with it (lane CI HUB-J13).
-  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, false], [async () => ({}) as GatewayInventory, false], [async () => ({ ...hub, status: "off" as const, accounts: [] }), false], [async () => hub, true]] as const) {
+  // No route or an unknown answer draws nothing; a machine with no hub says so; a configured hub lists its accounts.
+  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, undefined], [async () => ({}) as GatewayInventory, undefined], [async () => ({ ...hub, status: "off" as const, accounts: [] }), "off"], [async () => hub, "unavailable"]] as const) {
     setup(true, row, undefined, gateway);
     await settle();
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(document.querySelector('.accounts-row[data-login-state="stale_login"]')).not.toBeNull();
     const section = document.querySelector<HTMLElement>('[data-testid="accounts-gateway"]');
-    expect(Boolean(section)).toBe(shown);
-    if (section) {
+    expect(section?.dataset.gatewayStatus).toBe(shown);
+    if (section && shown === "unavailable") {
       expect(section.querySelectorAll(".accounts-hub-row")).toHaveLength(2);
       expect(section.querySelectorAll("button, input, select")).toHaveLength(0);
       expect(section.querySelector('[data-testid="gateway-reason"]')).not.toBeNull();
       expect(section.querySelector('[data-testid="gateway-team"]')).not.toBeNull();
-      expect(section.closest(".accounts-provider-group")?.querySelector("[data-operation]")).toBeNull();
+      expect(section.closest(".accounts-provider-group")).toBeNull();
     }
     document.body.innerHTML = "";
   }
+});
+
+it("an unreachable hub shows no capacity number, and a recommended account under 20% left says why on its row", async () => {
+  const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+  const low: AccountRow = { ...row, key: "codex:pippenz", provider: "codex", name: "pippenz", login_state: "logged_in", recommendation: "resets Wed 9:12 AM, 14% left", usage_source: "hub", usage_observed_at: at(-5), windows: [{ name: "weekly", used_percent: 86, resets_at: at(2 * 1440) }] };
+  setup(true, low, async () => ({ accounts: [low], quota_source: { state: "hub" } }));
+  await settle();
+  expect(document.querySelector('[data-testid="account-next"]')).not.toBeNull();
+  expect(document.querySelector('[data-testid="account-low-pick"]')).not.toBeNull();
+  document.body.innerHTML = "";
+
+  const unreachable: AccountRow = { ...low, recommendation: null, usage_source: "hub_unreachable", windows: [], usage_observed_at: null };
+  setup(true, unreachable, async () => ({ accounts: [unreachable], quota_source: { state: "unreachable", reason: "dashboard unreachable (ConnectionFailed)" } }));
+  await settle();
+  expect(document.querySelector('[data-testid="accounts-hub-unreachable"]')).not.toBeNull();
+  const meters = [...document.querySelectorAll<HTMLElement>('[data-testid="account-meter"]')];
+  expect(meters.map(meter => meter.dataset.state)).toEqual(["unreachable", "unreachable"]);
+  expect(meters.some(meter => meter.hasAttribute("data-left"))).toBe(false);
 });

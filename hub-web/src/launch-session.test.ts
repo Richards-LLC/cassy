@@ -468,10 +468,17 @@ describe("accounts (cas-9666)", () => {
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="main"]')!.checked).toBe(true);
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="old@petrastella.io"]')!.disabled).toBe(true);
     expect(step.querySelector(".launch-account-out code")!.textContent).toBe("cas claude login old@petrastella.io");
+    // Logged-out logins sit under one disclosure, apart from the pickable rows.
+    expect(step.querySelector('[data-testid="launch-not-offered"] input[value="old@petrastella.io"]')).not.toBeNull();
+    expect(step.querySelector('.launch-accounts input[value="old@petrastella.io"]')).toBeNull();
     pick(dialog(), 'input[name="launch-project"]');
     await flush();
     pick(dialog(), 'input[name="launch-account"][value="support@petrastella.io"]');
     expect(dialog().querySelector(".launch-summary")!.textContent).toContain("cas-src");
+    // The plan strip follows every choice.
+    const plan = dialog().querySelector<HTMLElement>('[data-testid="launch-plan"]')!;
+    expect(plan.querySelector('[data-plan="project"]')!.textContent).toContain("cas-src");
+    expect(plan.querySelector('[data-plan="supervisor"]')!.textContent).toContain("support@petrastella.io");
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
     await vi.waitFor(() => expect(calls.launches[0]?.request).toEqual({ target: { kind: "project", id: "p-cas-src" }, supervisor_cli: "claude", profile: "support@petrastella.io" }));
   });

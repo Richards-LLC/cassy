@@ -146,3 +146,28 @@ pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GH #2266: a migration rename beside a fixture edit widens the package;
+    /// with no covering spec resolved, every prescribed command is one the
+    /// capped runner accepts, never the SQL or JSON input itself.
+    #[test]
+    fn package_proof_never_prescribes_a_non_javascript_input() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("apps/backend/test/fixtures")).unwrap();
+        std::fs::write(repo.path().join("apps/backend/package.json"), "{}").unwrap();
+        let paths = ["apps/backend/prisma/migrations/1_init/migration.sql", "apps/backend/src/scenarios.json",
+            "apps/backend/test/fixtures/patterns.ts"].map(String::from);
+        let scopes = [scope(repo.path(), &paths[2])];
+        assert_eq!(scopes, [Scope::Package("apps/backend".into())]);
+        let commands = commands(Path::new("/cas"), repo.path(), &paths, &scopes, &Default::default());
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(javascript::invocation(&args).map(|run| run.files), Some(vec![paths[2].clone()]), "{command}");
+        }
+    }
+}

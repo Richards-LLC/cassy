@@ -271,8 +271,15 @@ fn checkout_task_beside_parked_delivery(
     task_id: &str,
     target: &str,
     require_fresh_base: bool,
+    admit_switch: &dyn Fn() -> Result<(), String>,
 ) -> Result<String, String> {
     let git = GitOperations::new(checkout.to_path_buf());
+    // cas-22c6: already on the task branch, nothing below moves the checkout.
+    if crate::factory_isolation::branch_at(checkout).as_deref()
+        != Some(crate::factory_isolation::worker_task_branch(worker, task_id).as_str())
+    {
+        admit_switch()?;
+    }
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(checkout)
@@ -349,6 +356,7 @@ fn reconcile_reused_factory_branch(
     task_identity: Option<&close_ops::TaskCommitIdentity>,
     recorded_start_branch: Option<&str>,
     parked_task_for_tip: impl Fn(&str) -> Option<String>,
+    admit_move: &dyn Fn() -> Result<(), String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
         return Ok(ReusedFactoryBranchStart::Unchanged);
@@ -452,6 +460,7 @@ fn reconcile_reused_factory_branch(
     }
 
     if git.is_ancestor(&factory_tip, &target_tip) {
+        admit_move()?;
         require_clean_tracked_tree()?;
         git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
@@ -552,6 +561,7 @@ fn reconcile_reused_factory_branch(
             // cas-2c75: every off-target commit already shipped on trunk and
             // none is this task's; start from the target, as an ancestor tip does.
             if only_released_commits {
+                admit_move()?;
                 git.reset_hard_in_dir(worktree_path, &target_tip).map_err(|error| {
                     format!("Cannot reset reused factory branch {expected_branch} to `{target_branch}`: {error}")
                 })?;
@@ -573,6 +583,7 @@ fn reconcile_reused_factory_branch(
                 tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
             ));
         }
+        admit_move()?;
         require_clean_tracked_tree()?;
         let keep = format!("parked/{task_id}");
         let kept = std::process::Command::new("git")
@@ -646,7 +657,7 @@ mod reused_factory_branch_tests {
         let target = "epic/never-pushed";
         for require_fresh_base in [false, true] {
             let error = checkout_task_beside_parked_delivery(
-                repo.path(), "test-worker", "cas-8bc4", target, require_fresh_base,
+                repo.path(), "test-worker", "cas-8bc4", target, require_fresh_base, &|| Ok(()),
             )
             .expect_err("missing target must be refused");
             assert!(error.contains(target), "{error}");
@@ -668,13 +679,13 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["branch", "epic/local-only"]);
         git(repo.path(), &["push", "origin", "main:refs/heads/epic/origin-only"]);
 
-        let error = checkout_task_beside_parked_delivery(repo.path(), "test-worker", "cas-0001", "epic/absent", false)
+        let error = checkout_task_beside_parked_delivery(repo.path(), "test-worker", "cas-0001", "epic/absent", false, &|| Ok(()))
             .expect_err("a target absent locally and on origin is refused");
         assert!(error.contains("epic/absent"), "{error}");
         assert!(git(repo.path(), &["branch", "--list", "factory/*"]).is_empty());
 
         for (task, target) in [("cas-0002", "epic/local-only"), ("cas-0003", "epic/origin-only")] {
-            let branch = checkout_task_beside_parked_delivery(repo.path(), "test-worker", task, target, false)
+            let branch = checkout_task_beside_parked_delivery(repo.path(), "test-worker", task, target, false, &|| Ok(()))
                 .expect("a target present in one place starts");
             assert_eq!(git(repo.path(), &["rev-parse", &branch]), git(repo.path(), &["rev-parse", "main"]));
         }
@@ -691,7 +702,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -715,7 +726,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect("unrelated prior delivery is reported, not reset");
         let ReusedFactoryBranchStart::Occupied { commit } = result else {
             panic!("unrelated prior delivery must occupy the lane: {result:?}");
@@ -750,12 +761,12 @@ mod reused_factory_branch_tests {
         };
 
         let ungranted = identity(Vec::new());
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&ungranted), None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&ungranted), None, |_| None, &|| Ok(()))
             .expect("ungranted import is reported");
         assert!(matches!(result, ReusedFactoryBranchStart::Occupied { .. }), "{result:?}");
 
         let granted = identity(vec![pr_head]);
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&granted), None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&granted), None, |_| None, &|| Ok(()))
             .expect("granted import resumes");
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), tip);
@@ -785,7 +796,7 @@ mod reused_factory_branch_tests {
             ..Default::default()
         };
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "epic/train", Some(&identity), None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "epic/train", Some(&identity), None, |_| None, &|| Ok(()))
             .expect("a released-only lane starts");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -798,7 +809,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -817,7 +828,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None, &|| Ok(()))
             .expect_err("tracked changes must block reset");
 
     }
@@ -840,7 +851,7 @@ mod reused_factory_branch_tests {
 
         let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
-        })
+        }, &|| Ok(()))
         .expect("a parked tip moves instead of refusing");
 
         assert_eq!(
@@ -877,7 +888,7 @@ mod reused_factory_branch_tests {
 
         let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
-        })
+        }, &|| Ok(()))
         .expect("a parked tip moves instead of refusing");
         let ReusedFactoryBranchStart::MovedFromParked { delivery_branch, .. } = result else {
             panic!("moved from parked: {result:?}");
@@ -2598,13 +2609,44 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskStartRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.start_task_with_principal(req, None).await
+        self.start_task_and_relaunch_sandbox(req, None).await
     }
 
     pub(crate) async fn task_start_for_queue(
         &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal,
     ) -> Result<CallToolResult, McpError> {
-        self.start_task_with_principal(req, Some(principal)).await
+        self.start_task_and_relaunch_sandbox(req, Some(principal)).await
+    }
+
+    /// cas-f157: a sandboxed worker's launched profile grants only the tasks
+    /// it held at launch. A successful start of any other task relaunches the
+    /// worker through the recycle path; the relaunch regenerates the profile
+    /// for its current tasks and resumes this one.
+    async fn start_task_and_relaunch_sandbox(
+        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+    ) -> Result<CallToolResult, McpError> {
+        let worker = principal.as_ref().map(|principal| principal.agent().clone());
+        let task_id = req.id.clone();
+        let mut result = self.start_task_with_principal(req, principal).await?;
+        let worker = match worker {
+            Some(worker) => Some(worker),
+            None => self.get_agent_id().ok().and_then(|id| self.open_agent_store().ok()?.get(&id).ok()),
+        };
+        if result.is_error != Some(true)
+            && let Some(worker) = worker.filter(|worker| worker.role == cas_types::AgentRole::Worker)
+        {
+            let text = match crate::worker_sandbox_profile::relaunch_for_started_task(&self.cas_root, &worker, &task_id) {
+                Ok(false) => None,
+                Ok(true) => Some(format!(
+                    "\n\nSANDBOX RELAUNCH: this pane's OS sandbox was launched for other tasks, so Bash cannot write {task_id}'s artifact directory. Cassy is relaunching this worker with a profile for {task_id}; the task stays started and the relaunched pane is told to resume it. End your turn now and do not edit until the relaunch.")),
+                Err(error) => Some(format!(
+                    "\n\nSANDBOX RELAUNCH NOT QUEUED: {error}. Bash cannot write {task_id}'s artifact directory until this worker is relaunched; ask the supervisor to recycle it.")),
+            };
+            if let Some(text) = text {
+                result.content.push(rmcp::model::ContentBlock::text(text));
+            }
+        }
+        Ok(result)
     }
 
     // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
@@ -2665,6 +2707,15 @@ impl CasCore {
         let task_store = self.open_task_store()?;
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
+            // GH #1695: a close saved with its active verification dispatch
+            // resumes on the verdict without the worker; it is not WIP.
+            let handed_off = |id: &str| task_store.get(id).is_ok_and(|task| {
+                task.pending_verification
+                    && task.deliverables.no_delivery_close_intent.as_ref().is_some_and(|intent|
+                        cas_store::get_latest_verification_dispatch(&self.cas_root, id).ok().flatten()
+                            .is_some_and(|dispatch| dispatch.id == intent.dispatch_id && matches!(dispatch.state,
+                                cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)))
+            });
             let mut active = task_store.list(Some(TaskStatus::InProgress))
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
                 .into_iter().filter(|task| task.id != req.id
@@ -2675,6 +2726,7 @@ impl CasCore {
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
                 .into_iter().filter(|lease| lease.task_id != req.id)
                 .map(|lease| lease.task_id));
+            active.retain(|id| !handed_off(id));
             active.sort();
             active.dedup();
             // gate[G-08 start]: Single active WIP per worker
@@ -2774,6 +2826,7 @@ impl CasCore {
             && matches!(
                 crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
                 crate::factory_isolation::WorkerBinding::Sibling { .. }
+                    | crate::factory_isolation::WorkerBinding::Unowned
             )
         {
             let own = crate::factory_isolation::worker_task_branch(&worker.name, &task.id);
@@ -2964,6 +3017,22 @@ impl CasCore {
                         .get("clone_path")
                         .map(std::path::Path::new)
                         .unwrap_or(target_repo_root);
+                    // cas-22c6 (GH #2286): queued or direct, a start that
+                    // would move this checkout's branch or HEAD waits while a
+                    // detached run reads it or it holds uncommitted work
+                    // (G-165). A start that keeps the checkout as it is, such
+                    // as a same-branch resume, is never refused here. Every
+                    // move below runs before the task, lease or checkout
+                    // records change; artifact-only shared starts skip this
+                    // block (GH #2022).
+                    let admit_task = task.id.clone();
+                    let admit_switch = || -> Result<(), String> {
+                        if !worker.metadata.contains_key("clone_path") {
+                            return Ok(());
+                        }
+                        crate::worker_task_queue::admit_checkout_switch(&self.cas_root, &worker, &admit_task)
+                            .map_err(|error| error.message.into_owned())
+                    };
                     let (worker_repo_root, _) = super::repo_context::git_layout(worker_checkout)
                         .map_err(|error| {
                             Self::error(
@@ -3027,7 +3096,7 @@ impl CasCore {
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
                             worker_checkout, &worker.name, &task.id, target_branch,
-                            task.deliverables.factory_branch_start.is_none(),
+                            task.deliverables.factory_branch_start.is_none(), &admit_switch,
                         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                         Some(format!("\nTask start preserved {previous}; starting on {worker_branch}."))
                     } else if task.status == TaskStatus::Open {
@@ -3041,7 +3110,7 @@ impl CasCore {
                             .map(|parked| {
                                 let preserved = parked.branch.clone().unwrap_or_else(|| worker_branch.clone());
                                 worker_branch = checkout_task_beside_parked_delivery(
-                                    worker_checkout, &worker.name, &task.id, target_branch, false,
+                                    worker_checkout, &worker.name, &task.id, target_branch, false, &admit_switch,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                                 Ok::<_, McpError>(format!(
                                     "\n\n🔀 PARKED BRANCH PRESERVED: {} stays on {preserved} at {}. This task uses {worker_branch}.",
@@ -3095,7 +3164,7 @@ impl CasCore {
                         let owner_task = owner_task.to_string();
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
-                            worker_checkout, &worker.name, &task.id, target_branch, false,
+                            worker_checkout, &worker.name, &task.id, target_branch, false, &admit_switch,
                         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                         beside_note = Some(format!(
                             "\n\n🔀 TASK BRANCH CUT: {previous} stays {owner_task}'s delivery, unchanged. This task starts on {worker_branch} from `{target_branch}`."
@@ -3159,6 +3228,7 @@ impl CasCore {
                                 .filter(|parked| parked.task_id != task.id)
                                 .map(|parked| parked.task_id)
                             },
+                            &admit_switch,
                         ) {
                             Ok(ReusedFactoryBranchStart::Reset) => {
                                 reset_start_base = true;
@@ -3191,7 +3261,7 @@ impl CasCore {
                                 ))?;
                                 let tip = tip.trim();
                                 worker_branch = checkout_task_beside_parked_delivery(
-                                    worker_checkout, &worker.name, &task.id, target_branch, false,
+                                    worker_checkout, &worker.name, &task.id, target_branch, false, &admit_switch,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                                 Some(format!(
                                     "\n\n🔀 TASK BRANCH CUT: {lane} stays unchanged at tip {tip}. Unattributed work outside `{target_branch}` includes {commit}. This task starts on {worker_branch} from `{target_branch}`, so its PR does not wait for that work."
@@ -4082,6 +4152,12 @@ impl CasCore {
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
         let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
+        // cas-96a7: the predicted QA impact is reference context, not a
+        // start-only instruction (bisected: brief starts overflowed from train
+        // merge 818665b8ec, which added it here; 9abfce90a2 was green). It is saved and shown, but in a brief start
+        // it is clipped with the other context instead of pushing the close
+        // checks past the response budget.
+        let predicted_impact = format!("\n\n{}", qa_impact::predicted(self, &task));
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),
@@ -4103,7 +4179,7 @@ impl CasCore {
         ) && current != start.branch {
             source_readback.push_str(&format!(
                 "WARNING: checkout branch {current} differs from recorded source branch {}.\n\
-                 Recovery: ask the supervisor to use {prefix}task action=rebind_branch id={}; repeated start does not rebind.\n",
+                 Keep working on {current}: commit and push your delivery, then ask the supervisor to use {prefix}task action=rebind_branch id={} (a rebind needs that pushed task commit); repeated start does not rebind.\n",
                 start.branch, task.id,
                 prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
             ));
@@ -4151,7 +4227,7 @@ impl CasCore {
             let durable_recall = self.related_recall_context(
                 &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
             ).unwrap_or_default();
-            let context = format!("{peer_notes}{advisory}{durable_recall}{cited_issues}");
+            let context = format!("{peer_notes}{advisory}{predicted_impact}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
@@ -4213,7 +4289,8 @@ impl CasCore {
                     .map(|line| format!("Cited issue: {line}"))
                     .unwrap_or_default();
             let optional = format!(
-                "\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                "\n{}\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                clipping.excerpt(predicted_impact.trim_start(), 600),
                 clipping.excerpt(&related_context, 120),
                 task_scope(&task, &mut clipping),
                 task_show_notes(&task.notes, &task.id, &mut clipping),
@@ -4258,7 +4335,7 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
@@ -4277,6 +4354,7 @@ impl CasCore {
             sibling_notes_info.unwrap_or_default(),
             self.workflow_guidance(),
             start_guidance,
+            predicted_impact,
             push_note,
         )))
     }

@@ -7,6 +7,451 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.49.0] - 2026-11-23
+
+### Fixed — Focused proof for data, migration and fixture changes
+
+- **Package proof names the specs that read the change, and accepts their runs** — Was: a delivery that renamed a Prisma migration, edited a JSON catalogue or edited a test fixture widened to a package proof. The park then printed `worker-check -- jest <file>.sql|.json`, which the capped runner always refuses. Passing runs of the specs that read those files did not count. Now: the gate finds the test files in that package that read a changed input through a relative path: the JSON file itself, the fixture module, or the migrations directory. It prints one runnable `worker-check` command for exactly those specs and accepts their whole-file passes at the delivered tip as the package proof. The specs' passes count only when every changed input in the package is read by one of them; if any input is read by no spec, the package keeps its own proof requirement and the gate names the unread inputs. When no spec reads the input that way, the gate names a changed JavaScript file to run, or describes the run it needs, never a command that cannot run.
+
+### Fixed — Factory park
+
+- **A lane that changes hub-web source parks with its source proof alone** — Was: the pre-push drift gate made the lane commit the rebuilt `hub-web/dist` bundles, and park then demanded a widened related-tests receipt for each changed bundle, which run no tests and could never earn one, so the lane could neither push without them nor park with them (GH #2329). Now: generated `hub-web/dist` files owe no proof and never widen; the `hub-web/src` files they were built from keep their normal proof.
+
+### Fixed — Factory close proof
+
+- **Tests built only for another OS are proven on that OS** — Was: park asked
+  for five local capped passes of a changed `#[cfg(target_os = "linux")]` test
+  on a macOS worker (and of a macOS-only test on Linux), where the capped
+  runner selects no tests, so the delivery could never park (GH #2320). Now:
+  park reads the test's `target_os` gate, from the function, its modules or
+  its file. Lane CI's Rust test job passing at the delivered tip proves a test
+  that builds on Linux (a lint-only green does not), and a test for any other
+  OS needs five passes recorded on that OS, which park now reads from the
+  receipts synced on the task. The refusal says which, and never asks for a
+  local run.
+
+### Fixed — Rebound delivery branches
+
+- **Close checks name the rebound branch even before its first commit** — After a supervisor rebinds a task to a new lane (for example `factory/<worker>-<task>-r2`), the close checks printed at task start, the publication check and every other close gate now measure that lane, even while it is still empty. Before, an empty rebound lane fell back to the old per-task branch that still held the earlier build (GH #1698).
+
+### Fixed — Factory
+
+- **New worker names can't take another worker's branches** — Was: spawn checked only the store on its own machine, so a custom name such as `swift` could be picked while origin already held `factory/swift-falcon-7`, and the name generator could hand out a name that registration then refused. Overflow minion names such as `kevin-2` also overlapped `kevin`. Now: spawn refuses a name that would share a `factory/` namespace with a registered worker or an existing local or origin branch (`WORKER_NAME_OVERLAPS`), and the generators skip such names. A name's own task branches never block it. Overflow minion names read `kevin2`. `cas factory` checks the final initial names, including `--worker-spec` names, and the daemon's fallback generation skips overlapping names. Workers added later from the GUI or WebSocket are checked the same way before they are bound or launched: a supplied overlapping name is refused and a generated one is redrawn. An unreadable name registry stops the launch or spawn.
+- **`cas doctor` reports overlapping worker names** — Was: an overlap that slipped in from another machine or an older store went unnoticed. Now: a `worker names` row lists each one with the way back. It reports only and changes nothing.
+- **Branch owners are named the same way everywhere** — Was: the SessionStart warning stayed quiet on another worker's `factory/` branch, a CI-retry wake named the raw branch remainder as the worker, and branch-only merges inferred only `cas-` task ids. Now: all three use the shared ownership rule. The warning fires on any factory branch that isn't yours, the wake names the registered owner (or says `unregistered`), and any task prefix is inferred.
+
+## [4.48.0] - 2026-11-23
+
+### Fixed — Message delivery honesty (GH #1731)
+
+- **Mail survives a worker recycle** — A message whose delivery failed while its worker was between recycle shutdown and relaunch was abandoned, so the successor started its task without the brief. The message now stays queued for the successor. A message to a worker with no successor coming is still abandoned, and the supervisor is told.
+- **A late lifecycle event names its known cause** — An event queued long after it happened, such as a `task_started` queued 15 minutes late, was labelled "cause unrecorded". The label now says how late it was queued and explains only the time it then waited in the queue.
+- **No idle notice about a task the worker just received** — An idle notice detected on one task was delivered after the worker got its next assignment, and named the new task. That notice is now withdrawn. A merge-required alert for a task that is still parked is kept, and still names that parked task.
+- **Senders learn when a peer has not received their message** — Cassy Cloud's "queued" receipt read as sent, even while the peer had not received the message for ten minutes. Two minutes after Cloud accepts a supervisor's peer message, Cassy checks its delivery status once, and alerts the sender if the peer still has not received it.
+
+### Fixed — Director CI notices
+
+- **No repeated "CI unknown" decision when no workflow runs on factory pushes** — In a repository whose GitHub Actions workflows trigger only on pull requests (or whose push filters exclude the factory branch), a parked delivery can never get a CI run. The director now reads the workflow triggers at the delivery tip and no longer asks the supervisor for a "CI unknown" decision on each delivery. A workflow that should run on the push still raises the bounded alert, which clears once CI posts (GH #2273).
+- **"CI unknown" decisions say what CI the director read** — The director's 10-minute "CI unknown" merge decision now names the exact GitHub check-runs query for the delivery tip and why it was not settled, for example test checks that were skipped or a tip where only a deployment preview reported. Supervisors no longer have to re-query GitHub to learn why the director disagrees with a pull request's checks (GH #2051).
+
+### Added — Task close
+
+- **Operator recovery decisions for contained historical deliveries** — a
+  delivery already on its target with no reusable pre-merge verdict could not
+  close, and when a later target commit had superseded one of its paths, the
+  `reviewed-drop:` reason and the missing-approval check each refused the
+  other (GH #2270). The operator now runs one command per epic,
+  `cas task recovery-decision --scope <epic-id> --note "..."`. It prints and
+  records the checks it waives: G-56 reviewed drop (the named commits must
+  still cover every dropped path), G-64 independent QA and G-70 missing
+  approval. A live supervisor then closes each contained delivery with
+  `operator_decision=<id>` and `commit_receipt=<containment commit>`, without
+  `supervisor_override`. G-164 refuses an unknown decision, a decision for
+  another epic, a combined `supervisor_override` and a delivery the decision
+  cannot close. Tier 2 deliveries, and deliveries whose tier cannot be
+  measured, keep every check. Agents cannot run the command or write its
+  record.
+
+### Fixed — MCP task recovery
+
+- **Accurate slow task responses** — A committed task start now reports accepted assignment and points to saved start context, while close responses retain their close outcome. Slow read-only task calls return explicit pagination guidance and an executable bounded request instead of a bare deadline error.
+
+### Fixed — Factory
+
+- **Sessionless supervisor messages retain compatibility** — The snapshot resolver now applies the existing legacy supervisor lookup when no factory session is supplied. Named sessions keep their liveness, ambiguity and isolation checks.
+- **Worker checks run the gate registry scan when a delivery touches what it audits** — Was:
+  a delivery that changed a refusal, a tool error result, a gate tag or a
+  bypass-style Boolean could park green on its own tests, then go red in lane
+  CI on `gates::registry_tests`. Now: the capped worker check asks the
+  registry scan's own inventory whether the delivery's changed lines fall in
+  an audited item, and adds `gates::registry_tests` to its guarded run only
+  then. Test-only code, ordinary errors and plain constants run no extra test.
+- **Directed message batches arrive as one turn** — A batch of messages to the supervisor that is waiting for its last delivery claim now keeps all of its messages. Before this fix, a queue refresh could send one of those messages early as its own turn, and the supervisor was woken twice for one batch.
+- **Train notices reach only the train's owner** — Was: a supervisor that did not own a release train still got its cut-ready and post-merge close recovery notices, with the owner refusal quoted in the body, even after it cleared its epic focus. Now: only the owning supervisor is notified, and a supervisor on another machine that does not own the train gets nothing.
+- **Slow close progress** — Task closes that outlive the MCP response budget return normal progress with a durable continuation ID. Read the task for the matching final outcome without retrying the close; checked parks remain awaiting merge.
+- **First-prompt startup failures surface** — A registered Claude worker that never takes its first prompt now fails after the five-minute startup grace and sends a task-bound recovery notice. Launch-bound transcript activity keeps a progressing worker alive; task bindings are released only after confirmed PTY teardown.
+- **Evidence summaries stay small** — Park publication records counts, a short sample and a report path instead of listing every file in synced task notes. Large evidence manifests travel as verified artifacts, and dependency trees such as node_modules are excluded from automatic evidence scans.
+- **Reconnected MCP versions stay known** — Was: when an MCP server started while other factory processes were writing, its startup version record could be lost. `worker_status` then showed the server's version as unknown, a heartbeat did not fix it, and Commander's Reload Cassy refused because no live PID and version were available. This was seen after `/mcp reconnect` (GH #2183). Now: the record waits for the other writer instead of being dropped, so the reconnected server's PID and version are reported.
+- **Cancelled work releases the next task** — Starting assigned work and repairing worker queues reconcile stale leases for cancelled or closed tasks. Unfinished work still enforces one task at a time, so recovery never asks a worker to block an already terminal task.
+- **Check replacement launch targets before queueing** — `spawn_workers branch=` now compares the requested branch with the task's effective target and reports a disagreement before work is queued. Persist a target correction through `task update target_branch=`; brief prose does not change delivery authority.
+- **Divergent target migrations preserve the start boundary** — Updating an unparked task with an untouched source to a target that excludes its recorded base now refuses before saving. Recovery starts an Open task before explicit supervisor target correction and branch rebinding. Nonempty or rewritten deliveries retain their existing recovery; dirty and foreign work stay protected.
+- **Brief task start shows the close checks again** — Was: the predicted QA
+  impact table was added to the start-only advisories, so a brief `task
+  action=start` often went over its response budget and replaced the close
+  checks with a pointer to the saved notes. Now: the prediction is reference
+  context. It is still saved with the start notes and shown in a full start,
+  but in a brief start it is clipped with the other context, and the close
+  checks stay inline. The response budget is unchanged.
+- **H-09 names the supported form for dependency logging, and refuses store reads through a variable** — Was:
+  a worker that changed into a directory Cassy could not resolve, then ran
+  `pnpm audit` or a background `pnpm install` logging to an artifacts
+  variable, got a bare operator-credential refusal with no way forward;
+  and a credential store read through a variable set in the same command
+  was allowed. Now: that refusal says to `cd` to the literal project
+  directory first, which is allowed; the operand spelling is still judged
+  exactly as before, and a value a variable is set to can only add a
+  refusal, so a store read through it is refused.
+- **A dead supervisor's unfinished train-merge queue no longer blocks the new train owner** — Was: after a train changed owners, the ended supervisor's held queue refused the new live owner's `train_merge` with an owner-generation error and held single merges behind it until the state file was edited by hand. Now: once the queue's recorded supervisor is no longer live, the current train owner adopts the queue, settles entries already merged and continues; a live prior owner still holds it.
+- **Same-tip re-park receipt** — A fully checked close retry at an unchanged durable park now reports COMMITTED while its follow-up continues, without creating a new delivery cycle.
+- **Completed close shutdown** — Close continuations release their worker ownership lock before signaling idle, so a finished close no longer briefly refuses worker shutdown.
+- **Blocked supplemental work resumes with its proof intact** — Worker recovery guidance now resumes approved work directly with task start instead of first setting the task Open, which an existing delivery proof rejects. Supplemental findings remain in notes; changes to reviewed scope still require supervisor recovery.
+- **Vitest table rows that share a name prove their test** — An `it.each` test whose rows expand to the same name used to fail capped stability, even when every row passed. This covers `%s` rows with a repeated first column and static titles. Worker-check and park now credit the source test when every row passes. A failing row, a test with no rows, or any difference from the rows the source table expands to (a row missing even when a same-named sibling still passes, or one row standing in for another) is still refused. Vitest's expanded names are derived from the source for static, `%s` and `$key` titles over literal tables; a table or title that cannot be expanded exactly is refused with advice to prove the whole spec.
+- **Supervisor routing explains unavailable owners** — Worker messages use the same registry snapshot for owner selection and diagnostics. Expired or ambiguous owners receive precise failure data, and stale session metadata cannot route a message into another factory.
+- **Branch refusals stop naming workers that don't exist** — Was: on a branch like `factory/<you>-staging`, the commit guard said the checkout belonged to a worker called `<you>-staging`. Now: it says the branch isn't yours and that no registered worker owns it. Other workers are named only when they are actually registered. In your own checkout, whether the branch is unowned or a registered worker's, the refusal also lists the commands the guard allows: save your staged and unstaged edits to a patch, clean the tree, switch back to your own branch, and reapply the edits if you want them.
+- **Takeovers adopt the right delivery** — Was: `transfer adopt_branch` refused a receiver sitting on any of the task's branches except the first one found. It also refused a receiver at a newer train tip with no work of its own, and after a review return it could adopt the train base instead of the delivery. Now: those three cases adopt the delivery tip, and never anything past it.
+- **Commit and push hooks read task branches the same way as the guard** — Was: the Git hooks accepted suffixes such as `cas--x` that the in-app guard refused. Now: both apply the same rule.
+- **Worker names can't overlap** — Was: registering `ab` and `ab-owner` let both workers claim `factory/ab-owner-cas-1234`. Now: registration and renames refuse a worker name that extends another worker's name across a hyphen, with any suffix (`WORKER_NAME_OVERLAPS`). Supervisors are exempt, so `ab-supervisor` beside worker `ab` still registers. Names without a hyphen boundary, such as `eager-panda-2` and `eager-panda-27`, are both allowed.
+- **Finding journey refusals carry a gate code** — Task updates rejecting undeclared main journeys now emit `G-161` for registry attribution. The existing rejection rule and structured error data are preserved.
+
+### Fixed — Messages to a busy recipient
+
+- **A message parked behind a busy recipient surfaces at its next tool call** — A worker's blocker sent to a supervisor in the middle of a tool call could sit gated for minutes with no wake attempt. Each daemon re-offer briefly claims the message. A tool call that finished inside that window found nothing, and Cassy then skipped the inbox at every later tool call until other mail arrived. Releasing the claim now re-signals the recipient's inbox, so the next tool call shows the message.
+
+### Fixed — Factory daemon
+
+- **CI watch no longer holds the store writer for seconds on a large project** — Was: each CI poll read every task, closed ones included, while holding the daemon's single store writer, up to 5.9 s on a 7,000-task project, and every other daemon write waited behind it. Now: it reads only open, in-progress, blocked and awaiting-merge tasks (271 of 6,986 on the same project), the only ones a merge-timeout escalation can concern.
+- **Message selection no longer takes a second store-writer turn on every pass while Commander is connected** — Was: each selection pass took the store writer a second time to read operator replies and adopt notices, opening two stores and running their schema checks, even when nothing was waiting. Now: it looks first on its own thread and takes that second turn only when a reply or notice is pending.
+
+### Fixed — Cloud task sync
+
+- **Peer closes unblock dependencies** — A receipted close for the same approved and merged delivery now reaches a peer's dependency checks even after that peer appended a newer note. The completion projection preserves newer local body and notes; later body refreshes keep their configured conflict policy. Open work, changed delivery scope, explicit rework, foreign task IDs and a LocalWins policy continue to hold dependencies.
+- **Corrective parks acknowledge owner review** — After request_changes, a builder's re-park can reach an owner whose later bookkeeping left its replica Open. Reconciliation requires the owner's exact latest review decision followed by the builder's canonical park for the same execution and delivery cycle. Unacknowledged review, ordinary Open tasks and changed delivery bindings remain held.
+- **Peer parks reach the train owner** — A completed park for the same assigned execution now reaches the train owner's merge checks even after the owner appended a newer note. The imported branch and anchor remain subject to owner review and exact pushed-tip checks. Explicit rework, changed execution bindings, foreign task identity and LocalWins remain protected.
+
+### Fixed — Factory task queue
+
+- **A task start waits instead of switching a busy checkout** — Was: when a
+  worker parked or released a task, the queue started its next task at once
+  and switched the worker's checkout to the new branch, even while a detached
+  proof run (a journey or capped test run) was still reading the old tip, so
+  that run's receipt was refused; a direct start did the same. Now: a start
+  that would actually move the worker's checkout (a branch switch or cut, or
+  a reset of a reused lane), queued or direct, waits while the worker has a
+  live detached run or uncommitted changes, with code G-165. A start that
+  leaves the checkout as it is, such as resuming a task on its own branch,
+  is not held. A queued start proceeds on a later queue pass once the
+  checkout is clear.
+- **Journey runs, pre-push rows and foreground checks hold the checkout too** — Was: only a backgrounded (`&`) capped check recorded a run, so a start could
+  still switch the checkout under `scripts/journey-eval.sh` (the GH #2286
+  incident), the worker pre-push fast rows, or a capped check started in the
+  foreground or by a harness background call. Now: each records a run bound
+  to its own process for its whole life and ends it on every exit, including
+  failures, HUP, INT and TERM; a killed run stops holding the checkout when its
+  process dies. These runs send no completion notice, since the caller is
+  already watching them. Outside a factory worker the scripts are unchanged.
+
+### Fixed — Factory tests
+
+- **macOS test fixtures use physical temp paths** — on macOS, `/tmp` and
+  `/var` are symlinks to `/private/...`. Four
+  `factory_mcp_ops_test::test_gc_*` tests rooted their project or HOME at the
+  raw temporary path, which host retention correctly refuses as a symlinked
+  ancestor. Three `receipt_scope` related-test fixtures compared the fake
+  runner's resolved paths with raw ones. These seven tests failed only on
+  Macs. The fixtures now canonicalize their temporary roots, as
+  `TestEnvGuard::temp_home` already does.
+
+### Fixed — Violet replies
+
+- **A mention wake names the thread it came from** — A Violet mention wake on a managed thread now carries the thread's `resource_id` and the claim ref to run first, and names `factory action=reply_intent` with those ids and the wake's `occurrence_id`. Before, it gave only `delivery_id` and `occurrence_id` and pointed to `coordination reply_intent`, which does not exist, so supervisors passed `delivery_id` as the resource and got `unknown_resource` (GH #2242).
+
+### Fixed — Factory close proof
+
+- **Documentation-only commits keep test proof** — A commit that adds only the changelog, product-overview and bug-family fragments that close asks for now keeps the earlier five-pass stability and widened package or crate receipts for Rust, Jest, Vitest and Playwright, including `.each` tests. A bug-family YAML no longer invalidates proof because of its file extension. Changed source, test or build inputs still require a fresh run, and a failed rerun withdraws the carried widened receipt.
+- **Merging the released trunk no longer adds other tests to a task's proof** — When a worker on an epic lane is told to merge `main`, close no longer counts the released commits that the merge brings in as the task's own work. Those commits often have no task reference. The task now owes five-pass stability only for the tests it changed itself, before or after the sync.
+
+### Fixed — Factory worker checks
+
+- **Playwright specs run under the config that lists them** — When a directory holds several Playwright configs, the capped stability run and the command park prescribes now use the config that lists the changed spec, such as `playwright.hermetic.config.ts` or `playwright.real-hub.config.ts`. Before, they used the default config, which found no tests, so the spec could never earn its five-pass proof. A `--config` the caller passes still wins, and a run that executes no tests is still not proof (GH #2195).
+- **Journeys that import a shared fixture are prescribed Playwright** — A Playwright spec that imports `test` from a local fixture such as `./journey`, rather than from `@playwright/test`, sat beside a Vitest config, so park prescribed a Vitest run that could never pass it. Now the Playwright config that lists the spec decides, and a plain unit test in the same package still gets Vitest (GH #2294).
+- **Widened JavaScript receipts count the runner's passing tests** — A widened Jest or Vitest proof counted distinct test names, so tests sharing a name in one file were counted once and the receipt disagreed with the runner (2955 against Jest's 2957 passed). The receipt now records the passing results the runner reported and labels them as passed tests. Skipped tests stay out of the count (GH #2246, #2166).
+
+### Added — Factory
+
+- **Claude workers run in the OS sandbox on macOS** — Was: a worker's shell
+  writes were limited only by hooks that parse command text, and confirmed
+  bypasses kept getting through them. Now:
+  - Claude workers on macOS start with a generated sandbox profile that limits
+    Bash writes to the worktree, the artifact and scratch roots, the operator's
+    write roots and the capped runner's state.
+  - Git paths are exact: commits, `factory/*` branches and fetch work, while the
+    shared `.git` config, hooks, worktree config, other branches and secret
+    files stay read-only.
+  - For one release, the text guards the sandbox replaces (H-11, H-12, H-14,
+    H-16, H-22, H-28, H-29, H-33) let sandboxed Bash calls through and count a
+    would-deny, shown in a new `shadowed` column of `cas gates report`.
+  - Write and Edit, Linux workers and supervisors keep the guards.
+  - `factory.claude.worker_sandbox=off` restores the old launch.
+
+### Fixed — Train merge
+
+- **A long train no longer stalls at its first delivery** — The daemon used to start the reviews for every later delivery before it took the head's own step. On a train of 40 or more deliveries that took longer than its two-minute advancement lease, so each pass lost the lease before reaching the head, and the train never advanced. The head now takes its step first. Later reviews start afterwards, renewing the lease before each one, and they stop as soon as the lease is lost (GH #2311).
+
+### Fixed — Cloud sync
+
+- **A stale quarantine entry no longer hides a later local task from sync** — Was: a quarantine entry whose short task id was later reused by a task this project created made every pull skip that task's peer updates and deleted its queued pushes, so a peer's park stayed Open on the train owner's machine. Now: an entry older than a local task stamped with this project is ignored by pull, push and the board, while rows that existed when they were quarantined stay quarantined.
+- **A parked delivery rejected by a newer cloud revision now reaches the cloud after one pull** — Was: when a team task push was rejected with a revision conflict and the cloud row held an older Open state than the local park or close, the pull kept the local row but parked the queued push for good, so the cloud revision was never adopted and every retry was rejected again. Now: that same pull adopts the cloud revision and rebuilds the queued push from the local row, so the next push is accepted.
+
+### Fixed — Commander
+
+- **A second Send made while the first is still being held is held too** — Was: during a network outage, a Send made right after another one was silently dropped and its text stayed in the composer, so only the first message was kept (GH #2321). Now: the second Send waits its turn behind the first, and both are held and delivered once, in order, when the network recovers.
+- **Read messages stay out of later pane turns** — Before using a prepared transport claim, the relay checks whether an inbox poll or explicit acknowledgement already handled that message. A successor no longer types the same Commander message after reading it through the inbox. Unread messages retain their delivery path and original confirmation provenance.
+
+### Fixed — Named journey startup
+
+- **Memory admission precedes server startup** — Named and responsive Playwright journeys prepare their source-bound snapshot before the webServer startup deadline begins. Refused memory admission exits with code 75 and a typed NOT_STARTED outcome. Ready and prebuilt snapshots still use normal source/hash verification; fixture and registered-hub runs keep their own servers and timeouts.
+
+### Fixed — Director and watchdog notices
+
+- **Task-scoped watchdog notices retire once their task is closed** — A watchdog notice about a specific task, such as the recovery notice for a merged delivery, now carries that task in its header. The supervisor's inbox drops it as stale when the task is already closed or cancelled, instead of asking for recovery on finished work minutes later (GH #2201, GH #1832).
+- **No stall alarm while a worker waits on its own reminder** — A worker whose task is in progress and who has armed its own reminder for that task is treated as waiting, not stalled. The director no longer nudges it or tells the supervisor to recover it every ten minutes. If the worker is still quiet after the reminder fires, the usual stall nudge and escalation resume (GH #1728).
+- **Routine capacity waits no longer page the supervisor** — When a capped build or test is refused for builder slots, memory pressure or disk headroom, Cassy records a capacity wait with a scheduled retry. The director now treats that worker as waiting rather than idle, so each refused attempt no longer sends a "detached job exited … message or reassign" notice. Real check failures still notify as before, and long waits keep their own escalation (GH #2132).
+- **No repeated idle notices while a worker is being recycled** — After the supervisor runs `clear_context` (or any respawn) on a worker, the director no longer re-sends that worker's idle or "pending delivery" notice every minute while the replacement starts. Notices resume normally once the new worker has registered (GH #1693).
+
+### Fixed — Task QA context
+
+- **Read metadata from the assigned checkout** — Task prediction and finding main-journey validation now use the task's registered worker checkout after checking its Git repository against the work target. Task show presents fresh QA impact separately from saved history, and start refreshes its impact context; a stale primary checkout no longer hides tracked worker registries or product context.
+
+### Fixed — Factory test reliability
+
+- **Remove two flaky delivery merge tests** — Deleted the task-ID target-resolution and unrelated-union-parameter tests after unrelated-lane failures. Production merge behavior and the remaining delivery-target tests are unchanged.
+- **Remove flaky SQLite latency test** — Deleted only `a_task_sync_mutation_under_a_foreign_sqlite_write_lock_stays_in_budget` after its recorded failure in run 44970901886 and success in run 44957653373 at the same `64ad9d1a5c` commit. Shared helpers, the remaining latency tests and production code are unchanged.
+- **Remove flaky Codex spawn coverage** — Deleted the startup-prompt/readiness-row spawn test after unrelated-lane failures. Production spawn behavior, shared helpers and the remaining epic-worker tests are unchanged.
+
+### Fixed — Delivery content proof
+
+- **Same-tree merge anchors retain their content history** — Close now recovers the task's ancestor content when both parents of an integrated parked merge have its exact tree. The proof uses their common base and retains task ownership, time and content checks, so missing, reverted or foreign delivery content still refuses.
+- **Content proof without a work window no longer claims unnamed commits** — Was:
+  after the same-tree merge recovery change, a content check run with no work
+  window recovered snapshot ranges under an epoch creation floor, so an
+  unnamed commit behind a clean sync merge counted as task delivery. Now: the
+  snapshot recovery runs only with a real work window; without one the
+  ordinary task range is used, as before.
+
+### Fixed — Factory recovery
+
+- **Separate branch push distance from global publication** — Retained-worktree reports now show commits ahead of the worker branch's own remote separately from commits on no remote. Missing tracking refs and failed probes are explicit; work published on the train stays visible when the worker's own remote still lags. Repositories without remotes label their local-target distance separately.
+
+### Fixed — Worker lifecycle
+
+- **Merged receipts owe no worker close** — Approved delivery PR merge notices are now quiet receipts instead of instructions to re-close a parked task. Merge/verdict finalization retains ownership; missing approval and delayed completion still route to the delivery's supervisor.
+
+### Fixed — Bug reports
+
+- **Component reports survive downstream refusals** — A product task containing a Cassy refusal no longer suppresses filing in `issues.components.cassy`. Existing component issues and component-owned tasks still receive the report as evidence.
+
+### Fixed — Web base attribution on macOS
+
+- **Base attribution maps Playwright failures under symlinked temp roots** — On macOS, `/var` points to `/private/var`, and the base replay crashed with a doubled `/private/private` path. Failing tests now resolve to the base or the delivery. Before this fix, unrelated failures could not be attributed and parks needed manual triage.
+
+### Fixed — Jest and Vitest rows that share a runtime title
+
+- **Table rows with the same expanded name are proved and counted** — Distinct `it.each` rows, or repeated static titles, that produce one runtime name used to fail capped stability, because their passing results were counted together against a single expected pass. Capped Jest and Vitest now accept them when every row passes. Their receipts count the rows that ran, not the distinct names, so the totals match the runner's own output.
+- **The package-proof command names a file worker-check accepts** — When a test helper widened stability proof to its whole package, the refusal could name a changed non-JavaScript file (such as a Prisma schema) in its suggested command, which worker-check then refused. It now names the JavaScript input that widened, so the printed command runs and its pass satisfies park.
+
+### Fixed — Delivery verification
+
+- **Batch QA local-delivery review coverage** — Regression checks now cover the required review before local delivery integration, approved and rejected continuations, and retries that reuse the existing verdict.
+
+### Fixed — Merge publication
+
+- **Delivery merges retain unrelated unpublished target work** — Merging a
+  delivery refuses unrelated unpublished target history before publishing its
+  commits. The refusal lists local-only commit identities and the fetched
+  target; source and target work remain preserved. Equal and behind targets
+  retain their ordinary merge path, and transactional publication shares the
+  fresh-target fence. The delivery's own commits and integration merge remain
+  eligible; typed receipt failures and detached review validation run before
+  publication checks.
+
+### Fixed — Deliverables
+
+- **CSS-mapped brands carry every report role the close gate requires** — Was:
+  a DESIGN.md whose CSS `maps` named a muted-text role but no evidence role
+  branded and finalized a customer report, then the report close refused it
+  for a missing `--evidence`. Now: the CSS-map brand path fills each missing
+  report role from the project's own semantic alias, exactly as the
+  design-spec value-key path does, so brand, finalize and the close gate
+  agree. Roles the DESIGN.md maps explicitly still win. A customer brand whose
+  maps leave a required role with no declaration or alias is refused by
+  `brand` and `finalize` with `brand-roles-unresolved`, instead of later at close.
+
+### Fixed — Factory test proof
+
+- **Playwright setup projects no longer block stability proof** — With the standard pattern of a journeys project that depends on a setup project, the capped Playwright runner now accepts setup tests that ran once, as Playwright schedules them, beside the five repeats of each changed journey. A failing setup test still fails the run. A changed setup test still needs five passes of its own, and the refusal names the capped command that runs its file.
+
+### Fixed — Commander journeys
+
+- **Playwright 1.65.1 and role-based HUB-J27 controls** — the Commander
+  journey suite now runs on `@playwright/test` 1.65.1; CI installs the
+  matching Chromium from the lockfile. The supervisor-commands journey finds
+  its composer, Send button, command palette and command buttons by role and
+  accessible name instead of IDs and data attributes.
+- **The slash-command palette updates when the conversation connects** — a
+  command typed while Commander was still connecting to the supervisor showed
+  "Commands work once the conversation is connected" until the text changed;
+  it now lists the matching commands as soon as the conversation is live.
+
+### Fixed — Task reads
+
+- **Reject unsupported list offsets** — Task list previously accepted `offset` and repeated the first page. It now returns `INVALID_PARAMS` with guidance to use filters or a larger limit. Show, get and notes retain their lossless byte cursors.
+
+### Fixed — Lane CI and worker proof
+
+- **Lane impact plans name a test command workers can actually run** — The plan's own-test expression uses regex and `or`, which the capped worker runner correctly refuses. The plan now also logs a `Worker proof` line with one accepted named-filter `worker-check` command per package and test harness, covering each own-test part. Parts that no named filter can express, such as a whole crate, are listed as `lane CI only`. Pre-merge verifiers accept receipts for those commands instead of asking for a receipt of the literal CI expression. The worker runner's filter rules are unchanged.
+
+### Fixed — Verification
+
+- **A provider safety refusal is an infrastructure error, not a lost review** — Was:
+  when the Codex provider's safety filter refused to review a delivery (for
+  example a credential-read guard), the verifier exited 1 and the dispatch
+  was released with no review and no classification. Now: the refusal is
+  recorded on that exact dispatch as an infrastructure ERROR, never a code
+  verdict, with the refused output kept on disk, and the supervisor gets one
+  notice with the exact-dispatch direct-verdict route. Ordinary code
+  rejections and authentication failures keep their existing handling.
+- **Peer parent plans reach child verifiers** — Child review now retrieves cited parent plan artifacts in the receiver's parent-task evidence directory before preparing the verifier. The authenticated project and task scope, revocation and file integrity are checked; unavailable references hold the review. Referenced parent proof also binds the candidate context.
+
+### Fixed — Progress watchdog and external reviews
+
+- **A parked delivery held for an external review no longer escalates to the operator** — A supervisor can hold one parked delivery with `task action=update state_patch={"merge_hold":{"owner":…,"reason":…,"until":…}}`. Until that deadline, the progress watchdog neither wakes the supervisor nor pages the operator for that delivery. Cassy records who set the hold and the parked commit, and adds the owner and reason to the task notes. The hold lapses at its deadline, which must be within 7 days, or when the delivery is re-parked at another commit; the watchdog then chases the delivery again. Before this fix, a delivery waiting overnight on a human GitHub review woke the supervisor every 45 minutes and moved toward an operator page. A decision note saying so did not stop it.
+
+### Fixed — Task transfer
+
+- **Remote receivers name their machine** — Transfers to a receiver registered on another machine now name that machine and direct its supervisor to perform the transfer. Peer discovery supplies the same guidance when the worker appears only in the scoped Cloud roster. Refusal preserves the current assignment, lease and checkout.
+
+### Fixed — Catalogue-driven Jest specs are no longer partly proved
+
+- **A changed JSON catalogue widens its spec to a whole-file run** — When a delivery changes a JSON file that a spec imports by relative path, the capped runner no longer selects only the spec's changed literal tests and reports a full pass. The tests generated from the catalogue have no changed source line, so the run widens to the whole spec, and park asks for that same whole-spec proof.
+- **A catalogue-only change still owes proof** — A delivery that changes only the JSON catalogue, and not the spec, now makes park ask for a whole-spec run of every test file that imports it.
+- **Switching a spec to another catalogue widens too** — A spec whose import moves from one existing JSON catalogue to another generates different tests without any JSON in the diff; it now widens to a whole-spec run instead of proving only its changed literal tests.
+
+### Fixed — Lane CI
+
+- **Journey-only changes no longer run the whole Rust suite** — A lane whose diff only touches Commander e2e files (journey specs, helpers or the hub double under `hub-web/e2e/`) no longer counts as an unknown input that selects the full Rust workspace. Those paths now select only Rust tests that name them, which is usually none; the lane's journey job still runs the affected journeys. A diff that also changes Rust keeps its Rust selection.
+
+### Fixed — Releases
+
+- **Recognize lane CI that finishes after a docs merge** — Release cuts now accept successful checks at an Advisory delivery's exact anchor, including Docs Lint with classified code-job skips. Pending, failed, missing, or different-anchor checks still hold the delivery; reopening and merging it again is unnecessary.
+
+### Fixed — Skills
+
+- **`skill action=show` serves the caller worktree's skill** — Was: in a
+  worker worktree with a newer `.claude/skills/<name>/SKILL.md`, `skill
+  action=show` returned the database copy or the main checkout's older body.
+  Now: the caller's own checkout is read first, then the database, the main
+  checkout and the builtin catalog, so a worker sees the skill it is editing.
+
+### Fixed — Honest delay labels on late lifecycle messages
+
+- **A hold recorded late no longer explains the whole delay** — A delayed lifecycle message used to name its last recorded hold as the cause of the entire delay, even when the hold began seconds before delivery. One 90-minute store-writer stall was reported as an "active composer" hold this way. Queue rows now record when their first hold began. When it began well after the message was queued, the label says how long the earlier wait went unrecorded.
+
+### Fixed — Delivery recovery
+
+- **Recover a held replacement delivery** — A supervisor can rebind a Blocked task to a fresh task branch after a proof-scope retarget, or after commit capture before its first successful park. Historical branch receipts remain audited; active reviews and parked deliveries still prevent replacement.
+
+### Fixed — CI
+
+- **Attribute merged train failures to the contained target** — Lane attribution now uses the merge-base with the live target, so failures brought in by a train merge are identified as inherited. A valid recorded start base remains a fallback when the target cannot be resolved; delivery-caused failures stay red.
+
+### Fixed — Commander test reliability
+
+- **Remove flaky project navigation journey case** — Deleted the HUB-J14 multi-machine navigation case containing the intermittent Idle-dot assertion after `hub.up("atlas")`. The journey failed at `74f6684dc7` and passed on rerun at `f12f32b35e` in cas-81e3; the remaining cases and product code are unchanged.
+
+### Fixed — Factory reminders
+
+- **Reminders survive ordinary database contention** — A reminder requested while another factory process briefly holds the database write lock now waits and retries within a bounded budget instead of failing with "database is locked". The reminder is stored exactly once; a lock held through the whole budget still refuses clearly and stores nothing.
+
+### Fixed — Delivery safety
+
+- **Merge only pushed, parked worker deliveries** — Push-branch tasks must finish parking before a merge can integrate their source. Clean workers use the same live origin check as retired or dirty workers, so an unpushed local rebase cannot publish with only a warning. Approved completion receipts require the same live source proof before integration. Local-merge delivery and already-published integration receipts retain their recovery paths.
+
+### Fixed — CI attribution
+
+- **Replay delivery tests before the base build** — Lane failure attribution now reruns the recorded original archive or build arguments, filter and shard before building the base into the shared target directory. Base dependencies can no longer hide a deterministic delivery regression during the head replay. Missing replay metadata and empty replays remain unresolved; identical-invocation flakes remain unattributed and keep the lane red.
+
+### Fixed — Merge queue
+
+- **Each failed merge-candidate retry reports its failure** — When preparing a merge candidate failed and you retried the merge, the retry said preparation "continues in the background", but its failure notice was dropped as a duplicate of the first one, so the merge stayed held with no further word. Now each failed attempt sends its own failure notice (GH #2106).
+
+### Fixed — Factory messaging
+
+- **Timed-out sends can be reconciled without resending** — A `coordination action=message` that is still writing when the response deadline passes now answers `IN_PROGRESS` with a `send-…` continuation id instead of a bare `UNKNOWN` with no identifier. The send keeps running rather than being cancelled mid-write. `coordination action=message_status id=<continuation id>` reports whether it is still running, committed (with its notification id or peer-outbox reference), refused without writing, or unknown, and its final outcome also arrives in the sender's inbox, so the sender never has to guess and resend. A send is called safe to resend only when it returned a refusal before any write: every message write (local queue, external inbox, and the peer outbox behind every Cloud peer send) records its commit, and a peer row the daemon will still retry counts as sent even when its first Cloud attempt failed.
+
+### Fixed — Revalidating an already-landed task
+
+- **Revalidation closes without a new delivery** — After a supervisor reopens a task whose delivery already landed, a worker that only revalidates it can close with `no_delivery=true`. The close is still refused if any retained commit is missing from the target, or if the new cycle added commits that name the task. Verification still applies (GH #1695).
+- **The worker's queue keeps moving** — While that close waits for its verdict, the worker can start their next queued task. Cassy resumes the close on the verdict without the worker.
+
+### Fixed — Close gate
+
+- **Five-pass proof survives the close gate's own doc fragments** — Was: adding
+  the changelog, product-overview or bug-family fragment that park asks for
+  voided an earlier five-pass Rust receipt, because any `.yaml` counted as a
+  test input. Now: those fragments carry the proof unless a Rust source names
+  them. A stability refusal also names the earlier proof and the changed inputs
+  (or broken ancestry) that stopped it carrying.
+
+### Fixed — Worker replacement
+
+- **Replacement workers are told to keep working instead of blocking for a rebind** — When a replacement worker starts a task whose recorded branch belongs to its predecessor, `task start` now tells it to keep working, commit and push its delivery, and then ask the supervisor for `rebind_branch`. Before, it told the worker to ask for the rebind first, and that rebind refuses until the replacement has delivered. An untouched predecessor branch is still rebound automatically at start (GH #1579).
+
+### Fixed — QA ledger
+
+- **A ledger written on another machine passes the evidence check once its files are restored** — Was: a ledger row that cited its capture by the writing machine's absolute path (for example a prowl `/Users/…/.cas/artifacts/<project>/<task>/log` path) was refused at merge as "PASS capture is missing, unreadable or outside the ledger directory", although the same file sat in the local task directory. Now: such a path is found at the same place under the local task directory, and it must still resolve inside the ledger directory. The ledger file is not rewritten.
+
+### Fixed — Release cleanup
+
+- **Preserve the open next train** — Post-publish cleanup now deletes only the epic named in that version's committed release preparation record. An open train synced to main survives; missing or ambiguous cut records permit no deletion, and concurrent branch advances remain protected by Git's lease.
+
+### Fixed — Historical delivery recovery
+
+- **Prescribed recovery closes no longer loop after reviewer errors** — A live
+  supervisor can replay the historical recovery command for the exact recorded
+  delivery already integrated into its target, including an earlier reviewer
+  ERROR. Recovery retains the original error and dispatch, records the audit
+  decision, and creates no pre-merge approval. Unintegrated deliveries and
+  unauthorized callers retain their existing refusals.
+
+### Changed — Factory
+
+- **A worker's sandbox covers only its own task** — Was: a macOS Claude
+  worker's sandbox let Bash write every task's artifact directory in the
+  project and the whole staging scratch root. Now:
+  - The profile grants the worker's current tasks' artifact directories and its
+    checkout's own temporary and build directories, plus the checkout, git paths
+    and the operator's write roots as before.
+  - Starting a task the running profile does not cover relaunches the worker
+    through the normal recycle, which keeps the task started and resumes it.
+
+### Fixed — Factory verification
+
+- **Fetch peer artifacts before review** — Automatic verifiers fetch a delivery's committed artifacts from Cloud into the reviewing machine's task directory and verify their size and SHA-256 before starting. Review inputs identify each local file by artifact ID. Missing or corrupt Cloud evidence stops startup with its artifact ID and underlying error, including for no-code closes.
+
+### Fixed — Factory worker hosts on macOS
+
+- **A worker host on macOS stays attached to its own project** — Was: when a session's recorded project path was a symlinked form of the store root, such as `/var/...` for `/private/var/...` on macOS, worker-host coordination refused every send with "Worker host belongs to another project". Now: both paths are resolved to their physical location before comparison, as the other session checks already do.
+
 ## [4.47.0] - 2026-11-21
 
 ### Fixed — Developer tooling

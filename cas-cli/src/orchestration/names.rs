@@ -31,14 +31,14 @@ pub fn generate_minion_supervisor() -> String {
     (*name).to_string()
 }
 
-/// Generate N unique minion worker names.
+/// Generate N unique minion worker names, skipping any `reject` refuses.
 ///
-/// If more names are requested than available, appends a numeric suffix.
-pub fn generate_minion_unique(count: usize) -> Vec<String> {
+/// Past the pool, names gain a bare number (`kevin2`): `kevin-2` would extend
+/// `kevin` with a hyphen, which registration refuses (N1, cas-dc08).
+pub fn generate_minion_unique(count: usize, reject: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut names = Vec::with_capacity(count);
     let mut rng = rand::rng();
 
-    // Shuffle the pool and take as many as we can
     let mut pool: Vec<&str> = MINION_WORKERS.to_vec();
     // Fisher-Yates shuffle
     for i in (1..pool.len()).rev() {
@@ -46,25 +46,18 @@ pub fn generate_minion_unique(count: usize) -> Vec<String> {
         pool.swap(i, j);
     }
 
-    for (i, name) in pool.iter().enumerate() {
-        if i >= count {
-            break;
-        }
-        names.push((*name).to_string());
-    }
-
-    // If we need more than the pool, add suffixed duplicates
-    let mut suffix = 2;
-    while names.len() < count {
+    // A finite bound also handles a `reject` that refuses everything.
+    for round in 1..=100 {
         for name in &pool {
             if names.len() >= count {
-                break;
+                return names;
             }
-            names.push(format!("{name}-{suffix}"));
+            let candidate = if round == 1 { (*name).to_string() } else { format!("{name}{round}") };
+            if !reject(&candidate) {
+                names.push(candidate);
+            }
         }
-        suffix += 1;
     }
-
     names
 }
 
@@ -105,7 +98,8 @@ pub fn generate() -> String {
     format!("{adj}-{noun}-{num}")
 }
 
-/// Generate N unique friendly names
+/// Generate N unique friendly names, skipping any `reject` refuses (cas-dc08:
+/// a name that would share another worker's `factory/` namespace).
 ///
 /// If more names are requested than possible combinations (50 * 51 * 99 = 252,450),
 /// this will return as many unique names as possible.
@@ -114,10 +108,10 @@ pub fn generate() -> String {
 /// ```rust
 /// use cas::orchestration::names;
 ///
-/// let names = names::generate_unique(3);
+/// let names = names::generate_unique(3, &|_| false);
 /// // Returns something like ["jolly-panda-42", "swift-falcon-7", "brave-owl-88"]
 /// ```
-pub fn generate_unique(count: usize) -> Vec<String> {
+pub fn generate_unique(count: usize, reject: &dyn Fn(&str) -> bool) -> Vec<String> {
     let max_combinations = ADJECTIVES.len() * NOUNS.len() * 99;
     let count = count.min(max_combinations);
 
@@ -126,7 +120,10 @@ pub fn generate_unique(count: usize) -> Vec<String> {
     let max_attempts = count * 10; // Prevent infinite loop
 
     while names.len() < count && attempts < max_attempts {
-        names.insert(generate());
+        let name = generate();
+        if !reject(&name) {
+            names.insert(name);
+        }
         attempts += 1;
     }
 
@@ -169,13 +166,13 @@ mod tests {
 
     #[test]
     fn test_generate_unique_returns_correct_count() {
-        let names = generate_unique(5);
+        let names = generate_unique(5, &|_| false);
         assert_eq!(names.len(), 5);
     }
 
     #[test]
     fn test_generate_unique_all_different() {
-        let names = generate_unique(10);
+        let names = generate_unique(10, &|_| false);
         let unique: HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "All names should be unique");
     }
@@ -183,7 +180,7 @@ mod tests {
     #[test]
     fn test_generate_unique_handles_large_count() {
         // Should not panic even with large count
-        let names = generate_unique(100);
+        let names = generate_unique(100, &|_| false);
         assert_eq!(names.len(), 100);
     }
 
@@ -207,23 +204,31 @@ mod tests {
 
     #[test]
     fn test_generate_minion_unique_returns_correct_count() {
-        let names = generate_minion_unique(5);
+        let names = generate_minion_unique(5, &|_| false);
         assert_eq!(names.len(), 5);
     }
 
     #[test]
     fn test_generate_minion_unique_all_different() {
-        let names = generate_minion_unique(10);
+        let names = generate_minion_unique(10, &|_| false);
         let unique: HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "All minion names should be unique");
     }
 
+    /// cas-dc08 (N1): names past the pool never extend a pool name with a
+    /// hyphen, and a rejected candidate is skipped, not returned.
     #[test]
     fn test_generate_minion_unique_exceeds_pool() {
-        // More than 20 minion names, should use suffixes
-        let names = generate_minion_unique(25);
+        let names = generate_minion_unique(25, &|name| name == "kevin");
         assert_eq!(names.len(), 25);
         let unique: HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), 25, "All names should still be unique");
+        assert!(!names.iter().any(|name| name == "kevin"), "{names:?}");
+        for name in &names {
+            assert!(
+                !names.iter().any(|other| cas_store::factory_name_extends(name, other)),
+                "{name} shares a namespace in {names:?}"
+            );
+        }
     }
 }

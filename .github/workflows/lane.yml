@@ -428,7 +428,8 @@ jobs:
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
         # Selection uses the classifier's merge-base with the live target.
-        # The recorded start base is retained only for failure attribution.
+        # Attribution uses that same contained target commit; the recorded
+        # start base is a fallback only when the target cannot be resolved.
         run: |
           record="refs/cas/delivery-base/$GITHUB_REF_NAME"
           git fetch --no-tags --quiet origin "+$record:$record" 2>/dev/null || true

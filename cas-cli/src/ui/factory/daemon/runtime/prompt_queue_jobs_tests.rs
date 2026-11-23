@@ -1155,6 +1155,43 @@ fn queue_select_reads_row_facts_off_the_store_writer_cas_b355() {
     assert!(held < Duration::from_secs(1), "QueueSelect held the writer {held:?}");
 }
 
+/// cas-1d2a (soundwave gabber, Nov 21): with Commander connected every
+/// selection took a second QueueSelect writer hop to read operator replies and
+/// adopt notices (two uncached store opens), whether or not any existed. An
+/// idle selection takes one hop; a pending notice brings the second back.
+#[test]
+fn an_idle_selection_with_commander_connected_skips_the_operator_writer_hop_cas_1d2a() {
+    let (_root, cas_dir) = project();
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    let connected = |cas_dir: &Path| QueueSelectRequest {
+        operator_replies: true,
+        adopt_operator_notices: true,
+        ..request(cas_dir)
+    };
+    let hops = |writer: &TestWriter| writer.ran().iter().map(|(label, _)| *label).collect::<Vec<_>>();
+
+    jobs.submit_select(connected(&cas_dir), super::super::queue_and_events::run_queue_select);
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    jobs.take_selection().expect("the idle selection lands");
+    assert_eq!(hops(&writer), ["QueueSelect"], "nothing to read or adopt: no operator hop");
+
+    crate::store::open_supervisor_queue_store(&cas_dir).unwrap()
+        .notify(
+            "operator",
+            "supervisor_notice",
+            r#"{"kind":"blocker","detail":"a PR was ejected","summary":"PR ejected"}"#,
+            cas_store::NotificationPriority::High,
+        )
+        .unwrap();
+    jobs.submit_select(connected(&cas_dir), super::super::queue_and_events::run_queue_select);
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    jobs.take_selection().expect("the selection with a pending notice lands");
+    assert_eq!(hops(&writer), ["QueueSelect", "QueueSelect", "QueueSelect"], "a pending notice brings the operator hop back");
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    assert!(queue.peek_all(10).unwrap().iter().any(|row| row.target == "operator"), "the notice was adopted");
+}
+
 /// cas-4272 review L3, cas-9594c: a queued Retry stamp holds its row out of
 /// delivery without holding QueueSelect; a selection submitted before the
 /// stamp landed skips the row.
@@ -1230,6 +1267,70 @@ fn an_untaken_claim_is_released_after_its_ttl() {
     jobs.expire_claims(&cas_dir, Instant::now() + CLAIM_READY_TTL + Duration::from_millis(10));
     settle(&mut jobs, |_| claim_source(&cas_dir, row, "worker-a").is_none());
     assert!(!jobs.has_claim(row, "worker-a"));
+}
+
+/// cas-20f6 (cas_bc4d, cas_1e7e2 lane flakes): a directed batch waits in the
+/// carry for its passenger's claim while a QueueSelect, whose writes run ahead
+/// of queued claims, re-reads that passenger as an unclaimed lone row. The
+/// fresh copy must not take the passenger's claim and submit it as its own
+/// turn; the carried leader delivers the whole batch once.
+#[test]
+fn a_carried_batch_keeps_its_passenger_out_of_a_fresh_selection() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, cas_dir) = project();
+    let mut sender = cas_types::Agent::new_with_role(
+        "carried-batch-sender".into(), "worker-a".into(), cas_types::AgentRole::Worker,
+    );
+    sender.factory_session = Some("s".into());
+    crate::store::open_agent_store(&cas_dir).unwrap().register(&sender).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let [lead, passenger] = ["First field report", "Second field report"]
+        .map(|text| {
+            let id = queue.enqueue_urgent_with_outcome(
+                &sender.name, "lead", text, Some("s"), None, None, false,
+                Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: sender.id.clone() }),
+            ).unwrap().id();
+            queue.queued_prompt(id).unwrap().unwrap()
+        });
+    // Use the real selection/batching producer, with the debounce already due.
+    rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+        [(chrono::Utc::now() - chrono::Duration::seconds(301)).to_rfc3339()],
+    ).unwrap();
+    let mut initial = super::super::queue_and_events::run_queue_select(&request(&cas_dir), 1).unwrap();
+    assert_eq!(initial.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
+    let facts = initial.facts.remove(&lead.id).unwrap();
+    assert_eq!(facts.message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
+    let mut delayed = QueueSelection {
+        rows: facts.message_batch.clone(),
+        facts: HashMap::from([(passenger.id, initial.facts.remove(&passenger.id).unwrap())]),
+        ..initial
+    };
+    let writer = TestWriter::start(true);
+    let mut jobs = jobs_on(&writer);
+    for row in [&lead, &passenger] {
+        assert!(!jobs.claim_resolved(&cas_dir, "s", row.id, "lead", "lead"));
+    }
+    jobs.carry_claimed_row(lead.clone(), facts);
+    jobs.submit_select(request(&cas_dir), move |_, generation| {
+        delayed.generation = generation;
+        Ok(delayed)
+    });
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    let selection = jobs.take_selection().unwrap();
+    assert!(selection.rows.is_empty(), "the carry owns its passenger: {:?}",
+        selection.rows.iter().map(|row| row.id).collect::<Vec<_>>());
+
+    writer.open();
+    settle(&mut jobs, |jobs| [&lead, &passenger].iter()
+        .all(|row| jobs.claim_resolved(&cas_dir, "s", row.id, "lead", "lead")));
+    let batch = jobs.take_selection().expect("the carried batch comes back");
+    assert_eq!(batch.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [lead.id]);
+    assert_eq!(batch.facts[&lead.id].message_batch.iter().map(|row| row.id).collect::<Vec<_>>(), [passenger.id]);
+    for row in [&lead, &passenger] {
+        assert!(matches!(jobs.claim_for_inject(&cas_dir, "s", row.id, "lead", "lead"),
+            ClaimStep::Claimed(_)), "all batch tokens are ready before consuming the leader");
+    }
 }
 
 

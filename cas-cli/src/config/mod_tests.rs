@@ -1109,6 +1109,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.cargo_build_jobs", "5", "5"),
         ("factory.nice_cargo", "false", "false"),
         ("factory.claude.worker_mcp", "inherit", "inherit"),
+        ("factory.claude.worker_sandbox", "off", "off"),
         ("factory.claude.remote_control", "true", "true"),
         ("factory.claude.fallback_model", " sonnet,haiku ", "sonnet,haiku"),
         ("factory.warn_stale_assignment", "false", "false"),

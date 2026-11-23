@@ -529,19 +529,29 @@ fn evidence_summary(report: &EvidenceReport) -> String {
 const PUBLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 const PUBLISH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The evidence a park must publish: with a LEDGER.md, the ledger and the
-/// paths its rows cite, plus cited logs; without one, every file. Other files
-/// (a folder copied from another task, say) are published best effort.
-fn required_evidence(dir: &Path) -> impl Fn(&str) -> bool {
-    let cited = std::fs::read_to_string(dir.join("LEDGER.md")).ok().map(|body| {
-        let mut names: std::collections::BTreeSet<String> = crate::qa_ledger::parse(&body, 0).rows.into_iter()
-            .map(|row| row.evidence_path.trim().trim_start_matches("./").to_string())
-            .collect();
-        names.insert("LEDGER.md".into());
-        names
-    });
-    move |name: &str| name.starts_with("cited/") || cited.as_ref().is_none_or(|cited| cited.contains(name))
+/// cas-fd1c (GH #2155, #2203, #2212): the task-relative paths a LEDGER.md's
+/// rows cite, plus the ledger itself; `None` without a ledger. Each evidence
+/// cell is one path, resolved exactly as the ledger check does
+/// ([`crate::qa_ledger::evidence_cell_path`]): relative, absolute inside the
+/// directory, or another machine's artifacts path. A cited directory covers the
+/// files beneath it.
+fn ledger_citations(dir: &Path) -> Option<std::collections::BTreeSet<String>> {
+    let body = std::fs::read_to_string(dir.join("LEDGER.md")).ok()?;
+    let root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mut names: std::collections::BTreeSet<String> = crate::qa_ledger::parse(&body, 0).rows.into_iter()
+        .filter_map(|row| crate::qa_ledger::evidence_cell_path(&root, &row.evidence_path))
+        .filter_map(|cited| cited.strip_prefix(&root).ok()?.to_str().map(|name| name.replace(std::path::MAIN_SEPARATOR, "/")))
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.insert("LEDGER.md".into());
+    Some(names)
 }
+
+/// Evidence trees Cassy's own gates read from the task evidence directory,
+/// so a peer reviewer needs them whole: the QA bundle, whose files resolve
+/// relative to `qa/` (`qa_evidence::resolve_bundle_file`), and terminal-qa
+/// receipts, found by walking `terminal-qa/` (`validate_terminal_qa`).
+const VERIFIER_TREES: [&str; 2] = ["qa/", "terminal-qa/"];
 
 /// What a routed build's park published: its evidence directory and the
 /// exact bytes the reviewing machine must hold before review (cas-e571).
@@ -675,8 +685,20 @@ pub(crate) fn publish_routed_evidence(
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let ledger_required = required_evidence(&dir);
-    let required = |name: &str| cited_names.contains(name) || (routed && ledger_required(name));
+    // A park publishes declared evidence only: top-level files, close-reason
+    // citations, ledger citations and the trees Cassy's verifier reads
+    // (cas-e571). Any other nested file nothing cites (a copied
+    // source checkout, raw captures already bundled) is listed, never uploaded.
+    let ledger = ledger_citations(&dir);
+    let ledger_cites = |name: &str| ledger.as_ref().is_some_and(|cited| cited.iter().any(|entry| {
+        name.strip_prefix(entry.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }));
+    let declared = |name: &str| !name.contains('/') || cited_names.contains(name) || ledger_cites(name)
+        || VERIFIER_TREES.iter().any(|tree| name.starts_with(tree));
+    // Routed builds require their ledger's citations, or without a ledger
+    // every declared file.
+    let required = |name: &str| cited_names.contains(name)
+        || (routed && declared(name) && (ledger.is_none() || ledger_cites(name)));
     // A stalled uncited copy must not spend the budget needed by the ledger.
     paths.sort_by_key(|(name, _)| !required(name));
     let deadline = std::time::Instant::now() + PUBLISH_BUDGET;
@@ -710,17 +732,29 @@ pub(crate) fn publish_routed_evidence(
     let mut skipped = Vec::new();
     let mut files = Vec::new();
     for (name, path) in paths {
+        let leaf = path.file_name().and_then(|leaf| leaf.to_str()).unwrap_or_default();
+        // An uncited, non-empty file nobody has published is listed, never read
+        // or hashed. An empty file costs nothing and stays in the manifest
+        // (cas-591f: every file is restorable, large trees stay bounded).
+        let empty = std::fs::metadata(&path).is_ok_and(|meta| meta.len() == 0);
+        if !empty && !declared(&name) && !published.iter().any(|record| record.name == leaf) {
+            skipped.push(format!("{name} (uncited; not published)"));
+            continue;
+        }
         let (sha256, size) = digest_file(&path).map_err(|error| fail(error.to_string()))?;
         if size == 0 {
             files.push(SyncedFile { name, sha256, artifact_id: None });
             continue;
         }
-        let leaf = path.file_name().and_then(|leaf| leaf.to_str()).unwrap_or_default();
         let reused = published.iter().find(|record| {
             record.name == leaf && record.sha256 == sha256 && validate(record, &task.id).is_ok()
         });
         let artifact_id = match reused {
             Some(record) => record.id.clone(),
+            None if !declared(&name) => {
+                skipped.push(format!("{name} (uncited; not published)"));
+                continue;
+            }
             None => {
                 let within = || std::time::Instant::now() < deadline;
                 let budget = || format!("not published within the {} s park budget; retry close", PUBLISH_BUDGET.as_secs());
@@ -1269,10 +1303,11 @@ mod tests {
         }).await.unwrap();
     }
 
-    /// cas-8018 (GH #2268): a routed park whose evidence directory also holds
-    /// a folder copied from another task parks when that folder's upload fails;
-    /// the ledger and the files it cites are published, the copy is listed as
-    /// unpublished, and the failing upload is retried once.
+    /// cas-8018 (GH #2268): a routed park parks when an uncited top-level
+    /// file's upload fails; the ledger and the files it cites are published,
+    /// the failed file is listed as unpublished, and its upload is retried
+    /// once. cas-fd1c (GH #2155, #2203): a nested source snapshot copied into
+    /// the evidence directory is listed and never uploaded.
     #[tokio::test(flavor = "multi_thread")]
     async fn routed_park_publishes_cited_evidence_when_an_uncited_copy_fails_gh2268() {
         use wiremock::matchers::body_partial_json;
@@ -1285,11 +1320,13 @@ mod tests {
                 | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
                 | --- | --- | --- | --- | --- | --- | --- | --- |\n\
                 | M01 | probe | ok [source: a.rs:1] | terminal: ok | PASS | fixture | green.log | - |\n";
-            let evidence: [(&str, &[u8]); 3] = [
+            let evidence: [(&str, &[u8]); 4] = [
                 ("LEDGER.md", ledger.as_bytes()), ("green.log", b"test: PASS\n"),
-                ("c7fa-src/shots/brand-default-develop-light-desktop.png", b"\x89PNG old capture"),
+                ("brand-default-develop-light-desktop.png", b"\x89PNG old capture"),
+                ("decided-before-source/apps/backend/.env.graphiti", b"NOT=evidence\n"),
             ];
             for (index, (name, _)) in evidence.iter().enumerate() {
+                if name.contains('/') { continue; }
                 let leaf = Path::new(name).file_name().unwrap().to_str().unwrap();
                 let optional = leaf.ends_with(".png");
                 if optional && !stalled {
@@ -1317,13 +1354,23 @@ mod tests {
             task.notes = format!("BUILD_ROUTE: {}", serde_json::json!({
                 "key": "route-1", "source_machine_id": "prowl-fixture", "sender_agent_id": "sup",
                 "recipient_agent_id": "worker", "recipient": "worker", "free_slots": 1, "load_per_cpu": null}));
-            let parking = PeerReviewer::new(&server.uri(), task);
+            let mut parking = PeerReviewer::new(&server.uri(), task);
             env.set("CAS_ROOT", &parking.root);
             for (name, bytes) in &evidence {
                 let file = parking.evidence_dir().join(name);
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
                 std::fs::write(file, bytes).unwrap();
             }
+            // GH #2203: a close that cites artifact ids and named evidence in
+            // prose, beside a `--cas-root` command, reads no checkout file. The
+            // citation scan admits only target/, the evidence directory and
+            // artifacts paths, and skips directories.
+            for name in ["Cargo.toml", "README.md", "Dockerfile", "schema.sql", ".prettierrc"] {
+                std::fs::write(parking.repo.join(name), "checkout file\n").unwrap();
+            }
+            parking.task.deliverables.parked_close_reason = Some(format!(
+                "PASS: art-0123abcd green.log Cargo.toml; cas factory worker-check --cas-root {}/.cas -- nextest run -p cas --lib",
+                parking.repo.display()));
             tokio::task::spawn_blocking(move || {
                 let started = std::time::Instant::now();
                 publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
@@ -1337,7 +1384,11 @@ mod tests {
                 assert!(manifest.strict);
                 let names: Vec<&str> = manifest.files.iter().map(|file| file.name.as_str()).collect();
                 assert_eq!(names, ["LEDGER.md", "green.log"]);
-                assert!(task.notes.contains("c7fa-src/shots/brand-default-develop-light-desktop.png"), "{}", task.notes);
+                assert!(task.notes.contains("brand-default-develop-light-desktop.png"), "{}", task.notes);
+                assert!(task.notes.contains("decided-before-source/apps/backend/.env.graphiti"), "{}", task.notes);
+                for checkout in ["Cargo.toml", "Dockerfile", "schema.sql", ".prettierrc"] {
+                    assert!(!task.notes.contains(checkout), "{checkout} swept: {}", task.notes);
+                }
             }).await.unwrap();
             let requests = server.received_requests().await.unwrap();
             let begins: Vec<serde_json::Value> = requests.iter()
@@ -1345,7 +1396,7 @@ mod tests {
                 .map(|request| serde_json::from_slice(&request.body).unwrap()).collect();
             assert_eq!(begins[0]["name"], "LEDGER.md");
             assert_eq!(begins[1]["name"], "green.log");
-            assert_eq!(begins.len(), 4, "one retry for the optional file");
+            assert_eq!(begins.len(), 4, "one retry for the optional file, no upload of the source copy");
             if stalled {
                 assert_eq!(requests.iter().filter(|request| request.url.path() == "/api/artifacts/cloud-2/complete").count(), 1);
             }
@@ -1418,13 +1469,32 @@ mod tests {
     /// (`proof/`) and top-level logs in its task evidence directory. The merge
     /// owner, holding only the synced task notes, restores each at the path the
     /// ledger cites; an artifact it cannot fetch never blocks the dispatch.
+    /// cas-fd1c (GH #2212): a ledger citing nested captures the way the ledger
+    /// gate accepts (one path per cell: relative, absolute inside the
+    /// directory, or another machine's artifacts path) publishes and restores
+    /// them; an uncited terminal-qa receipt still travels and uncited raw
+    /// captures stay unpublished. Bundle-receipt reuse on a no-code close is
+    /// covered through the real close handler in `no_code_close_tests`.
     #[tokio::test(flavor = "multi_thread")]
     async fn ordinary_park_evidence_reaches_the_merge_owner_at_cited_paths_gh2079() {
         use wiremock::matchers::body_partial_json;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let server = MockServer::start().await;
-        let evidence: [(&str, &[u8]); 2] =
-            [("proof/shot.png", b"\x89PNG capture"), ("web-green.log", b"web: PASS\n")];
+        let task = cas_types::Task::new("cas-2079-fixture".into(), "parked elsewhere".into());
+        let parking = PeerReviewer::new(&server.uri(), task);
+        let absolute = parking.evidence_dir().join("proof/shot.png");
+        let foreign = "/Users/other/.cas/artifacts/cassy-0123456789ab/cas-2079-fixture/proof/second.png";
+        let row = |id: &str, cited: &str| format!(
+            "| {id} | home | ok [source: a.rs:1] | visible: ok | PASS | fixture | {cited} | - |\n");
+        let ledger = format!("schema: 2\ncovers: cas-2079-fixture\n\
+            cells=3; PASS=3; FAIL=0; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=3\n\n\
+            | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+            | --- | --- | --- | --- | --- | --- | --- | --- |\n{}{}{}",
+            row("M01", "web-green.log"), row("M02", &absolute.display().to_string()), row("M03", foreign));
+        let evidence: [(&str, &[u8]); 5] = [("proof/shot.png", b"\x89PNG capture"),
+            ("proof/second.png", b"\x89PNG second"), ("web-green.log", b"web: PASS\n"),
+            ("LEDGER.md", ledger.as_bytes()), ("terminal-qa/status/report.md", b"terminal-qa: PASS\n")];
+        let raw = "raw/requests/0001.json";
         for (index, (name, bytes)) in evidence.iter().enumerate() {
             let leaf = Path::new(name).file_name().unwrap().to_str().unwrap();
             Mock::given(method("POST")).and(path("/api/artifacts/begin"))
@@ -1447,14 +1517,15 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
                 .mount(&server).await;
         }
-        let task = cas_types::Task::new("cas-2079-fixture".into(), "parked elsewhere".into());
-        let parking = PeerReviewer::new(&server.uri(), task);
         env.set("CAS_ROOT", &parking.root);
-        for (name, bytes) in &evidence {
+        for (name, bytes) in evidence.iter().chain([&(raw, &b"{\"model\":\"raw\"}"[..])]) {
             let file = parking.evidence_dir().join(name);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, bytes).unwrap();
         }
+        // The fixture ledger is one the gate itself accepts.
+        let checked = crate::qa_ledger::check(&parking.evidence_dir().join("LEDGER.md"), 0);
+        assert!(checked.ok, "{:?}", checked.diagnostics);
         let (parked, parking_dir) = tokio::task::spawn_blocking(move || {
             publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
             let parked = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
@@ -1472,6 +1543,10 @@ mod tests {
         for (name, bytes) in &evidence {
             assert_eq!(&std::fs::read(owner_dir.join(name)).unwrap(), bytes, "{name}");
         }
+        assert!(!owner_dir.join(raw).exists());
+        let begins = server.received_requests().await.unwrap().iter()
+            .filter(|request| request.url.path() == "/api/artifacts/begin").count();
+        assert_eq!(begins, evidence.len(), "only declared evidence is uploaded");
     }
 
 }

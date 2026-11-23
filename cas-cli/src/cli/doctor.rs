@@ -34,6 +34,7 @@ pub(crate) use git_hooks::verify_git_hooks_path;
 mod journeys;
 #[cfg(feature = "mcp-proxy")]
 mod retired_tools;
+mod worker_names;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -2654,6 +2655,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     checks.push(communication::check(&cas_root));
     // cas-e8d1 (GH #1233): open work the record says is done.
     checks.push(backlog_hygiene::check(&cas_root));
+    // cas-dc08 (N1): worker names that share a factory/ branch namespace.
+    checks.push(worker_names::check(&cas_root));
 
     recorder.mark("message handoff", &checks);
     // Check 3b: Schema details (tables and columns). An unreadable schema is a

@@ -88,12 +88,265 @@ pub fn own_task_branch_task_id<'a>(worker_name: &str, branch: &'a str) -> Option
         .filter(|task_id| is_task_id_like(task_id))
 }
 
-/// The worker named by a `factory/<name>` branch, if it is one.
-pub fn factory_branch_owner(branch: &str) -> Option<&str> {
-    branch
-        .trim()
-        .strip_prefix("factory/")
-        .filter(|owner| !owner.is_empty())
+/// What a branch is to `actor` (cas-ea31): the one ownership resolver.
+///
+/// Allow/deny ([`BranchOwnership::is_own`]) comes from the branch syntax and
+/// the actor's own name alone, so the Rust guards, the shell Git hooks and a
+/// store-less session all agree. A branch's owner is never inferred from its
+/// name: `registered` (factory agent names) only names who owns a branch that
+/// is not the actor's. Registration keeps factory names prefix-free (N1), so
+/// the registry can never turn an own branch into a sibling's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchOwnership {
+    /// `factory/<actor>`.
+    Canonical,
+    /// `factory/<actor>-<task-ref>`.
+    OwnTask { task_ref: String },
+    /// `factory/<actor>-<suffix>` whose suffix is not task-shaped.
+    OwnUnrecognized { suffix: String },
+    /// A registered agent's namespace.
+    Sibling { owner: String },
+    /// `factory/<name>` that no registered agent owns.
+    Unclaimed { name: String },
+    Protected,
+    Other,
+    Detached,
+}
+
+impl BranchOwnership {
+    pub fn is_own(&self) -> bool {
+        matches!(self, Self::Canonical | Self::OwnTask { .. })
+    }
+}
+
+pub fn branch_ownership(actor: &str, branch: Option<&str>, registered: &[String]) -> BranchOwnership {
+    let actor = actor.trim();
+    let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) else {
+        return BranchOwnership::Detached;
+    };
+    let Some(name) = branch.strip_prefix("factory/").filter(|name| !name.is_empty()) else {
+        return if matches!(branch, "main" | "master" | "staging") {
+            BranchOwnership::Protected
+        } else {
+            BranchOwnership::Other
+        };
+    };
+    let own = (!actor.is_empty()).then(|| {
+        if name == actor {
+            return Some(BranchOwnership::Canonical);
+        }
+        let suffix = name.strip_prefix(actor)?.strip_prefix('-')?;
+        Some(if is_task_id_like(suffix) {
+            BranchOwnership::OwnTask { task_ref: suffix.to_string() }
+        } else {
+            BranchOwnership::OwnUnrecognized { suffix: suffix.to_string() }
+        })
+    }).flatten();
+    if let Some(own) = own.as_ref().filter(|own| own.is_own()) {
+        return own.clone();
+    }
+    let owner = registered.iter().map(|owner| owner.trim())
+        .filter(|owner| !owner.is_empty() && *owner != actor)
+        .filter(|owner| name == *owner
+            || name.strip_prefix(owner).is_some_and(|rest| rest.starts_with('-')))
+        .max_by_key(|owner| owner.len());
+    match (owner, own) {
+        (Some(owner), _) => BranchOwnership::Sibling { owner: owner.to_string() },
+        (None, Some(own)) => own,
+        (None, None) => BranchOwnership::Unclaimed { name: name.to_string() },
+    }
+}
+
+/// Factory agent names in the store at `cas_root`, for naming owners only.
+pub fn registered_factory_names(cas_root: &Path) -> Vec<String> {
+    let Ok(store) = crate::store::open_agent_store(cas_root) else { return Vec::new() };
+    let Ok(agents) = store.list(None) else { return Vec::new() };
+    agents.into_iter()
+        .filter(|agent| matches!(agent.role, cas_types::AgentRole::Worker | cas_types::AgentRole::Supervisor))
+        .map(|agent| agent.name)
+        .collect()
+}
+
+/// cas-dc08 (N1 at spawn, design v3 row 23): why `name` cannot become a new
+/// worker, else `None`. Registration refuses an overlap with this machine's
+/// workers; `branches` (the names under `factory/` in local and origin refs)
+/// carry names from every machine. `is_task` says whether an id is a known
+/// task. A new name is refused when:
+/// - it extends, or is extended by, a registered worker name with `-`;
+/// - a branch `factory/<m>` exists and the name extends `m` (a: `m` already
+///   owns that namespace);
+/// - `factory/<name>` does not exist but `factory/<name>-<s>` does and `s`
+///   does not start with a known task id (b: someone else's branch the new
+///   name would own by syntax).
+pub fn worker_name_overlap(
+    name: &str,
+    workers: &[String],
+    branches: &std::collections::HashSet<String>,
+    is_task: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    use cas_store::factory_name_extends as extends;
+    let name = name.trim();
+    let refusal = |what: String| {
+        format!(
+            "WORKER_NAME_OVERLAPS: '{name}' would share the branch namespace of {what}. \
+             Choose a name that does not extend, and is not extended by, another worker \
+             name or factory branch with a hyphen, or omit the name to get a generated one."
+        )
+    };
+    let hyphen_prefixes = |value: &str| -> Vec<String> {
+        value.match_indices('-').map(|(at, _)| value[..at].to_string()).collect()
+    };
+    if let Some(other) = workers.iter().map(|other| other.trim())
+        .find(|other| extends(name, other) || extends(other, name))
+    {
+        return Some(refusal(format!("registered worker '{other}'")));
+    }
+    if let Some(owner) = hyphen_prefixes(name).into_iter().find(|owner| branches.contains(owner)) {
+        return Some(refusal(format!("branch factory/{owner}")));
+    }
+    if branches.contains(name) {
+        return None;
+    }
+    let starts_with_task = |rest: &str| {
+        hyphen_prefixes(rest).iter().map(String::as_str).chain([rest])
+            .any(|id| is_task_id_like(id) && is_task(id))
+    };
+    branches.iter()
+        .filter(|branch| extends(branch, name) && !starts_with_task(&branch[name.len() + 1..]))
+        .min()
+        .map(|branch| refusal(format!("branch factory/{branch}")))
+}
+
+/// N1 naming inputs, read once (cas-dc08): this machine's worker names, the
+/// `factory/*` branches in local and origin refs (name to full ref; never the
+/// network) and the task ids those branch names carry that the task store
+/// knows. Everything is read in [`WorkerNameRegistry::load`]; the checks hold
+/// no store, so they are safe to run anywhere.
+#[derive(Default)]
+pub struct WorkerNameRegistry {
+    pub workers: Vec<String>,
+    pub refs: std::collections::HashMap<String, String>,
+    branches: std::collections::HashSet<String>,
+    known_tasks: std::collections::HashSet<String>,
+}
+
+/// Only a task the store says it does not have is absent; any other failure
+/// leaves membership unknown, which must not read as "no such task".
+fn task_exists<T>(lookup: cas_store::Result<T>) -> Result<bool, String> {
+    match lookup {
+        Ok(_) => Ok(true),
+        Err(cas_store::StoreError::TaskNotFound(_)) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Every task-id-shaped piece of `branch` that the overlap rule can ask about:
+/// each hyphen-delimited stretch that starts after a hyphen and either ends at
+/// a hyphen or at the end of the name.
+fn task_id_candidates(branch: &str, into: &mut std::collections::HashSet<String>) {
+    for (at, _) in branch.match_indices('-') {
+        let rest = &branch[at + 1..];
+        let ends = rest.match_indices('-').map(|(end, _)| end).chain([rest.len()]);
+        into.extend(ends.map(|end| &rest[..end]).filter(|id| is_task_id_like(id)).map(str::to_string));
+    }
+}
+
+impl WorkerNameRegistry {
+    pub fn load(cas_root: &Path, repo: &Path) -> Result<Self, String> {
+        use std::process::Command;
+        use std::time::Duration;
+        let mut command = Command::new("git");
+        command.current_dir(repo).args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/factory/",
+            "refs/remotes/origin/factory/",
+        ]);
+        let budget = Duration::from_secs(5);
+        let output = crate::bounded_process::run_command(
+            &mut command,
+            crate::bounded_process::Deadline::after(budget),
+            budget,
+        )
+        .map_err(|error| format!("could not inspect worker branch names in {}: {error:?}", repo.display()))?;
+        // A project that is not a repository (a `--no-worktrees` fleet) has no
+        // factory branches; any other Git failure leaves the names unchecked.
+        let not_a_repository = !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("not a git repository");
+        if !output.status.success() && !not_a_repository {
+            return Err(format!(
+                "could not inspect worker branch names in {}: {}",
+                repo.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let refs: std::collections::HashMap<String, String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|reference| {
+                reference
+                    .strip_prefix("refs/heads/factory/")
+                    .or_else(|| reference.strip_prefix("refs/remotes/origin/factory/"))
+                    .map(|name| (name.to_string(), reference.to_string()))
+            })
+            .collect();
+        let agents = crate::store::open_agent_store(cas_root)
+            .and_then(|store| store.list(None).map_err(Into::into))
+            .map_err(|error| error.to_string())?;
+        // Known task membership is resolved here, once, so the overlap checks
+        // that run on the daemon loop never touch the store.
+        let mut candidates = std::collections::HashSet::new();
+        refs.keys().for_each(|branch| task_id_candidates(branch, &mut candidates));
+        let tasks = crate::store::open_task_store(cas_root)
+            .map_err(|error| format!("could not open the task store in {}: {error}", cas_root.display()))?;
+        let mut known_tasks = std::collections::HashSet::new();
+        for id in candidates {
+            if task_exists(tasks.get(&id)).map_err(|error| format!("could not look up task {id}: {error}"))? {
+                known_tasks.insert(id);
+            }
+        }
+        Ok(Self {
+            workers: agents.into_iter()
+                .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+                .map(|agent| agent.name)
+                .collect(),
+            branches: refs.keys().cloned().collect(),
+            refs,
+            known_tasks,
+        })
+    }
+
+    /// [`worker_name_overlap`] against this registry.
+    pub fn overlap(&self, name: &str) -> Option<String> {
+        worker_name_overlap(name, &self.workers, &self.branches, &|id| self.is_task(id))
+    }
+
+    /// [`worker_name_audit`] of this registry's workers.
+    pub fn audit(&self) -> Vec<String> {
+        worker_name_audit(&self.workers, &self.branches, &|id| self.is_task(id))
+    }
+
+    fn is_task(&self, id: &str) -> bool {
+        self.known_tasks.contains(id)
+    }
+}
+
+/// cas-dc08 (design v3 row 26): registered worker names that break N1, for
+/// `cas doctor`. Each pair is reported once. Report only.
+pub fn worker_name_audit(
+    workers: &[String],
+    branches: &std::collections::HashSet<String>,
+    is_task: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    workers.iter().enumerate()
+        .filter_map(|(at, name)| worker_name_overlap(name, &workers[at + 1..], branches, is_task))
+        .collect()
+}
+
+/// The registry of the checkout at `path`, never an ambient `CAS_ROOT`.
+fn registered_factory_names_at(path: &Path) -> Vec<String> {
+    crate::store::find_cas_root_ignoring_env(path)
+        .map(|root| registered_factory_names(&root))
+        .unwrap_or_default()
 }
 
 /// Where an agent's ambient git state sits relative to the branch its
@@ -102,8 +355,11 @@ pub fn factory_branch_owner(branch: &str) -> Option<&str> {
 pub enum WorkerBinding {
     /// HEAD is the worker's own `factory/<name>` branch — correctly bound.
     Own,
-    /// HEAD is another worker's factory branch.
+    /// HEAD is a registered agent's factory branch.
     Sibling { owner: String },
+    /// HEAD is a factory branch that is neither this worker's nor a
+    /// registered agent's (an unrecognized own suffix or a retired name).
+    Unowned,
     /// HEAD is a shared trunk branch, or unresolvable (detached / not a repo).
     /// The shared checkout is where every agent's `main` lives, so this is
     /// never a worker's own workspace.
@@ -121,24 +377,26 @@ pub enum WorkerBinding {
 /// HEAD in a dedicated linked worktree ([`render_worker_binding_at`]), so only
 /// an unresolvable shared or non-worktree directory reaches this as trunk.
 pub fn classify_worker_binding(worker_name: &str, branch: Option<&str>) -> WorkerBinding {
-    let worker_name = worker_name.trim();
-    let branch = branch.map(str::trim).unwrap_or("");
-    if branch.is_empty() {
-        return WorkerBinding::SharedTrunk;
+    binding_from(branch_ownership(worker_name, branch, &[]))
+}
+
+/// [`classify_worker_binding`] with owners named from `path`'s registry.
+pub fn classify_worker_binding_at(worker_name: &str, branch: Option<&str>, path: &Path) -> WorkerBinding {
+    let ownership = branch_ownership(worker_name, branch, &[]);
+    if ownership.is_own() || !matches!(ownership,
+        BranchOwnership::OwnUnrecognized { .. } | BranchOwnership::Unclaimed { .. }) {
+        return binding_from(ownership);
     }
-    // cas-73b8: the worker's own per-task branch is as much its own as
-    // `factory/<name>`; it is what the worker commits on while that branch is
-    // frozen for a parked delivery under QA.
-    if own_task_branch_task_id(worker_name, branch).is_some() {
-        return WorkerBinding::Own;
-    }
-    match factory_branch_owner(branch) {
-        Some(owner) if owner == worker_name => WorkerBinding::Own,
-        Some(owner) => WorkerBinding::Sibling {
-            owner: owner.to_string(),
-        },
-        None if matches!(branch, "main" | "master" | "staging") => WorkerBinding::SharedTrunk,
-        None => WorkerBinding::Other,
+    binding_from(branch_ownership(worker_name, branch, &registered_factory_names_at(path)))
+}
+
+fn binding_from(ownership: BranchOwnership) -> WorkerBinding {
+    match ownership {
+        BranchOwnership::Canonical | BranchOwnership::OwnTask { .. } => WorkerBinding::Own,
+        BranchOwnership::Sibling { owner } => WorkerBinding::Sibling { owner },
+        BranchOwnership::OwnUnrecognized { .. } | BranchOwnership::Unclaimed { .. } => WorkerBinding::Unowned,
+        BranchOwnership::Protected | BranchOwnership::Detached => WorkerBinding::SharedTrunk,
+        BranchOwnership::Other => WorkerBinding::Other,
     }
 }
 
@@ -242,7 +500,7 @@ pub fn verify_worker_worktree_binding(
     {
         return Ok(());
     }
-    match classify_worker_binding(worker_name, branch.as_deref()) {
+    match classify_worker_binding_at(worker_name, branch.as_deref(), path) {
         // Reachable only when the caller's expected branch disagrees with the
         // worker's canonical one; refuse rather than pick a winner.
         WorkerBinding::Own => anyhow::bail!(
@@ -258,7 +516,7 @@ pub fn verify_worker_worktree_binding(
             path.display(),
             branch.as_deref().unwrap_or("<unknown>"),
         ),
-        WorkerBinding::SharedTrunk | WorkerBinding::Other => anyhow::bail!(
+        WorkerBinding::Unowned | WorkerBinding::SharedTrunk | WorkerBinding::Other => anyhow::bail!(
             "ISOLATION BUG: worker '{worker_name}' would be bound to {}, which is checked out on \
              '{}' instead of its own '{expected_branch}'.",
             path.display(),
@@ -271,11 +529,27 @@ pub fn verify_worker_worktree_binding(
 ///
 /// Shared by the PreToolUse commit guard and `my_context` so both name the
 /// same canonical binding.
-pub fn sibling_misbinding_message(worker_name: &str, owner: &str, cwd: &str) -> String {
+pub fn sibling_misbinding_message(
+    worker_name: &str,
+    owner: &str,
+    branch: &str,
+    cwd: &str,
+    recovery: Option<&TakeoverPatch>,
+) -> String {
     let expected_branch = expected_worker_branch(worker_name);
+    // cas-ea31 (takeover case 1): in the worker's own registered checkout the
+    // way out is to keep the edits and switch back, not to move directories.
+    if let Some(patch) = recovery {
+        return format!(
+            "🚫 WORKER ISOLATION MISBINDING: you are '{worker_name}', but your checkout {cwd} is \
+             on '{branch}', which belongs to worker '{owner}'. Committing here would put your work \
+             on that worker's branch.\n\n{}",
+            recovery_steps(worker_name, patch),
+        );
+    }
     format!(
         "🚫 WORKER ISOLATION MISBINDING: you are '{worker_name}', but {cwd} is checked out on \
-         'factory/{owner}' — that is worker '{owner}''s worktree.\n\n\
+         '{branch}' — that is worker '{owner}''s worktree.\n\n\
          Committing here would put your work on another worker's branch, where its owner and the \
          supervisor's merge sequence will not expect it.\n\n\
          You own '{expected_branch}'. Move to your own worktree before committing:\n  \
@@ -290,6 +564,47 @@ pub fn sibling_misbinding_message(worker_name: &str, owner: &str, cwd: &str) -> 
          needed first. Then commit on the adopted branch.\n\n\
          Note: --no-verify does NOT bypass this guard (it only skips git hooks, not the Claude \
          Code PreToolUse harness)."
+    )
+}
+
+/// Where a refusal tells the worker to save its edits: shell-quoted directory
+/// and file, both already safe to paste.
+pub struct TakeoverPatch {
+    pub dir: String,
+    pub file: String,
+}
+
+/// The recovery H-22 prints in the worker's own registered checkout. Every
+/// command is one H-22 admits: save the edits, clean the tree, switch back,
+/// then optionally bring the edits along.
+fn recovery_steps(worker_name: &str, patch: &TakeoverPatch) -> String {
+    let expected_branch = expected_worker_branch(worker_name);
+    format!(
+        "Keep your edits, clean the tree, then switch back to your own branch:\n  \
+         mkdir -p {dir}\n  \
+         git diff --binary HEAD > {file}\n  \
+         git restore --staged --worktree .\n  \
+         git switch {expected_branch}\n\n\
+         To bring the edits along, apply them on your branch:\n  \
+         git apply {file}\n\n\
+         To take over another worker's delivery, ask your supervisor to run `task action=transfer \
+         id=<task-id> to_agent={worker_name} adopt_branch=true supervisor_override=true`; it copies \
+         the delivery to your own per-task branch.\n\n\
+         Note: --no-verify does NOT bypass this guard (it only skips git hooks, not the Claude \
+         Code PreToolUse harness).",
+        dir = patch.dir,
+        file = patch.file,
+    )
+}
+
+/// H-22 refusal for a factory branch no registered agent owns (cas-ea31,
+/// cas-7e76a): no owner is invented from the branch name.
+pub fn branch_not_owned_message(worker_name: &str, branch: &str, patch: &TakeoverPatch) -> String {
+    let expected_branch = expected_worker_branch(worker_name);
+    format!(
+        "WORKER_BRANCH_NOT_OWNED: 🚫 '{branch}' is not one of your branches, and no registered \
+         worker owns it. Yours are '{expected_branch}' and '{expected_branch}-<task-id>'.\n\n{}",
+        recovery_steps(worker_name, patch),
     )
 }
 
@@ -372,7 +687,11 @@ pub fn render_worker_binding(
 
     let expected_branch = expected_worker_branch(worker_name);
     let location = clone_path.unwrap_or("this session's working directory");
-    match classify_worker_binding(worker_name, branch) {
+    let binding = match clone_path {
+        Some(path) => classify_worker_binding_at(worker_name, branch, Path::new(path)),
+        None => classify_worker_binding(worker_name, branch),
+    };
+    match binding {
         WorkerBinding::Own => {
             output.push_str(&format!(
                 "**Worktree Binding**: OK — own branch {expected_branch}\n"
@@ -380,10 +699,19 @@ pub fn render_worker_binding(
         }
         WorkerBinding::Sibling { owner } => {
             output.push_str(&format!(
-                "\n🚫 **ISOLATION MISBINDING**: {location} is checked out on 'factory/{owner}', \
+                "\n🚫 **ISOLATION MISBINDING**: {location} is checked out on '{}', \
                  which belongs to worker '{owner}', not to you ('{worker_name}'). You own \
                  '{expected_branch}'. Do not commit from here — report this to your supervisor \
-                 and have your worker respawned onto its own worktree.\n"
+                 and have your worker respawned onto its own worktree.\n",
+                branch.unwrap_or("<unknown>"),
+            ));
+        }
+        WorkerBinding::Unowned => {
+            output.push_str(&format!(
+                "\n🚫 **BRANCH NOT OWNED**: {location} is checked out on '{}', which is not one \
+                 of your branches and no registered worker owns. You own '{expected_branch}'. \
+                 Switch back before committing: git switch {expected_branch}\n",
+                branch.unwrap_or("<unknown>"),
             ));
         }
         WorkerBinding::SharedTrunk => {
@@ -409,6 +737,15 @@ pub fn render_worker_binding(
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// cas-dc08: only a task the store reports missing is absent; any other
+    /// lookup failure stops the registry load instead of reading as absent.
+    #[test]
+    fn only_a_missing_task_is_absent_from_the_registry_cas_dc08() {
+        assert_eq!(task_exists(Ok(())), Ok(true));
+        assert_eq!(task_exists::<()>(Err(cas_store::StoreError::TaskNotFound("cas-gone".into()))), Ok(false));
+        assert!(task_exists::<()>(Err(cas_store::StoreError::NotInitialized)).is_err());
+    }
 
     fn init_repo(dir: &Path) {
         for args in [
@@ -438,11 +775,14 @@ mod tests {
             classify_worker_binding("fair-pelican-51", Some("factory/fair-pelican-51")),
             WorkerBinding::Own
         );
+        // Without a registry no owner is invented from the branch name.
         assert_eq!(
             classify_worker_binding("fair-pelican-51", Some("factory/bright-dolphin-92")),
-            WorkerBinding::Sibling {
-                owner: "bright-dolphin-92".to_string()
-            }
+            WorkerBinding::Unowned
+        );
+        assert_eq!(
+            branch_ownership("fair-pelican-51", Some("factory/bright-dolphin-92-cas-1"), &["bright-dolphin-92".into()]),
+            BranchOwnership::Sibling { owner: "bright-dolphin-92".into() }
         );
         for trunk in ["main", "master", "staging"] {
             assert_eq!(
@@ -461,21 +801,6 @@ mod tests {
             classify_worker_binding("fair-pelican-51", Some("epic/cas-1276")),
             WorkerBinding::Other
         );
-    }
-
-    #[test]
-    fn factory_branch_owner_ignores_non_factory_refs() {
-        assert_eq!(
-            factory_branch_owner("factory/zen-bear-56"),
-            Some("zen-bear-56")
-        );
-        assert_eq!(
-            factory_branch_owner("  factory/zen-bear-56 "),
-            Some("zen-bear-56")
-        );
-        assert_eq!(factory_branch_owner("factory/"), None);
-        assert_eq!(factory_branch_owner("epic/cas-1276"), None);
-        assert_eq!(factory_branch_owner("main"), None);
     }
 
     /// The stale-directory shape: git answers the enclosing checkout's HEAD,
@@ -610,6 +935,33 @@ mod tests {
     /// Supervisors legitimately sit on trunk in the shared checkout; the
     /// worker-identity check must not fire for them.
 
+    /// cas-ea31: the Git hooks and the Rust resolver must admit exactly the
+    /// same task-branch suffixes; the hooks run with no registry or binary.
+    #[test]
+    fn hook_task_branch_predicate_matches_rust_grammar_cas_ea31() {
+        use crate::ui::factory::daemon::runtime::teams::TeamsManager;
+        let suffixes = [
+            "cas-ea31", "cas-73b8.1", "cas-ef33-diag", "release-notes", "staging",
+            "e9e5", "2", "2-cas-x", "cas--x", "a-.b-c", "", "x/y-z",
+        ];
+        for template in [TeamsManager::WORKER_PRE_COMMIT_HOOK, TeamsManager::WORKER_PRE_PUSH_HOOK] {
+            let start = template.find("own_task_branch() {").expect("hook defines own_task_branch");
+            let end = start + template[start..].find("\n}\n").expect("function end") + 3;
+            let script = format!(
+                "expected=factory/kevin\n{}for b in \"$@\"; do if own_task_branch \"$b\"; then echo 1; else echo 0; fi; done\n",
+                &template[start..end],
+            );
+            let branches: Vec<String> = suffixes.iter().map(|suffix| format!("factory/kevin-{suffix}")).collect();
+            let output = std::process::Command::new("sh").arg("-c").arg(&script).arg("sh")
+                .args(&branches).output().expect("run hook predicate");
+            assert!(output.status.success(), "{output:?}");
+            let shell: Vec<bool> = String::from_utf8_lossy(&output.stdout).lines().map(|line| line == "1").collect();
+            let rust: Vec<bool> = branches.iter()
+                .map(|branch| own_task_branch_task_id("kevin", branch).is_some()).collect();
+            assert_eq!(shell, rust, "{suffixes:?}");
+        }
+    }
+
     /// cas-73b8: a worker whose `factory/<name>` is frozen for a parked
     /// delivery commits its next task on `factory/<name>-<task-id>`.
     #[test]
@@ -631,17 +983,23 @@ mod tests {
             own_task_branch_task_id("loyal-crow-4", "factory/loyal-crow-40"),
             None
         );
+        // cas-ea31: without a `-` boundary the longer worker's task branch
+        // is its own under both identities. With one (`ab` / `ab-owner`) the
+        // shorter name would parse it too, which is why registration
+        // refuses that pair.
+        let longer = "factory/eager-panda-27-cas-1234";
+        assert_eq!(own_task_branch_task_id("eager-panda-27", longer), Some("cas-1234"));
+        assert_eq!(own_task_branch_task_id("eager-panda-2", longer), None);
+        assert!(own_task_branch_task_id("ab", "factory/ab-owner-cas-1234").is_some());
         assert_eq!(
             classify_worker_binding("loyal-crow-4", Some("factory/loyal-crow-40")),
-            WorkerBinding::Sibling {
-                owner: "loyal-crow-40".to_string()
-            }
+            WorkerBinding::Unowned
         );
-        // Another worker's per-task branch stays a sibling's.
-        assert!(matches!(
+        // Another worker's per-task branch is never this worker's.
+        assert_eq!(
             classify_worker_binding("loyal-crow-4", Some("factory/nimble-wolf-5-cas-1185")),
-            WorkerBinding::Sibling { .. }
-        ));
+            WorkerBinding::Unowned
+        );
         // The suffix must read as a task id.
         for branch in [
             "factory/loyal-crow-4-",

@@ -156,6 +156,8 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
             .metadata
             .insert("worker_account_dir".to_string(), account_dir);
     }
+    // cas-f157: which tasks this launch's sandbox profile grants.
+    crate::worker_sandbox_profile::record_launched_tasks(agent);
 }
 
 /// Parse the harness-provided durable role hint used by every registration

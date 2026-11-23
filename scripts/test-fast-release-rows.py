@@ -112,7 +112,7 @@ class FastRows(unittest.TestCase):
                        "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
-                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py", "classify-web-inputs.py",
+                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "worker-run.sh", "release-train-announce.py", "classify-web-inputs.py",
                        "release-diary-thread.py", "doc-fragments.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):

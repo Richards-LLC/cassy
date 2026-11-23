@@ -18,10 +18,11 @@ const SUMMARY_LIMIT: usize = 200_000;
 /// Refusal rows searched for a task's latest refusal when attributing an override.
 const OVERRIDE_LOOKBACK: usize = 2_000;
 
-pub const KINDS: [EventType; 3] = [
+pub const KINDS: [EventType; 4] = [
     EventType::GateRefused,
     EventType::GateOverridden,
     EventType::GateFalsePositive,
+    EventType::GateShadowed,
 ];
 
 fn record(
@@ -138,6 +139,8 @@ pub struct Counts {
     pub refused: u64,
     pub overridden: u64,
     pub false_positive: u64,
+    /// Would-deny of a text guard in sandbox shadow mode (cas-3751a).
+    pub shadowed: u64,
 }
 
 /// Fact counts per code recorded at or after `since`.
@@ -152,11 +155,20 @@ pub fn summarize(store: &dyn EventStore, since: DateTime<Utc>) -> Result<BTreeMa
             match kind {
                 EventType::GateRefused => entry.refused += 1,
                 EventType::GateOverridden => entry.overridden += 1,
+                EventType::GateShadowed => entry.shadowed += 1,
                 _ => entry.false_positive += 1,
             }
         }
     }
     Ok(counts)
+}
+
+/// Record that `code` would have refused a call the worker OS sandbox now
+/// enforces (cas-3751a shadow mode). The call proceeds; the count decides
+/// whether the text guard can be deleted after the shadow release.
+pub fn record_shadowed(store: &dyn EventStore, code: &'static str, detail: &str) -> Result<()> {
+    let heading = detail.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
+    record(store, EventType::GateShadowed, &[code], None, heading)
 }
 
 /// Open the project event store and record a tool refusal; failures only warn.

@@ -755,11 +755,20 @@ pub fn factory_branches_merged_by(command: &str) -> Vec<String> {
 /// cas-2ee2: raw GitHub merges (`gh pr merge`, the merge API) are checked
 /// too; [`github_merge_refusal`] also runs for non-supervisor roles.
 pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
+    supervisor_merge_refusal_with_actor(cas_root, cwd, command, None)
+}
+
+pub(crate) fn supervisor_merge_refusal_with_actor(
+    cas_root: &Path,
+    cwd: &Path,
+    command: &str,
+    supervisor: Option<&str>,
+) -> Option<String> {
     let branches = factory_branches_merged_by(command);
     branches
         .into_iter()
         .find_map(|branch| branch_merge_refusal(cas_root, cwd, &branch))
-        .or_else(|| github_merge_refusal(cas_root, cwd, command))
+        .or_else(|| github_gate::github_merge_refusal_with_supervisor(cas_root, cwd, command, supervisor))
 }
 
 /// Check a raw Git merge in the repository where that command will run.

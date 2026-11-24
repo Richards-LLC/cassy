@@ -116,6 +116,15 @@ pub fn record_override_codes(
     record(store, EventType::GateOverridden, &registered, task_id, reason)
 }
 
+pub(crate) fn record_override_code(
+    store: &dyn EventStore,
+    code: &'static str,
+    task_id: &str,
+    reason: &str,
+) -> Result<()> {
+    record_override_codes(store, &[code.to_string()], Some(task_id), reason)
+}
+
 /// Record a supervisor-declared false positive of a registered code.
 pub fn record_false_positive(
     store: &dyn EventStore,

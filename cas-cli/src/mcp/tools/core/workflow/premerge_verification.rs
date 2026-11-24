@@ -676,7 +676,7 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn original_candidate_for_dispatch(
+pub(crate) fn original_candidate_for_dispatch(
     root: &Path,
     dispatch: &VerificationDispatch,
 ) -> Result<Option<Candidate>, String> {

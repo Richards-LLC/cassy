@@ -31,6 +31,8 @@ use cas_types::{QaPass, QaPassState, Task, TaskStatus};
 use super::{branch_binds_task, gate_applies, merge_gate};
 use crate::config::QaConfig;
 
+mod verifier;
+
 /// Commit status context branch protection requires.
 pub const QA_STATUS_CONTEXT: &str = "cassy/independent-qa";
 
@@ -399,11 +401,29 @@ fn run_bounded_detailed(mut command: Command, timeout: Duration) -> Result<Vec<u
     }
 }
 
-/// The PR's head branch and commit, from GitHub.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PrHead {
-    branch: String,
-    sha: String,
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrMetadata {
+    number: Option<u64>,
+    url: Option<String>,
+    head_ref_name: Option<String>,
+    head_ref_oid: Option<String>,
+    status_check_rollup: Option<Vec<serde_json::Value>>,
+}
+
+impl PrMetadata {
+    fn repository(&self) -> Option<String> {
+        let (repo, _) = self.url.as_deref()?.split_once("/pull/")?;
+        repo_slug(repo)
+    }
+
+    fn branch(&self) -> Option<&str> {
+        self.head_ref_name.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    }
+
+    fn head(&self) -> Option<&str> {
+        self.head_ref_oid.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    }
 }
 
 /// The PR number a raw merge targets, resolved the way the QA merge guard
@@ -432,33 +452,60 @@ pub fn merge_pr_number(cwd: &Path, merge: &GithubMerge) -> Result<u64, String> {
         .ok_or_else(|| "`gh pr view` returned no PR number".to_string())
 }
 
-/// Look the PR up with `gh pr view`; the error says why it could not be.
-fn gh_pr_head(cwd: &Path, repo: Option<&str>, selector: Option<&str>) -> Result<PrHead, String> {
+fn resolve_pr(cwd: &Path, merge: &GithubMerge) -> Result<PrMetadata, String> {
+    let selector = match &merge.selector {
+        MergeSelector::Number(number) => Some(number.to_string()),
+        MergeSelector::Branch(branch) => Some(branch.clone()),
+        MergeSelector::CurrentBranch => None,
+        MergeSelector::Unresolvable(why) => {
+            let id = graphql_pull_request_id(&merge.statement).ok_or_else(|| why.to_string())?;
+            let mut command = Command::new(gh_bin());
+            command.args([
+                "api", "graphql", "-f", "query=query($id: ID!) { node(id: $id) { ... on PullRequest { number url headRefName headRefOid } } }", "-f",
+            ]).arg(format!("id={id}")).current_dir(cwd);
+            let bytes = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
+            let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            return serde_json::from_value(body["data"]["node"].clone())
+                .map_err(|error| format!("GitHub did not resolve the pull request node: {error}"));
+        }
+    };
     let mut command = Command::new(gh_bin());
     command.args(["pr", "view"]);
     if let Some(selector) = selector {
         command.arg(selector);
     }
-    if let Some(repo) = repo {
+    if let Some(repo) = &merge.repo {
         command.args(["--repo", repo]);
     }
-    command
-        .args(["--json", "headRefName,headRefOid"])
-        .current_dir(cwd);
-    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
-    let value: serde_json::Value = serde_json::from_slice(&stdout)
-        .map_err(|error| format!("`gh pr view` returned unreadable JSON: {error}"))?;
-    let field = |name: &str| {
-        value
-            .get(name)
-            .and_then(|field| field.as_str())
-            .map(|field| field.trim().to_string())
-            .filter(|field| !field.is_empty())
+    let fields = if merge.transport == MergeTransport::PrCommand {
+        "number,url,headRefName,headRefOid,statusCheckRollup"
+    } else {
+        "number,url,headRefName,headRefOid"
     };
-    match (field("headRefName"), field("headRefOid")) {
-        (Some(branch), Some(sha)) => Ok(PrHead { branch, sha }),
-        _ => Err("`gh pr view` returned no headRefName/headRefOid".to_string()),
+    command.args(["--json", fields]).current_dir(cwd);
+    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
+    serde_json::from_slice(&stdout)
+        .map_err(|error| format!("`gh pr view` returned unreadable JSON: {error}"))
+}
+
+fn graphql_pull_request_id(statement: &str) -> Option<String> {
+    let query = statement.replace(r#"\""#, "\"");
+    let (_, rest) = query.split_once("pullRequestId")?;
+    let value = rest.trim_start().strip_prefix(':')?.trim_start();
+    if let Some(literal) = value.strip_prefix('"') {
+        return literal.split_once('"').map(|(id, _)| id.to_string()).filter(|id| !id.is_empty());
     }
+    let name: String = value.strip_prefix('$')?.chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+    let tokens = shell_words::split(statement).ok()?;
+    tokens.iter().enumerate().filter_map(|(index, token)| {
+        let field = match token.as_str() {
+            "-f" | "-F" | "--raw-field" | "--field" => tokens.get(index + 1)?.as_str(),
+            _ => token.strip_prefix("--field=").or_else(|| token.strip_prefix("--raw-field="))?,
+        };
+        let (key, id) = field.split_once('=')?;
+        (key == name && !id.is_empty() && !id.starts_with('@')).then(|| id.to_string())
+    }).last()
 }
 
 /// `owner/repo`, lowercased, from `OWNER/REPO`, `HOST/OWNER/REPO`, or a remote
@@ -500,24 +547,10 @@ fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
 /// current PR head and its own rollup together, independently of QA settings.
 /// Only observed pending/failed checks refuse; missing evidence retains the
 /// existing admission policy, and API merges retain their existing QA path.
-fn pr_ci_refusal(cwd: &Path, merge: &GithubMerge) -> Option<String> {
+fn pr_ci_refusal(pr: &PrMetadata, merge: &GithubMerge) -> Option<String> {
     if merge.transport != MergeTransport::PrCommand { return None; }
-    let selector = match &merge.selector {
-        MergeSelector::Number(number) => Some(number.to_string()),
-        MergeSelector::Branch(branch) => Some(branch.clone()),
-        MergeSelector::CurrentBranch => None,
-        MergeSelector::Unresolvable(_) => return None,
-    };
-    let mut command = Command::new(gh_bin());
-    command.args(["pr", "view"]);
-    if let Some(selector) = selector { command.arg(selector); }
-    if let Some(repo) = &merge.repo { command.args(["--repo", repo]); }
-    command.args(["--json", "headRefOid,statusCheckRollup"]).current_dir(cwd);
-    let bytes = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let head = value.get("headRefOid")?.as_str()?.trim();
-    if head.is_empty() { return None; }
-    let checks = value.get("statusCheckRollup")?.as_array()?;
+    let head = pr.head()?;
+    let checks = pr.status_check_rollup.as_ref()?;
     let (mut pending, mut failed) = (Vec::new(), Vec::new());
     for check in checks {
         let name = check.get("name").or_else(|| check.get("context"))
@@ -552,22 +585,43 @@ fn pr_ci_refusal(cwd: &Path, merge: &GithubMerge) -> Option<String> {
 /// Unreadable Cassy state fails open to the close backstop, like the git
 /// guard; a PR that cannot be mapped while a round is open fails closed.
 pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
-    let merges = github_merges_in(command);
-    if merges.is_empty() {
-        return None;
+    github_merge_refusal_with_supervisor(cas_root, cwd, command, None)
+}
+
+pub(crate) fn github_merge_refusal_with_supervisor(
+    cas_root: &Path,
+    cwd: &Path,
+    command: &str,
+    supervisor: Option<&str>,
+) -> Option<String> {
+    let mut lookups = Vec::new();
+    for merge in github_merges_in(command) {
+        let lookup = resolve_pr(cwd, &merge);
+        if let Ok(pr) = &lookup && let Some(refusal) = pr_ci_refusal(pr, &merge) {
+            return Some(refusal);
+        }
+        lookups.push((merge, lookup));
     }
-    if let Some(refusal) = merges.iter().find_map(|merge| pr_ci_refusal(cwd, merge)) {
-        return Some(refusal);
+    if lookups.is_empty() { return None; }
+    for (_, lookup) in &lookups {
+        match lookup {
+            Ok(pr) => if let Some(refusal) = verifier::merge_refusal(cas_root, pr, supervisor) {
+                return Some(refusal);
+            },
+            Err(error) => tracing::warn!(%error, "Raw GitHub merge: verifier could not resolve PR head"),
+        }
     }
-    let config = crate::config::Config::load(cas_root).ok()?;
-    let qa = config.qa();
+    let qa = crate::config::Config::load(cas_root).ok()?.qa();
     if !qa.independent_pass {
         return None;
     }
-    let tasks = crate::store::open_task_store(cas_root)
-        .ok()?
-        .list(None)
-        .ok()?;
+    let tasks = match crate::store::open_task_store(cas_root).and_then(|store| Ok(store.list(None)?)) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            tracing::warn!(%error, "Raw GitHub merge: delivery state unreadable");
+            return None;
+        }
+    };
     let gated: Vec<(Task, Vec<QaPass>)> = tasks
         .into_iter()
         .filter(|task| task.status != TaskStatus::Closed)
@@ -585,14 +639,12 @@ pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Optio
         .iter()
         .map(|(task, _)| origin_slug(&task_repo(cas_root, task)))
         .collect();
-    merges
+    lookups
         .iter()
-        .find_map(|merge| {
+        .find_map(|(merge, lookup)| {
             // `gh` merges in `--repo`, else in the repository it runs in.
-            let target = merge
-                .repo
-                .as_deref()
-                .and_then(repo_slug)
+            let target = lookup.as_ref().ok().and_then(PrMetadata::repository)
+                .or_else(|| merge.repo.as_deref().and_then(repo_slug))
                 .or_else(|| origin_slug(cwd));
             let scoped: Vec<(Task, Vec<QaPass>)> = gated
                 .iter()
@@ -606,7 +658,7 @@ pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Optio
             if scoped.is_empty() {
                 return None;
             }
-            refusal_for_merge(cas_root, cwd, &qa, &scoped, merge)
+            refusal_for_merge(cas_root, cwd, &qa, &scoped, merge, lookup.as_ref())
         })
         .map(|refusal| format!("🚫 {refusal}"))
 }
@@ -617,24 +669,14 @@ fn refusal_for_merge(
     qa: &QaConfig,
     gated: &[(Task, Vec<QaPass>)],
     merge: &GithubMerge,
+    lookup: Result<&PrMetadata, &String>,
 ) -> Option<String> {
-    let repo = merge.repo.as_deref();
-    let (pr_number, lookup) = match &merge.selector {
-        MergeSelector::Unresolvable(why) => (None, Err((*why).to_string())),
-        MergeSelector::Number(number) => (
-            Some(*number),
-            gh_pr_head(cwd, repo, Some(&number.to_string())),
-        ),
-        MergeSelector::Branch(branch) => (None, gh_pr_head(cwd, repo, Some(branch))),
-        MergeSelector::CurrentBranch => (None, gh_pr_head(cwd, repo, None)),
-    };
-    let (resolved, lookup_error) = match lookup {
-        Ok(head) => (Some(head), None),
-        Err(error) => (None, Some(error)),
-    };
-    let head_branch = resolved
-        .as_ref()
-        .map(|head| head.branch.clone())
+    let resolved = lookup.ok().filter(|pr| pr.branch().is_some() && pr.head().is_some());
+    let pr_number = lookup.ok().and_then(|pr| pr.number).or_else(|| match &merge.selector {
+        MergeSelector::Number(number) => Some(*number),
+        _ => None,
+    });
+    let head_branch = resolved.and_then(PrMetadata::branch).map(str::to_string)
         .or_else(|| match &merge.selector {
             MergeSelector::Branch(branch) => Some(branch.clone()),
             MergeSelector::CurrentBranch => git_output(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -643,7 +685,7 @@ fn refusal_for_merge(
     let head_sha = merge
         .match_head
         .clone()
-        .or_else(|| resolved.as_ref().map(|head| head.sha.clone()));
+        .or_else(|| resolved.and_then(PrMetadata::head).map(str::to_string));
     let bound: Vec<&(Task, Vec<QaPass>)> = gated
         .iter()
         .filter(|(task, passes)| {
@@ -693,8 +735,7 @@ fn refusal_for_merge(
         // cas-0169: the lookup failed, so nothing ties this PR to any open
         // round. Name the failure; listing the open rounds would blame tasks
         // the PR may have nothing to do with.
-        let failure = lookup_error
-            .as_deref()
+        let failure = lookup.err().map(String::as_str)
             .unwrap_or("no head branch was returned");
         return Some(format!(
             "INDEPENDENT QA REQUIRED: Cassy could not look up the head of the PR `{}` merges, \

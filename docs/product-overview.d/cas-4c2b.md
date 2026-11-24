@@ -1,3 +1,3 @@
 ## Core Concepts
 
-When Violet reports that it never received a post (`not_posted` with reason `request_not_found`), the reply intent is still unused. Cassy resends once on its own. If that resend also fails, the error is retryable and says to resend the same request ID with unchanged arguments.
+When Violet's lookup has no record of a post for this caller (`not_posted` with reason `request_not_found`), Cassy resends it once on its own after a closed connection. Otherwise the error is retryable and says to resend with the same request ID and arguments.

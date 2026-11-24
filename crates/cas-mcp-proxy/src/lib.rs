@@ -1660,14 +1660,14 @@ impl ProxyEngine {
                     let mut body = lookup;
                     body["ok"] = Value::Bool(false);
                     body["request_id"] = Value::String(request_id.into());
-                    // GH #1968: request_not_found means Violet never received
-                    // the post, so its reply intent is still unconsumed.
-                    if !body["error"].is_object() && body["reason"] == "request_not_found" {
-                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": true,
-                            "message": "Violet never received this request. Retry violet_post with the same request_id and unchanged arguments."});
-                    } else if !body["error"].is_object() {
-                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": false,
-                            "message": "Violet confirmed that this request did not post."});
+                    if !body["error"].is_object() {
+                        let missing = body["reason"] == "request_not_found";
+                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": missing,
+                            "message": if missing {
+                                "Violet has no record of this request for this caller; resend with the same request id and arguments"
+                            } else {
+                                "Violet confirmed that this request did not post."
+                            }});
                     }
                     if let Some(prior) = prior { body["post_response"] = prior; }
                     return Ok(violet_result(body));
@@ -3527,6 +3527,16 @@ def schema_mode():
 def send(message):
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
+def receipt():
+    return {"ok": True, "schema_version": 1, "kind": "message", "channel": {"id": "C123", "name": "fixture"},
+            "message": {"message_id": "1710000000.000001", "thread_id": "1710000000.000001",
+                        "permalink": "https://fixture.slack.com/archives/C123/p1710000000000001"}}
+def digest(channel):
+    return {"ok": True, "schema_version": 1, "channel": {"id": "C123", "name": channel, "is_private": False},
+            "messages": [], "files": [], "skipped_files": 0,
+            "counts": {"messages": 0, "roots": 0, "threads_expanded": 0, "files": 0, "downloaded_bytes": 0},
+            "filters": {"since": None, "mentions_only": False, "include_threads": False, "include_files": False},
+            "complete": True}
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -3582,6 +3592,8 @@ for line in sys.stdin:
                 if mode == "rejected":
                     body = {"ok": False, "state": "not_posted", "request_id": request_id,
                             "error": {"code": "invalid_params", "retryable": False}}
+                if mode == "receipt":
+                    body = receipt()
                 if schema_mode() == "legacy":
                     body = {"ok": mode != "outcome_unknown", "state": state}
                     if mode == "outcome_unknown":
@@ -3593,15 +3605,20 @@ for line in sys.stdin:
             elif name == "violet_reconcile_reply":
                 with open(state_path) as handle:
                     state = json.load(handle)
-                body = {"ok": state["state"] != "outcome_unknown", **state}
+                body = {"ok": state["state"] != "outcome_unknown", "request_id": state["request_id"],
+                        "state": state["state"], "channel_id": "C123"}
+                if state["state"] == "outcome_unknown":
+                    body["reason"] = "unconfirmed_write"
                 if state.get("diagnostic"):
                     body["reason"] = "occurrence_not_eligible"
                     body["error"] = {"code": "occurrence_not_eligible", "retryable": False,
                                      "message": "Provider rejected the occurrence", "detail": {"occurrence_id": "fixture-occurrence"}}
                 if state["state"] == "posted":
-                    body["receipt"] = {"ok": True, **state, "message": {"message_id": "1710000000.000001"}}
+                    body["receipt"] = receipt()
                 if state.get("mismatch"):
                     body["request_id"] = "00000092-2222-4222-8222-000000000092"
+            elif name == "violet_read":
+                body = digest(args.get("channel"))
             else:
                 body = {"ok": True}
             result = {"content": [{"type": "text", "text": json.dumps(body)}], "isError": not body["ok"]}
@@ -3781,25 +3798,26 @@ for line in sys.stdin:
     /// that did reach Violet before the drop is reconciled, never resent.
     #[tokio::test]
     async fn violet_post_on_a_closed_transport_is_resent_once_cas_71bf() {
-        // GH #1968: when the one resend also meets a closed transport the
-        // intent is still unconsumed, so the answer says to resend the same ID.
-        for (before, text, sent, state) in [("idle_close", "posted", 1, "posted"), ("open", "transport", 1, "posted"),
-            ("open", "drop", 2, "not_posted")] {
+        for (text, sent) in [("receipt", 1), ("transport", 1), ("drop", 2)] {
             let dir = tempfile::tempdir().unwrap();
             let engine = ProxyEngine::from_configs(HashMap::from([(
                 "violet".into(), fake_upstream_mode(dir.path(), true),
             )])).await.unwrap();
             let caller = registered_worker_caller();
-            engine.call_tool(&caller, "violet", "violet_read",
-                Some(serde_json::json!({"channel": before}).as_object().unwrap().clone())).await.unwrap();
+            if text == "receipt" {
+                engine.call_tool(&caller, "violet", "violet_read",
+                    Some(serde_json::json!({"channel": "idle_close"}).as_object().unwrap().clone())).await.unwrap();
+            }
             let request_id = "00000071-2222-4222-8222-0000000071bf";
             let result = engine.call_tool(&caller, "violet", "violet_post", Some(serde_json::json!({
                 "channel": "C123", "kind": "message", "text": text, "request_id": request_id,
             }).as_object().unwrap().clone())).await.unwrap();
             let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-            assert_eq!((body["state"].as_str(), body["request_id"].as_str()), (Some(state), Some(request_id)), "{text}: {body}");
-            if state == "not_posted" {
-                assert_eq!((body["reason"].as_str(), body["error"]["retryable"].as_bool()), (Some("request_not_found"), Some(true)), "{body}");
+            if text == "drop" {
+                assert_eq!((body["state"].as_str(), body["reason"].as_str(), body["error"]["retryable"].as_bool(), body["request_id"].as_str()),
+                    (Some("not_posted"), Some("request_not_found"), Some(true), Some(request_id)), "{body}");
+            } else {
+                assert_eq!((body["ok"].as_bool(), body["message"]["message_id"].as_str()), (Some(true), Some("1710000000.000001")), "{text}: {body}");
             }
             let posts: Vec<Value> = std::fs::read_to_string(dir.path().join("calls.log.requests")).unwrap().lines()
                 .map(|line| serde_json::from_str::<Value>(line).unwrap())

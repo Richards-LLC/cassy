@@ -2899,11 +2899,14 @@ button.chip:disabled { cursor: default; }
 .launch-account-state { color: var(--text-mid); font-size: var(--fs-xs); }
 .launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
 .launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
-.launch-login button { min-height: 36px; font-size: var(--fs-meta); border: var(--line-width) solid var(--color-transparent); }
+/* One Copy style for every login command: the outlined pill Accounts uses. */
+.launch-login button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.launch-login button:hover, .accounts-login button:hover { background: var(--bg-hover); }
 .launch-account-note { padding-inline: 0; }
 .launch-retry { justify-self: start; width: auto; min-height: 36px; font-size: var(--fs-meta); }
 .launch-account-body { display: grid; gap: var(--space-2); }
-.launch-summary { flex: 1 0 100%; order: -1; margin: 0; color: var(--text-hi); font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
+/* One line by Start: the plan strip above carries the detail. */
+.launch-summary { flex: 1 1 auto; order: 0; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-hi); font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
 .launch-grant-command[hidden], .launch-grant-invite[hidden], .launch-grant-note[hidden], .launch-grant-error[hidden], .launch-grant [data-launch-action="allow"][hidden] { display: none; }
@@ -2931,7 +2934,7 @@ button.chip:disabled { cursor: default; }
 .launch-error-detail summary::before { content: "▸"; font-size: 0.9em; }
 .launch-error-detail[open] summary::before { content: "▾"; }
 .launch-error-detail pre { margin: var(--space-2) 0 0; padding: var(--space-3); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-hi); background: var(--panel); border-radius: var(--radius-card); font-size: var(--fs-xs); }
-.launch-sheet .dialog-actions { background: var(--bg-raised); }
+:root .launch-sheet .dialog-actions { background: var(--bg-raised); -webkit-backdrop-filter: none; backdrop-filter: none; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .launch-sheet { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: calc(var(--space-4) + env(safe-area-inset-top)) calc(var(--space-4) + env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom)) calc(var(--space-4) + env(safe-area-inset-left)); border-radius: 0; }
   .launch-row { min-height: 52px; }
@@ -3765,8 +3768,9 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .meter[data-tone="low"] .meter-bar > span { background: var(--state-warn); }
 .meter[data-tone="crit"] .meter-bar > span { background: var(--state-crit); }
 .meter[data-state="stale"] .meter-bar > span { background: var(--state-off); }
-.meter-value { grid-area: value; justify-self: end; color: var(--ink); white-space: nowrap; font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
-.meter-unit { color: var(--ink-mid); font-weight: var(--weight-regular); }
+.meter-value { grid-area: value; justify-self: end; min-inline-size: 4.5ch; text-align: end; color: var(--ink); white-space: nowrap; font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-mono); font-variant-numeric: tabular-nums; }
+.meter-value--none { font-family: var(--font-ui); text-align: start; }
+.meter-unit { color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/1 var(--font-ui); }
 .meter[data-state="stale"] .meter-value, .meter-value--none { color: var(--ink-mid); font-weight: var(--weight-regular); }
 /* A reading with no number spans the bar and value columns: one quiet line. */
 .meter-value--none { grid-column: bar / value; grid-row: 1; justify-self: start; z-index: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -3783,7 +3787,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-plan p { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .launch-plan-k { color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
 .launch-plan-v { color: var(--text-hi); font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
-.launch-plan-meta { color: var(--text-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); font-variant-numeric: tabular-nums; }
+/* Meta lines wrap at word boundaries rather than cut mid-word. */
+.launch-plan .launch-plan-meta { white-space: normal; text-overflow: clip; color: var(--text-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); font-variant-numeric: tabular-nums; }
 .launch-plan-meta:empty { display: none; }
 @media (max-width: 40rem) { .launch-plan { grid-template-columns: minmax(0, 1fr); } .launch-plan p { white-space: normal; } }
 /* Account rows: radio · name and the server's reason · two brief meters · ↻. */
@@ -3811,8 +3816,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-account-pick { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
 .launch-account-why { color: var(--text-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
 .launch-account-low { color: var(--state-warn); }
-.launch-meters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-1) var(--space-4); margin-top: var(--space-1); }
-@media (max-width: 26rem) { .launch-meters { grid-template-columns: minmax(0, 1fr); } }
+.launch-meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-1) var(--space-4); margin-top: var(--space-1); }
 .launch-not-offered { color: var(--text-mid); font-size: var(--fs-meta); }
 .launch-not-offered > summary { display: inline-flex; align-items: center; min-height: 32px; padding-inline: var(--space-3); cursor: pointer; border-radius: var(--radius-pill); }
 .launch-not-offered > summary:hover { color: var(--text-hi); background: var(--bg-hover); }
@@ -3825,7 +3829,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .account-refresh:hover:not(:disabled) { background: var(--bg-hover); color: var(--ink); }
 .account-refresh:active:not(:disabled) { transform: scale(0.94); }
 .account-refresh:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
-.account-refresh[aria-busy="true"] { cursor: progress; }
+.account-refresh[aria-busy="true"] { cursor: progress; color: var(--color-action); border-color: var(--color-action); }
 .account-refresh[aria-busy="true"] svg { animation: account-refresh-spin 900ms linear infinite; }
 @keyframes account-refresh-spin { to { transform: rotate(360deg); } }
 .account-usage-result { max-inline-size: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-mid); font-size: var(--fs-xs); }

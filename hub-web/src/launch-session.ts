@@ -1,5 +1,5 @@
 import { AccountUsageChecks, type CheckAccountUsage, type CheckedAccountUsage } from "./account-usage-check";
-import { capacityLine, fillMeters, localReadLine, lowPickNote, meterMarkup, readings } from "./account-meters";
+import { capacityLine, fillMeters, localReadLine, meterMarkup, pickReason, readings, type PickReason, type WindowReading } from "./account-meters";
 import type { AccountWindow, UsageSource } from "./accounts-model";
 // New session (cas-0f51): start a factory session on a paired machine from
 // Commander — machine → project → supervisor → start — and land on its
@@ -129,6 +129,12 @@ export function accountStep(cli: SupervisorCli, profiles: { status: string; data
   }
   if (!entry.profiles.length) return { kind: "unavailable", message: `No ${name} accounts found on ${machine}. ${fallback}` };
   return { kind: "list", entry };
+}
+
+/** "ledger-api · Codex · 2 workers via gateway": the Start bar's one line. */
+export function startLine(input: { project: string; cli: SupervisorCli; workers?: number; route?: WorkerRoute }): string {
+  const crew = input.workers ? `${input.workers} ${input.workers === 1 ? "worker" : "workers"}${input.route === "gateway" ? " via gateway" : ""}` : "no workers";
+  return `${input.project} · ${supervisorCliLabel(input.cli)} · ${crew}`;
 }
 
 /** "Start cas-src with Claude (support@…) and 2 workers on soundwave." */
@@ -660,7 +666,11 @@ export class LaunchSheet {
     const offered = step.entry.profiles.filter((profile) => !notOffered(profile));
     const hidden = step.entry.profiles.filter(notOffered);
     const usage = (profile: LaunchProfile) => this.usageChecks.result(this.machineId!, `${this.cli}:${profile.name}`);
-    const rows = offered.map((profile) => accountRowMarkup(profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), usage(profile))).join("");
+    const candidates = offered.map((profile) => ({ name: profile.name, list: profileReadings(profile, usage(profile)), exclusion: profile.exclusion?.startsWith("resets later than ") ? undefined : profile.exclusion }));
+    // An older hub sends no windows: its own reason is all there is.
+    const reasonFor = (profile: LaunchProfile, index: number) => !profile.recommendation ? undefined
+      : profile.windows || usage(profile) ? pickReason(candidates[index]!, candidates.filter((_, other) => other !== index)) : { text: profile.recommendation, low: false };
+    const rows = offered.map((profile, index) => accountRowMarkup(profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), usage(profile), reasonFor(profile, index))).join("");
     const more = hidden.length ? `<details class="launch-not-offered" data-testid="launch-not-offered"><summary>${hidden.length} not offered</summary>${hidden.map((profile) => notOfferedMarkup(this.cli, profile)).join("")}</details>` : "";
     body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${rows || `<p class="launch-empty">No ${escapeHtml(supervisorCliLabel(this.cli))} account here can start a session.</p>`}</div>${more}`;
     fillMeters(body);
@@ -932,9 +942,11 @@ export class LaunchSheet {
     const ready = Boolean(this.selection && machine && launchUsable(machine));
     start.setAttribute("aria-disabled", String(!ready));
     const workers = parseWorkers((this.$("input[name=launch-workers]") as HTMLInputElement).value);
+    // One line by Start: the plan strip above carries the detail.
     summary.textContent = this.selection && machine
-      ? launchSummary({ verb: "Start", project: this.selection.name, cli: this.cli, account: this.chosenAccount(), workers: workers.ok ? workers.workers : undefined, machine: machine.label, end: ".", route: this.chosenRoute() })
+      ? startLine({ project: this.selection.name, cli: this.cli, workers: workers.ok ? workers.workers : undefined, route: this.chosenRoute() })
       : "Choose a project to start.";
+    summary.title = summary.textContent;
     this.syncPlan();
   }
 
@@ -1102,17 +1114,24 @@ export function commandTokensMarkup(command: string): string {
     .join(" ");
 }
 
-/** One pickable account: radio, name, the server's reason verbatim, two brief meters, and ↻. */
-function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup: string, usage: CheckedAccountUsage | undefined): string {
+/** The readings a profile's row draws: an explicit check's, else the listed ones. */
+export function profileReadings(profile: LaunchProfile, usage: CheckedAccountUsage | undefined): WindowReading[] {
+  return readings(usage?.windows ?? profile.windows, usage ? usage.observed_at : profile.usage_observed_at, Date.now(), usage ? undefined : profile.usage_source);
+}
+
+/** One pickable account: radio, name, why it leads (from its own readings), two brief meters, and ↻. */
+function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup: string, usage: CheckedAccountUsage | undefined, reason: PickReason | undefined): string {
   const name = escapeHtml(profile.name);
-  const list = readings(usage?.windows ?? profile.windows, usage ? usage.observed_at : profile.usage_observed_at, Date.now(), usage ? undefined : profile.usage_source);
-  const low = profile.recommendation ? lowPickNote(list) : undefined;
+  const list = profileReadings(profile, usage);
   const pick = profile.recommendation ? '<small class="launch-account-pick" data-testid="account-recommended">Recommended</small>' : "";
-  const why = profile.recommendation ?? profile.exclusion;
+  // A "resets later than …" exclusion only restates the meters; other exclusions (threshold, unknown usage) are news.
+  const exclusion = profile.exclusion && !profile.exclusion.startsWith("resets later than ") ? profile.exclusion : undefined;
+  const why = reason ? `<small class="launch-account-why${reason.low ? " launch-account-low" : ""}" data-testid="account-pick-reason"${reason.reset ? ` data-reset="${reason.reset}"` : ""}${reason.soonest === undefined ? "" : ` data-soonest="${reason.soonest}"`}>${escapeHtml(reason.text)}</small>`
+    : exclusion ? `<small class="launch-account-why">${escapeHtml(exclusion)}</small>` : "";
   const meters = !usage && profile.usage_source === "local" ? `<small class="launch-account-why" data-testid="account-local-read">${escapeHtml(localReadLine(list, profile.usage_observed_at))}</small>`
     : usage || profile.windows ? `<span class="launch-meters">${list.map((reading) => meterMarkup(reading, { labelled: true, brief: true })).join("")}</span>`
     : profile.usage ? `<small class="launch-account-why">${escapeHtml(profile.usage)}</small>` : "";
-  return `<div class="launch-account-entry"><label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-account-line"><span class="launch-row-name">${name}</span>${pick}${profile.is_default ? '<small class="launch-account-tag">Default</small>' : ""}</span>${why ? `<small class="launch-account-why">${escapeHtml(why)}</small>` : ""}${low ? `<small class="launch-account-why launch-account-low" data-testid="account-low-pick">${escapeHtml(low)}</small>` : ""}${meters}</span></label>${checkMarkup}</div>`;
+  return `<div class="launch-account-entry"><label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-account-line"><span class="launch-row-name">${name}</span>${pick}${profile.is_default ? '<small class="launch-account-tag">Default</small>' : ""}</span>${why}${meters}</span></label>${checkMarkup}</div>`;
 }
 
 /** A logged-out login or a duplicate: listed so every account is accounted for, never selectable. A logged-out one carries the command that fixes it. */

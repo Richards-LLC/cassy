@@ -15,7 +15,7 @@ export const SLOT_LABEL: Record<WindowSlot, string> = { "5h": "5h", week: "Week"
 export const STALE_MS = 60 * 60_000;
 
 export type WindowReading =
-  | { slot: WindowSlot; kind: "live" | "stale"; left: number; reset?: string; resetsIn?: string; age?: string }
+  | { slot: WindowSlot; kind: "live" | "stale"; left: number; reset?: string; resetsIn?: string; resetAt?: string; age?: string }
   | { slot: WindowSlot; kind: "reset" | "unknown" | "missing" | "unreachable" };
 
 const slotOf = (name: string): WindowSlot | undefined => /week|7d|seven/i.test(name) ? "week" : /^5h$|five|session/i.test(name) ? "5h" : undefined;
@@ -54,6 +54,7 @@ export function readings(windows: readonly AccountWindow[] | undefined, observed
       slot, kind: stale ? "stale" : "live", left: Math.round(100 - used),
       reset: window.resets_at && reset !== undefined && Number.isFinite(reset) ? accountTime(window.resets_at) : undefined,
       resetsIn: window.resets_at ? relativeIn(window.resets_at, now) : undefined,
+      resetAt: window.resets_at && reset !== undefined && Number.isFinite(reset) ? new Date(reset).toISOString() : undefined,
       age: stale && observed ? readAge(observed, now) : undefined,
     };
   });
@@ -74,10 +75,12 @@ export function meterMarkup(reading: WindowReading, options: { labelled: boolean
     const when = reading.kind === "stale" ? `<span class="meter-age">${escapeHtml(reading.age ?? "")}</span>` : reading.resetsIn ? `<span class="meter-in">${escapeHtml(reading.resetsIn)}</span>` : "";
     const at = !options.brief && reading.reset ? `<span class="meter-at">${when ? " · " : ""}resets ${escapeHtml(reading.reset)}</span>` : "";
     const aria = `${name}: ${reading.kind === "stale" ? "at most " : ""}${reading.left}% left${reading.reset ? `, resets ${reading.reset}` : ""}${reading.age ? `, ${reading.age}` : ""}`;
-    return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" data-left="${reading.left}" data-tone="${tone(reading.left)}" role="img" aria-label="${escapeHtml(aria)}">${label}<span class="meter-bar" aria-hidden="true"><span data-fill="${reading.left}"></span></span><span class="meter-value">${value}<span class="meter-unit"> left</span></span><span class="meter-when">${when}${at}</span></div>`;
+    return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" data-left="${reading.left}"${reading.resetAt ? ` data-reset="${reading.resetAt}"` : ""} data-tone="${tone(reading.left)}" role="img" aria-label="${escapeHtml(aria)}">${label}<span class="meter-bar" aria-hidden="true"><span data-fill="${reading.left}"></span></span><span class="meter-value">${value}<span class="meter-unit"> left</span></span><span class="meter-when">${when}${at}</span></div>`;
   }
   const words = reading.kind === "reset" ? "Unknown · reset since last read" : reading.kind === "unknown" ? "Unknown" : reading.kind === "unreachable" ? "Hub unreachable" : "Not reported";
-  return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" role="img" aria-label="${escapeHtml(`${name}: ${words}`)}">${label}<span class="meter-bar meter-bar--none" aria-hidden="true"></span><span class="meter-value meter-value--none">${words}</span></div>`;
+  // An unreachable hub is said once, above the ledger; each cell is a muted dash.
+  const shown = reading.kind === "unreachable" ? "—" : words;
+  return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" role="img" aria-label="${escapeHtml(`${name}: ${words}`)}">${label}<span class="meter-bar meter-bar--none" aria-hidden="true"></span><span class="meter-value meter-value--none">${shown}</span></div>`;
 }
 
 /** Least share left across known windows, or undefined when none is known. */
@@ -87,10 +90,26 @@ export function leastLeft(list: readonly WindowReading[]): number | undefined {
 }
 /** Below this, a recommended account says on its row why it is still first. */
 export const LOW_PICK = 20;
-/** Why SoonestReset still picks a nearly spent account: its capacity expires first. */
-export function lowPickNote(list: readonly WindowReading[]): string | undefined {
-  const left = leastLeft(list);
-  return left !== undefined && left < LOW_PICK ? `Only ${left}% left: picked first because it resets soonest, so its capacity is used before it expires` : undefined;
+type Known = Extract<WindowReading, { kind: "live" | "stale" }>;
+const weekOf = (list: readonly WindowReading[]): Known | undefined => list.find((reading): reading is Known => reading.slot === "week" && "left" in reading);
+export interface PickCandidate { name: string; list: readonly WindowReading[]; exclusion?: string }
+export interface PickReason { text: string; low: boolean; reset?: string; soonest?: boolean }
+/**
+ * Why the recommendation leads, built from the same readings its meters draw,
+ * so the reason, the plan strip and the bars can never disagree. "Soonest"
+ * is said only when a comparison with every other usable login shows it.
+ */
+export function pickReason(pick: PickCandidate, others: readonly PickCandidate[]): PickReason {
+  const week = weekOf(pick.list);
+  if (!week) return { text: "No weekly reading to rank by", low: false };
+  const left = leastLeft(pick.list) ?? week.left;
+  const at = (reading: Known | undefined) => reading?.resetAt ? Date.parse(reading.resetAt) : Infinity;
+  const sooner = others.map(other => ({ other, week: weekOf(other.list) })).filter(item => at(item.week) < at(week)).sort((a, b) => at(a.week) - at(b.week))[0];
+  const resets = week.resetsIn ? `week resets ${week.resetsIn}` : "weekly reset unknown";
+  const low = left < LOW_PICK;
+  const text = !sooner ? `${low ? `Only ${left}% left, but its` : "Its"} ${resets}, the soonest here, so its capacity is used before it expires`
+    : `${low ? `Only ${left}% left; ` : ""}${resets}. ${sooner.other.name} resets sooner (${sooner.week?.resetsIn ?? "unknown"})${sooner.other.exclusion ? ` but is excluded: ${sooner.other.exclusion}` : " but wasn't chosen"}`;
+  return { text, low, reset: week.resetAt, soonest: !sooner };
 }
 
 /**
@@ -106,7 +125,7 @@ export function localReadLine(list: readonly WindowReading[], observed: string |
 /** "77% 5h · 62% week · resets in 2 h": the plan strip's one-line summary. */
 export function capacityLine(list: readonly WindowReading[]): string {
   if (list.every(reading => reading.kind === "unreachable")) return "hub unreachable";
-  const parts = list.map(reading => reading.kind === "live" ? `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "stale" ? `≤${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : `${SLOT_LABEL[reading.slot].toLowerCase()} unknown`);
+  const parts = list.map(reading => reading.kind === "live" ? `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "stale" ? `≤${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "missing" ? `${SLOT_LABEL[reading.slot]} not reported` : `${SLOT_LABEL[reading.slot].toLowerCase()} unknown`);
   const soonest = list.filter((reading): reading is Extract<WindowReading, { kind: "live" | "stale" }> => (reading.kind === "live" || reading.kind === "stale") && Boolean(reading.resetsIn))[0];
   return `${parts.join(" · ")}${soonest?.resetsIn ? ` · resets ${soonest.resetsIn}` : ""}`;
 }

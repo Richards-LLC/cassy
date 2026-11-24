@@ -503,6 +503,20 @@ describe("accounts (cas-9666)", () => {
     await vi.waitFor(() => expect(calls.launches[0]?.request.profile).toBe("main"));
   });
 
+  it("builds the recommendation's reason from the readings its meters draw, and claims soonest only when it is", async () => {
+    const at = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
+    const profiles = structuredClone(ACCOUNTS);
+    Object.assign(profiles.claude!.profiles[1], { recommendation: "resets Wed 9:12 AM, 14% left", windows: [{ name: "weekly", used_percent: 86, resets_at: at(48) }], usage_observed_at: at(0) });
+    Object.assign(profiles.claude!.profiles[0], { windows: [{ name: "weekly", used_percent: 87, resets_at: at(17) }], usage_observed_at: at(0) });
+    const { sheet: s, dialog } = sheet({ machines: [ATLAS], profiles, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+    s.open();
+    await flush();
+    const row = dialog().querySelector('input[value="support@petrastella.io"]')!.closest(".launch-account-entry")!;
+    const reason = row.querySelector<HTMLElement>('[data-testid="account-pick-reason"]')!;
+    expect(reason.dataset.reset).toBe(row.querySelector<HTMLElement>('[data-testid="account-meter"][data-window="week"]')!.dataset.reset);
+    expect(reason.dataset.soonest).toBe("false");
+  });
+
   it("pins the worker route shown for the chosen project and never offers a hub that isn't ready", async () => {
     for (const [available, choose, sent] of [[true, "gateway", "gateway"], [false, "gateway", "direct"]] as const) {
       const gateway = { available, preselected: "direct" as const, clients: ["claude", "codex"], ...(available ? {} : { reason: "hub unreachable" }) };

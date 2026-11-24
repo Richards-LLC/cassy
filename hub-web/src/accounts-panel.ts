@@ -1,5 +1,5 @@
 import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
-import { fillMeters, leastLeft, localReadLine, lowPickNote, meterMarkup, readings } from "./account-meters";
+import { fillMeters, localReadLine, meterMarkup, pickReason, readings, type PickReason, type WindowReading } from "./account-meters";
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
@@ -22,8 +22,6 @@ export interface AccountsHost {
 }
 const ACTIONS: Record<AccountOperation, string> = { set_default: "Set default", rename: "Rename", disable: "Disable", enable: "Enable", remove: "Remove" };
 const CLEANUP_WORD = "clean up";
-/** Least capacity left across known windows; unknown sorts last. */
-const headroom = (row: AccountRow) => leastLeft(readings(row.windows, row.usage_observed_at, Date.now(), row.usage_source)) ?? -1;
 /** The account New session preselects for a provider: its recommendation, else the logged-in default, else the first logged-in one. */
 function nextLaunch(rows: readonly AccountRow[]): AccountRow | undefined {
   const usable = rows.filter(row => row.login_state === "logged_in" && !row.disabled);
@@ -41,7 +39,7 @@ function duplicateName(key: string, accounts: readonly AccountRow[]): string {
 /** A profile named like another harness (a Claude profile called "grok") says whose it is. */
 const harnessLookalike = (row: AccountRow) => PROVIDERS.some(([id]) => id !== row.provider && id === row.display_name.trim().toLowerCase());
 /** Loading keeps the ledger's shape, so rows land without reflow. */
-const SKELETON = `<p role="status" class="sr-only">Loading accounts…</p><ul class="accounts-ledger accounts-skeleton" aria-hidden="true">${"<li class=\"accounts-row\"><div class=\"accounts-who\"><span class=\"skeleton-dot\"></span><span class=\"skeleton-line\"></span></div><div class=\"accounts-cell\"><span class=\"skeleton-line\"></span></div><div class=\"accounts-cell\"><span class=\"skeleton-line\"></span></div></li>".repeat(3)}</ul>`;
+const SKELETON = `<p role="status" class="sr-only">Loading accounts…</p><ul class="accounts-ledger accounts-skeleton" aria-hidden="true">${"<li class=\"accounts-row\"><div class=\"accounts-who\"><span class=\"skeleton-dot\"></span><span class=\"skeleton-name\"><span class=\"skeleton-line\"></span><span class=\"skeleton-line skeleton-short\"></span></span></div><div class=\"accounts-cell\"><span class=\"skeleton-line\"></span></div><div class=\"accounts-cell\"><span class=\"skeleton-line\"></span></div></li>".repeat(3)}</ul>`;
 const CONFIRM_VERB: Partial<Record<AccountOperation, string>> = { remove: "remove", disable: "disable" };
 
 const HUB_STATE: Record<string, [string, string]> = { active: ["Active", "active"], disabled: ["Disabled", "idle"], unavailable: ["Unavailable", "blocked"] };
@@ -55,7 +53,7 @@ const HUB_STATE: Record<string, [string, string]> = { active: ["Active", "active
 export function gatewaySection(machine: AccountsMachine, gateway: GatewayInventory | undefined): string {
   if (!gateway || !["off", "ready", "unavailable"].includes(gateway.status) || !Array.isArray(gateway.accounts)) return "";
   const name = escapeHtml(machine.label);
-  if (gateway.status === "off") return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="off" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider">Home gateway</h4><span class="status-chip status-chip--idle">Off</span></div><p class="accounts-quiet">No hub is configured on ${name}. Workers run direct.</p></section>`;
+  if (gateway.status === "off") return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="off" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider">Home gateway · Off</h4></div><p class="accounts-quiet">Gateway routing is off on ${name}. Workers run direct.</p></section>`;
   const ready = gateway.status === "ready";
   const where = gateway.host === "loopback" ? "on this machine" : gateway.host === "tailnet" ? "on the tailnet" : "";
   const reason = gateway.reason ? `<p class="accounts-flag" data-testid="gateway-reason">${escapeHtml(gateway.reason)}. Gateway-routed workers start direct until the hub is ready.</p>` : "";
@@ -67,7 +65,7 @@ export function gatewaySection(machine: AccountsMachine, gateway: GatewayInvento
       const provider = HARNESS_NAME[account.provider as keyof typeof HARNESS_NAME] ?? account.provider;
       return `<li class="accounts-row accounts-hub-row" data-testid="gateway-row" data-hub-state="${escapeHtml(account.state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.label)}">${escapeHtml(account.label)}</strong><span class="accounts-sub">${escapeHtml(provider)}</span></div></div><div class="accounts-cell"><span class="status-chip status-chip--${tone}">${label}</span></div><div class="accounts-cell accounts-num"><span>${account.recent_requests} request${account.recent_requests === 1 ? "" : "s"}</span>${account.recent_failed ? `<span class="accounts-flag"> · ${account.recent_failed} failed</span>` : ""}</div></li>`;
     }).join("")}</ul>` : `<p class="accounts-quiet">No accounts on the hub.</p>`;
-  return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="${gateway.status}" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider">Home gateway</h4><span class="status-chip status-chip--${ready ? "active" : "blocked"}">${ready ? "Ready" : "Not ready"}</span><span class="accounts-quiet">${where ? `${where} · ` : ""}gateway-routed workers draw on these; the hub picks per request · read-only</span></div>${reason}${rows}${team}</section>`;
+  return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="${gateway.status}" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider" title="${escapeHtml(`${where ? `${where} · ` : ""}gateway-routed workers draw on these; the hub picks per request`)}">Home gateway · ${ready ? "Ready" : "Not ready"}</h4></div>${reason}${rows}${team}</section>`;
 }
 
 /** Body-mounted modal: shell redraws do not destroy edits or confirmations. */
@@ -208,6 +206,11 @@ export class AccountsSheet {
       if (signal.aborted || generation !== this.generation) return;
       this.catalogs.set(machine.id, catalog);
       this.render(machine, body, catalog);
+      // Every loaded machine re-draws, so a login shared with this one says where else it lives.
+      for (const other of this.host.machines()) {
+        const otherCatalog = this.catalogs.get(other.id), otherBody = this.machineBody(other.id);
+        if (other.id !== machine.id && otherCatalog && otherBody) this.render(other, otherBody, otherCatalog);
+      }
     } catch {
       if (signal.aborted || generation !== this.generation) return;
       body.innerHTML = `<p role="alert">Could not load accounts on ${escapeHtml(machine.label)}.</p><button type="button" data-retry data-machine="${escapeHtml(machine.id)}">Try again</button>`;
@@ -222,16 +225,23 @@ export class AccountsSheet {
     const observed = catalog.accounts.map(row => row.usage_observed_at).filter((at): at is string => Boolean(at)).sort().at(-1);
     const why = manage ? "" : "Needs manage access on this machine";
     const source = catalog.quota_source;
-    const from = source?.state === "hub" ? " · usage from the hub, one number per login on every machine" : "";
-    const unreachable = source?.state === "unreachable" ? `<p class="accounts-flag" data-testid="accounts-hub-unreachable" role="status">Hub unreachable${source.reason ? `: ${escapeHtml(source.reason)}` : ""}. Usage is hidden until it answers, rather than showing this machine's own read.</p>` : "";
-    const summary = `<div class="accounts-summary" data-quota-source="${escapeHtml(source?.state ?? "off")}"><p class="accounts-quiet">${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${observed && source?.state !== "unreachable" ? ` · usage read ${escapeHtml(accountTime(observed))}` : ""}${from}</p>${unreachable}${cleanup.length ? `<div class="accounts-cleanup-banner" data-testid="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : ""}</div>`;
+    const from = source?.state === "hub" ? " · from the hub" : "";
+    // Said once, above the ledger; each cell is a muted dash. The transport error stays on the machine.
+    const unreachable = source?.state === "unreachable" ? `<p class="accounts-flag" data-testid="accounts-hub-unreachable" role="status">Hub unreachable. Usage is hidden until it answers.</p>` : "";
+    const banner = cleanup.length ? `<div class="accounts-cleanup-banner" data-testid="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : "";
+    const summary = `<div class="accounts-summary" data-quota-source="${escapeHtml(source?.state ?? "off")}"><p class="accounts-quiet">${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${from}${observed && source?.state !== "unreachable" ? ` · read ${escapeHtml(accountTime(observed))}` : ""}</p>${banner}${unreachable}</div>`;
     const groups = PROVIDERS.map(([provider, label]) => {
       const listed = catalog.accounts.filter(row => row.provider === provider);
       if (!listed.length) return "";
       const next = nextLaunch(listed);
-      // Next launch first, cleanup last, most headroom between.
-      const accounts = listed.sort((a, b) => Number(b === next) - Number(a === next) || Number(needsCleanup(a)) - Number(needsCleanup(b)) || headroom(b) - headroom(a));
-      return `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${HARNESS_NAME[provider]} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts, account === next)).join("")}</ul></section>`;
+      // Next launch first, cleanup last, then by name: the order holds whatever the usage state.
+      const accounts = listed.sort((a, b) => Number(b === next) - Number(a === next) || Number(needsCleanup(a)) - Number(needsCleanup(b)) || a.display_name.localeCompare(b.display_name) || a.name.localeCompare(b.name));
+      const shown = new Map(accounts.map(account => [account, this.shown(machine, account)]));
+      const usable = accounts.filter(row => row.login_state === "logged_in" && !row.disabled && !row.duplicate_of);
+      const reason = next?.recommendation ? pickReason({ name: next.display_name, list: shown.get(next)! }, usable.filter(row => row !== next).map(row => ({ name: row.display_name, list: shown.get(row)! }))) : undefined;
+      // A window no login in this group reports leaves its column empty rather than repeating "Not reported".
+      const silent = new Set(["5h", "week"].filter(slot => accounts.every(row => shown.get(row)!.find(reading => reading.slot === slot)?.kind === "missing")));
+      return `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${HARNESS_NAME[provider]} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts, account === next, shown.get(account)!, account === next ? reason : undefined, silent)).join("")}</ul></section>`;
     }).join("");
     const cols = `<div class="accounts-cols" aria-hidden="true"><span>Account</span><span>5-hour window</span><span>Weekly window</span></div>`;
     return `${summary}${cols}${groups}${gateway}${manage ? "" : this.grantCallout(machine)}`;
@@ -243,37 +253,49 @@ export class AccountsSheet {
     return `<div class="accounts-grant" data-testid="accounts-grant" role="note"><p><strong>Read-only on ${escapeHtml(machine.label)}.</strong> Removing, disabling, renaming and choosing the default need manage access. Run this on ${escapeHtml(machine.label)}, then open the link it prints here:</p><div class="accounts-login"><code>${escapeHtml(command)}</code><button type="button" data-grant-command="${escapeHtml(command)}">Copy command</button></div></div>`;
   }
 
+  /** The readings a row draws: an explicit check's, else the listed ones. */
+  private shown(machine: AccountsMachine, account: AccountRow): WindowReading[] {
+    const checked = this.usageChecks.result(machine.id, account.key);
+    return readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at, Date.now(), checked ? undefined : account.usage_source);
+  }
+
+  /** Other paired machines holding the same login, by provider and login name. */
+  private elsewhere(machine: AccountsMachine, account: AccountRow): string[] {
+    if (account.provider === "grok" || account.duplicate_of) return [];
+    return this.host.machines().filter(other => other.id !== machine.id && this.catalogs.get(other.id)?.accounts.some(row => row.provider === account.provider && row.display_name === account.display_name && !row.duplicate_of)).map(other => other.label);
+  }
+
   /** One ledger row: identity and actions, then the two windows on the shared grid. */
-  private card(machine: AccountsMachine, account: AccountRow, manage: boolean, accounts: readonly AccountRow[], next: boolean): string {
+  private card(machine: AccountsMachine, account: AccountRow, manage: boolean, accounts: readonly AccountRow[], next: boolean, shown: WindowReading[], reason: PickReason | undefined, silent: ReadonlySet<string>): string {
     const attrs = `data-machine="${escapeHtml(machine.id)}" data-account="${escapeHtml(account.key)}"`;
     const grok = account.provider === "grok";
     const checked = this.usageChecks.result(machine.id, account.key);
     const lookalike = harnessLookalike(account) ? ` · ${HARNESS_NAME[account.provider]} profile` : "";
-    const flag = account.duplicate_of ? `<span class="accounts-flag" data-duplicate-of>Duplicate of ${duplicateName(account.duplicate_of, accounts)}</span>` : account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
-    const shown = readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at, Date.now(), checked ? undefined : account.usage_source);
-    const low = next && account.recommendation ? lowPickNote(shown) : undefined;
-    // The reason's numbers are already on the meters; the tag carries it as a tooltip.
-    const nextTag = next ? `<span class="accounts-next" data-testid="account-next" title="${escapeHtml(account.recommendation ?? "Default profile")}">Next launch</span>` : "";
-    const lowTag = low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(low)}</span>` : "";
+    const flag = !account.duplicate_of && account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
+    // The reason comes from the same readings as the meters; it is the tag's tooltip, and spoken on the row only when the pick is low.
+    const nextTag = next ? `<span class="accounts-next" data-testid="account-next"${reason?.reset ? ` data-reset="${reason.reset}"` : ""} title="${escapeHtml(reason?.text ?? "Default profile")}">Next launch</span>` : "";
+    const lowTag = reason?.low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(reason.text)}</span>` : "";
+    const others = this.elsewhere(machine, account);
+    const lives = others.length ? `<span class="accounts-sub" data-testid="account-elsewhere">also on ${escapeHtml(others.join(", "))}</span>` : "";
     // With a hub configured, a number that isn't the hub's says whose it is.
     const local = checked && account.usage_source ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own check</span>` : "";
     // The profile, not its folder: the folder repeats the email; the whole path is the tooltip.
     const profile = account.name !== account.display_name ? `<code class="accounts-sub" title="${escapeHtml(account.location ?? account.key)} on ${escapeHtml(machine.label)}">${escapeHtml(account.name)}</code>` : "";
-    const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, flag, local, profile].filter(Boolean).join("");
+    const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, flag, local, profile, lives].filter(Boolean).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];
       return `<button type="button" ${attrs} data-operation="${op}"${this.pending || reason !== null ? ` disabled title="${escapeHtml(reason ?? "Unavailable")}"` : ""}>${ACTIONS[op]}</button>`;
     };
     const reasons = [...new Set([account.capabilities.remove, account.capabilities.rename].filter(Boolean))].join(" · ");
-    const actions = grok ? "" : `<div class="accounts-actions" role="group" aria-label="Actions for ${escapeHtml(account.display_name)}">${this.usageChecks.markup(machine.id, account.key)}<details class="accounts-more" data-testid="account-actions"><summary aria-label="More actions for ${escapeHtml(account.display_name)}" title="More actions">⋯</summary><div class="accounts-menu">${operations.map(button).join("")}${reasons ? `<p class="accounts-quiet" data-testid="accounts-readonly">${escapeHtml(reasons)}</p>` : ""}</div></details></div>`;
+    const actions = grok ? "" : `<div class="accounts-actions" role="group" aria-label="Actions for ${escapeHtml(account.display_name)}">${this.usageChecks.markup(machine.id, account.key)}<details class="accounts-more" data-testid="account-actions"><summary aria-label="More actions for ${escapeHtml(account.display_name)}" title="More actions">⋯</summary><div class="accounts-menu">${this.usageChecks.markup(machine.id, account.key, "menu")}${operations.map(button).join("")}${reasons ? `<p class="accounts-quiet" data-testid="accounts-readonly">${escapeHtml(reasons)}</p>` : ""}</div></details></div>`;
     const loggedIn = account.login_state === "logged_in";
     const cells = grok ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet" data-testid="accounts-readonly">Grok uses one account and doesn't report usage.</p></div>`
       : !loggedIn && !checked ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet">Not read · ${account.login_state === "stale_login" ? "stale login" : "logged out"}</p><div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy</button></div></div>`
-      // An unreachable hub is said once in the summary; each row holds one quiet line, not two.
+      // A duplicate is the same login twice: say so and offer the fix, rather than repeat its twin's meters.
+      : account.duplicate_of ? `<div class="accounts-cell accounts-span accounts-duplicate"><p class="accounts-quiet" data-duplicate-of>Same login as ${duplicateName(account.duplicate_of, accounts)}</p>${grok ? "" : button("remove")}</div>`
       : !checked && account.usage_source === "local" ? `<div class="accounts-cell accounts-span" data-testid="account-local-read"><p class="accounts-quiet">${escapeHtml(localReadLine(shown, account.usage_observed_at))}</p></div>`
-      : shown.every(reading => reading.kind === "unreachable") ? `<div class="accounts-cell accounts-span" data-testid="account-meter" data-state="unreachable"><p class="accounts-quiet">No shared number while the hub is unreachable</p></div>`
-      : shown.map(reading => `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
+      : shown.map(reading => silent.has(reading.slot) ? `<div class="accounts-cell accounts-silent" data-col="${reading.slot}" aria-hidden="true"></div>` : `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
     return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}${next ? " is-next" : ""}" data-testid="account-row" data-account-key="${escapeHtml(account.key)}" data-login-state="${escapeHtml(account.login_state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.location ? `${account.location} on ${machine.label}` : account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})${lookalike}</span><span class="accounts-subline">${sub}</span></div>${actions}</div>${cells}</li>`;
   }
 

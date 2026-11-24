@@ -10,7 +10,6 @@ const casSrcRow = (page: Page) => page.getByRole("navigation", { name: "Choose a
 const newSession = (page: Page) => page.getByRole("button", { name: "New session", exact: true });
 // The Accounts confirmation form; it stays mounted (hidden) between operations.
 const accountsEditor = (dialog: Locator) => dialog.getByTestId("accounts-editor");
-const usageFor = (dialog: Locator, account: string) => dialog.getByRole("status", { name: `Usage for ${account}`, exact: true });
 
 /** Atlas with one live supervisor on cas-src; ledger-api and old-notes are idle projects. */
 const ATLAS: Machine = {
@@ -342,7 +341,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await expect(stale).toHaveAttribute("data-login-state", "stale_login");
       await expect(stale).toBeVisible();
       // The row names the profile; the folder it lives in is the tooltip.
-      await expect(dialog.getByRole("listitem").filter({ hasText: "hello@example.test" }).getByTitle(/^~\/\.claude-spare /)).toBeVisible();
+      await expect(dialog.getByRole("listitem").filter({ hasText: "hello@example.test" }).locator('code[title^="~/.claude-spare "]')).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (width === 390) {
         await page.mouse.move(200, 600);
@@ -441,12 +440,16 @@ test("HUB-J13 check native account usage before starting without switching", jou
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
       for (const provider of ["claude", "codex"]) {
-        await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
+        // A phone row keeps its width for the name: the check sits in the ⋯ menu there.
+        if (width === 390) {
+          await dialog.getByRole("button", { name: `More actions for ${provider} main`, exact: true }).click();
+          await dialog.locator(`[data-account-key="${provider}:main"] .accounts-menu`).getByRole("button", { name: "Refresh usage", exact: true }).click();
+        } else await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
         // The check's windows land on the row's meters as "% left"; its reason reaches the status.
         const row = dialog.locator(`[data-account-key="${provider}:main"]`);
         await expect(row.locator('[data-testid="account-meter"][data-window="5h"]')).toHaveAttribute("data-left", "77");
         await expect(row.locator('[data-testid="account-meter"][data-window="week"]')).toHaveAttribute("data-left", "56");
-        await expect(usageFor(dialog, `${provider}:main`)).toContainText("Snapshot is stale");
+        await expect(dialog.locator(`[data-usage-account="${provider}:main"] [data-testid="account-usage-status"]`)).toContainText("Snapshot is stale");
       }
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     });

@@ -129,6 +129,8 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         ("factory.gateway.enabled", "Worker Home-Gateway Transport", "Opt this project's Claude and Codex workers into the home gateway. Only the project's own setting enables it. Workers keep their native account directory; if the hub is not ready at spawn, the worker starts direct and worker_status says so.", ConfigType::Bool, "false"),
         ("factory.gateway.endpoint", "Home-Gateway Endpoint", "Hub base URL without /v1, usually set in the user-level ~/.cas/config.toml. Only loopback and tailnet hosts (100.64.0.0/10, *.ts.net) are accepted. Empty clears it.", ConfigType::String, ""),
         ("factory.gateway.key_file", "Home-Gateway Client Key File", "Path to the hub client key file, mode 0600. Only the path is stored; the key is read when a worker starts. Empty clears it.", ConfigType::String, ""),
+        ("factory.gateway.dashboard", "Home-Gateway Dashboard", "User-level only. The hub's existing usage dashboard (CPA Manager Plus) base URL, read for Commander's hub account inventory. Loopback and tailnet hosts only. Empty clears it.", ConfigType::String, ""),
+        ("factory.gateway.dashboard_key_file", "Home-Gateway Dashboard Key File", "User-level only. Path to the dashboard admin key file, mode 0600. Cassy uses it only for read-only requests and never sends it to Commander. Empty clears it.", ConfigType::String, ""),
     ] {
         registry.register(ConfigMeta {
             key, section: "factory", name, description, value_type, default,

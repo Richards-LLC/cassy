@@ -19,6 +19,16 @@ pub(crate) use importers::related_tests;
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
 struct IsolatedCheckoutRequired;
 
+/// A focused run selected no test to execute (GH #2369). Its owning package's
+/// own run proves the input instead: unsure means run more, never refuse.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ZeroTests(String);
+
+impl ZeroTests {
+    fn new(message: String) -> Self { Self(crate::gates::tag("G-61", message)) }
+}
+
 fn safe_path(path: &str) -> bool {
     !path.is_empty()
         && Path::new(path)
@@ -32,6 +42,11 @@ pub(super) fn javascript(path: &str) -> bool {
         Path::new(path).extension().and_then(|ext| ext.to_str()),
         Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "vue")
     )
+}
+
+/// A package's `package.json` selects that package's own run (GH #2164).
+pub(super) fn package_manifest(path: &str) -> bool {
+    Path::new(path).file_name().is_some_and(|name| name == "package.json")
 }
 
 pub(super) fn test_file(path: &str) -> bool {
@@ -54,19 +69,19 @@ pub(super) fn test_match(path: &str, runner: Option<&str>) -> bool {
 
 /// A scoped JavaScript stability command, however the shell names its runner.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Invocation {
-    pub(super) runner: &'static str,
+pub(crate) struct Invocation {
+    pub(crate) runner: &'static str,
     /// The runner's `--config` file, relative to the invocation directory.
-    pub(super) config: Option<String>,
+    pub(crate) config: Option<String>,
     /// Test files relative to the invocation directory.
-    pub(super) files: Vec<String>,
+    pub(crate) files: Vec<String>,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`; `<package>/package.json` runs that package";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
-pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
+pub(crate) fn invocation(args: &[String]) -> Option<Invocation> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let args = match args.as_slice() {
         ["pnpm" | "yarn" | "npm", "exec", rest @ ..] => rest,
@@ -103,7 +118,7 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
                 return None;
             }
             config = Some(value.to_string());
-        } else if safe_path(arg) && javascript(arg) {
+        } else if safe_path(arg) && (javascript(arg) || package_manifest(arg)) {
             files.push(arg.to_string());
         } else {
             return None;
@@ -1512,6 +1527,8 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
     }
     if tests.is_empty() { return Ok(()); }
     let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None, test_env)?;
+    // The selection ran no test; its owning package's run already printed.
+    if proof.tests.is_empty() { return Ok(()); }
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -1747,7 +1764,7 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
 /// (GH #2195), the config must select the file: a spec
 /// outside the default config's `testRegex` belongs to the config that
 /// matches it (GH #2058); with no such config the nearest one stays.
-fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
+pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
     let spec = repo.join(path);
     let mut current = spec.parent().context("test parent")?.to_path_buf();
     let (mut package, mut nearest) = (None, None);
@@ -1826,15 +1843,18 @@ fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
 /// import, else the nearest directory with runner evidence. Conflicting or
 /// absent evidence leaves the runner unknown.
 pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
-    let source = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
-    if source.contains("@playwright/test") {
-        return Some("playwright");
-    }
+    // A package manifest's dependencies are not a test API import.
+    let source = if package_manifest(path) { String::new() } else { std::fs::read_to_string(repo.join(path)).unwrap_or_default() };
+    // GH #2380: a unit test may drive a browser through `@playwright/test`'s
+    // library (`chromium`); its test API import names the runner.
     if source.contains("'vitest'") || source.contains("\"vitest\"") {
         return Some("vitest");
     }
     if source.contains("@jest/globals") {
         return Some("jest");
+    }
+    if source.contains("@playwright/test") {
+        return Some("playwright");
     }
     // GH #2055: a node:test file beside a Jest config is Node's own runner.
     if source.contains("'node:test'") || source.contains("\"node:test\"") {
@@ -1879,7 +1899,34 @@ fn runner_path(repo: &Path, package: &Path, runner: &str) -> Result<PathBuf> {
     }
 }
 
+/// The one execution boundary (GH #2369): a selection that cannot run a test,
+/// because it selects none or names a spec no runner config lists, runs the
+/// owning package instead, and park accepts that package receipt for the
+/// selection's inputs. A failing run still fails: unsure means run more.
 fn execute_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    runner: &str,
+    runner_config: Option<&Path>,
+    tests: &[Identity],
+    widened: Option<(&super::widened::Scope, &str, &str)>,
+    test_env: &[String],
+) -> Result<Proof> {
+    let error = match execute_selection(cas_root, repo, head, runner, runner_config, tests, widened, test_env) {
+        Err(error) if error.downcast_ref::<ZeroTests>().is_some()
+            && !matches!(widened, Some((super::widened::Scope::Package(_), _, _))) => error,
+        result => return result,
+    };
+    let file = widened.map(|(_, file, _)| file).or_else(|| tests.first().map(|test| test.path.as_str()))
+        .context("an empty selection names no input")?;
+    let package = super::widened::owning_package(repo, file, runner);
+    let cause = format!("{}; no runnable focused selection: {error:#}", widened.map_or("changed tests", |(_, _, cause)| cause));
+    eprintln!("Running {file}'s package {package:?} instead: {error:#}");
+    execute_selection(cas_root, repo, head, runner, runner_config, &[], Some((&package, file, cause.as_str())), test_env)
+}
+
+fn execute_selection(
     cas_root: &Path,
     repo: &Path,
     head: &str,
@@ -1908,7 +1955,7 @@ fn execute_tests(
     let consumers = match widened {
         Some((super::widened::Scope::Related(helper), _, _)) if matches!(runner, "playwright" | "node") => {
             let Some((_, specs)) = related_tests(repo, helper).filter(|(owner, _)| *owner == runner) else {
-                bail!(crate::gates::tag("G-61", format!("no {runner} test imports {helper}")));
+                bail!(ZeroTests::new(format!("no {runner} test imports {helper}")));
             };
             eprintln!("Running {helper} through its importing tests: {}", specs.join(" "));
             specs
@@ -2095,6 +2142,14 @@ fn execute_tests(
         };
         count += if widened.is_some() && runner == "playwright" {
             let (success, report) = run(0)?;
+            // A run that found no test is no failure to attribute.
+            fn ran_a_test(suite: &Value) -> bool {
+                suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
+                    || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(ran_a_test))
+            }
+            if !ran_a_test(&report) && found_no_tests(runner, success, &report) {
+                bail!(ZeroTests::new(format!("{runner} executed zero tests")));
+            }
             let inherited = if success { BTreeSet::new() } else {
                 let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
                     &executable, &config, &report, &environment, high)
@@ -2121,6 +2176,9 @@ fn execute_tests(
     Ok(())
     })();
     if let Err(error) = outcome {
+        if error.downcast_ref::<ZeroTests>().is_some() {
+            return Err(error);
+        }
         if runner == "vitest" {
             return Err(match retain_vitest_reports(cas_root, repo, head, reports.path()) {
                 Ok(kept) => anyhow::anyhow!(
@@ -2414,7 +2472,7 @@ fn listing_owner(
         }
         if directory == repo { break; }
     }
-    bail!(crate::gates::tag("G-61", format!("no Playwright config lists {spec}")))
+    bail!(ZeroTests::new(format!("no Playwright config lists {spec}")))
 }
 
 /// Test identities in a Playwright JSON report, named as `playwright_results` names them.
@@ -2437,6 +2495,21 @@ fn listed_tests(repo: &Path, root: &Path, suites: &Value, ancestry: &[String], t
     }
 }
 
+/// Playwright exits 1 and reports "No tests found" when a selection matches none.
+fn playwright_found_no_tests(report: &Value) -> bool {
+    report.get("errors").and_then(Value::as_array).is_some_and(|errors| errors.iter()
+        .any(|error| error.get("message").and_then(Value::as_str).is_some_and(|message| message.contains("No tests found"))))
+}
+
+/// A run that executed nothing is a zero-test selection only when the runner
+/// reported no failure: it passed, Vitest/Jest found no test file, or
+/// Playwright found no test. Otherwise it is a failing run (GH #2172).
+fn found_no_tests(runner: &str, success: bool, report: &Value) -> bool {
+    success || if runner == "playwright" { playwright_found_no_tests(report) } else {
+        report.get("testResults").and_then(Value::as_array).is_some_and(Vec::is_empty)
+    }
+}
+
 fn verify_repeats(
     runner: &str,
     repo: &Path,
@@ -2447,7 +2520,7 @@ fn verify_repeats(
     let mut count = 0;
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
-        count = validate_report_with_inherited(
+        count = match validate_report_with_inherited(
             runner,
             repo,
             &report,
@@ -2458,7 +2531,12 @@ fn verify_repeats(
             // source tables and every iteration must produce exactly them.
             (runner == "vitest").then_some(expected),
             &[],
-        )?;
+        ) {
+            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, success, &report) => {
+                bail!("{runner} stability failed at iteration {}; no retry", iteration + 1)
+            }
+            result => result?,
+        };
         if !success {
             bail!(
                 "{runner} stability failed at iteration {}; no retry",
@@ -2538,6 +2616,9 @@ fn validate_report_with_inherited(
             }
             results.insert(identity, count);
         }
+        if results.is_empty() && playwright_found_no_tests(report) {
+            bail!(ZeroTests::new(format!("{runner} executed zero tests")));
+        }
         if report
             .get("errors")
             .and_then(Value::as_array)
@@ -2546,11 +2627,10 @@ fn validate_report_with_inherited(
             bail!("Playwright stability report contains runner errors");
         }
     } else {
-        for file in report
-            .get("testResults")
-            .and_then(Value::as_array)
-            .context("testResults missing")?
-        {
+        let reported = report.get("testResults").and_then(Value::as_array).context("testResults missing")?;
+        // Vitest and Jest call a run that found no test file unsuccessful.
+        if reported.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
+        for file in reported {
             let path = report_path(
                 repo,
                 file.get("name")
@@ -2599,6 +2679,7 @@ fn validate_report_with_inherited(
             bail!("{runner} stability report was unsuccessful");
         }
     }
+    if results.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
     // A template identity is proved when every row it selected passed. Distinct
     // rows may share one runtime name (GH #2138, #2225), so how many rows there
     // must be comes from the source table, not from the run (cas-c1df).
@@ -2644,7 +2725,6 @@ fn validate_report_with_inherited(
     if !tests.is_empty() && results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
-    if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
     for file in files {
         if !results.keys().any(|ran| ran.path == *file) {
             bail!(crate::gates::tag("G-61", format!("{runner} executed no test of the required spec {file}")));
@@ -3339,7 +3419,7 @@ process.exit(ok ? 0 : 1);
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
         // The prescribed rerun names that config, and running it as printed passes the same way.
-        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), "HEAD", &tests);
         assert_eq!(prescribed.len(), 1);
         assert!(prescribed[0].contains(&format!("-- jest --config {config} {spec}`")), "{prescribed:?}");
         let args: Vec<String> = ["jest", "--config", config, spec].map(String::from).into();
@@ -3445,13 +3525,13 @@ process.exit(listed.length ? 0 : 1);
         let mut tests: Vec<Identity> = journeys.iter().map(|journey| id(journey, "journey")).collect();
         tests.push(id(unit, "catalog"));
         let listings = || std::fs::read_to_string(repo.path().join("hub-web/.listings")).unwrap_or_default().lines().count();
-        let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests);
+        let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &tests);
         assert_eq!(prescribed, [
             format!("`cas factory worker-check --cas-root /cas -- playwright {}`", journeys.join(" ")),
             format!("`cas factory worker-check --cas-root /cas -- vitest {unit}`"),
         ]);
         let uncached = listings();
-        let cached = with_listing_cache(|| super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests));
+        let cached = with_listing_cache(|| super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &tests));
         assert_eq!(cached, prescribed, "the cache changes no answer");
         assert_eq!(listings() - uncached, 2, "one listing per config, not per file ({uncached} without the cache)");
     }
@@ -3518,7 +3598,7 @@ process.exit(listed.length ? 0 : 1);
         assert!(super::super::stability::missing(&passing(), &tests).is_empty());
         // The prescribed command names that config, and runs as printed.
         let config = "playwright.hermetic.config.js";
-        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), "HEAD", &tests);
         assert_eq!(prescribed.len(), 1);
         assert!(prescribed[0].contains(&format!("-- playwright --config {config} {spec}`")), "{prescribed:?}");
         let args: Vec<String> = ["playwright", "--config", config, spec].map(String::from).into();
@@ -3566,10 +3646,7 @@ process.exit(listed.length ? 0 : 1);
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
 
-        let commands = super::super::stability::rerun_commands(
-            Path::new("/cas"),
-            repo.path(),
-            &[id("bare/a.test.ts", "a")],
+        let commands = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &[id("bare/a.test.ts", "a")],
         );
         let argv: Vec<_> = commands
             .concat()

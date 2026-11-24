@@ -1316,23 +1316,27 @@ fn passing_test_records(
     let Ok(repo) = repo.canonicalize() else {
         return Default::default();
     };
-    let path = receipt_path(cas_root, &repo, head);
-    let Some(directory) = path.parent() else {
-        return Default::default();
-    };
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Default::default();
-    };
-    let mut entries = entries.flatten().collect::<Vec<_>>();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut entries = Vec::new();
+    for checkout in std::iter::once(repo.clone()).chain(sibling_worktrees(&repo)) {
+        let Some(Ok(found)) = receipt_path(cas_root, &checkout, head).parent().map(std::fs::read_dir) else {
+            continue;
+        };
+        let mut found = found.flatten().collect::<Vec<_>>();
+        found.sort_by_key(std::fs::DirEntry::file_name);
+        entries.extend(found.into_iter().map(|entry| (checkout.clone(), entry)));
+    }
     let mut exact = BTreeMap::new();
     let mut ancestors = Vec::new();
-    for entry in entries {
+    for (checkout, entry) in entries {
         let Some((receipt_head, package, test)) =
-            read_passing_test_record(cas_root, &repo, &entry)
+            read_passing_test_record(cas_root, &checkout, &entry)
         else {
             continue;
         };
+        // GH #2378: another checkout's pass counts only at this exact head.
+        if checkout != repo && receipt_head != head {
+            continue;
+        }
         if receipt_head == head {
             exact.insert(
                 (package, test.harness.clone(), test.filter.clone()),
@@ -1402,6 +1406,30 @@ fn passing_test_records(
         .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
         .collect();
     (records, voided)
+}
+
+/// GH #2378: the other checkouts of this repository. A receipt binds a clean
+/// commit, so a pass in any of them proves the same tree at that head; a
+/// supervisor closing for a stopped worker runs in that worker's worktree.
+/// Read from Git's administrative files, so a close spawns no extra process.
+fn sibling_worktrees(repo: &Path) -> Vec<PathBuf> {
+    let dot_git = repo.join(".git");
+    let common = if dot_git.is_dir() { dot_git } else {
+        let Some(admin) = std::fs::read_to_string(&dot_git).ok()
+            .and_then(|link| link.trim().strip_prefix("gitdir:").map(|path| repo.join(path.trim())))
+        else { return Vec::new() };
+        match std::fs::read_to_string(admin.join("commondir")) {
+            Ok(common) => admin.join(common.trim()),
+            Err(_) => return Vec::new(),
+        }
+    };
+    let linked = std::fs::read_dir(common.join("worktrees")).into_iter().flatten().flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("gitdir")).ok())
+        .filter_map(|gitdir| Path::new(gitdir.trim()).parent().map(Path::to_path_buf));
+    common.parent().map(Path::to_path_buf).into_iter().chain(linked)
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path != repo && path.join(".git").exists())
+        .collect()
 }
 
 fn read_passing_test_record(
@@ -2497,7 +2525,30 @@ fn with_classification_progress<T>(interval: std::time::Duration, package: &str,
     })
 }
 
+/// A named Rust selection that ran zero tests (verified-test guard status 4).
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ZeroSelection(String);
+
+/// The verified-test guard's exit status for a selection that ran no test.
+const ZERO_SELECTION_STATUS: i32 = 4;
+
+/// cas-fcb1: a named selection that runs zero tests is no failure; the capped
+/// runner runs the owning crate once instead, and park accepts that crate
+/// receipt for the selection's changed tests. A failing run still fails.
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    match execute_selection_at(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, test_env, false) {
+        Err(error) if error.downcast_ref::<ZeroSelection>().is_some() => {
+            eprintln!("{error:#}; running the owning crate once instead");
+            execute_selection_at(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, test_env, true)
+        }
+        result => result,
+    }
+}
+
+// gate-audit[crate_run]: selector Runs the owning crate once after a named selection ran zero tests; admission, the zero-test guard and every refusal still apply, and a failing crate run still fails.
+#[allow(clippy::too_many_arguments)]
+fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String], crate_run: bool) -> Result<()> {
     if javascript::allowed_args(args) {
         validate_test_environment(args, test_env)?;
         if isolated_test_env.is_some() {
@@ -2532,7 +2583,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
     let mut widened_proof = None;
-    let owned_tests = if let Some(test) = &test {
+    let mut owned_tests = if let Some(test) = &test {
         capacity_preflight(&cas_root, &repo, &config, &cas_root.join("worker-check-slots"))?;
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         let classified = with_classification_progress(
@@ -2561,6 +2612,12 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
             }
         }
     } else { Vec::new() };
+    if crate_run && let Some(test) = &test {
+        let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
+        widened::invalidate(&cas_root, &repo, &head, &scope)?;
+        widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: widened::ZERO_SELECTION_REASON.into(), configs: Default::default() });
+        owned_tests.clear();
+    }
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
@@ -2826,6 +2883,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         if let Some(log) = &selected_log {
             stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, log)?;
         }
+        if test.is_some() && !crate_run && status.code() == Some(ZERO_SELECTION_STATUS) {
+            bail!(ZeroSelection(crate::gates::tag("G-61", format!("test: ZERO {head}: the selection ran no test"))));
+        }
         bail!(crate::gates::tag("G-61", format!(
             "{}: FAIL {head} ({status})",
             if test.is_some() { "test" } else { "check" }
@@ -2841,6 +2901,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 .trim()
                 .parse()?;
             std::fs::remove_file(&count_file)?;
+            if count == 0 && !crate_run {
+                bail!(ZeroSelection("Worker test executed zero tests; no PASS receipt recorded".into()));
+            }
             if count == 0 {
                 bail!("Worker test executed zero tests; no PASS receipt recorded");
             }

@@ -32,6 +32,8 @@ export interface FleetAgent {
   readonly generation?: string | number | null;
   readonly started_at?: string | null;
   readonly role?: string | null;
+  /** A worker's effective model route; fallback means the gateway was chosen but the worker started direct. */
+  readonly route?: { readonly kind: "gateway" | "direct" | "fallback"; readonly reason?: string } | null;
 }
 
 export interface FleetTask {

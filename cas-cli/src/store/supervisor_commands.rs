@@ -8,15 +8,20 @@ use sha2::{Digest, Sha256};
 
 pub(crate) enum Write { Reserve, Claim, Update }
 
+/// Longest one receipt write waits for the shared connection or SQLite lock.
+const RECEIPT_STORE_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
 fn prefix(session: &str, supervisor: &str) -> String {
     format!("commander.command.v1.{}.", hex::encode(Sha256::digest(
         serde_json::to_vec(&(session, supervisor)).expect("command scope"))))
 }
 
 fn transaction<T>(root: &Path, body: impl FnOnce(&rusqlite::Connection) -> cas_store::Result<T>) -> cas_store::Result<T> {
-    // A queued command retries on the next daemon pass under contention. Never
-    // let a command receipt wait behind another process's SQLite lock unbounded.
-    let _budget = cas_store::wait_budget::bound_waits_for(std::time::Duration::from_millis(50));
+    // A receipt write gets its own short budget (cas-8c4f): a loop pass that
+    // already spent its budget must not turn a brief holder into a failed
+    // command, and an unbounded caller still never waits indefinitely.
+    let _grant = cas_store::wait_budget::grant_waits_for(RECEIPT_STORE_WAIT_BUDGET);
+    let _budget = cas_store::wait_budget::bound_waits_for(RECEIPT_STORE_WAIT_BUDGET);
     let shared = cas_store::shared_db::shared_connection(&root.join("cas.db"))?;
     cas_store::shared_db::with_immediate_write_txn_pooled(&shared, |conn| {
         conn.execute_batch("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
@@ -71,3 +76,4 @@ pub(crate) fn write(root: &Path, session: &str, supervisor: &str, value: &Value,
         Ok(conn.execute(sql, params![key, value])? != 0)
     })
 }
+

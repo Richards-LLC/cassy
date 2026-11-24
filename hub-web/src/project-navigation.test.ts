@@ -47,11 +47,17 @@ describe("project-first navigation", () => {
       expect(action).not.toBeNull();
       expect(action.hidden).toBe(false);
       expect(action.tabIndex, "keyboard actions stay in the conversation header menu").toBe(-1);
-      expect(action.disabled).toBe(harness !== "claude");
+      expect(action.disabled).toBe(harness !== "claude" && harness !== "codex");
       if (harness === "claude") {
         action.click(); expect(reload).toHaveBeenLastCalledWith(expect.objectContaining({ key: supervisor.key }));
         action.focus(); navigation.render(nav, [supervisor], open, undefined, { reload });
         expect(document.activeElement).toBe(action);
+      } else if (harness === "codex") {
+        // cas-8c4f: Codex restarts its supervisor, so the card asks first.
+        reload.mockClear(); action.click();
+        expect(reload).not.toHaveBeenCalled();
+        nav.querySelector<HTMLButtonElement>('[data-reload-cassy="confirm"]')!.click();
+        expect(reload).toHaveBeenLastCalledWith(expect.objectContaining({ key: supervisor.key }));
       } else expect(nav.textContent).toBeTruthy();
     }
     const current = row("reload", { harness: "claude", machine_online: true, mcp_version: "4.1.0", installed_version: "4.1.0", reloadReceipt: { client_ref: "r", command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 4.1.0", output: "", interactive: false } });

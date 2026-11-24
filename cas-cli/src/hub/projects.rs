@@ -455,6 +455,7 @@ mod tests {
         let sessions = vec![HubSession {
             name: "factory-main".into(),
             mcp_version: None,
+            mcp_loaded_at: None,
             installed_version: None,
             harness: None,
             model: None,

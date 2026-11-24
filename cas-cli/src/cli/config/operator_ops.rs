@@ -859,6 +859,7 @@ large_artifact_dir = \"before\"\n",
                 "factory.write_roots" => "~/Documents".to_owned(),
                 // Validated: only loopback and tailnet hubs are accepted.
                 "factory.gateway.endpoint" => "http://127.0.0.1:8317".to_owned(),
+                "factory.gateway.dashboard" => "http://127.0.0.1:18317".to_owned(),
                 // Validated as a JSON list of Slack channel IDs (cas-4e0c).
                 "slack.channels" => r#"["C0123456789"]"#.to_owned(),
                 // The registry intentionally permits only `low` for the

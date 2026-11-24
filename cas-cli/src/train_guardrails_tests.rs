@@ -206,7 +206,12 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     configure("[factory]\nepic_base_branch='staging'\n");
     admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap();
     configure("");
-    assert!(admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap_err().contains(&format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={candidate}")));
+    let refused = || {
+        let reason = admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap_err();
+        assert!(reason.contains("PRODUCTION_BATCH_QA_REQUIRED"));
+        assert_eq!(reason.split_ascii_whitespace().nth(1).and_then(|field| field.strip_prefix("candidate_sha=")), Some(candidate.as_str()));
+    };
+    refused();
     assert_eq!(propose(), 0);
     receive(&stale, &stale, true).unwrap();
     assert_eq!(propose(), 0);
@@ -224,7 +229,7 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate_tree, None, None).unwrap();
     let moved = run(repo, &["commit-tree", &format!("{base}^{{tree}}"), "-p", &base, "-m", "advance production"]);
     run(repo, &["update-ref", "refs/heads/main", &moved, &base]);
-    assert!(admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap_err().contains(&format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={candidate}")));
+    refused();
     let moved_candidate = cas_store::ProductionCandidate { base_sha: moved.clone(), ..candidate_tree.clone() };
     assert!(crate::qa_batch::production::admit(&cas_dir, repo, "main", &moved_candidate, None, None)
         .unwrap_err().contains("PRODUCTION_BATCH_QA_REQUIRED"));

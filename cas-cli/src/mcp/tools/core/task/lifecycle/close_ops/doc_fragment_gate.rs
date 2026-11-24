@@ -44,7 +44,9 @@ pub(super) fn park_refusals(
     // gate[G-167 park as-of]: product delivery needs its docs/product-overview.d fragment
     let overview = format!("{OVERVIEW_DIR}/{id}.md");
     if tracked.iter().any(|path| path.starts_with(&format!("{OVERVIEW_DIR}/")))
+        // A release folds and deletes delivered fragments; the delivery still owns it.
         && !tracked.contains(&overview)
+        && !changed_paths.contains(&overview)
         && !receipt_scope::has_reasoned_decision(&task.notes, "no overview:")
     {
         refusals.push(crate::gates::tag("G-167", format!(

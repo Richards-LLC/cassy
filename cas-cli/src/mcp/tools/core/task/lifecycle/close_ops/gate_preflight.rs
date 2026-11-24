@@ -170,10 +170,10 @@ impl CasCore {
         if registry_on || overview_fragments {
             let mut docs = Vec::new();
             if registry_on && task.task_type == TaskType::Bug {
-                docs.push(format!("a fix touching a live journey adds `docs/qa/bug-families/<slug>.yaml` naming {id}"));
+                docs.push(format!("a fix touching a live journey adds `docs/qa/bug-families/<slug>.yaml` naming {id} (or decision note \"no bug family: <reason>\")"));
             }
             if overview_fragments {
-                docs.push(format!("product changes go in `{OVERVIEW_FRAGMENT_DIR}/{id}.md`"));
+                docs.push(format!("product changes go in `{OVERVIEW_FRAGMENT_DIR}/{id}.md` (or decision note \"no overview: <reason>\")"));
             }
             docs.push("never edit .claude/CODEMAP.md or docs/PRODUCT_OVERVIEW.md; release prep regenerates them".into());
             lines.push(format!("Docs: {}.", docs.join("; ")));

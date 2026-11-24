@@ -1327,6 +1327,7 @@ impl CasCore {
                     },
                     &agent_id,
                     "transfer adopt_branch",
+                    crate::mcp::tools::core::task::rebind::StartAudit::Note,
                 );
             }
         }

@@ -118,7 +118,10 @@ const EMPTY_SOURCE_REBIND_REASON: &str =
 pub(super) fn rebind_empty_source(task: &mut Task, target: &cas_types::WorkTarget, audit: &RetargetedSourceRebind) {
     let mut rebound_start = audit.previous_start.clone();
     rebound_start.work_target = target.clone();
-    task.deliverables.factory_branch_start = Some(rebound_start.clone());
+    super::rebind::rebind_start(
+        task, rebound_start.clone(), &audit.actor, EMPTY_SOURCE_REBIND_REASON,
+        super::rebind::StartAudit::Recorded,
+    );
     let audit_row = serde_json::json!({
         "actor": &audit.actor,
         "reason": EMPTY_SOURCE_REBIND_REASON,

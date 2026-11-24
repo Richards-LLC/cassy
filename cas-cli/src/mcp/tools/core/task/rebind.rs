@@ -109,18 +109,35 @@ use crate::mcp::CasCore;
 
 use super::{lifecycle::close_ops, repo_context, resolve_agent_identity};
 
-/// cas-faa9: the one writer for a start boundary that an identity change
-/// (adoption, transfer, retarget) moves. The previous record stays in the
-/// audit trail; an unchanged record writes nothing.
-pub(crate) fn rebind_start(task: &mut cas_types::Task, start: FactoryBranchStart, actor: &str, reason: &str) {
+/// Who records the audit row for a start-boundary write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartAudit {
+    /// The caller writes its own `DELIVERY BRANCH REBOUND` row, which the
+    /// quality ledger reads; this writer adds nothing.
+    Recorded,
+    /// This writer appends a `DELIVERY START REBOUND` row naming the
+    /// previous record whenever one existed and changed.
+    Note,
+}
+
+/// cas-faa9: the one writer for `factory_branch_start`. Start, adoption,
+/// retarget and explicit rebind each keep their own safety checks, then bind
+/// through here so the previous record always survives in the audit trail.
+pub(crate) fn rebind_start(
+    task: &mut cas_types::Task,
+    start: FactoryBranchStart,
+    actor: &str,
+    reason: &str,
+    audit: StartAudit,
+) -> Option<FactoryBranchStart> {
     let previous = task.deliverables.factory_branch_start.replace(start.clone());
-    if previous.as_ref() == Some(&start) {
-        return;
+    if audit == StartAudit::Recorded || previous.is_none() || previous.as_ref() == Some(&start) {
+        return previous;
     }
     let audit_row = serde_json::json!({
         "actor": actor,
         "reason": reason,
-        "previous_start": previous,
+        "previous_start": &previous,
         "start": start,
     });
     if !task.notes.is_empty() {
@@ -130,6 +147,7 @@ pub(crate) fn rebind_start(task: &mut cas_types::Task, start: FactoryBranchStart
         "[{}] DELIVERY START REBOUND: {audit_row}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
     ));
+    previous
 }
 
 // gate[G-152 rebind]: Delivery branch rebinding authority and evidence
@@ -516,12 +534,12 @@ impl CasCore {
             .deliverables
             .retain_factory_branch_anchor_as_history();
         rebound.deliverables.parked_branch = None;
-        rebound.deliverables.factory_branch_start = Some(FactoryBranchStart {
+        rebind_start(&mut rebound, FactoryBranchStart {
             work_target: target.clone(),
             assignee: assignee.to_string(),
             branch: branch.to_string(),
             base_sha: base.clone(),
-        });
+        }, &supervisor.name, reason, StartAudit::Recorded);
         // The common root was validated above. A linked checkout need not
         // duplicate its project configuration, and shares these same refs.
         // GH #1673: after a reviewed retarget, an untouched lane has no

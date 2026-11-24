@@ -13583,6 +13583,122 @@ mod worker_commit_guard_tests {
         input
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn raw_github_merge_hook_holds_the_exact_verifier_dispatch_cas_eb2e() {
+        use cas_types::{
+            AgentRole, Event, EventEntityType, EventType, RepositoryProofBoundary, Verification,
+            VerificationProofBoundary, VerificationProvenance, VerificationStatus,
+        };
+
+        let mut env = TestEnvGuard::temp_home();
+        env.remove("CAS_FACTORY_MODE");
+        env.remove("CAS_FACTORY_SESSION");
+        let repo = make_git_repo();
+        let cas_root = crate::store::init_cas_dir(repo.path()).unwrap();
+        let cwd = repo.path().to_str().unwrap();
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        let head = std::str::from_utf8(&head.stdout).unwrap().trim();
+        let gh = repo.path().join("gh");
+        crate::test_paths::warm_stub(
+            &gh,
+            r#"#!/bin/sh
+case "$1 $2 $3" in
+  'pr view 2546') printf '{"number":2546,"headRefName":"factory/proof","headRefOid":"%s","statusCheckRollup":[]}' "$CAS_TEST_PR_HEAD";;
+  'pr view 2547') printf '{"number":2547,"headRefName":"factory/other","headRefOid":"%s","statusCheckRollup":[]}' "$CAS_TEST_PR_HEAD";;
+  'pr view 2548') printf '{"number":2548,"headRefName":"factory/proof","headRefOid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","statusCheckRollup":[]}';;
+  *) exit 1;;
+esac
+"#,
+        );
+        env.set("CAS_QA_GH", &gh);
+        env.set("CAS_TEST_PR_HEAD", head);
+        std::fs::write(cas_root.join("config.yaml"), "qa:\n  independent_pass: false\n").unwrap();
+
+        let mut task = Task::new("cas-verifier-pr".into(), "Raw merge verifier fixture".into());
+        task.deliverables.delivery_pr_number = Some(2546);
+        task.deliverables.parked_branch = Some("factory/proof".into());
+        open_task_store(&cas_root).unwrap().add(&task).unwrap();
+        let supervisor = Agent::new_with_role("merge-supervisor".into(), "supervisor".into(), AgentRole::Supervisor);
+        open_agent_store(&cas_root).unwrap().register(&supervisor).unwrap();
+        let proof = VerificationProofBoundary::task_at(RepositoryProofBoundary {
+            peer_premerge: None, repository_root: cwd.into(), worktree_root: cwd.into(),
+            head_commit: head.into(), state_digest: "fixture".into(), target_branch: None,
+            anchor_commits: vec![head.into()],
+        });
+        let dispatch = || {
+            cas_store::create_verification_dispatch_bound(
+                &cas_root, &task.id, &supervisor.id, &supervisor.id, &proof,
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap()
+        };
+        let verdict = |dispatch: &cas_types::VerificationDispatch, status| {
+            let mut verdict = Verification::new(format!("ver-{}", dispatch.id), task.id.clone());
+            verdict.status = status;
+            verdict.provenance = VerificationProvenance::SupervisorDirect;
+            verdict.agent_id = Some(supervisor.id.clone());
+            verdict.issuer_agent_id = Some(supervisor.id.clone());
+            verdict.dispatch_id = Some(dispatch.id.clone());
+            let mut conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+            let tx = conn.transaction().unwrap();
+            cas_store::add_verification_with_conn(&tx, &verdict).unwrap();
+            assert!(cas_store::resolve_verification_dispatch_with_conn(
+                &tx, &dispatch.id, &supervisor.id, None, true,
+            ).unwrap().is_some());
+            tx.commit().unwrap();
+        };
+        let events = crate::store::open_event_store(&cas_root).unwrap();
+        let reason = "fixture operator approved the residual risk";
+        let authorize = |dispatch: &cas_types::VerificationDispatch| {
+            events.record(&Event::new(EventType::TaskNoteAdded, EventEntityType::Task, &task.id, "decision")
+                .with_session(supervisor.id.clone())
+                .with_metadata(serde_json::json!({
+                    "supervisor_decision": format!("Raw GitHub merge override {}: {reason}", dispatch.id),
+                }))).unwrap();
+        };
+        let run = |role: &str, command: &str, expected: Option<&str>| {
+            let mut input = hook_git_write_input(cwd, command);
+            input.agent_role = Some(role.into());
+            if role == "supervisor" {
+                input.session_id = supervisor.id.clone();
+            }
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
+            let denial = crate::gates::facts::hook_denial(&output);
+            match expected {
+                Some(code) => assert!(denial.is_some_and(|text| text.contains(code)),
+                    "{role} {command}: expected {code}, got {denial:?}"),
+                None => assert!(denial.is_none(), "{role} {command}: {denial:?}"),
+            }
+        };
+        let merge = |number| format!("gh {} {} {number} --squash", "pr", "merge");
+        let command = merge(2546);
+        let api = concat!("gh api -X PUT ", "repos/acme/project/pulls/2546/", "merge");
+        let first = dispatch();
+        authorize(&first);
+        run("worker", &command, Some("PR_VERIFIER_PENDING"));
+        run("supervisor", api, Some("PR_VERIFIER_PENDING"));
+        verdict(&first, VerificationStatus::Rejected);
+        run("worker", &command, Some("PR_VERIFIER_REJECTED"));
+        run("worker", &merge(2547), None);
+        run("worker", &merge(2548), None);
+        run("supervisor", &command, None);
+        let overrides = events.list_by_type(EventType::GateOverridden, 10).unwrap();
+        let audit = overrides.iter().find(|event| event.entity_id == "H-24").unwrap();
+        let audit = audit.metadata.as_ref().unwrap();
+        assert_eq!(audit["task_id"], task.id);
+        assert_eq!(audit["detail"], format!("{}: {reason}", first.id));
+
+        let next = dispatch();
+        assert_ne!(next.id, first.id);
+        verdict(&next, VerificationStatus::Approved);
+        run("worker", &command, None);
+    }
+
     #[test]
     fn worker_git_push_hook_bypass_is_refused_but_supervisor_is_unaffected() {
         let repo = make_git_repo();

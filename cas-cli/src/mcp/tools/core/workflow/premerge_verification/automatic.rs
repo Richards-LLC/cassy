@@ -1519,6 +1519,82 @@ mod tests {
         assert!(!owns(&root, &recovered));
     }
 
+    /// GH #2325: a daemon verifier whose provider startup stalls inside its live
+    /// host keeps a Claimed row past the deadline. The owning retry releases it
+    /// and schedules exactly one replacement on the same dispatch.
+    #[test]
+    fn stalled_daemon_verifier_claim_is_replaced_once_gh_2325() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let mut task = Task::new("cas-81c2-stall".into(), "Stalled verifier".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let gate = |entered: mpsc::Sender<()>, hold: mpsc::Receiver<()>| move |_: &Path| {
+            entered.send(()).unwrap();
+            hold.recv().ok();
+            Err::<(Command, Option<String>), String>("stalled provider".into())
+        };
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (first_hold_tx, first_hold_rx) = mpsc::channel();
+        let stalled = launch_with_preparation(
+            &core, &task, &dispatch, root.join("first.json"), gate(first_entered_tx, first_hold_rx),
+        ).unwrap().unwrap();
+        first_entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
+        assert!(owns(&root, &claimed));
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute("UPDATE agents SET last_heartbeat=?2 WHERE id=?1", rusqlite::params![
+            claimed.verifier_agent_id, (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339(),
+        ]).unwrap();
+        conn.execute("UPDATE verification_dispatches SET deadline_at=?2 WHERE id=?1", rusqlite::params![
+            dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+        ]).unwrap();
+        let expired = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+
+        let recovered = recover_expired_claim(&core, &expired).unwrap();
+        assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
+        assert!(recovered.verifier_agent_id.is_none());
+
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let (second_hold_tx, second_hold_rx) = mpsc::channel();
+        let replacement = launch_with_preparation(
+            &core, &task, &recovered, root.join("second.json"), gate(second_entered_tx, second_hold_rx),
+        ).unwrap().expect("the released dispatch starts one replacement");
+        second_entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let live = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(live.state, cas_types::VerificationDispatchState::Claimed);
+        assert_ne!(live.verifier_agent_id, claimed.verifier_agent_id);
+        assert!(launch_with_preparation(
+            &core, &task, &live, root.join("third.json"),
+            |_| panic!("a claimed dispatch must not start a second replacement"),
+        ).unwrap().is_none());
+
+        first_hold_tx.send(()).unwrap();
+        stalled.join().unwrap();
+        let after_stalled = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(after_stalled.verifier_agent_id, live.verifier_agent_id, "the stalled attempt cannot take the replacement's claim");
+        second_hold_tx.send(()).unwrap();
+        replacement.join().unwrap();
+    }
+
     #[test]
     fn cas_ce3e_launched_verifier_survives_attention_failure() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

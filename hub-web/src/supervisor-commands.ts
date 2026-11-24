@@ -127,8 +127,7 @@ export class SlashCommands {
   private hide(): void {
     this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false");
   }
-  private dismiss(): void {
-    const origin = this.anchor ? "header" : "composer";
+  private dismiss(origin: CommandOrigin = this.anchor ? "header" : "composer"): void {
     this.close(); this.returnFocus(origin);
   }
   returnFocus(origin: CommandOrigin): void {
@@ -244,7 +243,7 @@ export class SlashCommands {
     // cas-c009: content-width actions, Cancel first and the command last.
     const actions = document.createElement("div"); actions.className = "supervisor-command-actions";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "secondary"; cancel.textContent = "Cancel";
-    cancel.onclick = () => this.dismiss();
+    cancel.onclick = () => this.dismiss("composer");
     const confirm = document.createElement("button"); confirm.type = "button"; confirm.className = "primary"; confirm.dataset.commandConfirm = command.id;
     confirm.textContent = command.label; confirm.onclick = () => this.options.session.confirm();
     cancel.disabled = confirm.disabled = intent.phase === "sending";

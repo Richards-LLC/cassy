@@ -234,7 +234,7 @@ describe("supervisor slash commands", () => {
     commands.dispose();
   });
 
-  it.each(["confirming", "sending", "refused"] as const)("reconciles a %s reload onto the replacement composer", async phase => {
+  it.each(["confirming", "sending", "refused"])("reconciles a %s reload onto the replacement composer", async phase => {
     const lease = holdControl();
     const send = vi.fn();
     const controller = commandComposer("codex", send, { control: () => lease.promise });

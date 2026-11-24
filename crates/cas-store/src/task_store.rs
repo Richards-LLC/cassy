@@ -628,7 +628,8 @@ impl SqliteTaskStore {
                 if formatted_note.starts_with("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---") {
                     replacement = Some(crate::task_note_markers::replace_rendered_provenance(&notes, formatted_note));
                 } else {
-                    replacement = crate::task_note_markers::replace_raw_artifact_note(&notes, formatted_note);
+                    replacement = crate::task_note_markers::replace_raw_artifact_note(&notes, formatted_note)
+                        .or_else(|| crate::task_note_markers::replace_evidence_sync(&notes, formatted_note));
                 }
                 if replacement.as_deref() == Some(notes.as_str())
                     || (replacement.is_none()

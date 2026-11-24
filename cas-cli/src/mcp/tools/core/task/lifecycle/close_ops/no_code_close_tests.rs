@@ -490,6 +490,39 @@ async fn ordinary_park_requires_every_cited_local_proof_cas_dae1() {
     }
 }
 
+/// cas-7c35 (GH #2322, #2371): a re-park through the real close handler on a
+/// task that already carries an older evidence summary replaces that summary,
+/// keeps unrelated history, and never requires a file for prose naming target.
+#[tokio::test(flavor = "multi_thread")]
+async fn repark_replaces_older_evidence_summary_cas_7c35() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-7c35";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    std::fs::write(checkout.join("own.md"), "delivery\n").unwrap();
+    git(&checkout, &["add", "own.md"]);
+    git(&checkout, &["commit", "-qm", "docs(cas-7c35): owned delivery"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let dir = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+        &f.cas_dir(), &f.task(id),
+    ).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("capture.txt"), b"").unwrap();
+    let mut task = f.task(id);
+    task.notes = format!("{}\n\n[2026-11-23 23:00] keep this decision\n\n[2026-11-23 23:01] Evidence synced for review on the merge owner\nEVIDENCE_SYNC: {{\"machine_id\":\"m\",\"root\":\"/old-root\",\"files\":[],\"strict\":false}}\nFiles: 0; optional not published: 0; required not published: 0; excluded trees: 0. Full report: evidence-sync-report.json", task.notes);
+    f.put(&task);
+    assert!(!checkout.join("target").exists());
+    let reply = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id,
+        "reason": "PASS docs only: merged epic target into the delivery; target/owner unchanged.",
+    })).await;
+    let task = f.task(id);
+    assert_eq!(task.status, TaskStatus::AwaitingMerge, "{reply}");
+    assert_eq!(task.notes.lines().filter(|line| line.starts_with("EVIDENCE_SYNC: ")).count(), 1, "{}", task.notes);
+    assert!(!task.notes.contains("/old-root"), "{}", task.notes);
+    assert!(task.notes.contains("keep this decision"), "{}", task.notes);
+}
+
 /// cas-fd1c (GH #2212): a no-code delivery with a portable external_ref, whose
 /// bundle files an earlier publication already receipted, parks through the
 /// real close handler without uploading those files again, and the nested raw

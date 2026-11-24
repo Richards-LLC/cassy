@@ -17783,8 +17783,12 @@ pub(crate) fn resolve_close_delivery_branch(
     }
     let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    let refspec = format!("{own_ref}:refs/heads/{task_branch}");
-    let [push] = crate::worktree::GitOperations::git_remedies([&["push", "origin", &refspec]])?;
+    // GH #2357: H-40 admits a lane push only when the local and remote
+    // names match, so name the per-task branch locally before publishing it.
+    let [name, push] = crate::worktree::GitOperations::git_remedies([
+        &["branch", &task_branch, &own_ref],
+        &["push", "origin", &task_branch],
+    ])?;
     Err(format!(
         "⚠️ DELIVERY BRANCH UNRESOLVED\n\n\
          task close rejected: task {id} has no branch of its own. `{task_branch}` does not \
@@ -17792,7 +17796,7 @@ pub(crate) fn resolve_close_delivery_branch(
          task's delivery ({foreign}) with no commit claiming {id}. Cassy will not measure \
          another task's delivery as this one.\n\n\
          If the current lane tip is {id}'s delivery, publish that exact tip with \
-         `{push}`, then retry \
+         `{name}` and `{push}`, then retry \
          `{caller}task action=close id={id}`. Otherwise recover {id}'s actual delivery first; \
          do not publish another task's work under its name.",
         id = task.id,

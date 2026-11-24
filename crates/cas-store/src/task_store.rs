@@ -336,6 +336,23 @@ impl SqliteTaskStore {
                 )
                 .optional()?;
             let mut persisted_deliverables = task.deliverables.clone();
+            // cas-faa9: every retarget keeps the target it left, whichever
+            // writer moved it. A stale in-memory copy cannot drop entries.
+            if let Some(stored) = tx
+                .query_row(
+                    "SELECT deliverables FROM tasks WHERE id = ?1",
+                    params![task.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            {
+                let stored = Self::parse_deliverables(&stored);
+                for previous in stored.prior_work_targets.iter()
+                    .chain(stored.work_target.as_ref())
+                {
+                    persisted_deliverables.record_prior_work_target(Some(previous));
+                }
+            }
             let mut persisted_terminal_outcome = task.terminal_outcome.clone();
             let reopening_terminal = matches!(prev_status.as_deref(), Some("closed" | "cancelled"))
                 && !task.is_terminal();

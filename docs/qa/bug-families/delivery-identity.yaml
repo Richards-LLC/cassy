@@ -1,0 +1,4 @@
+title: Delivery identity follows retargets, rebinds and adoption
+statement: A task laned off an epic or release-train target keeps that target's reviewed history upstream after it is retargeted to a successor, so close parks instead of refusing it as foreign work; a plain branch with no owning epic never counts. Every start-boundary write goes through one writer that keeps the replaced start's target, so explicit rebind and adoption preserve that history too. After adoption the receiver's start is accepted on its adopted lane, and its pushed tip becomes the park anchor. A deleted target is named in the refusal.
+tasks: [cas-faa9]
+journeys: [FACTORY-CLOSE, FACTORY-SPAWN]

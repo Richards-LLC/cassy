@@ -29,7 +29,7 @@ export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchVie
   if (!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|ogg)|audio\/(mpeg|mp4|ogg|wav|webm)|application\/pdf)$/.test(mime)) return sheet;
   const document = sheet.ownerDocument;
   const image = mime.startsWith("image/");
-  const note = document.createElement("span"); note.className = "preview-note"; note.setAttribute("role", "status");
+  const note = document.createElement("span"); note.className = "preview-note"; note.setAttribute("role", "status"); note.setAttribute("aria-label", "Preview status");
   let viewerUnavailable = false, previewUnavailable = false;
   const updateNote = () => {
     const label = sheet.dataset.label ?? file.name;
@@ -57,8 +57,8 @@ export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchVie
       viewerUnavailable = true; updateNote();
     });
   });
-  const root = document.createElement("div"); root.className = "rich-attachment"; root.style.width = image ? "320px" : "640px"; root.style.maxWidth = "100%"; root.style.minWidth = "0";
-  const viewport = previewElement(document); viewport.className = "rich-media";
+  const root = document.createElement("div"); root.className = "rich-attachment"; root.dataset.testid = "rich-attachment"; root.style.width = image ? "320px" : "640px"; root.style.maxWidth = "100%"; root.style.minWidth = "0";
+  const viewport = previewElement(document); viewport.className = "rich-media"; viewport.dataset.testid = "rich-media";
   viewport.machineId = options.machineId; viewport.available = options.available;
   viewport.dataset.previewState = "pending";
   viewport.style.width = "100%"; viewport.style.display = "grid"; viewport.style.overflow = "hidden";

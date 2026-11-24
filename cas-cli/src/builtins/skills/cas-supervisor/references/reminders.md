@@ -18,7 +18,7 @@ Keep one active reminder per task or phase and cancel it when the phase complete
 
 ## API contract
 
-Every reminder has exactly one trigger, `remind_delay_secs` or `remind_event`. Use a delay only for work that becomes due at that time, such as an expiring handoff, a build-admission retry or a post-release invariant run, and pass `remind_ttl_secs` covering the phase. A task-filtered `task_completed` or `task_blocked` wait without TTL lasts until the task is terminal; a task-filtered deadline reached while the task is still live sends one owner notice. Keep the returned ID.
+Every reminder has exactly one trigger, `remind_delay_secs` or `remind_event`. Use a delay only for work that becomes due at that time, such as an expiring handoff or a post-release invariant run, and pass `remind_ttl_secs` covering the phase. A task-filtered `task_completed` or `task_blocked` wait without TTL lasts until the task is terminal; a task-filtered deadline reached while the task is still live sends one owner notice. Keep the returned ID.
 
 ```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \

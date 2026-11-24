@@ -10,11 +10,24 @@ use tree_sitter::{Node, Parser};
 
 use super::stability::{Identity, Proof};
 
+mod importers;
 mod web_attribution;
+
+pub(crate) use importers::related_tests;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
 struct IsolatedCheckoutRequired;
+
+/// A focused run selected no test to execute (GH #2369). Its owning package's
+/// own run proves the input instead: unsure means run more, never refuse.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ZeroTests(String);
+
+impl ZeroTests {
+    fn new(message: String) -> Self { Self(crate::gates::tag("G-61", message)) }
+}
 
 fn safe_path(path: &str) -> bool {
     !path.is_empty()
@@ -29,6 +42,11 @@ pub(super) fn javascript(path: &str) -> bool {
         Path::new(path).extension().and_then(|ext| ext.to_str()),
         Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "vue")
     )
+}
+
+/// A package's `package.json` selects that package's own run (GH #2164).
+pub(super) fn package_manifest(path: &str) -> bool {
+    Path::new(path).file_name().is_some_and(|name| name == "package.json")
 }
 
 pub(super) fn test_file(path: &str) -> bool {
@@ -51,19 +69,19 @@ pub(super) fn test_match(path: &str, runner: Option<&str>) -> bool {
 
 /// A scoped JavaScript stability command, however the shell names its runner.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Invocation {
-    pub(super) runner: &'static str,
+pub(crate) struct Invocation {
+    pub(crate) runner: &'static str,
     /// The runner's `--config` file, relative to the invocation directory.
-    pub(super) config: Option<String>,
+    pub(crate) config: Option<String>,
     /// Test files relative to the invocation directory.
-    pub(super) files: Vec<String>,
+    pub(crate) files: Vec<String>,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`; `<package>/package.json` runs that package";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
-pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
+pub(crate) fn invocation(args: &[String]) -> Option<Invocation> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let args = match args.as_slice() {
         ["pnpm" | "yarn" | "npm", "exec", rest @ ..] => rest,
@@ -100,7 +118,7 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
                 return None;
             }
             config = Some(value.to_string());
-        } else if safe_path(arg) && javascript(arg) {
+        } else if safe_path(arg) && (javascript(arg) || package_manifest(arg)) {
             files.push(arg.to_string());
         } else {
             return None;
@@ -191,6 +209,16 @@ pub(crate) fn changed_tests(
                 })
                 .collect();
         }
+        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
+        let old = show(repo, base, path)?
+            .map(String::from_utf8)
+            .transpose()?
+            .unwrap_or_default();
+        // GH #2221: tests generated from a changed or newly selected JSON
+        // catalogue have no changed test line, so only a whole-spec run proves them.
+        if let Some(data) = changed_data_import(repo, base, head, path, &source, &old)? {
+            bail!("{path} generates tests from {data}, which the delivery changed or newly selected; a static selection would omit them");
+        }
         // A restored file has no delivered test change. Do not require
         // runtime identities for callbacks merely present in its final tree.
         if lines.is_empty() {
@@ -201,11 +229,6 @@ pub(crate) fn changed_tests(
         if path.ends_with(".vue") {
             bail!("Vue component {path} requires related-test proof");
         }
-        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
-        let old = show(repo, base, path)?
-            .map(String::from_utf8)
-            .transpose()?
-            .unwrap_or_default();
         let test_file = self::test_file(path);
         let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
             Ok(all) => all,
@@ -224,8 +247,9 @@ pub(crate) fn changed_tests(
         let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)
             .unwrap_or_default()
             .into_iter()
+            .map(|(identity, body, _)| (identity, body))
             .collect();
-        for (identity, body) in parsed_tests(path, &source, &lines, true)? {
+        for (identity, body, _) in parsed_tests(path, &source, &lines, true)? {
             // Hunk lines may contain several calls. Repeating an unchanged
             // neighbour would violate the delivery-only selection contract.
             if previous.get(&identity) != Some(&body) {
@@ -234,6 +258,95 @@ pub(crate) fn changed_tests(
         }
     }
     Ok(selected.into_iter().collect())
+}
+
+/// The catalogue that changes this source's generated tests, if any: a JSON
+/// file it imports by relative path that the delivery changed, or a JSON
+/// import the delivery added, removed or switched.
+fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str, old: &str) -> Result<Option<String>> {
+    let imported = json_imports(path, source)?;
+    if let Some(switched) = imported.symmetric_difference(&json_imports(path, old)?).next() {
+        return Ok(Some(switched.clone()));
+    }
+    let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
+    Ok(changed.lines().find(|data| imported.contains(*data)).map(str::to_owned))
+}
+
+/// Repository paths of the JSON files a source imports by relative literal.
+fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
+    Ok(relative_literals(path, source)?.into_iter()
+        .filter(|resolved| resolved.extension().is_some_and(|extension| extension == "json"))
+        .filter_map(|resolved| resolved.to_str().map(str::to_owned))
+        .collect())
+}
+
+/// Repository paths that a source's relative string literals name, resolved
+/// from the source's own directory (`'./scenarios.json'`, `'../prisma/migrations'`).
+fn relative_literals(path: &str, source: &str) -> Result<Vec<PathBuf>> {
+    let directory = Path::new(path).parent().unwrap_or(Path::new(""));
+    let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s$]+)["'`]"#)?;
+    Ok(literal.captures_iter(source).map(|capture| {
+        let mut resolved = PathBuf::new();
+        for part in directory.join(&capture[1]).components() {
+            match part {
+                Component::ParentDir => { resolved.pop(); }
+                Component::CurDir => {}
+                other => resolved.push(other),
+            }
+        }
+        resolved
+    }).collect())
+}
+
+/// GH #2221: the test files at `head` that import the changed catalogue
+/// `data` by relative path. Its generated tests have no changed source line.
+pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec<String>> {
+    let Some(name) = Path::new(data).file_name().and_then(|name| name.to_str()) else { return Ok(Vec::new()) };
+    let output = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0").current_dir(repo)
+        .args(["grep", "-l", "-F", "-e", name, head]).output()?;
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        bail!("git grep {name} {head} failed");
+    }
+    let prefix = format!("{head}:");
+    let mut specs = Vec::new();
+    for spec in String::from_utf8(output.stdout)?.lines().filter_map(|line| line.strip_prefix(&prefix)) {
+        if !javascript(spec) || !test_match(spec, runner_hint(repo, spec)) {
+            continue;
+        }
+        let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
+        if json_imports(spec, &source)?.contains(data) {
+            specs.push(spec.to_owned());
+        }
+    }
+    Ok(specs)
+}
+
+/// GH #2224, #2266: for each changed `input` under `package`, the test files
+/// at `head` that read it through a relative literal: the input itself (a JSON
+/// catalogue), a module import without its extension (a fixture), or a
+/// directory holding it inside the package (Prisma migrations). An input read
+/// any other way has no covering spec here and maps to an empty list.
+pub(super) fn covering_specs(repo: &Path, head: &str, package: &str, inputs: &[&str]) -> Result<BTreeMap<String, Vec<String>>> {
+    let listed = super::git(repo, &["ls-tree", "-r", "--name-only", head, "--", if package.is_empty() { "." } else { package }])?;
+    let mut covering: BTreeMap<String, Vec<String>> = inputs.iter().map(|input| ((*input).to_owned(), Vec::new())).collect();
+    for spec in listed.lines().filter(|path| javascript(path) && test_match(path, runner_hint(repo, path))) {
+        let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
+        let literals = relative_literals(spec, &source)?;
+        for input in inputs {
+            let input_path = Path::new(input);
+            let reads = |resolved: &Path| {
+                let inside = resolved.starts_with(package) && resolved != Path::new(package) && !Path::new(spec).starts_with(resolved);
+                resolved == input_path
+                    || (javascript(input) && (input_path.with_extension("") == resolved
+                        || input_path.parent() == Some(resolved) && input_path.file_stem().is_some_and(|stem| stem == "index")))
+                    || (inside && input_path.starts_with(resolved))
+            };
+            if literals.iter().any(|resolved| reads(resolved)) {
+                covering.entry((*input).to_owned()).or_default().push(spec.to_owned());
+            }
+        }
+    }
+    Ok(covering)
 }
 
 fn show(repo: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
@@ -481,7 +594,22 @@ fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(
 fn source_tests(path: &str, source: &str, lines: &[(usize, usize)]) -> Result<Vec<Identity>> {
     Ok(parsed_tests(path, source, lines, true)?
         .into_iter()
-        .map(|(identity, _)| identity)
+        .map(|(identity, ..)| identity)
+        .collect())
+}
+
+/// The runtime test names an `it.each` test expands to, with how many rows
+/// share each name.
+type Expansion = BTreeMap<String, usize>;
+
+/// The names each changed `it.each` test expands to under Vitest, read from its
+/// literal table in the source, independent of any run (cas-c1df). A test whose
+/// table or title cannot be expanded exactly, or that sits under a templated
+/// suite, has no entry.
+fn source_rows(path: &str, source: &str) -> Result<BTreeMap<Identity, Expansion>> {
+    Ok(parsed_tests(path, source, &[(1, usize::MAX)], false)?
+        .into_iter()
+        .filter_map(|(identity, _, rows)| Some((identity, rows?)))
         .collect())
 }
 
@@ -490,7 +618,7 @@ fn parsed_tests(
     source: &str,
     lines: &[(usize, usize)],
     strict: bool,
-) -> Result<Vec<(Identity, String)>> {
+) -> Result<Vec<(Identity, String, Option<Expansion>)>> {
     let tree = source_tree(path, source)?;
     let mut aliases = BTreeMap::new();
     imported_aliases(tree.root_node(), source, &mut aliases);
@@ -512,7 +640,7 @@ fn parsed_tests(
         &mut tests,
     )?;
     let mut unique = BTreeSet::new();
-    if tests.iter().any(|(identity, _)| !unique.insert(identity)) {
+    if tests.iter().any(|(identity, ..)| !unique.insert(identity)) {
         bail!("ambiguous source-to-runtime test identity in {path}");
     }
     Ok(tests)
@@ -930,7 +1058,7 @@ fn walk(
     force: bool,
     strict: bool,
     aliases: &BTreeMap<String, String>,
-    tests: &mut Vec<(Identity, String)>,
+    tests: &mut Vec<(Identity, String, Option<Expansion>)>,
 ) -> Result<()> {
     if strict
         && node.kind() == "call_expression"
@@ -957,6 +1085,7 @@ fn walk(
             .context("test arguments")?;
         let first = args.named_child(0);
         let mut name = first.and_then(|name| title(name, source));
+        let inherited_template = templated;
         let mut templated = templated || each;
         if suite && supported && name.is_none() && let Some(pattern) = dynamic_suite_title(first, source) {
             name = Some(pattern);
@@ -998,7 +1127,7 @@ fn walk(
                     headers.iter().map(|(_, _, text)| text).collect::<Vec<_>>(),
                 ))?;
                 for name in names {
-                    tests.push((Identity::exact(path, name), fingerprint.clone()));
+                    tests.push((Identity::exact(path, name), fingerprint.clone(), None));
                 }
             }
             return Ok(());
@@ -1066,7 +1195,11 @@ fn walk(
                     );
                 }
                 let mut names = suites.to_vec();
-                names.push(name.expect("resolved title"));
+                let own_title = name.expect("resolved title");
+                let expansion = (each && !inherited_template)
+                    .then(|| expand_table(node, source, &own_title, &suites.iter().map(|suite| format!("{suite} ")).collect::<String>()))
+                    .flatten();
+                names.push(own_title);
                 tests.push((
                     Identity {
                         path: path.to_string(),
@@ -1074,6 +1207,7 @@ fn walk(
                         parameterized: templated,
                     },
                     text(node, source).to_string(),
+                    expansion,
                 ));
             }
             // Test bodies cannot declare additional runnable tests.
@@ -1088,6 +1222,208 @@ fn walk(
         )?;
     }
     Ok(())
+}
+
+/// The names `it.each([...])(title, fn)` registers under Vitest 4, one per row,
+/// when its table is an array literal of plain values and its title is static,
+/// takes `%s` / `%#` / `%$` arguments from literal rows, or takes `$key` values
+/// from literal object rows. `prefix` is the enclosing suites' names, each
+/// followed by a space. Anything whose exact Vitest rendering is not known
+/// (other `%` directives, nested keys, long or quoted strings, objects, a
+/// variable or spread table) gives `None`.
+fn expand_table(call: Node<'_>, source: &str, title: &str, prefix: &str) -> Option<Expansion> {
+    let arguments = call.child_by_field_name("function")?.child_by_field_name("arguments")?;
+    let table = arguments.named_child(0).filter(|_| arguments.named_child_count() == 1)?;
+    if table.kind() != "array" {
+        return None;
+    }
+    let mut rows = Vec::new();
+    let mut cursor = table.walk();
+    let mut previous_comma = true;
+    for child in table.children(&mut cursor) {
+        match child.kind() {
+            "[" | "]" | "comment" => {}
+            "," if previous_comma => return None,
+            "," => previous_comma = true,
+            "spread_element" => return None,
+            _ => {
+                rows.push(child);
+                previous_comma = false;
+            }
+        }
+    }
+    let properties = dollar_keys(title);
+    let mut names = Expansion::new();
+    for (index, row) in rows.iter().enumerate() {
+        let name = match (title.contains('%'), properties.is_empty()) {
+            (false, true) => title.to_string(),
+            (true, true) => percent_title(title, index, *row, source)?,
+            (false, false) => dollar_title(title, *row, source)?,
+            (true, false) => return None,
+        };
+        *names.entry(format!("{prefix}{name}")).or_default() += 1;
+    }
+    Some(names)
+}
+
+/// The `$key` placeholders Vitest substitutes (`\$([$\w.]+)`), in order.
+fn dollar_keys(title: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut chars = title.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        if ch != '$' {
+            continue;
+        }
+        let mut end = at + 1;
+        while let Some(&(next, ch)) = chars.peek() {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.') {
+                end = next + ch.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if end > at + 1 {
+            keys.push(title[at + 1..end].to_string());
+        }
+    }
+    keys
+}
+
+/// `%s` arguments come from a row array, or are the row itself; a missing one
+/// renders as `undefined`. `%#` is the row index and `%$` that plus one.
+fn percent_title(title: &str, index: usize, row: Node<'_>, source: &str) -> Option<String> {
+    let mut args = Vec::new();
+    if row.kind() == "array" {
+        let mut cursor = row.walk();
+        let mut previous_comma = true;
+        for child in row.children(&mut cursor) {
+            match child.kind() {
+                "[" | "]" | "comment" => {}
+                "," if previous_comma => return None,
+                "," => previous_comma = true,
+                _ => {
+                    args.push(child);
+                    previous_comma = false;
+                }
+            }
+        }
+    } else {
+        args.push(row);
+    }
+    let mut args = args.into_iter();
+    let mut name = String::new();
+    let mut chars = title.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            name.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            's' => name.push_str(&match args.next() {
+                Some(arg) => plain_literal(arg, source)?,
+                None => "undefined".into(),
+            }),
+            '#' => name.push_str(&index.to_string()),
+            '$' => name.push_str(&(index + 1).to_string()),
+            _ => return None,
+        }
+    }
+    Some(name)
+}
+
+/// Each `$key` is the row object's value as Vitest displays it (strings in
+/// single quotes, `0` as `+0`, a missing key as `undefined`).
+fn dollar_title(pattern: &str, row: Node<'_>, source: &str) -> Option<String> {
+    if row.kind() != "object" {
+        return None;
+    }
+    let mut values = BTreeMap::new();
+    let mut cursor = row.walk();
+    for pair in row.named_children(&mut cursor) {
+        match pair.kind() {
+            "comment" => {}
+            "pair" => {
+                let key = pair.child_by_field_name("key")?;
+                let key = match key.kind() {
+                    "property_identifier" => text(key, source).to_string(),
+                    "string" => title(key, source)?,
+                    _ => return None,
+                };
+                values.insert(key, quoted_literal(pair.child_by_field_name("value")?, source)?);
+            }
+            _ => return None,
+        }
+    }
+    let mut name = String::new();
+    let mut rest = pattern;
+    while let Some(at) = rest.find('$') {
+        name.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        let end = tail
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')))
+            .unwrap_or(tail.len());
+        let key = &tail[..end];
+        if key.is_empty() {
+            name.push('$');
+        } else if key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            name.push_str(values.get(key).map_or("undefined", String::as_str));
+        } else {
+            return None;
+        }
+        rest = &tail[end..];
+    }
+    name.push_str(rest);
+    Some(name)
+}
+
+/// A literal Vitest prints under `%s`: strings raw, numbers, `true`, `false`,
+/// `null`, `undefined`. A `$` in a string would be re-read as a placeholder.
+fn plain_literal(node: Node<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "string" => title(node, source).filter(|value| !value.contains('$')),
+        _ => scalar_literal(node, source),
+    }
+}
+
+/// A literal Vitest prints for `$key`: `plain_literal` except strings are
+/// single-quoted (short, plain ones only) and `0` prints as `+0`.
+fn quoted_literal(node: Node<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "string" => title(node, source)
+            .filter(|value| {
+                value.len() <= 30
+                    && value.chars().all(|ch| ch.is_ascii_alphanumeric() || " _.,:;!?()+=#@*/-".contains(ch))
+            })
+            .map(|value| format!("'{value}'")),
+        _ => scalar_literal(node, source).map(|value| if value == "0" { "+0".into() } else { value }),
+    }
+}
+
+fn scalar_literal(node: Node<'_>, source: &str) -> Option<String> {
+    let literal = text(node, source);
+    match node.kind() {
+        "true" | "false" | "null" | "undefined" => Some(literal.to_string()),
+        "number" => plain_number(literal),
+        "unary_expression" if literal.starts_with('-') => {
+            let number = plain_number(literal[1..].trim())?;
+            (number != "0").then(|| format!("-{number}"))
+        }
+        _ => None,
+    }
+}
+
+/// A decimal literal whose JavaScript string form is its own text.
+fn plain_number(literal: &str) -> Option<String> {
+    let (whole, fraction) = literal.split_once('.').unwrap_or((literal, ""));
+    let plain = whole.chars().all(|ch| ch.is_ascii_digit())
+        && (whole == "0" || !whole.starts_with('0'))
+        && !whole.is_empty()
+        && whole.len() <= 15
+        && fraction.len() <= 15
+        && fraction.chars().all(|ch| ch.is_ascii_digit())
+        && (fraction.is_empty() && !literal.contains('.') || fraction.ends_with(|ch| ch != '0'));
+    plain.then(|| literal.to_string())
 }
 
 fn tree_root(mut node: Node<'_>) -> Node<'_> {
@@ -1172,20 +1508,29 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
                     &super::lane_lock_path(cas_root, &repo).unwrap_or_default(),
                 )
             })?;
-    let _slot = super::admit_daemon_build(cas_root).map_err(|cause| {
-        super::recorded_refusal(
-            cas_root,
-            &repo,
-            &cause,
-            crate::factory_capacity_wait::CapacityKind::Other,
-        )
+    let _slot = super::admit(&super::queue_command(cas_root, args), || {
+        super::admit_daemon_build(cas_root).map_err(|cause| {
+            super::recorded_refusal(
+                cas_root,
+                &repo,
+                &cause,
+                crate::factory_capacity_wait::CapacityKind::Other,
+            )
+        })
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
+    if invocation.runner == "playwright" {
+        for spec in tests.iter().map(|test| &test.path).collect::<BTreeSet<_>>() {
+            super::widened::invalidate(cas_root, &repo, &head, &super::widened::Scope::File(spec.clone()))?;
+        }
+    }
     for (scope, (file, cause)) in &widened {
         execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file, cause)), test_env)?;
     }
     if tests.is_empty() { return Ok(()); }
     let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None, test_env)?;
+    // The selection ran no test; its owning package's run already printed.
+    if proof.tests.is_empty() { return Ok(()); }
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -1251,25 +1596,68 @@ fn runner_config(dir: &Path, runner: &str) -> Option<PathBuf> {
         })
 }
 
+/// A runner config's listing: the canonical test files it selects, or `None`
+/// when the runner could not list them.
+type Listing = Option<BTreeSet<PathBuf>>;
+
+thread_local! {
+    static LISTINGS: std::cell::RefCell<Option<BTreeMap<(&'static str, PathBuf, PathBuf), Listing>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// GH #2331: run `work` with each runner config listed, and each package's
+/// import graph read, at most once. A close asks which config owns every
+/// changed file, often several times per file, and each separate listing loads
+/// the whole config again: cas-9fcc's park made about 1013 Playwright
+/// listings in a 464 s judgement. Both are forgotten when `work` returns, so a
+/// later close sees files written since.
+pub(crate) fn with_listing_cache<T>(work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            if self.0 { LISTINGS.with(|cache| cache.borrow_mut().take()); }
+        }
+    }
+    let _reset = Reset(LISTINGS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.is_none().then(|| cache.replace(BTreeMap::new())).is_some()
+    }));
+    importers::with_graph_cache(work)
+}
+
+/// `list()` once per runner, directory and config while a cache is active;
+/// `None` when no cache is active, so the caller asks about its one file.
+fn cached_listing(runner: &'static str, dir: &Path, config: &Path, list: impl FnOnce() -> Listing) -> Option<Listing> {
+    let key = (runner, dir.to_path_buf(), config.to_path_buf());
+    if let Some(listing) = LISTINGS.with(|cache| cache.borrow().as_ref().map(|cache| cache.get(&key).cloned())) {
+        return Some(listing.unwrap_or_else(|| {
+            let listing = list();
+            LISTINGS.with(|cache| cache.borrow_mut().as_mut().map(|cache| cache.insert(key, listing.clone())));
+            listing
+        }));
+    }
+    None
+}
+
 /// Whether the local Jest, run with `config`, lists `spec`: Jest's own
 /// discovery (`roots`, `projects`, `testMatch`, `testRegex`) decides ownership.
 fn jest_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> bool {
-    let Ok(jest) = runner_path(repo, dir, "jest") else { return false };
-    let Ok(output) = Command::new(jest)
-        .current_dir(dir)
-        .env("CI", "1")
-        .arg("--config")
-        .arg(config)
-        .args(["--listTests", "--json"])
-        .output()
-    else {
-        return false;
+    let list = || -> Listing {
+        let jest = runner_path(repo, dir, "jest").ok()?;
+        let output = Command::new(jest)
+            .current_dir(dir)
+            .env("CI", "1")
+            .arg("--config")
+            .arg(config)
+            .args(["--listTests", "--json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        let listed = serde_json::from_slice::<Vec<String>>(&output.stdout).ok()?;
+        Some(listed.iter().filter_map(|path| Path::new(path).canonicalize().ok()).collect())
     };
-    let (Ok(listed), Ok(spec)) = (serde_json::from_slice::<Vec<String>>(&output.stdout), spec.canonicalize()) else {
-        return false;
-    };
-    output.status.success()
-        && listed.iter().any(|path| Path::new(path).canonicalize().is_ok_and(|path| path == spec))
+    let listing = cached_listing("jest", dir, config, list).unwrap_or_else(list);
+    spec.canonicalize().is_ok_and(|spec| listing.is_some_and(|listed| listed.contains(&spec)))
 }
 
 /// The repository-relative Jest config that lists `path`, when Jest can be asked.
@@ -1282,18 +1670,86 @@ pub(crate) fn jest_owner(repo: &Path, path: &str) -> Option<PathBuf> {
     config.strip_prefix(repo).ok().map(Path::to_path_buf)
 }
 
+/// Whether the local Playwright, run with `config`, lists a test in `spec`:
+/// the config's own `testDir`, `testMatch`, `testIgnore` and projects decide
+/// ownership (GH #2195). Listing loads the config without starting servers.
+fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path) -> bool {
+    fn lists(suite: &Value) -> bool {
+        suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
+            || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(lists))
+    }
+    fn files(suite: &Value, root: &Path, listed: &mut BTreeSet<PathBuf>) {
+        for spec in suite.get("specs").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(file) = spec.get("file").and_then(Value::as_str)
+                && let Ok(file) = root.join(file).canonicalize() { listed.insert(file); }
+        }
+        for child in suite.get("suites").and_then(Value::as_array).into_iter().flatten() { files(child, root, listed); }
+    }
+    let Ok(playwright) = runner_path(repo, dir, "playwright") else { return false };
+    // GH #2331: one listing of the whole config answers for every spec in a
+    // close. A config that throws while loading (it needs an environment this
+    // host lacks) prints no report and lists no spec, whatever the filter. A
+    // test file that fails to load fails only the listings that include it,
+    // so that config falls back to asking per spec.
+    let whole = || -> Listing {
+        let output = Command::new(&playwright).current_dir(dir).env("CI", "1")
+            .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"]).output().ok()?;
+        let Ok(report) = serde_json::from_slice::<Value>(&output.stdout) else { return Some(BTreeSet::new()) };
+        let only_no_tests = report.get("errors").and_then(Value::as_array).is_some_and(|errors| errors.iter()
+            .all(|error| error.get("message").and_then(Value::as_str).is_some_and(|message| message.starts_with("Error: No tests found"))));
+        if !output.status.success() && !only_no_tests { return None; }
+        let Some(root) = report.get("config").and_then(|config| config.get("rootDir")).and_then(Value::as_str) else {
+            return Some(BTreeSet::new());
+        };
+        let root = Path::new(root).to_path_buf();
+        let mut listed = BTreeSet::new();
+        files(&report, &root, &mut listed);
+        Some(listed)
+    };
+    if let Some(Some(listed)) = cached_listing("playwright", dir, config, whole) {
+        return spec.canonicalize().is_ok_and(|spec| listed.contains(&spec));
+    }
+    let Ok(output) = Command::new(playwright).current_dir(dir).env("CI", "1")
+        .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"])
+        .arg(regex::escape(&spec.to_string_lossy())).output()
+    else { return false };
+    output.status.success()
+        && serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|report| lists(&report))
+}
+
+/// Whether the vitest that runs for `path` can transform a `.vue` file: its
+/// config names the Vue plugin, or Nuxt's test config that brings it. With no
+/// config or no plugin `vitest related <file>.vue` crashes (GH #2352).
+pub(crate) fn vitest_loads_vue(repo: &Path, path: &str) -> bool {
+    runner_root(repo, path, "vitest").ok().and_then(|(_, config)| config)
+        .and_then(|config| std::fs::read_to_string(config).ok())
+        .is_some_and(|config| ["plugin-vue", "@nuxt/test-utils", "unplugin-vue"].iter().any(|plugin| config.contains(plugin)))
+}
+
+/// The repository-relative non-default Playwright config that lists `path`,
+/// when its directory's default config does not (GH #2195).
+pub(crate) fn playwright_owner(repo: &Path, path: &str) -> Option<PathBuf> {
+    let (dir, config) = runner_root(repo, path, "playwright").ok()?;
+    let config = config?;
+    if runner_config(&dir, "playwright").as_ref() == Some(&config) { return None; }
+    config.strip_prefix(repo).ok().map(Path::to_path_buf)
+}
+
 /// The runner configs in `dir`, nearest default first. Jest repositories keep
-/// further configs beside it (`jest-integration.config.js`) for other specs.
+/// further configs beside it (`jest-integration.config.js`) for other specs, as
+/// Playwright ones do (`playwright.hermetic.config.ts`).
 fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
     let mut configs: Vec<PathBuf> = runner_config(dir, runner).into_iter().collect();
-    if runner == "jest" {
+    if matches!(runner, "jest" | "playwright") {
+        let defaults = if runner == "jest" { JEST_CONFIGS } else { PLAYWRIGHT_CONFIGS };
         let mut extra: Vec<PathBuf> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                name.contains("jest") && name.contains(".config.") && !JEST_CONFIGS.contains(&name.as_str())
+                (if runner == "jest" { name.contains("jest") } else { name.starts_with("playwright") })
+                    && name.contains(".config.") && javascript(&name) && !defaults.contains(&name.as_str())
             })
             .map(|entry| entry.path())
             .collect();
@@ -1306,16 +1762,26 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
 /// The runner's working directory and explicit config for a test file: the
 /// nearest ancestor holding that runner's config, else the nearest
 /// package.json. A nested package.json must not hide the config and its
-/// transforms (cas-1468). For Jest the config must select the file: a spec
+/// transforms (cas-1468). For Jest, or for one of several Playwright configs
+/// (GH #2195), the config must select the file: a spec
 /// outside the default config's `testRegex` belongs to the config that
 /// matches it (GH #2058); with no such config the nearest one stays.
-fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
+pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
     let spec = repo.join(path);
     let mut current = spec.parent().context("test parent")?.to_path_buf();
     let (mut package, mut nearest) = (None, None);
     loop {
-        for config in runner_configs(&current, runner) {
-            if runner != "jest" || jest_config_selects(repo, &current, &config, &spec) {
+        let configs = runner_configs(&current, runner);
+        // One Playwright config owns its directory; among several, the one
+        // listing the spec does (GH #2195).
+        let several = configs.len() > 1;
+        for config in configs {
+            let selects = match runner {
+                "jest" => jest_config_selects(repo, &current, &config, &spec),
+                "playwright" if several => playwright_config_selects(repo, &current, &config, &spec),
+                _ => true,
+            };
+            if selects {
                 return Ok((current, Some(config)));
             }
             nearest.get_or_insert_with(|| (current.clone(), Some(config)));
@@ -1379,15 +1845,18 @@ fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
 /// import, else the nearest directory with runner evidence. Conflicting or
 /// absent evidence leaves the runner unknown.
 pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
-    let source = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
-    if source.contains("@playwright/test") {
-        return Some("playwright");
-    }
+    // A package manifest's dependencies are not a test API import.
+    let source = if package_manifest(path) { String::new() } else { std::fs::read_to_string(repo.join(path)).unwrap_or_default() };
+    // GH #2380: a unit test may drive a browser through `@playwright/test`'s
+    // library (`chromium`); its test API import names the runner.
     if source.contains("'vitest'") || source.contains("\"vitest\"") {
         return Some("vitest");
     }
     if source.contains("@jest/globals") {
         return Some("jest");
+    }
+    if source.contains("@playwright/test") {
+        return Some("playwright");
     }
     // GH #2055: a node:test file beside a Jest config is Node's own runner.
     if source.contains("'node:test'") || source.contains("\"node:test\"") {
@@ -1396,9 +1865,15 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
         let mut runners = local_runners(&current);
-        // A Playwright spec imports its runner; a plain test file beside a
-        // Playwright config belongs to the unit runner.
-        if runners.len() > 1 {
+        // Beside a unit runner, a Playwright config that lists the file owns
+        // it, though it imports `test` from a local fixture (GH #2294); a
+        // plain test file there belongs to the unit runner.
+        if runners.len() > 1 && runners.contains("playwright") {
+            let spec = repo.join(path);
+            if runner_configs(&current, "playwright").iter()
+                .any(|config| playwright_config_selects(repo, &current, config, &spec)) {
+                return Some("playwright");
+            }
             runners.remove("playwright");
         }
         match runners.len() {
@@ -1426,7 +1901,34 @@ fn runner_path(repo: &Path, package: &Path, runner: &str) -> Result<PathBuf> {
     }
 }
 
+/// The one execution boundary (GH #2369): a selection that cannot run a test,
+/// because it selects none or names a spec no runner config lists, runs the
+/// owning package instead, and park accepts that package receipt for the
+/// selection's inputs. A failing run still fails: unsure means run more.
 fn execute_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    runner: &str,
+    runner_config: Option<&Path>,
+    tests: &[Identity],
+    widened: Option<(&super::widened::Scope, &str, &str)>,
+    test_env: &[String],
+) -> Result<Proof> {
+    let error = match execute_selection(cas_root, repo, head, runner, runner_config, tests, widened, test_env) {
+        Err(error) if error.downcast_ref::<ZeroTests>().is_some()
+            && !matches!(widened, Some((super::widened::Scope::Package(_), _, _))) => error,
+        result => return result,
+    };
+    let file = widened.map(|(_, file, _)| file).or_else(|| tests.first().map(|test| test.path.as_str()))
+        .context("an empty selection names no input")?;
+    let package = super::widened::owning_package(repo, file, runner);
+    let cause = format!("{}; no runnable focused selection: {error:#}", widened.map_or("changed tests", |(_, _, cause)| cause));
+    eprintln!("Running {file}'s package {package:?} instead: {error:#}");
+    execute_selection(cas_root, repo, head, runner, runner_config, &[], Some((&package, file, cause.as_str())), test_env)
+}
+
+fn execute_selection(
     cas_root: &Path,
     repo: &Path,
     head: &str,
@@ -1450,10 +1952,25 @@ fn execute_tests(
     for test in tests {
         by_file.entry(&test.path).or_default().push(test);
     }
+    // GH #2146, #2200: a helper holds no tests; each test importing it runs on
+    // its own, a Playwright spec under the config that owns it.
+    let consumers = match widened {
+        Some((super::widened::Scope::Related(helper), _, _)) if matches!(runner, "playwright" | "node") => {
+            let Some((_, specs)) = related_tests(repo, helper).filter(|(owner, _)| *owner == runner) else {
+                bail!(ZeroTests::new(format!("no {runner} test imports {helper}")));
+            };
+            eprintln!("Running {helper} through its importing tests: {}", specs.join(" "));
+            specs
+        }
+        _ => Vec::new(),
+    };
     if let Some((scope, file, _)) = widened {
         super::widened::invalidate(cas_root, repo, head, scope)?;
-        by_file.insert(file, Vec::new());
+        if consumers.is_empty() { by_file.insert(file, Vec::new()); }
+        for spec in &consumers { by_file.insert(spec, Vec::new()); }
     }
+    let mut configs = BTreeMap::new();
+    let mut covered: BTreeMap<String, (String, u64)> = BTreeMap::new();
     let mut count = 0;
     let mut attribution_notes = Vec::new();
     // GH #2172: a Playwright run writes its reports under the task's artifact
@@ -1474,9 +1991,17 @@ fn execute_tests(
             let config = self::runner_config(&package, runner);
             (package, config)
         } else { runner_root(repo, path, runner)? };
-        let config: Vec<std::ffi::OsString> = runner_config
-            .map(Path::to_path_buf)
-            .or(discovered)
+        let discovered = if consumers.is_empty() || runner != "playwright" || runner_config.is_some() { discovered } else {
+            Some(listing_owner(repo, path, &package, &environment, high, reports.path())?)
+        };
+        let used = runner_config.map(Path::to_path_buf).or(discovered);
+        let used_config = used.clone();
+        if runner == "playwright" && matches!(widened, Some((super::widened::Scope::File(_) | super::widened::Scope::Related(_), _, _)))
+            && let Some(config) = used.as_deref().and_then(|config| config.strip_prefix(repo).ok()).and_then(Path::to_str)
+        {
+            configs.insert(path.to_string(), config.to_string());
+        }
+        let config: Vec<std::ffi::OsString> = used
             .into_iter()
             .flat_map(|config| ["--config".into(), config.into_os_string()])
             .collect();
@@ -1486,6 +2011,7 @@ fn execute_tests(
             runner_path(repo, &package, runner)?
         };
         let source = std::fs::read_to_string(repo.join(path))?;
+        let expected_rows = source_rows(path, &source).unwrap_or_default();
         let sites = if widened.is_none() { declared_sites(path, &source)? } else { Vec::new() };
         if !sites.is_empty() {
             if runner != "playwright" {
@@ -1516,7 +2042,9 @@ fn execute_tests(
             .collect::<Vec<_>>()
             .join("|");
         let pattern = if runner == "playwright" {
-            format!("(?:^|\\s)(?:{pattern})$")
+            // GH #2349: Playwright greps the title path followed by the test's
+            // tags (`title @tag`), so a tagged test needs the tag suffix too.
+            format!("(?:^|\\s)(?:{pattern})(?:\\s@\\S+)*$")
         } else {
             format!("^(?:{pattern})$")
         };
@@ -1616,6 +2144,14 @@ fn execute_tests(
         };
         count += if widened.is_some() && runner == "playwright" {
             let (success, report) = run(0)?;
+            // A run that found no test is no failure to attribute.
+            fn ran_a_test(suite: &Value) -> bool {
+                suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
+                    || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(ran_a_test))
+            }
+            if !ran_a_test(&report) && found_no_tests(runner, success, &report) {
+                bail!(ZeroTests::new(format!("{runner} executed zero tests")));
+            }
             let inherited = if success { BTreeSet::new() } else {
                 let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
                     &executable, &config, &report, &environment, high)
@@ -1623,12 +2159,28 @@ fn execute_tests(
                 attribution_notes.push(note);
                 inherited
             };
-            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited)?
-        } else { verify_repeats(runner, repo, &selected, run)? };
+            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited, None,
+                if consumers.is_empty() { &[] } else { std::slice::from_ref(&path) })?
+        } else { verify_repeats(runner, repo, &selected, &expected_rows, run)? };
+        // GH #2146: a stability run that executed every test of a spec under
+        // its config also proves that spec as a helper's consumer. A partial
+        // selection proves nothing about the spec's other tests.
+        if runner == "playwright" && widened.is_none() && !selected.is_empty()
+            && let Some(config) = used_config.as_deref()
+            && let Some(relative) = config.strip_prefix(repo).ok().and_then(Path::to_str)
+            && playwright_listing(repo, &package, &executable, config, path, &environment, high, reports.path())
+                .is_some_and(|listed| listed.iter().filter(|test| test.path == path)
+                    .all(|ran| selected.iter().any(|chosen| chosen.selects(ran))))
+        {
+            covered.insert(path.to_string(), (relative.to_string(), selected.len() as u64));
+        }
     }
     Ok(())
     })();
     if let Err(error) = outcome {
+        if error.downcast_ref::<ZeroTests>().is_some() {
+            return Err(error);
+        }
         if runner == "vitest" {
             return Err(match retain_vitest_reports(cas_root, repo, head, reports.path()) {
                 Ok(kept) => anyhow::anyhow!(
@@ -1660,9 +2212,17 @@ fn execute_tests(
         elapsed_ms: start.elapsed().as_millis(),
     };
     if let Some((scope, _, cause)) = widened {
-        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")) }, count as u64)?;
-        println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
-    } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
+        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause} {}", attribution_notes.join("; ")), configs }, count as u64)?;
+        println!("widened: PASS {head} {scope:?} {count} passed tests; passes=1");
+    } else {
+        super::stability::record(cas_root, repo, head, proof.clone())?;
+        for (spec, (config, count)) in covered {
+            super::widened::record(cas_root, repo, head, super::widened::Proof {
+                runner: runner.into(), scope: super::widened::Scope::File(spec.clone()),
+                reason: "stability:every test of the spec".into(), configs: BTreeMap::from([(spec, config)]),
+            }, count)?;
+        }
+    }
     Ok(proof)
 }
 
@@ -1875,22 +2435,110 @@ fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<b
     Ok(status.success())
 }
 
+/// GH #2146: Playwright's own `--list` of `spec` under `config`, every test the
+/// config would run in that file; `None` when the listing cannot be produced.
+fn playwright_listing(
+    repo: &Path, directory: &Path, executable: &Path, config: &Path, spec: &str,
+    environment: &[(&str, &str)], high: u64, scratch: &Path,
+) -> Option<BTreeSet<Identity>> {
+    let report = scratch.join("listing.json");
+    let _ = std::fs::remove_file(&report);
+    let mut command = Command::new(executable);
+    command.envs(environment.iter().copied()).current_dir(directory).env("CI", "1")
+        .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"])
+        .arg(regex::escape(&repo.join(spec).to_string_lossy()))
+        .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
+    if !run_scoped_javascript(command, high, &scratch.join("listing-scope")).ok()? { return None; }
+    let listed: Value = serde_json::from_slice(&std::fs::read(&report).ok()?).ok()?;
+    let root = listed.get("config").and_then(|config| config.get("rootDir")).and_then(Value::as_str)
+        .map(Path::new).unwrap_or(repo);
+    let mut tests = BTreeSet::new();
+    listed_tests(repo, root, listed.get("suites").unwrap_or(&Value::Null), &[], &mut tests);
+    Some(tests).filter(|tests| tests.iter().any(|test| test.path == spec))
+}
+
+/// The Playwright config that lists `spec`. Configs beside the spec's nearest
+/// default, `playwright.responsive.config.ts` among them, each own different
+/// specs; the listing decides, nearest directory first and a directory's
+/// default before its siblings.
+fn listing_owner(
+    repo: &Path, spec: &str, package: &Path, environment: &[(&str, &str)], high: u64, scratch: &Path,
+) -> Result<PathBuf> {
+    let executable = runner_path(repo, package, "playwright")?;
+    let mut directory = repo.join(spec);
+    while directory.pop() && directory.starts_with(repo) {
+        for config in runner_configs(&directory, "playwright") {
+            if playwright_listing(repo, &directory, &executable, &config, spec, environment, high, scratch).is_some() {
+                return Ok(config);
+            }
+        }
+        if directory == repo { break; }
+    }
+    bail!(ZeroTests::new(format!("no Playwright config lists {spec}")))
+}
+
+/// Test identities in a Playwright JSON report, named as `playwright_results` names them.
+fn listed_tests(repo: &Path, root: &Path, suites: &Value, ancestry: &[String], tests: &mut BTreeSet<Identity>) {
+    for suite in suites.as_array().into_iter().flatten() {
+        let mut names = ancestry.to_vec();
+        if !ancestry.is_empty() || suite.get("column").and_then(Value::as_u64).unwrap_or(0) != 0 {
+            names.extend(suite.get("title").and_then(Value::as_str).map(str::to_string));
+        }
+        for spec in suite.get("specs").and_then(Value::as_array).into_iter().flatten() {
+            if let (Some(file), Some(title)) = (spec.get("file").and_then(Value::as_str), spec.get("title").and_then(Value::as_str))
+                && let Ok(path) = report_path(repo, &root.join(file).to_string_lossy())
+            {
+                let mut full = names.clone();
+                full.push(title.to_string());
+                tests.insert(Identity::exact(path, full.join(" ")));
+            }
+        }
+        listed_tests(repo, root, suite.get("suites").unwrap_or(&Value::Null), &names, tests);
+    }
+}
+
+/// Playwright exits 1 and reports "No tests found" when a selection matches none.
+fn playwright_found_no_tests(report: &Value) -> bool {
+    report.get("errors").and_then(Value::as_array).is_some_and(|errors| errors.iter()
+        .any(|error| error.get("message").and_then(Value::as_str).is_some_and(|message| message.contains("No tests found"))))
+}
+
+/// A run that executed nothing is a zero-test selection only when the runner
+/// reported no failure: it passed, Vitest/Jest found no test file, or
+/// Playwright found no test. Otherwise it is a failing run (GH #2172).
+fn found_no_tests(runner: &str, success: bool, report: &Value) -> bool {
+    success || if runner == "playwright" { playwright_found_no_tests(report) } else {
+        report.get("testResults").and_then(Value::as_array).is_some_and(Vec::is_empty)
+    }
+}
+
 fn verify_repeats(
     runner: &str,
     repo: &Path,
     tests: &[Identity],
+    expected: &BTreeMap<Identity, Expansion>,
     mut run: impl FnMut(usize) -> Result<(bool, Value)>,
 ) -> Result<usize> {
     let mut count = 0;
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
-        count = validate_report(
+        count = match validate_report_with_inherited(
             runner,
             repo,
             &report,
             tests,
             if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
-        )?;
+            &BTreeSet::new(),
+            // cas-c1df: Vitest's expanded row names are derived from the
+            // source tables and every iteration must produce exactly them.
+            (runner == "vitest").then_some(expected),
+            &[],
+        ) {
+            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, success, &report) => {
+                bail!("{runner} stability failed at iteration {}; no retry", iteration + 1)
+            }
+            result => result?,
+        };
         if !success {
             bail!(
                 "{runner} stability failed at iteration {}; no retry",
@@ -1908,12 +2556,17 @@ fn validate_report(
     tests: &[Identity],
     repeats: usize,
 ) -> Result<usize> {
-    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new())
+    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new(), None, &[])
 }
 
+/// `expected` holds the names each changed `it.each` test expands to, read
+/// from its source table. With it, every template must have an entry and the
+/// rows the templates selected must be exactly those names and multiplicities.
+/// `files` are the spec files a widened run must have executed, and the only
+/// ones it may have: a missing or unrelated file is not proof (GH #2146).
 fn validate_report_with_inherited(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
-    inherited: &BTreeSet<(Identity, String)>,
+    inherited: &BTreeSet<(Identity, String)>, expected: Option<&BTreeMap<Identity, Expansion>>, files: &[&str],
 ) -> Result<usize> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
     if runner == "playwright" {
@@ -1932,8 +2585,31 @@ fn validate_report_with_inherited(
             &mut projects,
             inherited,
         )?;
-        for ((identity, _project), count) in projects {
+        // GH #2207: Playwright applies --repeat-each only to the projects the
+        // run selects; a dependency (setup) project keeps its own repeatEach.
+        let declared: BTreeMap<&str, u64> = report.pointer("/config/projects").and_then(Value::as_array)
+            .into_iter().flatten().filter_map(|project| Some((project.get("repeatEach")?.as_u64()?, project)))
+            .flat_map(|(each, project)| ["id", "name"].into_iter()
+                .filter_map(move |key| Some((project.get(key)?.as_str()?, each))))
+            .collect();
+        for ((identity, project), count) in projects {
+            let dependency = declared.get(project.as_str()).copied()
+                .filter(|each| *each != repeats as u64);
+            if let Some(each) = dependency && !tests.iter().any(|test| test.selects(&identity)) {
+                // Every scheduled run of an unchanged dependency passed.
+                if count as u64 != each {
+                    bail!("playwright dependency {project} requires {each} passing runs: {} :: {}",
+                        identity.path, identity.name);
+                }
+                continue;
+            }
             if count != repeats {
+                if dependency.is_some() {
+                    bail!(
+                        "playwright requires {repeats} passing repeats per project: {} :: {}. A changed dependency test needs its own capped run: worker-check -- playwright {}",
+                        identity.path, identity.name, identity.path
+                    );
+                }
                 bail!(
                     "playwright requires {repeats} passing repeats per project: {} :: {}",
                     identity.path,
@@ -1941,6 +2617,9 @@ fn validate_report_with_inherited(
                 );
             }
             results.insert(identity, count);
+        }
+        if results.is_empty() && playwright_found_no_tests(report) {
+            bail!(ZeroTests::new(format!("{runner} executed zero tests")));
         }
         if report
             .get("errors")
@@ -1950,11 +2629,10 @@ fn validate_report_with_inherited(
             bail!("Playwright stability report contains runner errors");
         }
     } else {
-        for file in report
-            .get("testResults")
-            .and_then(Value::as_array)
-            .context("testResults missing")?
-        {
+        let reported = report.get("testResults").and_then(Value::as_array).context("testResults missing")?;
+        // Vitest and Jest call a run that found no test file unsuccessful.
+        if reported.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
+        for file in reported {
             let path = report_path(
                 repo,
                 file.get("name")
@@ -2003,10 +2681,13 @@ fn validate_report_with_inherited(
             bail!("{runner} stability report was unsuccessful");
         }
     }
-    // A template identity is proved when every row it selected passed.
+    if results.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
+    // A template identity is proved when every row it selected passed. Distinct
+    // rows may share one runtime name (GH #2138, #2225), so how many rows there
+    // must be comes from the source table, not from the run (cas-c1df).
     for test in tests {
         let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
-        if rows.peek().is_none() || rows.any(|(_, count)| *count != repeats) {
+        if rows.peek().is_none() || rows.any(|(_, count)| *count < repeats) {
             bail!(
                 "{runner} stability requires {repeats} passing results: {} :: {}",
                 test.path,
@@ -2014,17 +2695,57 @@ fn validate_report_with_inherited(
             );
         }
     }
+    if let Some(expected) = expected {
+        let mut want: BTreeMap<Identity, usize> = BTreeMap::new();
+        for test in tests.iter().filter(|test| test.parameterized) {
+            let Some(names) = expected.get(test) else {
+                bail!(
+                    "{runner} stability cannot derive the expanded rows of {} :: {} from its source table; prove the whole spec file instead of a changed-test selection",
+                    test.path,
+                    test.name
+                );
+            };
+            for (name, rows) in names {
+                *want.entry(Identity::exact(test.path.clone(), name.clone())).or_default() += rows * repeats;
+            }
+        }
+        let have: BTreeMap<Identity, usize> = results
+            .iter()
+            .filter(|(ran, _)| tests.iter().any(|test| test.parameterized && test.selects(ran)))
+            .map(|(ran, count)| (ran.clone(), *count))
+            .collect();
+        if let Some(row) = want.keys().chain(have.keys()).find(|row| want.get(*row) != have.get(*row)) {
+            bail!(
+                "{runner} stability expects {} passing results from the source table, saw {}: {} :: {}",
+                want.get(row).copied().unwrap_or(0),
+                have.get(row).copied().unwrap_or(0),
+                row.path,
+                row.name
+            );
+        }
+    }
     if !tests.is_empty() && results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
-    if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
-    Ok(results.len())
+    for file in files {
+        if !results.keys().any(|ran| ran.path == *file) {
+            bail!(crate::gates::tag("G-61", format!("{runner} executed no test of the required spec {file}")));
+        }
+    }
+    if let Some(ran) = results.keys().find(|ran| !files.is_empty() && !files.contains(&ran.path.as_str())) {
+        bail!(crate::gates::tag("G-61", format!("{runner} ran {} outside the required specs", ran.path)));
+    }
+    // Jest/Vitest count executed rows, not distinct names (GH #2166, #2246).
+    Ok(if runner == "playwright" { results.len() } else { results.values().sum() })
 }
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
     let path = Path::new(path);
+    // A runner may report the resolved path: macOS `/var` is `/private/var`.
+    let canonical = repo.canonicalize().ok();
     let path = if path.is_absolute() {
         path.strip_prefix(repo)
+            .or_else(|error| canonical.as_deref().map_or(Err(error), |repo| path.strip_prefix(repo)))
             .context("reported test is outside the repository")?
     } else {
         path
@@ -2359,6 +3080,248 @@ mod tests {
         );
     }
 
+    /// GH #2146: hub-web's responsive-goals.ts helper holds no tests; its
+    /// assertions run through pair-link.journey.ts. The gate widened it to the
+    /// whole package. It now runs through the Playwright specs importing it,
+    /// directly or through other helpers; a helper no spec imports, or one a
+    /// unit test also imports, keeps its previous proof. hub-double.ts imports
+    /// Playwright only for types, and a Vitest test imports it: its helpers
+    /// keep their Vitest route (cas-87b5).
+    #[test]
+    fn playwright_helper_runs_through_its_importing_specs_gh2146() {
+        use super::super::widened::{self, Scope};
+        // `execute` takes the same build admission as a real capped run. Held
+        // guard: admission off and HOME private, so neither this host's memory
+        // pressure or live cargo builders nor ~/.cas decides the result (the
+        // lane CI failure on run 45127045758 was "memory PSI exceeds 10%").
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let cas = tempfile::tempdir().unwrap();
+        let repo = cas.path().join("worktrees/web");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(&repo)
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        // Two configs, as hub-web has them: the default one lists e2e/journeys and the
+        // responsive one lists e2e/responsive, each its own `**/*.journey.ts`.
+        let files = [
+            (".gitignore", "node_modules/\n"),
+            ("package.json", "{}"),
+            ("playwright.config.js", "module.exports = { testDir: 'e2e/journeys', testMatch: '**/*.journey.ts' };"),
+            ("playwright.responsive.config.js", "module.exports = { testDir: 'e2e/responsive', testMatch: '**/*.journey.ts' };"),
+            ("vitest.config.ts", "export default {};"),
+            ("e2e/journeys/world.ts", "export const world = 1;"),
+            ("e2e/journeys/journey.ts", "import { test } from \"@playwright/test\";\nimport { world } from \"./world\";\nexport { test, world };"),
+            ("e2e/journeys/responsive-goals.ts", "import { expect } from \"@playwright/test\";\nexport const goals = () => expect(1).toBe(1);"),
+            ("e2e/journeys/extra.ts", "import { expect } from \"@playwright/test\";\nexport const extra = () => expect(1).toBe(1);"),
+            ("e2e/journeys/orphan.ts", "import { expect } from \"@playwright/test\";\nexport const unused = 1;"),
+            ("e2e/responsive/pair-link.journey.ts", "import { test } from '../journeys/journey';\nimport { goals } from '../journeys/responsive-goals.js';\nimport { shared } from '../../src/shared';\ntest('pairs', goals);\n"),
+            ("e2e/journeys/read-history.journey.ts", "import { test } from './journey';\ntest('reads', () => {});\n"),
+            ("e2e/journeys/summary.journey.ts", "import { test } from './journey';\nimport { goals } from './responsive-goals';\ntest('sums', () => { goals(); });\n"),
+            ("e2e/journeys/partial.journey.ts", "import { test } from './journey';\nimport { extra } from './extra';\ntest('a', () => {});\ntest('b', () => {});\n"),
+            ("src/shared.ts", "export const shared = 1;"),
+            ("src/shared.test.ts", "import { test } from 'vitest';\nimport { shared } from './shared';\nimport { unused } from '../e2e/journeys/orphan';\ntest('shared', () => {});"),
+            ("e2e/journeys/hub-double.ts", "import type { Page } from \"@playwright/test\";\nimport { runtime } from \"./hub-double-runtime\";\nexport const double = (page: Page) => runtime;"),
+            ("e2e/journeys/hub-double-runtime.ts", "export const runtime = 1;"),
+            ("preview/browser-page.test.ts", "import { double } from \"../e2e/journeys/hub-double\";\nit(\"serves\", () => double);"),
+        ];
+        for (path, body) in files {
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), body).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let (helper, extra) = ("e2e/journeys/responsive-goals.ts", "e2e/journeys/extra.ts");
+        let (pair, history, summary, partial) = ("e2e/responsive/pair-link.journey.ts", "e2e/journeys/read-history.journey.ts",
+            "e2e/journeys/summary.journey.ts", "e2e/journeys/partial.journey.ts");
+        // The delivery changes two helpers and, in two of their consumers, one test each.
+        std::fs::write(repo.join(helper), "import { expect } from \"@playwright/test\";\nexport const goals = () => expect(2).toBe(2);").unwrap();
+        std::fs::write(repo.join(extra), "import { expect } from \"@playwright/test\";\nexport const extra = () => expect(2).toBe(2);").unwrap();
+        std::fs::write(repo.join(summary), "import { test } from './journey';\nimport { goals } from './responsive-goals';\ntest('sums', () => { goals(); goals(); });\n").unwrap();
+        std::fs::write(repo.join(partial), "import { test } from './journey';\nimport { extra } from './extra';\ntest('a', () => { extra(); });\ntest('b', () => {});\n").unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let (tests, scopes) = super::super::stability::requirements(&repo, "HEAD", "HEAD~1", &[helper.into()], None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [Scope::Related(helper.into())]);
+        assert_eq!(related_tests(&repo, helper), Some(("playwright", vec![summary.into(), pair.into()])));
+        assert_eq!(related_tests(&repo, extra), Some(("playwright", vec![partial.into()])));
+        assert_eq!(related_tests(&repo, "e2e/journeys/world.ts"),
+            Some(("playwright", vec![partial.into(), history.into(), summary.into(), pair.into()])));
+        let command = widened::commands(Path::new("/cas"), &repo, &[helper.into()], &scopes, &Default::default());
+        assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
+        assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new(), configs: Default::default() }));
+
+        // Park's receipt matcher (receipt_scope.rs reads it): a helper is covered
+        // only when every importing spec ran at the tip under the config that
+        // owns it. The captured-shape stand-in lists a spec only under the config
+        // whose testDir holds it, so ownership comes from the configs above.
+        let head = String::from_utf8(Command::new("git").current_dir(&repo).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+        let playwright = repo.join("node_modules/.bin/playwright");
+        std::fs::create_dir_all(playwright.parent().unwrap()).unwrap();
+        std::fs::write(&playwright, STAND_IN_PLAYWRIGHT).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let covered = |scope: &Scope| widened::missing(&super::super::PassingTests::new(cas.path(), &repo, &head), std::slice::from_ref(scope), &Default::default()).is_empty();
+        // The ordinary dispatch a worker runs: `worker-check -- playwright [--config c] <path>`.
+        let exec = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            execute(cas.path(), &args, &repo, &[])
+        };
+        assert!(!covered(&scopes[0]));
+        // Consumers run one by one. An omitted one or an unrelated spec leaves the helper uncovered.
+        exec(&["playwright", "--config", "playwright.responsive.config.js", pair]).unwrap();
+        assert!(!covered(&scopes[0]), "summary.journey.ts has not run");
+        exec(&["playwright", history]).unwrap();
+        assert!(!covered(&scopes[0]), "an unrelated spec is no proof");
+        // summary.journey.ts has one test and it changed: its ordinary five-pass
+        // stability run executes every test of the spec, which proves the consumer.
+        exec(&["playwright", summary]).unwrap();
+        assert!(covered(&scopes[0]), "every importing spec ran");
+        // partial.journey.ts changed one of two tests: five passes of that one
+        // test prove nothing about the other, so the helper it imports waits
+        // for a run of the whole spec, which the helper's own run makes.
+        let extra_scope = Scope::Related(extra.into());
+        exec(&["playwright", partial]).unwrap();
+        assert!(!covered(&extra_scope), "a partial selection is no proof");
+        exec(&["playwright", extra]).unwrap();
+        assert!(covered(&extra_scope));
+        // The helper's own run finds each owning config and records it.
+        exec(&["playwright", helper]).unwrap();
+        let passing = super::super::PassingTests::new(cas.path(), &repo, &head);
+        let proof = passing.records().iter().filter_map(|(_, _, test)| test.widened.as_ref())
+            .find(|proof| proof.scope == scopes[0]).unwrap();
+        assert_eq!(proof.configs, BTreeMap::from([
+            (pair.to_string(), "playwright.responsive.config.js".to_string()),
+            (summary.to_string(), "playwright.config.js".to_string()),
+        ]));
+        // A report of some other spec is no proof of a required consumer: the
+        // stand-in's report of read-history.journey.ts, checked as summary's.
+        let scratch = tempfile::tempdir().unwrap();
+        let report_file = scratch.path().join("report.json");
+        let output = Command::new(&playwright).current_dir(&repo).env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report_file)
+            .args(["test", "--config", "playwright.config.js", "--repeat-each", "1", "--reporter=json"])
+            .arg(regex::escape(&repo.join(history).to_string_lossy())).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&std::fs::read(&report_file).unwrap()).unwrap();
+        let error = validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[summary]).unwrap_err();
+        assert!(format!("{error:#}").contains("[G-61]"), "{error:#}");
+        assert!(validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[history]).is_ok());
+        assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
+        let runtime = "e2e/journeys/hub-double-runtime.ts";
+        let scopes = [widened::scope(&repo, runtime)];
+        assert_eq!(widened::commands(Path::new("/cas"), &repo, &[runtime.into()], &scopes, &Default::default()),
+            [format!("cas factory worker-check --cas-root /cas -- vitest related --run {runtime}")]);
+        assert!(related_tests(&repo, "src/shared.ts").is_none());
+    }
+
+    /// GH #2200: a workflow change and the `node:test` CI guard that reads it
+    /// through a helper. G-61 prescribed `playwright <workflow>.yml`, which
+    /// the capped runner refuses. The helper now runs through the guard tests
+    /// importing it; the receipt that run records is the one park reads, and a
+    /// failing guard records none.
+    #[test]
+    fn node_guard_helper_proof_runs_its_importing_tests_gh2200() {
+        use super::super::widened::{self, Scope};
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let write = |path: &str, text: &str| {
+            std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.path().join(path), text).unwrap();
+        };
+        let (workflow, helper) = (".github/workflows/playwright.yml", "tests/ci/workflow.mjs");
+        git(&["init", "--quiet"]);
+        write("package.json", "{}");
+        write("playwright.config.js", "module.exports = {};");
+        write(workflow, "retries: 0\n");
+        write(helper, "import { readFileSync } from 'node:fs';\nconst workflow = new URL('../../.github/workflows/playwright.yml', import.meta.url);\nexport const retries = () => /retries: 0/.test(readFileSync(workflow, 'utf8'));\n");
+        write("tests/ci/workflow.test.mjs", "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { retries } from './workflow.mjs';\ntest('workflow never retries', () => assert.ok(retries()));\n");
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        write(workflow, "name: e2e\nretries: 0\n");
+        write(helper, &format!("// Guards {workflow}.\n{}", std::fs::read_to_string(repo.path().join(helper)).unwrap()));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = [workflow.to_string(), helper.to_string()];
+        let (tests, scopes) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [Scope::Related(helper.into())]);
+        let prescribed = widened::commands(Path::new("/cas"), repo.path(), &paths, &scopes, &Default::default());
+        assert_eq!(prescribed, [format!("cas factory worker-check --cas-root /cas -- node --test {helper}")]);
+        let args: Vec<String> = ["node", "--test", helper].map(String::from).into();
+        let invocation = invocation(&args).expect("the prescribed command is a capped runner");
+        let cas_root = tempfile::tempdir().unwrap();
+        let passing = |head: &str| widened::missing(&super::super::PassingTests::new(cas_root.path(), repo.path(), head), &scopes, &Default::default());
+        assert_eq!(passing(&head), scopes);
+        execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &[], Some((&scopes[0], helper, "uncertain")), &[]).unwrap();
+        assert!(passing(&head).is_empty());
+        // A guard that fails records no proof for its new tip.
+        write(workflow, "retries: 2\n");
+        git(&["commit", "--quiet", "-am", "retry"]);
+        let failed = git(&["rev-parse", "HEAD"]);
+        assert!(execute_tests(cas_root.path(), repo.path(), &failed, "node", None, &[], Some((&scopes[0], helper, "uncertain")), &[]).is_err());
+        assert_eq!(passing(&failed), scopes);
+    }
+
+    /// GH #2329: C-37 makes a lane that changes hub-web/src commit the rebuilt
+    /// hub-web/dist, and park then demanded a widened Related() receipt for each
+    /// changed bundle, which runs no tests and can never earn one. A generated
+    /// bundle owes nothing; the source's own spec keeps its proof.
+    #[test]
+    fn generated_hub_web_bundles_owe_no_proof_gh2329() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let spec = "hub-web/src/panel.test.ts";
+        // A bundle the classifier cannot read, as a minified chunk can be.
+        let bundles = ["hub-web/dist/app.js", "hub-web/dist/chunk-accounts-panel-ABC123.js"];
+        let write = |path: &str, body: &str| {
+            let full = repo.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        };
+        write("hub-web/package.json", "{}");
+        write("hub-web/vitest.config.ts", "export default {};\n");
+        write(spec, "import { it } from 'vitest';\nit('renders the panel', () => {});\n");
+        for bundle in bundles {
+            write(bundle, "var a = ;\n");
+        }
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        write(spec, "import { it } from 'vitest';\nit('renders the panel', () => { expect(1).toBe(1); });\n");
+        for bundle in bundles {
+            write(bundle, "var a = ; var b = 2;\n");
+        }
+        git(&["commit", "--quiet", "-am", "head"]);
+        let paths = [spec, bundles[0], bundles[1]].map(str::to_owned);
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
+        assert!(tests.iter().any(|test| test.path == spec && test.name == "renders the panel"), "{tests:?}");
+        assert!(widened.iter().all(|scope| !format!("{scope:?}").contains("hub-web/dist")), "{widened:?}");
+    }
+
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
     /// apps/backend/jest.config.js and its ts-jest transform.
     #[test]
@@ -2458,7 +3421,7 @@ process.exit(ok ? 0 : 1);
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
         // The prescribed rerun names that config, and running it as printed passes the same way.
-        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), "HEAD", &tests);
         assert_eq!(prescribed.len(), 1);
         assert!(prescribed[0].contains(&format!("-- jest --config {config} {spec}`")), "{prescribed:?}");
         let args: Vec<String> = ["jest", "--config", config, spec].map(String::from).into();
@@ -2467,6 +3430,186 @@ process.exit(ok ? 0 : 1);
         execute_tests(cas_root.path(), repo.path(), &head, "jest", Some(&explicit), &tests, None, &[]).unwrap();
         assert!(super::super::stability::missing(&passing(), &tests).is_empty());
         assert_eq!(passing().receipts().len(), 1);
+    }
+
+    /// A stand-in Playwright emitting what Playwright 1.65.1's JSON reporter
+    /// emits (checked against a real 1.65.1 `--list` and `--repeat-each` run
+    /// of a testDir-only config): one unnamed project (id and name ''),
+    /// rootDir is testDir and files are relative to it; `--list` keeps each
+    /// discovered test with empty results; a run adds one test per repetition,
+    /// each with one result. It lists the files under testDir that the config's
+    /// `**/*<suffix>` testMatch (default `.spec.ts`) and the positional pattern
+    /// name ("No tests found" otherwise), with each spec's own title and line; a
+    /// file may hold several `test('title'` lines, `--grep` keeps the matching
+    /// ones (it matches the title path followed by the `{ tag: [...] }` tags),
+    /// and the report goes to PLAYWRIGHT_JSON_OUTPUT_FILE when that is set.
+    const STAND_IN_PLAYWRIGHT: &str = r#"#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
+const config = path.resolve(at('--config')), settings = require(config), root = path.join(path.dirname(config), settings.testDir);
+const last = a[a.length - 1], pattern = last.startsWith('--') ? /(?:)/ : new RegExp(last), repeats = listing ? 1 : Number(at('--repeat-each')), grep = a.includes('--grep') ? new RegExp(at('--grep')) : null;
+const testMatch = settings.testMatch ?? '**/*.@(spec|test).?(c|m)[jt]s?(x)', suffix = settings.testMatch ? testMatch.replace('**/*', '') : '.spec.ts';
+const files = fs.existsSync(root) ? fs.readdirSync(root).filter((f) => f.endsWith(suffix)).map((f) => path.join(root, f)) : [];
+// A `test('title', { tag: ['@a'] }, ...)` line; Playwright greps the title path, then the tags, joined by spaces.
+const specsOf = (file) => fs.readFileSync(file, 'utf8').split('\n').flatMap((text, index) => {
+  const found = text.match(/^test\('([^']*)'(?:, \{ tag: \[([^\]]*)\] \})?/);
+  const tags = found && found[2] ? found[2].split(',').map((tag) => tag.trim().replace(/['"]/g, '')) : [];
+  return found && (!grep || grep.test(['', '', path.relative(root, file), found[1], ...tags].join(' '))) ? [{ title: found[1], line: index + 1, tags }] : []; });
+const listed = files.filter((file) => pattern.test(file) && specsOf(file).length), workers = 1, outputDir = path.join(path.dirname(config), 'test-results');
+const metadata = listing || !listed.length ? {} : { actualWorkers: Math.min(workers, listed.length * repeats) };
+const project = { outputDir, repeatEach: repeats, retries: 0, metadata, id: '', name: '', testDir: root, testIgnore: [], testMatch: [testMatch], timeout: 30000 };
+const startTime = new Date().toISOString(), result = { workerIndex: 0, parallelIndex: 0, status: 'passed', duration: 1, errors: [],
+  stdout: [], stderr: [], retry: 0, startTime, annotations: [], attachments: [] };
+const test = { timeout: 30000, annotations: [], expectedStatus: 'passed', projectId: '', projectName: '',
+  results: listing ? [] : [result], status: listing ? 'skipped' : 'expected' };
+const specCount = listed.reduce((sum, file) => sum + specsOf(file).length, 0);
+// With a `.record-runs` marker beside the config, each executed test's title is appended once per repeat to `.ran`.
+if (!listing && fs.existsSync(path.join(path.dirname(config), '.record-runs')))
+  for (const file of listed) for (const spec of specsOf(file)) fs.appendFileSync(path.join(path.dirname(config), '.ran'), `${spec.title}\n`.repeat(repeats));
+const noTests = 'Error: No tests found.\nMake sure that arguments are regular expressions matching test files.\nYou may need to escape symbols like "$" or "*" and quote the arguments.';
+const report = {
+  config: { argv: process.argv, configFile: config, rootDir: root, failOnFlakyTests: false, forbidOnly: false, fullyParallel: false, globalSetup: null,
+    globalTeardown: null, globalTimeout: 0, grep: {}, grepInvert: null, maxFailures: 0, metadata, preserveOutput: 'always',
+    filteredProjects: [{ grep: {}, grepInvert: null, outputDir, repeatEach: repeats, retries: 0, metadata, name: '', testDir: root,
+      snapshotDir: root, testIgnore: [], testMatch, timeout: 30000, use: {}, dependencies: [], ignoreSnapshots: false, __projectId: '' }],
+    projects: [project], quiet: false, reporter: [['json']], reportSlowTests: { max: 5, threshold: 300000 }, shard: null, tags: [],
+    updateSnapshots: 'default', updateSourceMethod: 'patch', version: '1.65.1', workers, webServer: null },
+  suites: listed.map((file, index) => {
+    const relative = path.relative(root, file);
+    return { title: relative, file: relative, column: 0, line: 0, specs: specsOf(file).map((spec, n) => ({ title: spec.title, ok: true, tags: spec.tags.map((tag) => tag.slice(1)),
+      tests: Array(repeats).fill(test), id: `spec-${index}-${n}`, file: relative, line: spec.line, column: 1 })) };
+  }),
+  errors: listed.length ? [] : [{ message: noTests, stack: noTests }],
+  stats: { startTime, duration: 1, expected: listing ? 0 : specCount * repeats, skipped: listing ? specCount : 0, unexpected: 0, flaky: 0 },
+};
+if (listing && fs.existsSync(path.join(path.dirname(config), '.count-listings'))) fs.appendFileSync(path.join(path.dirname(config), '.listings'), `${config}\n`);
+// The JSON reporter writes to PLAYWRIGHT_JSON_OUTPUT_FILE when it is set and to stdout otherwise.
+if (process.env.PLAYWRIGHT_JSON_OUTPUT_FILE) fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
+else console.log(JSON.stringify(report));
+process.exit(listed.length ? 0 : 1);
+"#;
+
+    /// GH #2294: Commander journeys import `test` from their local `./journey`
+    /// fixture, so the spec never names `@playwright/test`; beside a Vitest
+    /// config the walk dropped Playwright and G-61 prescribed Vitest, which
+    /// cannot run them. The Playwright config that lists the spec decides.
+    /// GH #2331: cas-9fcc's park asked those configs about every changed
+    /// file, 1013 listings in 414 s; within one close each config lists once.
+    #[test]
+    fn spec_importing_a_local_fixture_is_prescribed_playwright_gh2294() {
+        let repo = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = repo.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("hub-web/package.json", "{}");
+        write("hub-web/vitest.config.ts", "export default {};");
+        // hub-web's journeys project: testDir ./e2e/journeys, testMatch **/*.journey.ts.
+        write("hub-web/playwright.config.js", "module.exports = { testDir: 'e2e/journeys', testMatch: '**/*.journey.ts' };");
+        write("hub-web/playwright.responsive.config.js", "module.exports = { testDir: 'e2e/responsive', testMatch: '**/*.journey.ts' };");
+        write("hub-web/e2e/responsive/wide.journey.ts", "import { test } from '@playwright/test';\ntest('wide', async () => {});\n");
+        write("hub-web/.count-listings", "");
+        write("hub-web/node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo.path().join("hub-web/node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        write("hub-web/e2e/journeys/journey.ts", "import { test as base } from '@playwright/test';\nexport const test = base;\n");
+        // cas-9fcc's four journeys, as its G-61 refusal named them.
+        let journeys = ["catalog-refresh", "end-session", "opaque-auth", "reply-voice"]
+            .map(|name| format!("hub-web/e2e/journeys/{name}.journey.ts"));
+        for journey in &journeys {
+            write(journey, "import { test, expect } from './journey';\ntest('journey', async () => {});\n");
+        }
+        // A plain unit test beside both configs still belongs to Vitest.
+        let unit = "hub-web/src/catalog.test.ts";
+        write(unit, "test('catalog', () => {});\n");
+
+        let mut tests: Vec<Identity> = journeys.iter().map(|journey| id(journey, "journey")).collect();
+        tests.push(id(unit, "catalog"));
+        let listings = || std::fs::read_to_string(repo.path().join("hub-web/.listings")).unwrap_or_default().lines().count();
+        let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &tests);
+        assert_eq!(prescribed, [
+            format!("`cas factory worker-check --cas-root /cas -- playwright {}`", journeys.join(" ")),
+            format!("`cas factory worker-check --cas-root /cas -- vitest {unit}`"),
+        ]);
+        let uncached = listings();
+        let cached = with_listing_cache(|| super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &tests));
+        assert_eq!(cached, prescribed, "the cache changes no answer");
+        assert_eq!(listings() - uncached, 2, "one listing per config, not per file ({uncached} without the cache)");
+    }
+
+    /// GH #2195: tests/e2e specs belong to playwright.hermetic.config.js, but
+    /// the capped run and its prescribed command used the default config,
+    /// which lists no such spec, so no stability proof could be earned.
+    #[test]
+    fn playwright_spec_runs_under_the_config_that_lists_it_gh2195() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let write = |path: &str, text: &str| {
+            let path = repo.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(&["init", "--quiet"]);
+        write("package.json", "{}");
+        write("playwright.config.js", "module.exports = { testDir: 'e2e' };");
+        write("playwright.hermetic.config.js", "module.exports = { testDir: 'tests/e2e' };");
+        write("node_modules/.bin/playwright", STAND_IN_PLAYWRIGHT);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo.path().join("node_modules/.bin/playwright"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // GH #2349: Playwright greps the title followed by the tags, so a test
+        // declared with the tag option is `title @tag`. One spec holds tests
+        // whose titles share a prefix, tagged or not; each must run alone.
+        write(".gitignore", ".ran\n");
+        write(".record-runs", "");
+        let spec = "tests/e2e/sign-in.spec.ts";
+        let source = |body: &str| format!(
+            "import {{ test }} from '@playwright/test';\n\
+             test('hermetic sign in', {{ tag: ['@staging', '@smoke'] }}, async () => {{ {body} }});\n\
+             test('hermetic sign in extra', async () => {{ {body} }});\n\
+             test('hermetic sign in extra later', {{ tag: ['@staging'] }}, async () => {{ {body} }});\n");
+        write(spec, &source("throw 0;"));
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        write(spec, &source(""));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
+        assert_eq!(tests, [id(spec, "hermetic sign in"), id(spec, "hermetic sign in extra"), id(spec, "hermetic sign in extra later")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        // Each target's own run executes that test five times and no neighbour.
+        for target in &tests {
+            let _ = std::fs::remove_file(repo.path().join(".ran"));
+            execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, std::slice::from_ref(target), None, &[]).unwrap();
+            let ran = std::fs::read_to_string(repo.path().join(".ran")).unwrap();
+            assert_eq!(ran.lines().collect::<Vec<_>>(), vec![target.name.as_str(); 5], "{target:?}");
+        }
+        // Worker-check discovers the owning config and records five capped passes.
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &tests, None, &[]).unwrap();
+        assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
+        assert!(super::super::stability::missing(&passing(), &tests).is_empty());
+        // The prescribed command names that config, and runs as printed.
+        let config = "playwright.hermetic.config.js";
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), "HEAD", &tests);
+        assert_eq!(prescribed.len(), 1);
+        assert!(prescribed[0].contains(&format!("-- playwright --config {config} {spec}`")), "{prescribed:?}");
+        let args: Vec<String> = ["playwright", "--config", config, spec].map(String::from).into();
+        let explicit = repo.path().join(invocation(&args).unwrap().config.unwrap());
+        execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&explicit), &tests, None, &[]).unwrap();
+        // An explicit caller config stays authoritative: the default lists no
+        // test, and a zero-test run is no proof.
+        let default = repo.path().join("playwright.config.js");
+        assert!(execute_tests(cas_root.path(), repo.path(), &head, "playwright", Some(&default), &tests, None, &[]).is_err());
     }
 
     /// A config-free global test resolves its runner from package metadata;
@@ -2505,10 +3648,7 @@ process.exit(ok ? 0 : 1);
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
 
-        let commands = super::super::stability::rerun_commands(
-            Path::new("/cas"),
-            repo.path(),
-            &[id("bare/a.test.ts", "a")],
+        let commands = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &[id("bare/a.test.ts", "a")],
         );
         let argv: Vec<_> = commands
             .concat()
@@ -2887,6 +4027,57 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         );
     }
 
+    /// GH #2221: a spec generating tests from a JSON catalogue owes whole-spec
+    /// proof when the catalogue alone changes, when its import switches to
+    /// another existing catalogue, or when both spec and catalogue change.
+    #[test]
+    fn changed_json_catalogue_refuses_static_selection_of_its_spec() {
+        use super::super::widened::Scope;
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let spec = "src/__scenarios__/acceptance.spec.ts";
+        let catalogue = "src/__scenarios__/scenarios.json";
+        let write = |path: &str, body: &str| {
+            std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.path().join(path), body).unwrap();
+        };
+        let source = |data: &str, metadata: &str| format!("import cases from './{data}';\n\
+            it('the baseline lists only real scenario tests', () => {{ {metadata} }});\n\
+            for (const [channel, listed] of cases) {{ const test = listed ? it.failing : it; test(channel, async () => {{}}); }}\n");
+        let commit = |message: &str| {
+            git(&["add", "."]);
+            git(&["commit", "--quiet", "-m", message]);
+            git(&["rev-parse", "HEAD"])
+        };
+        git(&["init", "--quiet", "-b", "main"]);
+        write(catalogue, "[[\"sms\", false]]");
+        write("src/__scenarios__/legacy.json", "[[\"fax\", true]]");
+        write(spec, &source("scenarios.json", ""));
+        let base = commit("base");
+
+        write(catalogue, "[[\"sms\", false], [\"email\", true]]");
+        let catalogue_only = commit("catalogue only");
+        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into()], None).unwrap();
+        assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into())]));
+
+        write(spec, &source("legacy.json", "expect(1).toBe(1);"));
+        let switched = commit("switch catalogue");
+        assert!(changed_tests(repo.path(), &catalogue_only, &switched, &[spec.into()], None).is_err());
+
+        write(catalogue, "[[\"sms\", true]]");
+        write(spec, &source("scenarios.json", "expect(2).toBe(2);"));
+        let both = commit("harness and catalogue");
+        assert!(changed_tests(repo.path(), &base, &both, &[spec.into()], None).is_err());
+        assert_eq!(super::super::widened::scope(repo.path(), spec), Scope::File(spec.into()));
+    }
+
     /// GH #1977, #2000, #1971: park asks only for tests the task's own
     /// commits changed in the delivered tree.
     #[test]
@@ -2970,10 +4161,142 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             let rows = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed", "assertionResults":[
                 {"fullName":"row a","status":"passed"}, {"fullName":"row b","status":"passed"}]}]});
             validate_report(runner, repo, &rows, &template, 1).unwrap();
+            let indexed = [Identity { parameterized: true, ..id("a.test.js", "row $#") }];
+            let mut index_rows = rows.clone();
+            index_rows["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"row 0","status":"passed"}, {"fullName":"row 1","status":"passed"}]);
+            validate_report(runner, repo, &index_rows, &indexed, 1).unwrap();
+            // GH #2138: two passing rows with one static title prove it and count as two.
+            let mut shared = rows.clone();
+            shared["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"group changed","status":"passed"}, {"fullName":"group changed","status":"passed"}]);
+            assert_eq!(validate_report(runner, repo, &shared, &selected, 1).unwrap(), 2);
+            // GH #2225, #2252: `$field` rows that expand to one title prove the template.
+            let field = [Identity { parameterized: true, ..id("a.test.js", "case $name") }];
+            let mut field_rows = rows.clone();
+            field_rows["testResults"][0]["assertionResults"] = json!([
+                {"fullName":"case alpha","status":"passed"}, {"fullName":"case alpha","status":"passed"}]);
+            assert_eq!(validate_report(runner, repo, &field_rows, &field, 1).unwrap(), 2);
             let mut failed_row = rows.clone();
             failed_row["testResults"][0]["assertionResults"][1]["status"] = json!("failed");
             assert!(validate_report(runner, repo, &failed_row, &template, 1).is_err());
         }
+    }
+
+    /// GH #2216, #2258, #2138: `%s`, `$property` and static `it.each` titles
+    /// own every expanded row, including rows Vitest names identically. The
+    /// rows are Vitest 4.0.18's JSON report for this source.
+    #[test]
+    fn vitest_table_templates_own_every_expanded_row_cas_c1df() {
+        let source = "describe('creator', () => {\n  it.each([{ compact: false }, { compact: true }])('menu (compact=$compact)', () => {});\n  it.each([['Funnel Drop', 'a'], ['Funnel Drop', 'b'], ['AIDA', 'c']])('hands post chat %s to the writer', () => {});\n  it.each([{ n: 1 }, { n: 2 }])('keeps input intact', () => {});\n});";
+        let templates = source_tests("a.test.ts", source, &[(1, 5)]).unwrap();
+        assert_eq!(templates.len(), 3);
+        let rows = ["menu (compact=false)", "menu (compact=true)", "hands post chat Funnel Drop to the writer",
+            "hands post chat Funnel Drop to the writer", "hands post chat AIDA to the writer", "keeps input intact", "keeps input intact"]
+            .map(|name| json!({"fullName": format!("creator {name}"), "status": "passed"}));
+        let report = json!({"success": true, "testResults": [{"name": "/project/a.test.ts", "status": "passed", "assertionResults": rows}]});
+        validate_report("vitest", Path::new("/project"), &report, &templates, 1).unwrap();
+        // A failing duplicate row, or a template with no row, cannot be accepted.
+        let mut failed = report.clone();
+        failed["testResults"][0]["assertionResults"][3]["status"] = json!("failed");
+        assert!(validate_report("vitest", Path::new("/project"), &failed, &templates, 1).is_err());
+        let mut missing = report.clone();
+        missing["testResults"][0]["assertionResults"].as_array_mut().unwrap().truncate(5);
+        assert!(validate_report("vitest", Path::new("/project"), &missing, &templates, 1).is_err());
+        // The source tables name the rows each template expands to, whatever any
+        // run reports: Vitest 4.0.18's own names for this source.
+        let expected = source_rows("a.test.ts", source).unwrap();
+        let derived: BTreeMap<_, _> = expected.values().flatten().map(|(name, rows)| (name.as_str(), *rows)).collect();
+        assert_eq!(derived, BTreeMap::from([
+            ("creator hands post chat AIDA to the writer", 1), ("creator hands post chat Funnel Drop to the writer", 2),
+            ("creator keeps input intact", 2), ("creator menu (compact=false)", 1), ("creator menu (compact=true)", 1),
+        ]));
+        let repo = Path::new("/project");
+        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, |iteration| {
+            Ok((true, bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
+        });
+        iterate(&report, None).expect("five complete iterations are accepted");
+        // One of two rows sharing a name is gone while its sibling still passes
+        // ("keeps input intact"): refused in every iteration, and when every
+        // iteration lacks it.
+        let mut one_duplicate = report.clone();
+        one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
+        assert_eq!(one_duplicate["testResults"][0]["assertionResults"].as_array().unwrap().len(), 6);
+        assert!(verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, one_duplicate.clone()))).is_err());
+        for lost in 0..5 {
+            assert!(iterate(&report, Some((lost, &one_duplicate))).is_err(), "iteration {lost} lost one duplicate row");
+        }
+        // The same number of rows, one of them the wrong one: the second
+        // "keeps input intact" ran as a second "menu (compact=true)".
+        let mut swapped = report.clone();
+        swapped["testResults"][0]["assertionResults"][6]["fullName"] = json!("creator menu (compact=true)");
+        assert_eq!(swapped["testResults"][0]["assertionResults"].as_array().unwrap().len(), 7);
+        assert!(iterate(&report, Some((3, &swapped))).is_err());
+        // A table the source cannot expand (a variable) is refused rather than
+        // trusted to what a run happened to report; the same report is accepted
+        // when no expectation is demanded.
+        let variable = "const table = [1, 2];\nit.each(table)('row %i', () => {});";
+        let variable_templates = source_tests("a.test.ts", variable, &[(2, 2)]).unwrap();
+        let variable_report = json!({"success": true, "testResults": [{"name": "/project/a.test.ts", "status": "passed",
+            "assertionResults": [{"fullName": "row 1", "status": "passed"}, {"fullName": "row 2", "status": "passed"}]}]});
+        let variable_expected = source_rows("a.test.ts", variable).unwrap();
+        assert!(variable_expected.is_empty());
+        validate_report("vitest", repo, &variable_report, &variable_templates, 1).unwrap();
+        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, |_| Ok((true, variable_report.clone()))).is_err());
+    }
+
+    /// The names derived from a source table are the ones Vitest 4.0.18 printed
+    /// for this exact source (probed with `vitest run --reporter=json`); a table
+    /// or title whose rendering is not known derives nothing.
+    #[test]
+    fn derived_table_names_match_vitest_4_0_18_cas_c1df() {
+        let source = r#"describe('p', () => {
+  it.each([{ compact: false }, { compact: true }])('prop bool $compact', () => {});
+  it.each([{ s: 'x' }, { s: '' }])('prop str $s', () => {});
+  it.each([{ n: 1 }, { n: -2 }, { n: 1.5 }, { n: 0 }])('prop num $n', () => {});
+  it.each([{ v: null }, { v: undefined }])('prop nullish $v', () => {});
+  it.each([{ a: 1, b: 'q' }, { a: 2, b: 'r' }])('two $a and $b and $a', () => {});
+  it.each([{ a: 1 }])('missing $zzz here', () => {});
+  it.each([['Funnel Drop', 'a'], ['AIDA', 'c']])('pct %s then %s', () => {});
+  it.each([['x'], ['y']])('pct one %s', () => {});
+  it.each(['p', 'q'])('flat %s', () => {});
+  it.each([[true, null, undefined]])('lit %s %s %s', () => {});
+  it.each([['a', 'b']])('extra %s', () => {});
+  it.each([['a']])('short %s %s', () => {});
+  it.each([['a'], ['b']])('index %# %$ %s', () => {});
+  it.each([{ n: 1 }, { n: 2 }])('static title', () => {});
+});"#;
+        let derived: BTreeMap<String, usize> = source_rows("a.test.ts", source).unwrap().into_values().flatten().collect();
+        let printed = ["p prop bool false", "p prop bool true", "p prop str 'x'", "p prop str ''", "p prop num 1", "p prop num -2",
+            "p prop num 1.5", "p prop num +0", "p prop nullish null", "p prop nullish undefined", "p two 1 and 'q' and 1",
+            "p two 2 and 'r' and 2", "p missing undefined here", "p pct Funnel Drop then a", "p pct AIDA then c", "p pct one x",
+            "p pct one y", "p flat p", "p flat q", "p lit true null undefined", "p extra a", "p short a undefined", "p index 0 1 a",
+            "p index 1 2 b", "p static title", "p static title"];
+        let mut expected = BTreeMap::new();
+        for name in printed { *expected.entry(name.to_string()).or_default() += 1; }
+        assert_eq!(derived, expected);
+        for (fragment, title) in [
+            ("[1, 2]", "int %d and %i"), ("[['a']]", "percent %% and %s"), ("[{ a: 1 }]", "mixed %s and $a"),
+            ("[{ s: \"it's\" }]", "quoted $s"), ("[{ s: 'long string value that is well over the forty character threshold' }]", "long $s"),
+            ("[[{ k: 1 }]]", "object %s"), ("[[[1, 2]]]", "array %s"), ("[{ a: { b: 1 } }]", "nested $a.b"),
+        ] {
+            let unknown = format!("it.each({fragment})('{title}', () => {{}});");
+            assert!(source_rows("a.test.ts", &unknown).unwrap().is_empty(), "{title}: rendering is not known exactly");
+        }
+    }
+
+    /// GH #2246, #2166: Jest printed `Tests: 2957 passed` while the widened
+    /// receipt said 2955: tests sharing a name in one file collapsed into one
+    /// identity. The count is the passing results the runner reported.
+    #[test]
+    fn widened_jest_count_is_the_runners_passing_results_gh2246() {
+        let report = json!({"success":true,"testResults":[
+            {"name":"/project/a.test.js","status":"passed","assertionResults":[
+                {"fullName":"pool drains","status":"passed"}, {"fullName":"pool drains","status":"passed"}]},
+            // Jest 30 reports a suite holding a pending test as "focused".
+            {"name":"/project/b.test.js","status":"focused","assertionResults":[
+                {"fullName":"resets","status":"passed"}, {"fullName":"needs db","status":"pending"}]}]});
+        assert_eq!(validate_report("jest", Path::new("/project"), &report, &[], 1).unwrap(), 3);
     }
 
     #[test]
@@ -2993,6 +4316,35 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         assert!(
             validate_report("playwright", Path::new("/project"), &report, &selected, 5).is_err()
         );
+    }
+
+    /// GH #2207, replaying Playwright 1.65.1's report for the canonical
+    /// pattern: `journeys` depends on a `setup` project. The CLI repeat count
+    /// reaches only the selected project, so setup runs once per run.
+    #[test]
+    fn playwright_setup_dependency_runs_once_beside_five_journey_repeats_gh2207() {
+        let repo = Path::new("/project");
+        let pass = json!({"projectId":"setup","expectedStatus":"passed","results":[{"status":"passed","retry":0}]});
+        let journey = json!({"projectId":"journeys","expectedStatus":"passed","results":[{"status":"passed","retry":0}]});
+        let mut report = json!({"config":{"rootDir":"/project/tests","projects":[
+            {"id":"setup","name":"setup","repeatEach":1}, {"id":"journeys","name":"journeys","repeatEach":5}]},
+            "errors":[],"suites":[
+            {"title":"journeys/auth.setup.ts","file":"journeys/auth.setup.ts","column":0,"line":0,"specs":[
+                {"file":"journeys/auth.setup.ts","title":"seeded session for super-admin","tests":[pass.clone()]},
+                {"file":"journeys/auth.setup.ts","title":"seeded session for owner","tests":[pass]}]},
+            {"title":"token-login.spec.ts","file":"token-login.spec.ts","column":0,"line":0,"specs":[
+                {"file":"token-login.spec.ts","title":"token login lands","tests":vec![journey; 5]}]}]});
+        let changed = [id("tests/token-login.spec.ts", "token login lands")];
+        assert_eq!(validate_report("playwright", repo, &report, &changed, 5).unwrap(), 1);
+        // A changed setup test still owes its own five runs, not one as a dependency.
+        let setup = [id("tests/journeys/auth.setup.ts", "seeded session for owner")];
+        assert!(validate_report("playwright", repo, &report, &setup, 5).is_err());
+        // A failing dependency still fails the run; its dependents never ran.
+        report["suites"][0]["specs"][1]["tests"][0]["results"][0]["status"] = json!("failed");
+        for test in report["suites"][1]["specs"][0]["tests"].as_array_mut().unwrap() {
+            test["results"] = json!([]);
+        }
+        assert!(validate_report("playwright", repo, &report, &changed, 5).is_err());
     }
 
     #[test]
@@ -3032,7 +4384,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let tests = [id("a.test.js", "seeded")];
         for fail_at in [None, Some(2)] {
             let mut invocations = 0;
-            let result = verify_repeats("vitest", Path::new("/project"), &tests, |index| {
+            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), |index| {
                 invocations += 1;
                 let pass = Some(index) != fail_at;
                 Ok((

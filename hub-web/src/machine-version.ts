@@ -34,6 +34,24 @@ export function supervisorVersion(running: string | undefined, installed?: strin
 }
 
 /**
+ * The durable Reload Cassy result (cas-8c4f): the build this supervisor's live
+ * MCP process loaded, and when, in Eastern time. It derives from the live
+ * catalog, so it survives refreshes and redraws and changes only on a reload.
+ */
+export function cassyLoadedBadge(running: string | undefined, loadedAt: string | undefined): string | undefined {
+  const parts = cassyLoaded(running, loadedAt);
+  return parts && `cassy ${parts.version} · loaded ${parts.time} ET`;
+}
+
+/** The badge's version and Eastern load time, for compact placements such as a supervisor card. */
+export function cassyLoaded(running: string | undefined, loadedAt: string | undefined): { version: string; time: string } | undefined {
+  const at = loadedAt ? new Date(loadedAt) : undefined;
+  if (!parsed(running) || !at || !Number.isFinite(at.getTime())) return undefined;
+  const time = at.toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true });
+  return { version: running!.trim().replace(/^v/, ""), time };
+}
+
+/**
  * The hub's own running version beside the binary installed on its machine.
  * A hub older than the installed binary is named as such, with the command
  * that loads it; a published release is offered only beyond what is
@@ -46,7 +64,7 @@ export function machineVersionMarkup(runtime: string | undefined, latest?: strin
     : stale ? `Hub ${escapeHtml(runtime)} · installed ${escapeHtml(installed!.replace(/^v/, ""))}` : `Cassy ${escapeHtml(runtime)}`;
   const restart = stale ? ` <span class="machine-version-update" title="This machine's hub is still the process started before ${escapeHtml(installed!.replace(/^v/, ""))} was installed. Run cas hub restart there to load it.">Run cas hub restart</span>` : "";
   const update = isNewerRelease(stale ? installed : runtime, latest);
-  return `<span class="machine-version"><span class="machine-version-installed${known ? "" : " unknown"}">${label}</span>${restart}${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
+  return `<span class="machine-version" data-testid="machine-version"><span class="machine-version-installed${known ? "" : " unknown"}">${label}</span>${restart}${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
 }
 
 /** cas-da546: a machine's version is shown only when it is out of step: its

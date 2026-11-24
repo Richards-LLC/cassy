@@ -3,6 +3,89 @@ use crate::ui::factory::daemon::FactoryDaemon;
 use cas_store::SurfacingSource;
 use std::time::{Duration, Instant};
 
+/// GH #2264: successor mail can be polled after a transport job took its
+/// claim but before the control loop uses the returned selection.
+#[tokio::test(flavor = "current_thread")]
+async fn commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19() {
+    use rmcp::handler::server::wrapper::Parameters;
+    if !fixture_child("commander_polled_after_relay_claim_does_not_start_another_turn_cas_4f19") { return; }
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    for handling in ["unread", "polled", "acknowledged"] {
+        let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let name = daemon.app.supervisor_name().to_string();
+        let session = daemon.session_name.clone();
+        env.set("CAS_ROOT", &cas);
+        env.set("CAS_FACTORY_SESSION", &session);
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("fixture-device".into()), credential_id: Some("fixture-credential".into()),
+            device_label: Some("Fixture".into()), operator_label: Some("Operator".into()),
+            request_id: Some(format!("claim-{handling}")), scopes: vec!["message:send".into()],
+            operator_verified: true, ..Default::default()
+        };
+        let id = super::delivery::enqueue_commander_message(&cas, "ended-session", "ended-supervisor",
+            "COMMANDER-CLAIM-4F19", None, false, None, &attribution).unwrap().id();
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        assert_eq!(queue.retarget_operator_rows_to_successor("ended-supervisor", Some("ended-session"),
+            &name, Some(&session)).unwrap(), [id]);
+        daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+            cas.clone(), daemon.app.project_scope(),
+        );
+        daemon.queue_jobs.store(&cas).unwrap();
+        // Run the real selection AND readiness preparation. Stop at the
+        // asynchronous claim boundary, before any physical payload starts.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !daemon.queue_jobs.has_claim(id, &name) {
+                daemon.process_prompt_queue().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            assert!(!daemon.app.mux.has_pending_injects());
+            while !daemon.queue_jobs.claim_ready(id, &name) {
+                daemon.queue_jobs.apply_completions();
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("relay selection and claim complete before the inbox poll");
+        if handling != "unread" {
+            let core = crate::mcp::CasCore::with_daemon(cas.clone(), None, None);
+            core.set_agent_id_for_testing("single-sup".into());
+            #[cfg(feature = "mcp-proxy")]
+            let service = crate::mcp::CasService::new(core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let service = crate::mcp::CasService::new(core);
+            for action in if handling == "acknowledged" { vec!["inbox_poll", "message_ack"] } else { vec!["inbox_poll"] } {
+                let result = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+                    "action":action,"notification_id":id,
+                })).unwrap())).await.unwrap();
+                assert_ne!(result.is_error, Some(true), "{result:?}");
+            }
+            assert_eq!(queue.recipient_receipt(id, &name).unwrap(), Some(SurfacingSource::InboxPoll));
+        }
+        let control = super::delivery::enqueue_commander_message(&cas, &session, &name,
+            "COMMANDER-CONTROL-4F19", None, false, None,
+            &crate::ui::factory::protocol::MessageAttribution { request_id:Some(format!("control-{handling}")), ..attribution }).unwrap().id();
+        let typed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+                if typed.contains("COMMANDER-CONTROL-4F19") && typed.ends_with('\r')
+                    && !daemon.app.mux.has_pending_injects()
+                    && !daemon.queue_jobs.has_claim(id, &name) { break typed; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the unobserved control reaches the real consumer");
+        assert!(daemon.queue_jobs.drain_for_shutdown(&cas, Duration::from_secs(5)));
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(typed.contains("COMMANDER-CLAIM-4F19"), handling == "unread", "{handling}: {typed:?}; {report:?}");
+        if handling != "unread" {
+            assert_eq!(report.recipient_receipt, Some(SurfacingSource::InboxPoll));
+            assert_eq!(report.confirmation_source, if handling == "acknowledged" {
+                cas_store::ConfirmationSource::ExplicitAck
+            } else { cas_store::ConfirmationSource::Unconfirmed });
+        }
+        assert!(queue.message_delivery_report(control).unwrap().unwrap().delivered_at.is_some());
+    }
+}
+
 /// The real hub must reach the live composer while its local viewer reads history.
 #[tokio::test(flavor = "current_thread")]
 async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_reply() {

@@ -26,8 +26,8 @@ test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a
   await hub.seedPaired();
   await clock.start();
   await page.goto("./");
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-  const header = page.locator("#conversation-connection");
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / }).click();
+  const header = page.getByRole("status", { name: "Connection", exact: true, includeHidden: true });
   await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
   const pairingExchanges = hub.exchanges.length;
   await journey.stage("A blocked authenticated route keeps the active pairing and retries", async () => {
@@ -52,7 +52,7 @@ test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a
     blocked = false;
     await clock.advance(10_000);
     await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
-    await expect(page.locator("#hub-footer-badges .machine-badge-state")).not.toHaveAttribute("data-reconnecting", "true");
+    await expect(page.getByTestId("machine-badge-state")).not.toHaveAttribute("data-reconnecting", "true");
     await expect(page.getByRole("log").getByText("Queued while the connection was down.", { exact: true })).toBeVisible();
     const accepted = hub.nextSend();
     await page.getByRole("textbox", { name: "Your message" }).fill("After the browser block clears");

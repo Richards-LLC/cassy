@@ -125,6 +125,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             use_cases: &["Configure supported Claude launch options"],
         });
     }
+    for (key, name, description, value_type, default) in [
+        ("factory.gateway.enabled", "Worker Home-Gateway Transport", "Opt this project's Claude and Codex workers into the home gateway. Only the project's own setting enables it. Workers keep their native account directory; if the hub is not ready at spawn, the worker starts direct and worker_status says so.", ConfigType::Bool, "false"),
+        ("factory.gateway.endpoint", "Home-Gateway Endpoint", "Hub base URL without /v1, usually set in the user-level ~/.cas/config.toml. Only loopback and tailnet hosts (100.64.0.0/10, *.ts.net) are accepted. Empty clears it.", ConfigType::String, ""),
+        ("factory.gateway.key_file", "Home-Gateway Client Key File", "Path to the hub client key file, mode 0600. Only the path is stored; the key is read when a worker starts. Empty clears it.", ConfigType::String, ""),
+        ("factory.gateway.dashboard", "Home-Gateway Dashboard", "User-level only. The hub's existing usage dashboard (CPA Manager Plus) base URL, read for Commander's hub account inventory. Loopback and tailnet hosts only. Empty clears it.", ConfigType::String, ""),
+        ("factory.gateway.dashboard_key_file", "Home-Gateway Dashboard Key File", "User-level only. Path to the dashboard admin key file, mode 0600. Cassy uses it only for read-only requests and never sends it to Commander. Empty clears it.", ConfigType::String, ""),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description, value_type, default,
+            constraint: Constraint::None, advanced: true, requires_feature: None,
+            keywords: &["factory", "worker", "gateway", "hub", "proxy", "transport"],
+            use_cases: &["Route workers through the operator's own model hub"],
+        });
+    }
     registry.register(ConfigMeta {
         key: "factory.claude.worker_mcp", section: "factory",
         name: "Claude Worker MCP Scope",
@@ -134,6 +148,16 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         advanced: false, requires_feature: None,
         keywords: &["factory", "claude", "worker", "mcp", "scope", "inherit"],
         use_cases: &["Let Claude workers use additional native MCP servers in this project"],
+    });
+    registry.register(ConfigMeta {
+        key: "factory.claude.worker_sandbox", section: "factory",
+        name: "Claude Worker OS Sandbox",
+        description: "shadow (default) runs macOS Claude workers' Bash tool in the OS sandbox with the generated profile, and the text guards it replaces only log would-deny counts. off launches workers without the sandbox and the text guards enforce. Linux, supervisors and MCP are unchanged.",
+        value_type: ConfigType::String, default: "shadow",
+        constraint: Constraint::OneOf(vec!["shadow".into(), "off".into()]),
+        advanced: false, requires_feature: None,
+        keywords: &["factory", "claude", "worker", "sandbox", "seatbelt", "shadow"],
+        use_cases: &["Turn the Claude worker OS sandbox off if it blocks normal work"],
     });
     // FACTORY SECTION
     // ============================================================

@@ -1,3 +1,0 @@
-title: Terminal predecessor leases cannot block the next assigned worker task
-tasks: [cas-7b09e]
-journeys: [FACTORY-SPAWN, FACTORY-CLOSE]

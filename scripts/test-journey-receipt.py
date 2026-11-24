@@ -65,7 +65,7 @@ class Tooling(unittest.TestCase):
         self.git('config', 'user.email', 'fixture@example.test')
         self.git('config', 'user.name', 'fixture')
         (self.repo / 'scripts').mkdir()
-        for name in ['journey-eval.sh', 'journey-receipt.py', 'journey-bundles.py']:
+        for name in ['journey-eval.sh', 'worker-run.sh', 'journey-receipt.py', 'journey-bundles.py']:
             shutil.copyfile(ROOT / 'scripts' / name, self.repo / 'scripts' / name)
         if (ROOT / 'scripts/journey_dist.py').exists():
             shutil.copyfile(ROOT / 'scripts/journey_dist.py', self.repo / 'scripts/journey_dist.py')

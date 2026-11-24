@@ -996,6 +996,8 @@ mod tests {
         }
         let pending = reminders.list_pending_for_target(&agent.id).unwrap();
         assert_eq!(pending.len(), 3);
+        // A transport is one poll's view of GitHub (it reads the run list once,
+        // cas-0bc1), so each poll builds its own, as the daemon does.
         let transport = GhCiTransport::from_project(temp.path()).unwrap();
         for reminder in &pending {
             let filter = reminder.trigger_filter.as_ref().unwrap();
@@ -1004,6 +1006,7 @@ mod tests {
             assert!(ci_completed_runs(&transport, &condition).unwrap().is_none());
         }
         std::fs::write(temp.path().join("runs.json"), runs("completed").to_string()).unwrap();
+        let transport = GhCiTransport::from_project(temp.path()).unwrap();
         for reminder in &pending {
             let condition = parse_ci_completed(reminder.trigger_filter.as_ref().unwrap()).unwrap();
             let completed = ci_completed_runs(&transport, &condition).unwrap().unwrap();

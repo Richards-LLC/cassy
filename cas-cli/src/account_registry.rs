@@ -133,10 +133,30 @@ fn metadata(
             });
             (identity, None) // Never load Claude secret-bearing credential JSON.
         }
-        // Codex publishes capacity/plan in native rollout metadata, but no
-        // demonstrated non-secret email/account/workspace identity source.
-        Provider::Codex => (None, None),
+        // Codex writes the ChatGPT account it ran as into each rollout's
+        // `session_meta` line; the newest rollout names the current login.
+        // Never read from auth.json. No rollout means no identity.
+        Provider::Codex => (codex_rollout_account(folder).map(|account| AccountIdentity { account_id: Some(account), ..Default::default() }), None),
     }
+}
+
+/// `payload.creator_account_id` from the newest rollout's `session_meta`
+/// line: non-secret, written by the Codex CLI itself. A re-login as another
+/// account follows the latest session.
+fn codex_rollout_account(folder: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let newest = walkdir::WalkDir::new(folder.join("sessions"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.into_path())))
+        .max_by_key(|(modified, _)| *modified)?
+        .1;
+    let mut first = String::new();
+    std::io::BufReader::new(std::fs::File::open(newest).ok()?).read_line(&mut first).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&first).ok()?;
+    (meta["type"] == "session_meta").then_some(())?;
+    string_at(&meta, "/payload/creator_account_id")
 }
 
 pub(crate) fn account(provider: Provider, home: &Path, folder: PathBuf) -> Account {

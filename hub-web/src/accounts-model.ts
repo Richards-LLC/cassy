@@ -7,10 +7,24 @@ export interface AccountRow {
   location?: string;
   login_state: "logged_in" | "logged_out" | "never_logged_in" | "stale_login" | "unknown";
   disabled: boolean; duplicate_of: string | null; is_default: boolean; recommendation: string | null;
+  /** Why automatic selection skipped this login, in the selector's words; older hubs omit it. */
+  exclusion?: string | null;
   windows: AccountWindow[]; usage_observed_at: string | null;
+  /** `hub`: the one shared number for this login; `local`: this machine's own read; `hub_unreachable`: none shown. Absent: no hub configured. */
+  usage_source?: UsageSource;
   capabilities: Record<AccountOperation, string | null>;
 }
-export interface AccountsCatalog { accounts: AccountRow[] }
+export type UsageSource = "hub" | "local" | "hub_unreachable";
+/** Where this machine's capacity numbers come from. Older hubs omit it. */
+export interface QuotaSource { state: "off" | "hub" | "unreachable"; reason?: string }
+export interface AccountsCatalog { accounts: AccountRow[]; quota_source?: QuotaSource }
+/** One account on the machine's home gateway hub (GET /v1/accounts/gateway). Read-only; Team plans never appear. */
+export interface HubAccount { provider: string; label: string; state: "active" | "disabled" | "unavailable"; recent_requests: number; recent_failed: number; recent_minutes?: number }
+export interface GatewayInventory {
+  status: "off" | "ready" | "unavailable"; reason?: string; host?: "loopback" | "tailnet";
+  inventory: "ok" | "off" | "unavailable"; inventory_reason?: string;
+  accounts: HubAccount[]; team_accounts: number;
+}
 export interface AccountChange { operation: AccountOperation; account: string; confirmation?: string; new_name?: string }
 
 export function accountTime(instant: string): string {
@@ -20,26 +34,3 @@ export function accountTime(instant: string): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "shortGeneric" }).format(date);
 }
 
-export function accountCapacity(windows: readonly AccountWindow[], observed?: string | null, now = Date.now()): string[] {
-  if (!windows.length) return ["Usage unknown"];
-  return windows.map(window => {
-    const reset = window.resets_at ? new Date(window.resets_at).getTime() : undefined;
-    const known = window.used_percent !== null && Number.isFinite(window.used_percent) && window.used_percent >= 0 && window.used_percent <= 100 && (reset === undefined || (Number.isFinite(reset) && reset > now));
-    const amount = known ? `${Math.round(100 - window.used_percent!)}% left` : "usage unknown";
-    // cas-eae3: a reset already past is a stale fact; only a coming one is shown.
-    const resetCopy = reset !== undefined && Number.isFinite(reset) && reset > now ? ` · resets ${accountTime(window.resets_at!)}` : "";
-    return `${window.name} ${amount}${resetCopy}${observed ? ` · as of ${accountTime(observed)}` : ""}`;
-  });
-}
-
-/** One usage window as a bar: the share left, or unknown, and its reset. */
-export interface AccountMeter { name: string; left: number | null; reset: string | null }
-
-export function accountMeters(windows: readonly AccountWindow[], now = Date.now()): AccountMeter[] {
-  return windows.map(window => {
-    const reset = window.resets_at ? new Date(window.resets_at).getTime() : undefined;
-    const valid = reset === undefined || Number.isFinite(reset);
-    const known = window.used_percent !== null && Number.isFinite(window.used_percent) && window.used_percent >= 0 && window.used_percent <= 100 && valid && (reset === undefined || reset > now);
-    return { name: window.name, left: known ? Math.round(100 - window.used_percent!) : null, reset: reset !== undefined && valid && reset > now ? accountTime(window.resets_at!) : null };
-  });
-}

@@ -1,6 +1,10 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { writeFileSync } from "node:fs";
+import type { Page } from "@playwright/test";
+
+const conversationHeading = (page: Page) => page.getByTestId("conversation-heading");
+const hostMachine = (page: Page) => conversationHeading(page).getByTestId("host-machine");
 
 // Exercise the production bundle through the same list -> conversation route
 // as the retained cas-0546 F02/F03 traces. Each part has independent receipts.
@@ -37,10 +41,10 @@ for (const cell of cells) {
 
       await journey.stage("Choose cas-src and read its machine", async () => {
         await journey.open();
-        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
+        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
         if (cell.width === 390) await row.tap(); else await row.click();
-        await expect(page.locator(".conversation-identity h1")).toMatchAriaSnapshot('- heading "cas-src" [level=1]');
-        await expect(page.locator(".conversation-identity .host-machine")).toBeVisible();
+        await expect(conversationHeading(page).getByRole("heading", { level: 1 })).toMatchAriaSnapshot('- heading "cas-src" [level=1]');
+        await expect(hostMachine(page)).toBeVisible();
       });
 
       if ("long" in cell) {
@@ -62,20 +66,20 @@ for (const cell of cells) {
           await testInfo.attach("revisit focus", { path: focusPath, contentType: "application/json" });
           // Phone navigation lands on the reading region, so reopening the
           // conversation does not raise the soft keyboard (cas-12c29).
-          await expect(page.locator(".conversation-reading.thread")).toBeFocused();
+          await expect(page.getByTestId("conversation-thread")).toBeFocused();
           await expect(page.getByRole("textbox", { name: "Your message" })).not.toBeFocused();
         });
       }
 
       await journey.stage("The host identity is whole vertically and fits the page", async () => {
-        const line = page.locator(".conversation-identity .host-where");
+        const line = conversationHeading(page).getByTitle(`${label} · ${PELICAN}`, { exact: true });
         await expect(line).toHaveAttribute("title", `${label} · ${PELICAN}`);
         // Dropped OS and codename remain in the accessible text, even though
         // their intentionally sr-only rectangles cannot represent ink bounds.
         await expect(line).toContainText(label);
         await expect(line).toContainText(PELICAN);
         await page.evaluate(() => document.fonts.ready);
-        const bounds = await page.locator(".conversation-identity .host-machine").evaluate(el => {
+        const bounds = await hostMachine(page).evaluate(el => {
           const text = Array.from(el.childNodes).find(node => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
           if (!text) throw new Error("The machine has no visible name text");
           const range = document.createRange();

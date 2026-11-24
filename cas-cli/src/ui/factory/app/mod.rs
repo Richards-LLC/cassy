@@ -1189,6 +1189,9 @@ pub struct FactoryApp {
     /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
     /// result is final for its tip; a pending one is re-read after a minute.
     lane_ci_pending: delivery_evidence::LaneCiCache,
+    /// cas-8c4f: the supervisor's live Cassy MCP build and when it loaded,
+    /// refreshed off the render path; the status bar shows it until a reload.
+    pub(crate) supervisor_cassy_badge: Option<String>,
     merge_alert_retries: merge_alert::Retries,
     /// Cached full epic-status containment, keyed by delivery and target tips.
     delivery_containment: delivery_evidence::DeliveryContainmentCache,
@@ -1711,6 +1714,7 @@ impl FactoryApp {
         let DeliveryInputs {
             qa_progress,
             answered_blocked_workers,
+            recycling_workers,
             data: loaded_data,
             blocks_deps,
             idle_liveness,
@@ -1782,8 +1786,10 @@ impl FactoryApp {
                 // gate, and revalidation then rebinds it to the worker's live
                 // lease, so a held worker kept getting "pending delivery"
                 // relays until release_worker.
+                // cas-fcd5b (GH #1693): a worker being recycled is not idle;
+                // its replacement starts a fresh episode once it registers.
                 if let DirectorEvent::WorkerIdle { worker, .. } = event
-                    && self.event_detector.is_worker_held(worker)
+                    && (self.event_detector.is_worker_held(worker) || recycling_workers.contains(worker))
                 {
                     return None;
                 }
@@ -1806,7 +1812,7 @@ impl FactoryApp {
                         DirectorEvent::WorkerIdle { active_task, .. } => active_task.as_ref(),
                         _ => None,
                     };
-                    if merge_alert::worker_has_pending_reminder(
+                    if crate::ui::factory::director::worker_has_pending_reminder(
                         &unfiltered_data, worker, active.map(|task| task.task_id.as_str()), merge_now,
                     ) || worker_waits.get(worker).is_some_and(|read| {
                         active.is_some_and(|task| task.task_id == read.task) && read.waiting
@@ -1942,8 +1948,10 @@ impl FactoryApp {
                         } else {
                             "CI failed. Supervisor decision needed: request changes, or explicitly review and override red CI before merging."
                         };
+                        let source = if ready.ci_source.is_empty() { String::new() }
+                            else { format!("\nCI read: {}", ready.ci_source) };
                         let text = format!(
-                            "{decision}\nTask {} on {} at {}.\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
+                            "{decision}\nTask {} on {} at {}.{source}\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
                             ready.evidence.task_id, ready.evidence.factory_branch, ready.tip,
                             ready.evidence.unmerged_count, ready.evidence.checked_epic_ref,
                             ready.evidence.epic_sha, ready.evidence.task_id,
@@ -8665,12 +8673,12 @@ mod spawn_isolation_tests {
         app.factory_session = Some("spawn-focus-fixture".into());
         app.epic_branch = Some("obsolete-snapshot-focus".into());
         let task_snapshot = serde_json::to_vec(
-            &app.snapshot_worker_spawn(Some("task-worker"), true, Some("cas-child"))
+            &app.snapshot_worker_spawn(Some("task-worker"), true, Some("cas-child"), crate::factory_isolation::WorkerNameRegistry::default())
                 .unwrap(),
         )
         .unwrap();
         let focus_snapshot = serde_json::to_vec(
-            &app.snapshot_worker_spawn(Some("focus-worker"), true, None)
+            &app.snapshot_worker_spawn(Some("focus-worker"), true, None, crate::factory_isolation::WorkerNameRegistry::default())
                 .unwrap(),
         )
         .unwrap();

@@ -83,3 +83,17 @@ Verifier ver-0e147d7370b5 invalidated the prior completion claim: the shared dia
 ### Per-account native usage recheck
 
 Each Claude/Codex account gets a quiet Check usage action in Accounts and New session. The action needs only machine-read access and never selects an account, changes defaults or starts a model turn. A shared controller owns per-account loading, dated results, named failure and retry; closing the sheet aborts outstanding reads. The server uses the existing `cas limits` native readers. Checked at is the lookup time; Usage as of is the native observation time. Old snapshots remain visibly stale, missing windows stay unknown, and the next action is to open a session on that account to refresh the native source. All displayed account times use Eastern 12-hour formatting. No live provider lookup is claimed. Existing Glass action, evidence, spacing, focus and phone target tokens govern the new control.
+
+### Home gateway routing
+
+Single idea: the operator can see, before launch, which roles the home gateway moves. After launch they can see which hub accounts it can draw on, kept apart from the native profiles it never pins.
+
+New session adds a two-choice **Worker route** step under Workers, using the supervisor picker's option treatment. One hint names the routed workers and says the supervisor stays direct. A second line, shown only when Home gateway is chosen, explains native profile versus hub account and the per-worker fallback. When the hub isn't ready, its option is disabled and the line gives the reason. The summary repeats the choice. In Accounts, a read-only **Home gateway** group follows the native groups with a Ready / Not ready chip. Each hub account row has a masked label, provider, state chip, and recent requests and failures. The group has no buttons, radios or defaults. Team accounts are counted in a note, never listed. No key, address or new token crosses the wire; existing Glass, status-chip, ledger and spacing tokens govern it.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | The same provider avatars and ledger rows as native accounts; the hub group reads as a sibling, not a new surface. |
+| Fit | 5 | Existing launch option, field-hint, status-chip and accounts-ledger classes; no new palette or token. |
+| Hierarchy | 4 | Route sits under Workers, the roles it moves; the hub group follows native profiles with its readiness in the heading. |
+| Craft | 4 | HUB-J13 home-gateway journey passes at 1280×800 and 390×844 in light and dark, with no sideways scroll; captures in `e2e/.results/journeys/HUB-J13`. The first draft said "the account below", which is wrong in the two-column layout and wrong about whose account it is (that's the supervisor's). It now reads "their own account". |
+| Accessibility | 4 | Native radios in a named group (`Worker route`), disabled option plus a `role=status` reason, read-only rows with no focus traps; forced-colors inherits the existing option border rule. |

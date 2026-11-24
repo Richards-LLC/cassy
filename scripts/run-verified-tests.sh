@@ -9,6 +9,10 @@
 #   scripts/run-verified-tests.sh nextest run -p cas --lib module
 #   scripts/run-verified-tests.sh test -p cas --doc
 #
+# Exit status 4 means the selection ran zero tests (nextest's own "no tests to
+# run" status, or a zero pass count): the capped worker runner then runs the
+# owning crate instead (cas-fcb1). Any other non-zero status is a failure.
+#
 # CARGO may replace the cargo binary in self-tests.  VERIFIED_TEST_LOG keeps
 # the raw captured output when a caller needs a durable receipt. The bounded
 # nextest discovery path requires python3, including downstream embedded use.
@@ -28,14 +32,18 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
+# An explicit template keeps temporaries in the capped runner's TMPDIR; a bare
+# `mktemp` on recent macOS uses the per-user /var/folders directory instead,
+# which a sandboxed worker cannot write (cas-fa0f).
+tmp_template="${TMPDIR:-/tmp}/verified-tests.XXXXXX"
 if [[ -n "${VERIFIED_TEST_LOG:-}" ]]; then
     log="${VERIFIED_TEST_LOG}"
     : >"${log}"
-    clean_log="$(mktemp)"
+    clean_log="$(mktemp "${tmp_template}")"
     trap 'rm -f "${clean_log}"' EXIT
 else
-    log="$(mktemp)"
-    clean_log="$(mktemp)"
+    log="$(mktemp "${tmp_template}")"
+    clean_log="$(mktemp "${tmp_template}")"
     trap 'rm -f "${log}" "${clean_log}"' EXIT
 fi
 
@@ -344,8 +352,15 @@ fail() {
 
 echo
 echo "--- verified-test guard (GH #499) ---"
+zero_tests=4
+if [[ "${cargo_status}" -eq "${zero_tests}" ]] && grep -q 'no tests to run' "${clean_log}"; then
+    echo "ZERO: the selection ran no test (nextest exited ${zero_tests})." >&2
+    exit "${zero_tests}"
+fi
 if [[ "${cargo_status}" -ne 0 ]]; then
     echo "FAIL: the test run exited ${cargo_status}." >&2
+    # A failure never reads as a zero-test selection.
+    [[ "${cargo_status}" -eq "${zero_tests}" ]] && exit 1
     exit "${cargo_status}"
 fi
 if [[ "${summaries}" -eq 0 ]]; then
@@ -353,8 +368,9 @@ if [[ "${summaries}" -eq 0 ]]; then
         "No Cargo or nextest summary was emitted, so this command proved no test completed."
 fi
 if [[ "${passed}" -eq 0 ]]; then
-    fail "0 tests passed across ${summaries} harness summary line(s)." \
-        "A zero-test result is a failed verification, even when Cargo reports success."
+    echo "ZERO: 0 tests passed across ${summaries} harness summary line(s)." >&2
+    echo "      A zero-test result is not a passing verification, even when Cargo reports success." >&2
+    exit "${zero_tests}"
 fi
 
 echo "PASS: ${passed} test(s) passed across ${summaries} harness summary line(s)."

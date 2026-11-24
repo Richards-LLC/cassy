@@ -137,6 +137,7 @@ impl CasCore {
                 lines.push(format!("Rule references: {} need marked code/test sites. Declare Rule-driven sites in the brief or close receipt; each anchor needs its adjacent marker and verbatim scope. Inspect with `cas rules refs <id>`.", ids.into_iter().collect::<Vec<_>>().join(", ")));
             }
         }
+        lines.extend(super::ac_checklist::requirement(&self.cas_root, task));
         if receipt_scope::has_changelog_fragments_at(&repo, "HEAD") {
             lines.push(format!(
                 "Changelog: product or developer source needs a titled entry in its own `{}/{id}.md` fragment (not in CHANGELOG.md), or a decision note \"no changelog: <reason>\".",
@@ -170,10 +171,10 @@ impl CasCore {
         if registry_on || overview_fragments {
             let mut docs = Vec::new();
             if registry_on && task.task_type == TaskType::Bug {
-                docs.push(format!("a fix touching a live journey adds `docs/qa/bug-families/<slug>.yaml` naming {id}"));
+                docs.push(format!("a fix touching a live journey adds `docs/qa/bug-families/<slug>.yaml` naming {id} (or decision note \"no bug family: <reason>\")"));
             }
             if overview_fragments {
-                docs.push(format!("product changes go in `{OVERVIEW_FRAGMENT_DIR}/{id}.md`"));
+                docs.push(format!("product changes go in `{OVERVIEW_FRAGMENT_DIR}/{id}.md` (or decision note \"no overview: <reason>\")"));
             }
             docs.push("never edit .claude/CODEMAP.md or docs/PRODUCT_OVERVIEW.md; release prep regenerates them".into());
             lines.push(format!("Docs: {}.", docs.join("; ")));

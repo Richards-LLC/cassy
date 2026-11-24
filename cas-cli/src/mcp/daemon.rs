@@ -156,6 +156,11 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
             .metadata
             .insert("worker_account_dir".to_string(), account_dir);
     }
+    if let Ok(transport) = std::env::var(cas_mux::gateway::TRANSPORT_ENV) {
+        agent.metadata.insert("worker_transport".to_string(), transport);
+    }
+    // cas-f157: which tasks this launch's sandbox profile grants.
+    crate::worker_sandbox_profile::record_launched_tasks(agent);
 }
 
 /// Parse the harness-provided durable role hint used by every registration
@@ -260,6 +265,7 @@ pub(crate) fn register_with_role_reconciliation(
                 "worker_model",
                 "worker_effort",
                 "worker_account_dir",
+                "worker_transport",
             ] {
                 if !agent.metadata.contains_key(key)
                     && let Some(value) = prior.metadata.get(key)

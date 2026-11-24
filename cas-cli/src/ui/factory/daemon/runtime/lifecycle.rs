@@ -1455,6 +1455,14 @@ fn apply_delivery_pr_observation(
     Ok(())
 }
 
+/// Every status for which `Task::is_terminal` is false.
+const LIVE_TASK_STATUSES: [cas_types::TaskStatus; 4] = [
+    cas_types::TaskStatus::Open,
+    cas_types::TaskStatus::InProgress,
+    cas_types::TaskStatus::Blocked,
+    cas_types::TaskStatus::AwaitingMerge,
+];
+
 /// Give the merge/verdict path a bounded chance to finalize the delivery. If it
 /// remains open, the existing durable supervisor attention lane tells the
 /// supervisor exactly which PR/receipt needs recovery. Its stable key makes
@@ -1464,9 +1472,17 @@ fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
     let Ok(store) = crate::store::open_task_store_cached(cas_dir) else {
         return;
     };
-    let Ok(tasks) = store.list(None) else {
-        return;
-    };
+    // cas-1d2a: a terminal task never needs this relay (skipped below), yet
+    // `list(None)` decoded all of them on the store writer at every CI poll:
+    // 6,986 rows and 108 MB on gabber, held up to 5.9 s. The status index
+    // reaches only the live rows (271 rows, 5 MB).
+    let mut tasks = Vec::new();
+    for status in LIVE_TASK_STATUSES {
+        let Ok(rows) = store.list(Some(status)) else {
+            return;
+        };
+        tasks.extend(rows);
+    }
     let now = chrono::Utc::now();
     for task in tasks {
         let (Some(pr_number), Some(merge_commit), Some(merged_at), Some(worker)) = (
@@ -1791,8 +1807,12 @@ fn enqueue_worker_attention_relay_inner(
     } else {
         String::new()
     };
+    // cas-58aa (GH #2201): the recipient drain retires a task-scoped relay
+    // once its task is terminal, but it can only read the task from the tag.
+    let task_attr = task_id.filter(|id| !id.is_empty())
+        .map(|id| format!(" task_id=\"{id}\"")).unwrap_or_default();
     let mut body = format!(
-        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
+        "<worker-attention kind=\"{kind}\" worker=\"{worker}\"{task_attr} notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
     );
     // cas-207e: ready tasks or merges waiting on an actionable-idle
     // supervisor are a blocker, not routine: idle workers burn wall clock.
@@ -2408,6 +2428,39 @@ mod worker_attention_tests {
         assert_eq!(operator.len(), 1, "{rows:?}");
         assert!(operator[0].prompt.contains("cas-ready") && operator[0].prompt.contains("calm-owl"), "{}", operator[0].prompt);
         assert!(rows.iter().any(|row| row.target != "operator"), "the supervisor is still woken: {rows:?}");
+    }
+
+    /// cas-58aa (GH #2201): a task-scoped delivery recovery relay reached the
+    /// supervisor 13 minutes after the supervisor closed that task. The drain
+    /// must see the relay's task and retire it once the task is terminal.
+    #[test]
+    fn cas_58aa_task_scoped_attention_relay_expires_when_its_task_closed() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-2201")]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "relay-2201");
+        let mut worker = Agent::new_with_role("worker-id".into(), "calm-owl".into(), AgentRole::Worker);
+        worker.factory_session = Some("relay-2201".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-2201".into(), "merged delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        tasks.add(&task).unwrap();
+        let key = "delivery-pr-merged:cas-2201:654:abc123";
+        assert!(matches!(
+            enqueue_worker_attention_relay_detail_with_key(&cas_dir, "worker_delivery_stalled", "calm-owl",
+                Some("cas-2201"), None, |_| "PR #654 merged; supervisor recovery".into(), key, Some(key)),
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let relay = queue.peek_all(10).unwrap().into_iter().find(|row| row.target == "supervisor").unwrap();
+        let surfaced = queue.surface_for_recipient_within_budget(
+            "supervisor", Some("relay-2201"), cas_store::HookDrain::Unseen, 10, 100_000).unwrap().rows;
+        assert!(surfaced.iter().all(|row| row.id != relay.id), "closed task's relay surfaced: {surfaced:?}");
+        assert_eq!(queue.message_delivery_report(relay.id).unwrap().unwrap().pending_reason,
+            Some(cas_store::PendingReason::SupersededStale));
     }
 
     #[test]
@@ -3806,6 +3859,36 @@ mod worker_attention_tests {
         }
     }
 
+    /// cas-1d2a: the CI-watch persist job decoded every task, terminal ones
+    /// included, on the store writer (gabber: 108 MB, held up to 5.9 s). The
+    /// scan now reads live rows only, so a terminal row that cannot even be
+    /// decoded must not stop a live merged delivery's escalation.
+    #[test]
+    fn delivery_merge_timeout_scan_never_reads_terminal_tasks_cas_1d2a() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-watcher")]);
+        let (_temp, cas_dir) = delivery_relay_fixture(true);
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        let mut live = cas_types::Task::new("cas-1d2a-live".into(), "delivery".into());
+        live.status = cas_types::TaskStatus::AwaitingMerge;
+        live.assignee = Some("delivery-worker".into());
+        live.deliverables.delivery_pr_number = Some(932);
+        live.deliverables.delivery_pr_merge_commit = Some("merge-tip".into());
+        live.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now() - chrono::Duration::minutes(10));
+        task_store.add(&live).unwrap();
+        let mut done = cas_types::Task::new("cas-1d2a-done".into(), "finished long ago".into());
+        done.status = cas_types::TaskStatus::Closed;
+        task_store.add(&done).unwrap();
+        rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap()
+            .execute("UPDATE tasks SET priority = 'unreadable' WHERE id = 'cas-1d2a-done'", []).unwrap();
+        assert!(task_store.list(None).is_err(), "fixture: a scan of every task trips on the terminal row");
+
+        relay_delivery_pr_merge_timeouts(&cas_dir);
+
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "the live merged delivery still escalates: {rows:?}");
+        assert!(rows[0].prompt.contains("PR #932"));
+    }
+
 }
 
 impl FactoryDaemon {
@@ -4314,6 +4397,7 @@ impl FactoryDaemon {
             drop(store_free_input);
 
             self.advance_queued_command();
+            self.refresh_supervisor_cassy_badge();
 
             let summary_metadata = format!(
                 "session={} role=supervisor task={}",

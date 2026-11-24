@@ -323,7 +323,12 @@ impl ReleaseNoticePhase {
 }
 
 /// One waking release action for the train's owning supervisor, sent once
-/// per `occurrence` (the train revision or version it is about).
+/// per `occurrence` (the train revision or version it is about). GH #2310: a
+/// train-gated notice (cut ready, CI red) for an owner that is no supervisor of
+/// this machine belongs to a peer elsewhere, which sends its own copy; a local
+/// supervisor that is not the owner gets none. The post-publish notices take
+/// their owner from the release receipt, which may name `operator`, so they
+/// keep the fallback chain.
 pub(crate) fn release_action(
     root: &Path,
     train: &cas_types::Task,
@@ -332,7 +337,15 @@ pub(crate) fn release_action(
     detail: &str,
 ) -> Result<(), crate::error::CasError> {
     let agents = open_agent_store(root)?.list(None)?;
-    let recipient = resolve(&agents, train.epic_verification_owner.as_deref(), None);
+    let owner = train.epic_verification_owner.as_deref();
+    if matches!(phase, ReleaseNoticePhase::CutReady | ReleaseNoticePhase::RustRed)
+        && owner.is_some_and(|owner| !agents.iter().any(|a| {
+            a.role == AgentRole::Supervisor && (a.id == owner || a.name == owner)
+        }))
+    {
+        return Ok(());
+    }
+    let recipient = resolve(&agents, owner, None);
     enqueue(root, &recipient, phase.kind(), detail, &format!("{}:{occurrence}", train.id))
 }
 
@@ -341,7 +354,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["blocker", "premerge_verification", "premerge_candidate_ready", "premerge_candidate_failed", "train_ready", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_post_publish_failed", "release_closeout", "factory_binary_skew", "train_ci_red", "train_main_sync", "registration_outcome"]
+    let valid_kind = ["blocker", "premerge_verification", "premerge_candidate_ready", "premerge_candidate_failed", "train_ready", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_post_publish_failed", "release_closeout", "factory_binary_skew", "train_ci_red", "train_main_sync", "registration_outcome", "send_outcome"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

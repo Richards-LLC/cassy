@@ -1309,6 +1309,27 @@ impl CasCore {
                 "\n[{timestamp}] BRANCH ADOPTED: {} -> {} at {} by {agent_id}",
                 adoption.source_branch, adoption.branch, adoption.tip,
             ));
+            // cas-faa9 (GH #1437, #2334): the start record names the lane
+            // that now carries the delivery and its receiver, so start,
+            // rebind and close measure that lane instead of the old owner's.
+            if let (Some(work_target), Some(base_sha)) =
+                (task.deliverables.work_target.clone().or_else(|| {
+                    task.deliverables.factory_branch_start.as_ref().map(|start| start.work_target.clone())
+                }), adoption.base.clone())
+            {
+                crate::mcp::tools::core::task::rebind::rebind_start(
+                    &mut task,
+                    cas_types::FactoryBranchStart {
+                        work_target,
+                        assignee: target_agent.name.clone(),
+                        branch: adoption.branch.clone(),
+                        base_sha,
+                    },
+                    &agent_id,
+                    "transfer adopt_branch",
+                    crate::mcp::tools::core::task::rebind::StartAudit::Note,
+                );
+            }
         }
         // Update assignee to the target agent
         task.assignee = Some(target_name);

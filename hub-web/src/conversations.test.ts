@@ -6,6 +6,7 @@ import { ConversationView } from "./conversation-view";
 import { applePlatform, appearanceButtonMarkup, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName } from "./cloud-brand";
+import { cassyLoadedBadge } from "./machine-version";
 
 import { pendingSessionLabel, visibleCatalog } from "./worker-visibility";
 
@@ -35,6 +36,24 @@ it("shows the live supervisor's own Cassy version and flags an installed upgrade
       expect(badge?.textContent).toContain("↑");
     }
   }
+});
+
+it("names the build a supervisor's live MCP loaded and when, in Eastern time (cas-8c4f)", () => {
+  const badge = cassyLoadedBadge("v4.52.0", "2026-11-23T22:44:00Z");
+  expect(badge).toContain("4.52.0");
+  expect(badge).toContain("5:44 PM");
+  expect(cassyLoadedBadge("unknown", "2026-11-23T22:44:00Z")).toBeUndefined();
+  expect(cassyLoadedBadge("4.52.0", undefined)).toBeUndefined();
+  // The supervisor card keeps it while current; an older build keeps its update arrow instead.
+  const base: ConversationRow = { key: "atlas:lead", machineId: "atlas", session: "lead", supervisor: "lead", projectDir: "/projects/cas-src", host: "Atlas", freshness: "now", connection: "Live", attention: 0, selected: false, machine_online: true };
+  const view = document.createElement("div");
+  view.innerHTML = conversationRowMarkup({ ...base, mcp_version: "4.52.0", installed_version: "4.52.0", mcp_loaded_at: "2026-11-23T22:44:00Z" });
+  const card = view.querySelector<HTMLElement>("[data-testid=supervisor-version]");
+  expect(card?.textContent).toContain("4.52.0");
+  // cas-0d58: the pill holds the version alone; the load time is in its title.
+  expect(card?.title).toContain("5:44 PM");
+  view.innerHTML = conversationRowMarkup({ ...base, mcp_version: "4.51.0", installed_version: "4.52.0", mcp_loaded_at: "2026-11-23T22:44:00Z" });
+  expect(view.querySelector(".supervisor-version")?.classList.contains("update-available")).toBe(true);
 });
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
@@ -593,7 +612,7 @@ describe('conversation evidence', () => {
     expect(pendingSessionLabel(dormant, false)).toBeUndefined();
     // A row whose machine is down says Last known, not its last turn (cas-da546).
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Last known', machine_online: false, attention: 0, preview: 'An older turn.', selected: false };
-    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview">Last known</span>');
+    expect(conversationRowMarkup(row)).toContain('<span data-testid="conversation-preview" class="conversation-preview">Last known</span>');
   });
   it('marks a parked draft in another conversation, under any connection problem (cas-97d58 F19)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: 'Gate run 3 of 3 is going.', selected: false, draft: 'Please keep the release notes short' };
@@ -603,7 +622,7 @@ describe('conversation evidence', () => {
     // The open conversation shows its draft in the composer, not the row.
     expect(conversationRowMarkup({ ...row, selected: true })).not.toContain('conversation-preview');
     // A connection problem still leads, so the row agrees with the header.
-    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
+    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span data-testid="conversation-preview" class="conversation-preview interrupted">Reconnecting</span>');
     expect(conversationRowMarkup({ ...row, draft: '   ' })).not.toContain('conversation-preview');
   });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {
@@ -619,7 +638,7 @@ describe('conversation evidence', () => {
     const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
     expect(shell).toContain('class="conversation-shell thread-open machine-accent-0"');
     expect(shell).toContain('id="compose-fab" class="compose-fab"');
-    expect(conversationShellMarkup({ selected: false, loaded: true, paired: true })).toContain('class="conversation-shell">');
+    expect(conversationShellMarkup({ selected: false, loaded: true, paired: true })).toContain('class="conversation-shell" data-testid="conversation-shell">');
   });
   it('offers one primary Pair a machine on first run: the welcome, with the header chip primary only where the welcome is hidden (D3)', () => {
     const shell = document.createElement('div');

@@ -440,7 +440,7 @@ describe("grouped project sessions (cas-55a4)", () => {
     // A machine clock ahead never reads as the future.
     expect(activityTime(now + 30_000, now).short).toBe("now");
     const markup = conversationRowMarkup(row("calm-puma-34", 300, { when: "20m", whenSpoken: "20 minutes ago", freshness: "Last activity 20m ago" }));
-    expect(markup).toContain('<span class="conversation-when" title="Last activity 20m ago" aria-hidden="true">20m</span>');
+    expect(markup).toContain('<span class="conversation-when" data-testid="conversation-when" title="Last activity 20m ago" aria-hidden="true">20m</span>');
     expect(markup).toContain('<span class="sr-only">, 20 minutes ago</span>');
     // No activity, no time: never a catalog-check "now".
     expect(conversationRowMarkup(row("idle-otter-1"))).not.toContain("conversation-when");

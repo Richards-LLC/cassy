@@ -312,9 +312,43 @@ impl Config {
                 let mode = value.parse().map_err(MemError::Parse)?;
                 self.factory.get_or_insert_with(FactoryConfig::default).claude.worker_mcp = mode;
             }
+            "factory.claude.worker_sandbox" => {
+                let mode = value.parse().map_err(MemError::Parse)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).claude.worker_sandbox = mode;
+            }
             "factory.claude.remote_control" => {
                 let enabled = value.parse().map_err(|_| MemError::Other(format!("Invalid boolean value for {key}: {value}")))?;
                 self.factory.get_or_insert_with(FactoryConfig::default).claude.remote_control = enabled;
+            }
+            "factory.gateway.enabled" => {
+                let enabled = value.parse().map_err(|_| MemError::Other(format!("Invalid boolean value for {key}: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).gateway.enabled = enabled;
+            }
+            "factory.gateway.endpoint" => {
+                let endpoint = value.trim();
+                let endpoint = (!endpoint.is_empty())
+                    .then(|| cas_mux::gateway::validate_endpoint(endpoint))
+                    .transpose()
+                    .map_err(MemError::Other)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).gateway.endpoint = endpoint;
+            }
+            "factory.gateway.key_file" => {
+                let path = value.trim();
+                self.factory.get_or_insert_with(FactoryConfig::default).gateway.key_file =
+                    (!path.is_empty()).then(|| path.to_string());
+            }
+            "factory.gateway.dashboard" => {
+                let endpoint = value.trim();
+                let endpoint = (!endpoint.is_empty())
+                    .then(|| cas_mux::gateway::validate_endpoint(endpoint))
+                    .transpose()
+                    .map_err(MemError::Other)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).gateway.dashboard = endpoint;
+            }
+            "factory.gateway.dashboard_key_file" => {
+                let path = value.trim();
+                self.factory.get_or_insert_with(FactoryConfig::default).gateway.dashboard_key_file =
+                    (!path.is_empty()).then(|| path.to_string());
             }
             "factory.claude.fallback_model" => {
                 let model = cas_types::factory_claude::FactoryClaudeConfig::parse_fallback(value).map_err(MemError::Other)?;

@@ -1,0 +1,4 @@
+title: The HUB-J25 show-work journey case fails intermittently on the release path (element not found after work rows arrive), so both of its cases are removed until a race-free rewrite
+found: '2026-11-24'
+tasks: [cas-929df]
+journeys: [HUB-J25]

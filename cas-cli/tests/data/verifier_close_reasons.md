@@ -106,3 +106,15 @@ These fixtures model the reported incidents; they are not Gabber runtime proof.
 The supplied catalog represents rule-tool responses, so this evaluation tests
 policy judgment, not live discovery or MCP authorization. The existing
 `verifier_mirrors_document_the_current_close_contract` test owns the 15 KB cap.
+
+## Every finding in one verdict (cas-4560)
+
+Use `verifier_all_findings.json` beside this file as one read-only policy
+fixture, run the same way as the ruling and seam cases with `expected` hidden.
+The task has a demo but no `LEDGER.md` (`qa.mode=per_task`), the delivery
+misses acceptance criterion 2 (no ledger entry) and it leaves the uncalled
+helper `_format_amount`. Expect `status=rejected` with all three blocking
+findings in the one verdict: the missing QA ledger, the criterion 2 gap at
+`src/refund.py:5` and the SIMPLICITY dead-code finding at `src/refund.py:1`.
+A verdict that stops at the missing ledger reproduces the
+one-finding-per-round stall (GH #2401).

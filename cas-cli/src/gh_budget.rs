@@ -158,21 +158,31 @@ pub(crate) fn shared_read<E>(
     ttl: Duration,
     fetch: impl FnOnce() -> Result<Vec<u8>, E>,
 ) -> Result<Vec<u8>, E> {
+    shared_read_by(key, |_| ttl, fetch)
+}
+
+/// [`shared_read`] where the cached answer decides how long it stays fresh
+/// (cas-0bc1): `ttl_for` sees the bytes and returns their lifetime, so a
+/// commit's unfinished checks can be re-read in a minute and its finished
+/// ones in ten.
+pub(crate) fn shared_read_by<E>(
+    key: &str,
+    ttl_for: impl Fn(&[u8]) -> Duration,
+    fetch: impl FnOnce() -> Result<Vec<u8>, E>,
+) -> Result<Vec<u8>, E> {
     #[cfg(test)]
     if std::env::var_os("CAS_TEST_GH_BUDGET").is_none() {
         return fetch();
     }
     let Some(dir) = cas_home().map(|home| home.join("gh-cache")) else { return fetch() };
-    let name: String = key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let name = cache_name(key);
     let path = dir.join(format!("{name}.json"));
-    let fresh = |path: &Path| {
-        std::fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|at| at.elapsed().ok())
-            .is_some_and(|age| age < ttl)
+    let fresh = |path: &Path| -> Option<Vec<u8>> {
+        let age = std::fs::metadata(path).and_then(|meta| meta.modified()).ok()?.elapsed().ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        (age < ttl_for(&bytes)).then_some(bytes)
     };
-    if fresh(&path) && let Ok(bytes) = std::fs::read(&path) {
+    if let Some(bytes) = fresh(&path) {
         return Ok(bytes);
     }
     let _ = std::fs::create_dir_all(&dir);
@@ -182,7 +192,7 @@ pub(crate) fn shared_read<E>(
         .write(true)
         .open(dir.join(format!("{name}.lock")));
     let _held = lock.ok().filter(|file| fs2::FileExt::lock_exclusive(file).is_ok());
-    if fresh(&path) && let Ok(bytes) = std::fs::read(&path) {
+    if let Some(bytes) = fresh(&path) {
         return Ok(bytes);
     }
     let bytes = fetch()?;
@@ -191,6 +201,50 @@ pub(crate) fn shared_read<E>(
         let _ = std::fs::rename(&staging, &path);
     }
     Ok(bytes)
+}
+
+fn cache_name(key: &str) -> String {
+    key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// Drop one shared answer so the next reader fetches (cas-0bc1).
+pub(crate) fn invalidate(key: &str) {
+    #[cfg(test)]
+    if std::env::var_os("CAS_TEST_GH_BUDGET").is_none() {
+        return;
+    }
+    if let Some(dir) = cas_home().map(|home| home.join("gh-cache")) {
+        let _ = std::fs::remove_file(dir.join(format!("{}.json", cache_name(key))));
+    }
+}
+
+/// How long a commit's check-runs answer is shared (cas-0bc1): a minute while
+/// any check is unfinished, ten once all have completed. A finished commit's
+/// checks change only by a rerun or a new attempt, which the CI watch sees in
+/// the run list and answers with [`invalidate`]; the ten minutes bound a miss.
+pub(crate) fn check_runs_ttl(bytes: &[u8]) -> Duration {
+    let finished = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|answer| answer.get("check_runs")?.as_array().cloned())
+        .is_some_and(|runs| {
+            !runs.is_empty()
+                && runs.iter().all(|run| run.get("status").and_then(|status| status.as_str()) == Some("completed"))
+        });
+    Duration::from_secs(if finished { 600 } else { 60 })
+}
+
+/// A shared answer's lifetime less up to a tenth, by a fixed share of its key
+/// (cas-a9eb): answers cached in one poll expire spread over that tenth, not
+/// together in one later poll. It only shortens, so no refresh comes after
+/// `ttl`, and a zero lifetime stays zero.
+pub(crate) fn jittered(ttl: Duration, key: &str) -> Duration {
+    let share = key.bytes().fold(0u32, |hash, byte| hash.wrapping_mul(31).wrapping_add(u32::from(byte))) % 100;
+    ttl.mul_f64(1.0 - f64::from(share) / 1000.0)
+}
+
+/// The shared key of one commit's check-runs answer, for every reader.
+pub(crate) fn check_runs_key(repo: &str, sha: &str) -> String {
+    format!("check-runs {repo} {sha}")
 }
 
 /// A stable, id-free name for what a call asks GitHub for.

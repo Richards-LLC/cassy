@@ -1060,6 +1060,42 @@ mod tests {
                 if cli != cas_mux::SupervisorCli::Codex { assert!(error.to_string().contains(&format!("{cli:?}").to_lowercase()), "{error}"); }
                 assert!(daemon.supervisor_commands.records.is_empty(), "nothing is admitted: {error}");
                 assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+                if cli == cas_mux::SupervisorCli::Codex {
+                    // Confirmed, it waits for the rollout's turn end, then restarts
+                    // the pane instead of typing anything into it.
+                    let old = process();
+                    record(&daemon, old.0.id(), Some("9.99.1"));
+                    let sid = "019f84af-3121-7950-ba14-b01db2dad6c8";
+                    let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+                    let mut agent = store.get("single-sup").unwrap();
+                    agent.cc_session_id = Some(sid.into());
+                    agent.metadata.insert("supervisor_account_dir".into(), root.path().to_str().unwrap().into());
+                    store.update(&agent).unwrap();
+                    std::fs::create_dir_all(root.path().join("sessions")).unwrap();
+                    let rollout = root.path().join(format!("sessions/rollout-{sid}.jsonl"));
+                    let meta = serde_json::json!({"type":"session_meta","payload":{"id":sid,"cwd":root.path(),"originator":"codex-tui","source":"cli"}});
+                    let turn = |kind: &str| serde_json::json!({"type":"event_msg","payload":{"type":kind,"turn_id":"t1"}});
+                    std::fs::write(&rollout, format!("{meta}\n{}\n", turn("task_started"))).unwrap();
+                    let confirmed = Request::Run { command, confirmed: true };
+                    let receipt = daemon.dispatch_supervisor_command(confirmed, "reload-codex".into(), owner.clone()).await.unwrap();
+                    assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+                    assert!(daemon.supervisor_commands.restart.is_none(), "an open Codex turn is never restarted");
+                    std::fs::write(&rollout, format!("{meta}\n{}\n{}\n", turn("task_started"), turn("task_complete"))).unwrap();
+                    let receipt = tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            let DaemonMessage::SupervisorCommandReceipt { receipt } = daemon.dispatch_supervisor_command(Request::Status, "reload-codex".into(), owner.clone()).await.unwrap()
+                                else { panic!("status returns a receipt") };
+                            if receipt.phase != Phase::Queued { break receipt; }
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("the queued Codex reload acts at the turn end");
+                    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "a Codex reload types nothing");
+                    match receipt.phase {
+                        Phase::Submitted => assert!(daemon.supervisor_commands.restart.is_some(), "{}", receipt.detail),
+                        Phase::Refused => assert!(receipt.detail.starts_with("Supervisor restart refused"), "{}", receipt.detail),
+                        phase => panic!("unexpected Codex reload phase {phase:?}: {}", receipt.detail),
+                    }
+                }
                 continue;
             }
             let old = process();

@@ -2053,7 +2053,7 @@ mod tests {
 
     #[test]
     fn expired_dead_claim_merge_retry_preserves_candidate_cas_de6d() {
-        for case in ["dead", "timedout-dead", "live", "unreadable", "mismatch", "shutdown", "unknown", "foreign", "unexpired", "other-owner"] {
+        for case in ["dead", "timedout-dead", "live", "stalled", "unreadable", "mismatch", "shutdown", "unknown", "foreign", "unexpired", "other-owner"] {
             let mut env = crate::test_support::TestEnvGuard::temp_home();
             crate::store::known_repos::ensure_host_schema().unwrap();
             let dir = tempfile::tempdir().unwrap();
@@ -2098,7 +2098,7 @@ mod tests {
             let mut process = std::process::Command::new("true").spawn().unwrap();
             child.pid = Some(process.id());
             process.wait().unwrap();
-            if matches!(case, "live" | "unreadable" | "mismatch" | "shutdown") {
+            if matches!(case, "live" | "stalled" | "unreadable" | "mismatch" | "shutdown") {
                 child.pid = Some(std::process::id());
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
                 if case == "mismatch" { child.pid_starttime = Some(child.pid_starttime.expect("readable fixture fingerprint") + 1); }
@@ -2113,6 +2113,11 @@ mod tests {
                 agents.update(&child).unwrap();
             }
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            if case == "stalled" {
+                // GH #2325: the host pid is alive but the verifier thread inside it stopped.
+                conn.execute("UPDATE agents SET last_heartbeat=?2 WHERE id=?1",
+                    rusqlite::params![child.id, (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339()]).unwrap();
+            }
             if case != "unexpired" {
                 conn.execute("UPDATE verification_dispatches SET deadline_at=?2 WHERE id=?1",
                     rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()]).unwrap();
@@ -2159,7 +2164,7 @@ mod tests {
             assert_eq!(current.requested_at, dispatch.requested_at);
             assert_eq!(current.receipt_id, dispatch.receipt_id);
             assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
-            let recover = matches!(case, "dead" | "timedout-dead" | "mismatch" | "shutdown");
+            let recover = matches!(case, "dead" | "timedout-dead" | "stalled" | "mismatch" | "shutdown");
             let audits: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1",
                 [&dispatch.id], |row| row.get(0),

@@ -266,7 +266,7 @@ pub(crate) const VERIFIER_FACTORY_STORE_BUDGET: std::time::Duration = std::time:
 pub(crate) mod cycle;
 pub(crate) use peer::legacy_peer_approval;
 
-const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
+pub(crate) const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
 fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
     let message = git(
@@ -676,7 +676,7 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub(crate) fn original_candidate_for_dispatch(
+fn original_candidate_for_dispatch(
     root: &Path,
     dispatch: &VerificationDispatch,
 ) -> Result<Option<Candidate>, String> {
@@ -686,32 +686,48 @@ pub(crate) fn original_candidate_for_dispatch(
     let Some(bound_key) = proof_candidate_key(proof)? else {
         return Ok(None);
     };
-    let manifest = root
-        .join("verification-candidates")
-        .join(&bound_key)
-        .join("candidate.json");
-    let bytes = std::fs::read(&manifest).map_err(|error| format!(
-        "VERIFIED_DELIVERY_CANDIDATE_READ: candidate manifest {} for dispatch {} (key {bound_key}): {error}",
-        manifest.display(), dispatch.id,
-    ))?;
-    let candidate: Candidate = serde_json::from_slice(&bytes).map_err(|error| format!(
-        "VERIFIED_DELIVERY_CANDIDATE_PARSE: candidate manifest {} for dispatch {} (key {bound_key}): {error}",
-        manifest.display(), dispatch.id,
-    ))?;
-    let key = candidate_manifest_key(&candidate)?;
-    if candidate.proof != *proof
-        || candidate.task_id != dispatch.task_id
-        || candidate.repository.to_string_lossy() != proof.repository_root
-        || candidate.cas_root != root
-        || bound_key != key
-        || git(
-            &candidate.repository,
-            &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
-        )? != candidate.tree
-    {
+    let repository = Path::new(&proof.repository_root);
+    let tree = git(repository, &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)])?;
+    let candidate = original_candidate_at_ref(root, repository, &bound_key, &proof.head_commit, &tree)?;
+    if candidate.proof != *proof || candidate.task_id != dispatch.task_id {
         return Err("candidate does not match its immutable dispatch proof".into());
     }
     Ok(Some(candidate))
+}
+
+pub(crate) fn original_candidate_at_ref(
+    root: &Path,
+    repository: &Path,
+    bound_key: &str,
+    commit: &str,
+    tree: &str,
+) -> Result<Candidate, String> {
+    if bound_key.len() != 64 || !bound_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("candidate context identity is invalid".into());
+    }
+    let manifest = root
+        .join("verification-candidates")
+        .join(bound_key)
+        .join("candidate.json");
+    let bytes = std::fs::read(&manifest).map_err(|error| format!(
+        "VERIFIED_DELIVERY_CANDIDATE_READ: candidate manifest {} (key {bound_key}): {error}",
+        manifest.display(),
+    ))?;
+    let candidate: Candidate = serde_json::from_slice(&bytes).map_err(|error| format!(
+        "VERIFIED_DELIVERY_CANDIDATE_PARSE: candidate manifest {} (key {bound_key}): {error}",
+        manifest.display(),
+    ))?;
+    let key = candidate_manifest_key(&candidate)?;
+    if candidate.repository != repository
+        || Path::new(&candidate.proof.repository_root) != repository
+        || candidate.proof.head_commit != commit
+        || candidate.cas_root != root
+        || bound_key != key
+        || candidate.tree != tree
+    {
+        return Err("candidate does not match its immutable dispatch proof".into());
+    }
+    Ok(candidate)
 }
 
 pub(crate) fn candidate_for_dispatch(root: &Path, dispatch: &VerificationDispatch) -> Result<Option<Candidate>, String> {

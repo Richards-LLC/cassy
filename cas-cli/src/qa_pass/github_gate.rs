@@ -66,7 +66,7 @@ enum MergeTransport { PrCommand, Api }
 pub struct GithubMerge {
     transport: MergeTransport,
     pub selector: MergeSelector,
-    /// `OWNER/REPO` when the command names one.
+    /// `[HOST/]OWNER/REPO` when the command names one.
     pub repo: Option<String>,
     /// `--match-head-commit`: the exact head the caller insists on.
     pub match_head: Option<String>,
@@ -184,7 +184,23 @@ fn heredocs_opened_by(line: &str) -> Vec<(String, bool, bool)> {
 pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
     let mut merges = Vec::new();
     let command = strip_data_heredoc_bodies(command);
-    for statement in command.split(['\n', ';', '|', '&']) {
+    let mut quote = None;
+    let mut escaped = false;
+    for statement in command.split(|character| {
+        if std::mem::take(&mut escaped) {
+            return false;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if quote == Some(character) {
+            quote = None;
+        } else if quote.is_none() && matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+        } else if quote.is_none() {
+            return matches!(character, '\n' | ';' | '|' | '&');
+        }
+        false
+    }) {
         let tokens: Vec<&str> = statement
             .split_whitespace()
             .map(|token| token.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | '(' | ')')))
@@ -242,6 +258,7 @@ fn parse_pr_merge(args: &[&str], statement: &str) -> Option<GithubMerge> {
     ];
     let mut selector = None;
     let mut repo = None;
+    let mut url_repo = None;
     let mut match_head = None;
     let mut index = 0;
     while index < args.len() {
@@ -263,18 +280,16 @@ fn parse_pr_merge(args: &[&str], statement: &str) -> Option<GithubMerge> {
             index += 2;
             continue;
         } else if !arg.starts_with('-') && selector.is_none() {
-            let (parsed, url_repo) = classify_pr_argument(arg);
+            let (parsed, repository) = classify_pr_argument(arg);
             selector = Some(parsed);
-            if repo.is_none() {
-                repo = url_repo;
-            }
+            url_repo = repository;
         }
         index += 1;
     }
     Some(GithubMerge {
         transport: MergeTransport::PrCommand,
         selector: selector.unwrap_or(MergeSelector::CurrentBranch),
-        repo,
+        repo: url_repo.or(repo),
         match_head,
         statement: statement.to_string(),
     })
@@ -287,25 +302,15 @@ fn classify_pr_argument(arg: &str) -> (MergeSelector, Option<String>) {
     if let Ok(number) = bare.parse::<u64>() {
         return (MergeSelector::Number(number), None);
     }
-    if let Some((prefix, rest)) = arg.split_once("/pull/") {
+    if let Some((prefix, rest)) = arg.split_once("/pull/")
+        && let Some(repo) = repo_identity(prefix)
+    {
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         if let Ok(number) = digits.parse::<u64>() {
-            let repo = prefix
-                .rsplit('/')
-                .take(2)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("/");
-            return (
-                MergeSelector::Number(number),
-                repo.contains('/').then_some(repo),
-            );
+            return (MergeSelector::Number(number), Some(repo));
         }
     }
-    let branch = arg.rsplit_once(':').map_or(arg, |(_, branch)| branch);
-    (MergeSelector::Branch(branch.to_string()), None)
+    (MergeSelector::Branch(arg.to_string()), None)
 }
 
 /// A `PUT …/pulls/<n>/merge` REST call (`gh api`, `curl`, …).
@@ -332,11 +337,28 @@ fn put_pull_merge(tokens: &[&str]) -> Option<(u64, Option<String>)> {
         {
             return None;
         }
-        let repo = before
-            .split_once("repos/")
-            .map(|(_, repo)| repo.trim_end_matches('/').to_string())
-            .filter(|repo| repo.split('/').count() == 2 && !repo.contains('{'));
+        let repo = before.split_once("repos/").and_then(|(endpoint, repo)| {
+            let repo = repo.trim_end_matches('/');
+            if repo.split('/').count() != 2 || repo.contains('{') {
+                return None;
+            }
+            let url = url::Url::parse(endpoint).ok();
+            let host = url.as_ref().and_then(url::Url::host_str)
+                .or_else(|| hostname_flag(tokens));
+            Some(match host {
+                Some("api.github.com") => format!("github.com/{repo}"),
+                Some(host) => format!("{host}/{repo}"),
+                None => repo.to_string(),
+            })
+        });
         Some((digits.parse().ok()?, repo))
+    })
+}
+
+fn hostname_flag<'a>(tokens: &[&'a str]) -> Option<&'a str> {
+    tokens.iter().enumerate().find_map(|(index, token)| match *token {
+        "--hostname" => tokens.get(index + 1).copied(),
+        _ => token.strip_prefix("--hostname="),
     })
 }
 
@@ -414,7 +436,7 @@ struct PrMetadata {
 impl PrMetadata {
     fn repository(&self) -> Option<String> {
         let (repo, _) = self.url.as_deref()?.split_once("/pull/")?;
-        repo_slug(repo)
+        repo_identity(repo)
     }
 
     fn branch(&self) -> Option<&str> {
@@ -458,11 +480,16 @@ fn resolve_pr(cwd: &Path, merge: &GithubMerge) -> Result<PrMetadata, String> {
         MergeSelector::Branch(branch) => Some(branch.clone()),
         MergeSelector::CurrentBranch => None,
         MergeSelector::Unresolvable(why) => {
-            let id = graphql_pull_request_id(&merge.statement).ok_or_else(|| why.to_string())?;
+            let words = shell_words::split(&merge.statement).map_err(|error| error.to_string())?;
+            let tokens: Vec<&str> = words.iter().map(String::as_str).collect();
+            let id = graphql_pull_request_id(&tokens).ok_or_else(|| why.to_string())?;
             let mut command = Command::new(gh_bin());
             command.args([
                 "api", "graphql", "-f", "query=query($id: ID!) { node(id: $id) { ... on PullRequest { number url headRefName headRefOid } } }", "-f",
             ]).arg(format!("id={id}")).current_dir(cwd);
+            if let Some(host) = hostname_flag(&tokens) {
+                command.args(["--hostname", host]);
+            }
             let bytes = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
             let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
             return serde_json::from_value(body["data"]["node"].clone())
@@ -488,48 +515,86 @@ fn resolve_pr(cwd: &Path, merge: &GithubMerge) -> Result<PrMetadata, String> {
         .map_err(|error| format!("`gh pr view` returned unreadable JSON: {error}"))
 }
 
-fn graphql_pull_request_id(statement: &str) -> Option<String> {
-    let query = statement.replace(r#"\""#, "\"");
-    let (_, rest) = query.split_once("pullRequestId")?;
-    let value = rest.trim_start().strip_prefix(':')?.trim_start();
-    if let Some(literal) = value.strip_prefix('"') {
-        return literal.split_once('"').map(|(id, _)| id.to_string()).filter(|id| !id.is_empty());
-    }
-    let name: String = value.strip_prefix('$')?.chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
-    let tokens = shell_words::split(statement).ok()?;
-    tokens.iter().enumerate().filter_map(|(index, token)| {
-        let field = match token.as_str() {
-            "-f" | "-F" | "--raw-field" | "--field" => tokens.get(index + 1)?.as_str(),
-            _ => token.strip_prefix("--field=").or_else(|| token.strip_prefix("--raw-field="))?,
-        };
-        let (key, id) = field.split_once('=')?;
-        (key == name && !id.is_empty() && !id.starts_with('@')).then(|| id.to_string())
-    }).last()
+fn graphql_pull_request_id(tokens: &[&str]) -> Option<String> {
+    let fields: std::collections::HashMap<&str, &str> = tokens.iter().enumerate()
+        .filter_map(|(index, token)| {
+            let field = match *token {
+                "-f" | "-F" | "--raw-field" | "--field" => tokens.get(index + 1).copied(),
+                _ => ["--field=", "--raw-field=", "-f", "-F"].iter()
+                    .find_map(|prefix| token.strip_prefix(prefix)),
+            }?;
+            field.split_once('=')
+        }).collect();
+    let body: Option<serde_json::Value> = tokens.iter().enumerate().find_map(|(index, token)| {
+        let value = match *token {
+            "<<<" | "-d" | "--data" | "--data-raw" | "--data-binary" | "--json" =>
+                tokens.get(index + 1).copied(),
+            _ => ["<<<", "--data=", "--data-raw=", "--data-binary=", "--json=", "-d"].iter()
+                .find_map(|prefix| token.strip_prefix(prefix)),
+        }?;
+        serde_json::from_str(value).ok()
+    });
+    let query = match &body {
+        Some(body) => body.get("query")?.as_str()?,
+        None => fields.get("query").copied()?,
+    };
+    static MERGE_INPUT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            r"\b(?:mergePull", r"Request|enablePull", r"RequestAutoMerge)\s*\(\s*input\s*:\s*",
+            r#"(?:\$(\w+)|\{[^}]*?\bpullRequestId\s*:\s*(?:\$(\w+)|"([^"]+)"))"#,
+        )).expect("valid GraphQL input pattern")
+    });
+    let captures = MERGE_INPUT.captures(query)?;
+    let id = if let Some(name) = captures.get(1) {
+        let name = name.as_str();
+        match &body {
+            Some(body) => body.get("variables")?.get(name)?.get("pullRequestId")?.as_str()?,
+            None => fields.get(format!("{name}[pullRequestId]").as_str()).copied()?,
+        }
+    } else if let Some(name) = captures.get(2) {
+        match &body {
+            Some(body) => body.get("variables")?.get(name.as_str())?.as_str()?,
+            None => fields.get(name.as_str()).copied()?,
+        }
+    } else {
+        captures.get(3)?.as_str()
+    };
+    (!id.is_empty() && !id.starts_with('@')).then(|| id.to_string())
 }
 
-/// `owner/repo`, lowercased, from `OWNER/REPO`, `HOST/OWNER/REPO`, or a remote
-/// URL (`https://…`, `git@host:…`). Local-path remotes have no slug.
-fn repo_slug(value: &str) -> Option<String> {
-    let normalized =
-        crate::cloud::normalize_git_remote_url(value).unwrap_or_else(|| value.trim().to_string());
+fn repo_identity(value: &str) -> Option<String> {
+    let value = value.trim();
+    let normalized = url::Url::parse(value).ok()
+        .and_then(|url| Some(format!("{}{}", url.host_str()?, url.path())))
+        .or_else(|| crate::cloud::normalize_git_remote_url(value))
+        .unwrap_or_else(|| value.to_string());
     let normalized = normalized.trim_end_matches('/');
     let normalized = normalized.strip_suffix(".git").unwrap_or(normalized);
-    let parts: Vec<&str> = normalized
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    match parts.as_slice() {
-        [.., owner, repo] if !owner.contains(':') => {
-            Some(format!("{owner}/{repo}").to_ascii_lowercase())
-        }
-        _ => None,
-    }
+    let parts: Vec<&str> = normalized.split('/').collect();
+    let (host, owner, name) = match parts.as_slice() {
+        [owner, name] => ("github.com", *owner, *name),
+        [host, owner, name] => (*host, *owner, *name),
+        _ => return None,
+    };
+    [host, owner, name].iter().all(|part| !matches!(*part, "" | "." | "..") &&
+        part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
+        .then(|| format!("{host}/{owner}/{name}").to_ascii_lowercase())
 }
 
-/// The GitHub `owner/repo` of a checkout's `origin`, when it has one.
-fn origin_slug(dir: &Path) -> Option<String> {
-    repo_slug(&git_output(dir, &["remote", "get-url", "origin"])?)
+fn origin_identity(dir: &Path) -> Option<String> {
+    repo_identity(&git_output(dir, &["config", "--get", "remote.origin.url"])?)
+}
+
+fn same_repository(configured: &str, actual: &str, cwd: &Path) -> bool {
+    if configured == actual {
+        return true;
+    }
+    let (Some(origin), Some(actual)) = (
+        configured.strip_prefix("github.com/"),
+        actual.strip_prefix("github.com/"),
+    ) else { return false };
+    crate::github_repo::resolve_slug(origin, cwd, Path::new(&gh_bin()), GH_LOOKUP_TIMEOUT)
+        .is_ok_and(|repo| repo.canonical.eq_ignore_ascii_case(actual))
 }
 
 fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -605,7 +670,7 @@ pub(crate) fn github_merge_refusal_with_supervisor(
     if lookups.is_empty() { return None; }
     for (_, lookup) in &lookups {
         match lookup {
-            Ok(pr) => if let Some(refusal) = verifier::merge_refusal(cas_root, pr, supervisor) {
+            Ok(pr) => if let Some(refusal) = verifier::merge_refusal(cas_root, cwd, pr, supervisor) {
                 return Some(refusal);
             },
             Err(error) => tracing::warn!(%error, "Raw GitHub merge: verifier could not resolve PR head"),
@@ -635,22 +700,25 @@ pub(crate) fn github_merge_refusal_with_supervisor(
     }
     // cas-0169: a round belongs to the repository its delivery lives in. A
     // task whose repository has no GitHub origin stays in scope (fail closed).
-    let task_slugs: Vec<Option<String>> = gated
+    let task_repositories: Vec<_> = gated
         .iter()
-        .map(|(task, _)| origin_slug(&task_repo(cas_root, task)))
+        .map(|(task, _)| {
+            let directory = task_repo(cas_root, task);
+            origin_identity(&directory).map(|identity| (directory, identity))
+        })
         .collect();
     lookups
         .iter()
         .find_map(|(merge, lookup)| {
             // `gh` merges in `--repo`, else in the repository it runs in.
             let target = lookup.as_ref().ok().and_then(PrMetadata::repository)
-                .or_else(|| merge.repo.as_deref().and_then(repo_slug))
-                .or_else(|| origin_slug(cwd));
+                .or_else(|| merge.repo.as_deref().and_then(repo_identity))
+                .or_else(|| origin_identity(cwd));
             let scoped: Vec<(Task, Vec<QaPass>)> = gated
                 .iter()
-                .zip(&task_slugs)
-                .filter(|(_, slug)| match (&target, slug) {
-                    (Some(target), Some(slug)) => target == slug,
+                .zip(&task_repositories)
+                .filter(|(_, repository)| match (&target, repository) {
+                    (Some(target), Some((directory, identity))) => same_repository(identity, target, directory),
                     _ => true,
                 })
                 .map(|(entry, _)| entry.clone())
@@ -678,7 +746,7 @@ fn refusal_for_merge(
     });
     let head_branch = resolved.and_then(PrMetadata::branch).map(str::to_string)
         .or_else(|| match &merge.selector {
-            MergeSelector::Branch(branch) => Some(branch.clone()),
+            MergeSelector::Branch(branch) => Some(branch.split_once(':').map_or(branch.as_str(), |(_, bare)| bare).to_string()),
             MergeSelector::CurrentBranch => git_output(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]),
             _ => None,
         });
@@ -1032,11 +1100,11 @@ mod tests {
         );
         assert_eq!(
             only("gh pr merge acme:factory/w-1").selector,
-            MergeSelector::Branch("factory/w-1".to_string())
+            MergeSelector::Branch("acme:factory/w-1".to_string())
         );
         let url = only("gh pr merge https://github.com/acme/gabber/pull/2546 --squash");
         assert_eq!(url.selector, MergeSelector::Number(2546));
-        assert_eq!(url.repo.as_deref(), Some("acme/gabber"));
+        assert_eq!(url.repo.as_deref(), Some("github.com/acme/gabber"));
         let flagged = only(
             "cd /repo && /usr/bin/gh pr merge -R acme/gabber --body 'x' --match-head-commit abc123 77",
         );
@@ -1187,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_slugs_compare_owner_and_name_across_spellings() {
+    fn repository_identity_compares_host_owner_and_name() {
         for value in [
             "Richards-LLC/cassy",
             "github.com/richards-llc/cassy",
@@ -1196,16 +1264,16 @@ mod tests {
             "ssh://git@github.com/Richards-LLC/cassy/",
         ] {
             assert_eq!(
-                repo_slug(value).as_deref(),
-                Some("richards-llc/cassy"),
+                repo_identity(value).as_deref(),
+                Some("github.com/richards-llc/cassy"),
                 "{value}"
             );
         }
-        assert_eq!(repo_slug("cassy"), None);
-        assert_eq!(repo_slug(""), None);
+        assert_eq!(repo_identity("cassy"), None);
+        assert_eq!(repo_identity(""), None);
         assert_ne!(
-            repo_slug("Richards-LLC/petra-stella-cloud"),
-            repo_slug("Richards-LLC/cassy")
+            repo_identity("github.example.com/Richards-LLC/cassy"),
+            repo_identity("Richards-LLC/cassy")
         );
     }
 

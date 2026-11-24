@@ -13619,15 +13619,24 @@ mod worker_commit_guard_tests {
         git(&["commit", "--allow-empty", "-m", "prepared candidate"]);
         let candidate_head = git(&["rev-parse", "HEAD"]);
         assert_ne!(candidate_head, head);
+        git(&["branch", "fixture-target", &candidate_head]);
+        let pr_branch = repo.path().join("pr-branch");
+        std::fs::write(&pr_branch, "factory/proof").unwrap();
+        env.set("CAS_TEST_PR_BRANCH", &pr_branch);
         let gh = repo.path().join("gh");
         crate::test_paths::warm_stub(
             &gh,
             r#"#!/bin/sh
+if [ "$1 $2 $3 $4 $5" = 'repo view old/project --json nameWithOwner' ]; then
+  printf '{"nameWithOwner":"acme/project"}'
+  exit
+fi
 printf '%s\n' "$*" >> "$CAS_TEST_PR_LOOKUPS"
+branch=$(cat "$CAS_TEST_PR_BRANCH")
 if [ "$1 $2" = 'api graphql' ]; then
   [ "$6" = "id=PR_fixture" ] || exit 1
   case "$4" in
-    *'number url headRefName headRefOid'*) printf '{"data":{"node":{"number":2546,"url":"https://github.com/acme/project/pull/2546","headRefName":"factory/proof","headRefOid":"%s"}}}' "$CAS_TEST_PR_HEAD";;
+    *'number url headRefName headRefOid'*) printf '{"data":{"node":{"number":2546,"url":"https://github.com/acme/project/pull/2546","headRefName":"%s","headRefOid":"%s"}}}' "$branch" "$CAS_TEST_PR_HEAD";;
     *) exit 1;;
   esac
   exit
@@ -13646,11 +13655,11 @@ case "$repository" in
 esac
 head=$CAS_TEST_PR_HEAD
 case "$repository:$selector" in
-  acme/project:2546|other/project:2546) number=2546; branch=factory/proof;;
+  acme/project:2546|other/project:2546) number=2546;;
   acme/project:2547) number=2547; branch=factory/other;;
   acme/project:2548) number=2548; branch=factory/proof; head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
-  acme/project:fork:factory/renamed) number=2546; branch=factory/renamed;;
-  acme/project:factory/renamed) number=2549; branch=factory/renamed; head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
+  acme/project:fork:factory/renamed) [ "$branch" = factory/renamed ] || exit 1; number=2546;;
+  acme/project:factory/renamed|acme/project:2549) number=2549; branch=factory/renamed; head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
   *) exit 1;;
 esac
 IFS=,
@@ -13772,6 +13781,7 @@ printf '}'
         run("worker", graphql, Some("PR_VERIFIER_REJECTED"));
         run("worker", &merge(2547), None);
         run("worker", &merge(2548), None);
+        run("worker", &merge(2549), None);
         run("worker", &format!("{command} --repo other/project"), None);
         run("supervisor", &command, None);
         let overrides = events.list_by_type(EventType::GateOverridden, 10).unwrap();
@@ -13781,7 +13791,9 @@ printf '}'
         assert_eq!(audit["detail"], format!("{}: {reason}", first.id));
 
         let variables_denial = denial_for("worker", graphql_variables);
+        std::fs::write(&pr_branch, "factory/renamed").unwrap();
         let owner_denial = denial_for("worker", owner_branch);
+        std::fs::write(&pr_branch, "factory/proof").unwrap();
         let enterprise_denial = denial_for("worker", enterprise_url);
         let enterprise_rest_denial = denial_for("worker", enterprise_rest);
         cas_store::request_changes_for_parked_delivery(&cas_root, &task.id, &supervisor.id, "repair fixture").unwrap();
@@ -13806,6 +13818,21 @@ printf '}'
         run("worker", &command, None);
         run("worker", api, None);
         run("worker", graphql, None);
+
+        git(&["remote", "set-url", "origin", "https://github.com/old/project.git"]);
+        let current = open_task_store(&cas_root).unwrap().get(&task.id).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let candidate = core.build_completion_candidate(&current, repo.path(), "factory/proof", "fixture-target").unwrap();
+        assert_ne!(candidate.proof.head_commit, head);
+        let candidate_dispatch = cas_store::create_verification_dispatch_bound(
+            &cas_root, &task.id, &supervisor.id, &supervisor.id,
+            &VerificationProofBoundary::task_at(candidate.proof),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        run("worker", &command, Some("PR_VERIFIER_PENDING"));
+        verdict(&candidate_dispatch, VerificationStatus::Rejected);
+        run("worker", &command, Some("PR_VERIFIER_REJECTED"));
+        run("worker", &merge(2548), None);
     }
 
     #[test]

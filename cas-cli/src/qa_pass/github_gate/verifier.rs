@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Duration,
+};
 
 use cas_types::{
     AgentRole, AgentStatus, EventEntityType, EventType, VerificationDispatchState,
@@ -6,18 +10,22 @@ use cas_types::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{PrMetadata, origin_slug, repo_slug};
+use super::{PrMetadata, origin_identity, repo_identity, same_repository};
 use crate::mcp::tools::core::{
-    task::repo_context::resolve_repo_context,
-    workflow::premerge_verification::original_candidate_for_dispatch,
+    task::repo_context::{BoundedRepoProbe, git_layout, resolve_repo_context},
+    workflow::premerge_verification::{
+        CANDIDATE_COMMIT_PREFIX, Candidate, original_candidate_at_ref,
+    },
 };
+use crate::store::{KnownRepoStore, known_repos::open_host_known_repo_store};
 
 pub(super) fn merge_refusal(
     cas_root: &Path,
+    cwd: &Path,
     pr: &PrMetadata,
     supervisor: Option<&str>,
 ) -> Option<String> {
-    match check_pr(cas_root, pr, supervisor) {
+    match check_pr(cas_root, cwd, pr, supervisor) {
         Ok(refusal) => refusal,
         Err(error) => {
             tracing::warn!(%error, "Raw GitHub merge: verifier state unreadable");
@@ -26,23 +34,119 @@ pub(super) fn merge_refusal(
     }
 }
 
-fn dispatch_rows(conn: &Connection) -> rusqlite::Result<rusqlite::Statement<'_>> {
-    conn.prepare(
-        "SELECT d.id, d.task_id, json_extract(task.deliverables, '$.delivery_pr_number'),
+enum Binding<'a> {
+    Receipt(WorkTarget),
+    Candidate(&'a Candidate),
+}
+
+struct DispatchRow<'a> {
+    id: String,
+    task_id: String,
+    requested_at: String,
+    pr_number: Option<u64>,
+    source_branch: String,
+    binding: Binding<'a>,
+}
+
+fn dispatch_rows<'a>(conn: &Connection, head: &str, candidates: &'a [Candidate]) -> rusqlite::Result<Vec<DispatchRow<'a>>> {
+    let mut receipt_query = conn.prepare(
+        "SELECT d.id, d.task_id, d.requested_at, json_extract(task.deliverables, '$.delivery_pr_number'),
                 r.source_branch, r.repo_selector, r.target_branch
-         FROM verification_dispatches d
+         FROM worker_completion_receipts r
+         CROSS JOIN worker_delivery_transactions t ON t.receipt_id=r.id AND t.task_id=r.task_id
+         CROSS JOIN verification_dispatches d
+            ON d.delivery_transaction_id=t.id AND d.receipt_id=r.id AND d.task_id=r.task_id
          JOIN tasks task ON task.id=d.task_id
-         LEFT JOIN worker_delivery_transactions t
-            ON t.id=d.delivery_transaction_id AND t.receipt_id=d.receipt_id AND t.task_id=d.task_id
-         LEFT JOIN worker_completion_receipts r ON r.id=t.receipt_id AND r.task_id=d.task_id
-         WHERE r.commit_sha=?1 OR (d.delivery_transaction_id IS NULL AND d.repository_proof IS NOT NULL)
-         ORDER BY d.requested_at DESC, d.id DESC",
-    )
+         WHERE r.commit_sha=?1",
+    )?;
+    let pr_number = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Option<u64>> {
+        Ok(row.get::<_, Option<i64>>(3)?.and_then(|number| u64::try_from(number).ok()))
+    };
+    let mut rows = receipt_query.query_map([head], |row| Ok(DispatchRow {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        requested_at: row.get(2)?,
+        pr_number: pr_number(row)?,
+        source_branch: row.get(4)?,
+        binding: Binding::Receipt(WorkTarget { repo_selector: row.get(5)?, target_branch: row.get(6)? }),
+    }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if !candidates.is_empty() {
+        let mut candidate_query = conn.prepare(
+            "SELECT d.id, d.task_id, d.requested_at, json_extract(task.deliverables, '$.delivery_pr_number')
+             FROM verification_dispatches d JOIN tasks task ON task.id=d.task_id
+             WHERE d.task_id=?1 AND d.delivery_transaction_id IS NULL
+                AND json_extract(d.repository_proof, '$.head_commit')=?2",
+        )?;
+        for candidate in candidates {
+            for row in candidate_query.query_map(params![candidate.task_id, candidate.proof.head_commit], |row| Ok(DispatchRow {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                requested_at: row.get(2)?,
+                pr_number: pr_number(row)?,
+                source_branch: candidate.source_branch.clone(),
+                binding: Binding::Candidate(candidate),
+            }))? {
+                rows.push(row?);
+            }
+        }
+    }
+    rows.sort_unstable_by(|first, second| {
+        (&second.requested_at, &second.id).cmp(&(&first.requested_at, &first.id))
+    });
+    Ok(rows)
+}
+
+fn source_candidates(cas_root: &Path, cwd: &Path, head: &str, repository: &str) -> Vec<Candidate> {
+    if !cas_root.join("verification-candidates").is_dir() {
+        return Vec::new();
+    }
+    let mut directories: HashSet<_> = [cas_root, cwd].into_iter()
+        .filter_map(|path| git_layout(path).ok().map(|(root, _)| root)).collect();
+    if let Ok(registry) = open_host_known_repo_store() {
+        if let Ok(repos) = registry.list() {
+            directories.extend(repos.into_iter().map(|repo| repo.path));
+        }
+        if let Ok(bindings) = registry.list_bindings() {
+            directories.extend(bindings.into_iter().map(|binding| binding.repo_root));
+        }
+    }
+    let probe = BoundedRepoProbe::new(
+        crate::bounded_process::Deadline::after(Duration::from_secs(4)),
+        Duration::from_secs(1),
+        directories.len(),
+    );
+    let mut candidates = Vec::new();
+    for directory in directories {
+        let Ok(refs) = probe.output(&directory, &[
+            "for-each-ref", "--format=%(objectname)%09%(parent)%09%(tree)%09%(refname:strip=3)%09%(subject)",
+            "refs/cas/verification-candidates/",
+        ]) else { continue };
+        let mut matching = refs.lines().filter_map(|line| {
+            let mut fields = line.splitn(5, '\t');
+            let (commit, parents, tree, key, subject) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+            (parents.split_whitespace().nth(1) == Some(head)
+                && subject.strip_prefix(CANDIDATE_COMMIT_PREFIX) == Some(key))
+                .then_some((commit, tree, key))
+        }).peekable();
+        if matching.peek().is_none() || !origin_identity(&directory)
+            .is_some_and(|identity| same_repository(&identity, repository, &directory)) {
+            continue;
+        }
+        for (commit, tree, key) in matching {
+            match original_candidate_at_ref(cas_root, &directory, key, commit, tree) {
+                Ok(candidate) if candidate.source_sha == head => candidates.push(candidate),
+                Ok(_) => {},
+                Err(error) => tracing::warn!(%commit, %error, "Raw GitHub merge: verifier candidate unreadable"),
+            }
+        }
+    }
+    candidates
 }
 
 // gate-audit[audited_override]: bypass H-24 A registered supervisor may override a rejected dispatch only after the reason is recorded.
 fn check_pr(
     cas_root: &Path,
+    cwd: &Path,
     pr: &PrMetadata,
     supervisor: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
@@ -56,41 +160,26 @@ fn check_pr(
         cas_root.join("cas.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    let mut statement = dispatch_rows(&conn)?;
-    let mut rows = statement.query([head])?;
+    let candidates = source_candidates(cas_root, cwd, head, &repo);
     let mut decided = HashSet::new();
-    while let Some(row) = rows.next()? {
-        let dispatch_id: String = row.get(0)?;
-        let task_id: String = row.get(1)?;
-        if decided.contains(&task_id) {
+    let mut receipt_repos = HashMap::new();
+    for row in dispatch_rows(&conn, head, &candidates)? {
+        let DispatchRow { id: dispatch_id, task_id, pr_number, source_branch, binding, .. } = row;
+        if decided.contains(&task_id) || (pr_number != Some(number) && source_branch != branch) {
             continue;
         }
-        let task_pr = row.get::<_, Option<i64>>(2)?.and_then(|value| u64::try_from(value).ok());
-        let source_branch: Option<String> = row.get(3)?;
+        if let Binding::Receipt(target) = &binding {
+            let matched = receipt_repos.entry((target.repo_selector.clone(), target.target_branch.clone()))
+                .or_insert_with(|| receipt_repo(cas_root, target)
+                    .is_some_and(|identity| same_repository(&identity, &repo, cwd)));
+            if !*matched {
+                continue;
+            }
+        }
         let dispatch = cas_store::get_verification_dispatch_with_conn(&conn, &dispatch_id)?;
-        if let Some(source_branch) = source_branch {
-            if task_pr != Some(number) && source_branch != branch {
-                continue;
-            }
-            let target = WorkTarget { repo_selector: row.get(4)?, target_branch: row.get(5)? };
-            if receipt_repo(cas_root, &target).as_deref() != Some(repo.as_str()) {
-                continue;
-            }
-        } else {
-            if !dispatch.repository.as_ref().is_some_and(|proof| {
-                origin_slug(Path::new(&proof.repository_root)).as_deref() == Some(repo.as_str())
-            }) {
-                continue;
-            }
-            match original_candidate_for_dispatch(cas_root, &dispatch) {
-                Ok(Some(candidate)) if candidate.source_sha == head &&
-                    (task_pr == Some(number) || candidate.source_branch == branch) => {}
-                Ok(_) => continue,
-                Err(error) => {
-                    tracing::warn!(%task_id, %dispatch_id, %error, "Raw GitHub merge: verifier candidate unreadable");
-                    continue;
-                }
-            }
+        if let Binding::Candidate(candidate) = binding
+            && dispatch.repository.as_ref() != Some(&candidate.proof) {
+            continue;
         }
         let verdict = match dispatch.state {
             VerificationDispatchState::Pending
@@ -157,25 +246,21 @@ mod tests {
                 params![task_id, serde_json::json!({"repository_root": repo.path(), "head_commit": "a".repeat(40)}).to_string()],
             ).unwrap();
         }
-        let mut statement = dispatch_rows(&conn).unwrap();
-        let mut rows = statement.query(["b".repeat(40)]).unwrap();
-        let mut count = 0;
-        while rows.next().unwrap().is_some() {
-            count += 1;
-        }
-        assert_eq!(count, 0);
+        let head = "b".repeat(40);
+        let candidates = source_candidates(&root, repo.path(), &head, "github.com/acme/project");
+        assert_eq!(dispatch_rows(&conn, &head, &candidates).unwrap().len(), 0);
     }
 }
 
 fn receipt_repo(cas_root: &Path, target: &WorkTarget) -> Option<String> {
     let selector = &target.repo_selector;
     if !selector.starts_with("project:")
-        && let Some(repo) = repo_slug(selector.strip_prefix("remote:").unwrap_or(selector))
+        && let Some(repo) = repo_identity(selector.strip_prefix("remote:").unwrap_or(selector))
     {
         return Some(repo);
     }
     match resolve_repo_context(cas_root, target) {
-        Ok(context) => origin_slug(&context.repo_root),
+        Ok(context) => origin_identity(&context.repo_root),
         Err(error) => {
             tracing::warn!(%error, "Raw GitHub merge: verifier receipt repository unreadable");
             None

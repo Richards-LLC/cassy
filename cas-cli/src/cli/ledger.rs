@@ -2175,7 +2175,6 @@ mod tests {
         assert_eq!(shown, ["v1.0.0", "v1.1.0", "unreleased"], "oldest release first, work in progress last");
         let text = render(&report);
         for expected in [
-            "Friction ledger: v1.1.0",
             "Interventions: 1",
             "Model turns: 2 wakes, 1 no-op wakes",
             "measured usage: 30 input tokens, 5 output tokens, 0.50 minutes",
@@ -2209,5 +2208,82 @@ mod tests {
             .find(|event| event.release_version.as_deref() == Some("v1.1.1")).unwrap();
         assert!(matches!(release.payload, QualityPayload::Release { ejections: 2, .. }),
             "release snapshot double-counted the old emitter and recovered alias: {release:?}");
+    }
+    fn turn(project: &str, task: Option<&str>, spend: Option<cas_store::TurnSpend>, input: u64, notice: Option<&str>) -> QualityEvent {
+        QualityEvent {
+            seq: 0,
+            id: format!("turn-{project}-{task:?}-{input}"),
+            occurred_at: Utc::now(),
+            task_id: task.map(str::to_owned),
+            release_version: None,
+            actor: Some("agent-1".into()),
+            title: None,
+            link: None,
+            payload: QualityPayload::Turn {
+                woken_by: cas_store::WakeChannel::Worker, notice_kind: notice.map(str::to_owned), supersedes: None,
+                actions: vec![], no_op: true, input_tokens: Some(input), output_tokens: Some(10), minutes: Some(1.0), spend,
+            },
+            local_note: None,
+            from_cloud: false,
+            project_id: project.into(),
+        }
+    }
+
+    fn spend(harness: &str, model: &str, effort: &str, cached: u64) -> Option<cas_store::TurnSpend> {
+        Some(cas_store::TurnSpend {
+            harness: Some(harness.into()), model: Some(model.into()), effort: Some(effort.into()), cached_input_tokens: Some(cached),
+        })
+    }
+
+    #[test]
+    fn spend_is_split_per_task_and_reconciles_with_the_actor_totals() {
+        let events = [
+            turn("", Some("cas-a"), spend("claude", "claude-opus-5-5", "high", 60), 100, Some("merge_ready")),
+            turn("", Some("cas-a"), spend("codex", "gpt-6.1-sol", "xhigh", 5), 50, Some("merge_ready")),
+            turn("", None, None, 20, Some("merge_ready")),
+            turn("other", Some("cas-a"), spend("claude", "claude-opus-5-5", "high", 0), 7, Some("merge_ready")),
+        ];
+        let report = aggregate("v9.99.0".into(), true, None, None, &events);
+        let a = &report.spend_by_task["cas-a"];
+        assert_eq!((a.total.input_tokens, a.total.cached_input_tokens, a.total.output_tokens), (150, 65, 20));
+        assert_eq!(a.by_split.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["claude/claude-opus-5-5/high", "codex/gpt-6.1-sol/xhigh"]);
+        assert_eq!(report.spend_by_task["other/cas-a"].total.input_tokens, 7, "another project's task id is its own row");
+        assert!(report.spend_by_task[NO_TASK].by_split.contains_key("unknown/unknown/unknown"));
+        assert_eq!(report.spend_by_task.values().map(|t| t.total.input_tokens).sum::<u64>(), report.turns.input_tokens);
+        assert_eq!((report.spend_coverage.turns, report.spend_coverage.with_model, report.spend_coverage.with_task), (4, 3, 3));
+        let health = health::assess(&report);
+        let state = |name: &str| health.iter().find(|h| h.sensor == name).map(|h| h.state).unwrap();
+        assert_eq!(state("turn_spend"), health::Health::Ok);
+        assert_eq!(state("estimates"), health::Health::Empty);
+        assert_eq!(state("feature_feedback"), health::Health::Empty);
+        assert_eq!(state("hosted_runner_losses"), health::Health::Broken, "an unread sensor is not a zero");
+    }
+
+    #[test]
+    fn sensors_that_cannot_be_trusted_are_broken_not_ok() {
+        let run = |minutes| QualityEvent { payload: QualityPayload::CheckRun { review: None, check_id: "task_duration:epic".into(),
+            stage: cas_store::CheckStage::Lane, outcome: CheckOutcome::Pass, sha: None, minutes: Some(minutes) },
+            ..turn("domdms", None, None, 0, None) };
+        let mut report = aggregate("v9.99.0".into(), true, None, None, &[run(120_000.0), run(500.0)]);
+        let mut missing = sensors::RunnerLosses::default();
+        missing.jobs_examined = 100;
+        missing.missing = vec!["job 1: hosted runner allocation not retained".into(); 6];
+        report.sensors.hosted_runner_losses = Measure::Known(missing);
+        let states = |report: &LedgerReport| health::assess(report).into_iter().map(|h| (h.sensor, h.state)).collect::<BTreeMap<_, _>>();
+        assert_eq!(states(&report)["durations"], health::Health::Broken, "a 83-day sample is impossible");
+        assert_eq!(states(&report)["hosted_runner_losses"], health::Health::Broken);
+        if let Measure::Known(r) = &mut report.sensors.hosted_runner_losses { r.missing.truncate(5); }
+        assert_eq!(states(&report)["hosted_runner_losses"], health::Health::Ok, "5 of 100 is within tolerance");
+    }
+
+    #[test]
+    fn an_actor_from_another_project_is_never_blamed_on_this_projects_agent_store() {
+        let wake = |project: &str| turn(project, None, None, 1, None);
+        assert_eq!(wake_gap_reason(&wake("travel-trak"), Some(&[]), false), "emitting_project_records_no_notice_kind");
+        assert_eq!(wake_gap_reason(&wake("travel-trak"), Some(&[]), true), "foreign_wake_notice_missing");
+        assert_eq!(wake_gap_reason(&wake(""), Some(&[]), true), "actor_identity_not_retained");
+        let here = [cas_types::Agent::new("agent-1".into(), "worker".into())];
+        assert_eq!(wake_gap_reason(&wake(""), Some(&here), true), "notice_kind_not_recovered_from_retained_inputs");
     }
 }

@@ -369,12 +369,18 @@ pub(super) fn recover_expired_claim_with_probes(
     let Some(child) = dispatch.verifier_agent_id.as_deref().and_then(|id| agents.get(id).ok()) else {
         return Ok(dispatch.clone());
     };
-    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str()) {
+    let machine = cas_types::Agent::get_or_generate_machine_id();
+    let daemon_owned = child.metadata.get(OWNER_KEY) == Some(&dispatch.id);
+    let local = child.machine_id.as_deref() == Some(machine.as_str())
+        || (child.machine_id.is_none() && daemon_owned && owner.machine_id.as_deref() == Some(machine.as_str()));
+    if !local {
         return Ok(dispatch.clone());
     }
     // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
     // review authority needs positive death evidence, not that ambiguity.
-    let confirmed_dead = child.status == cas_types::AgentStatus::Shutdown
+    let stalled = daemon_owned
+        && !crate::factory_review_scratch::verifier_progressing(&core.cas_root, dispatch, Some(&child), now);
+    let confirmed_dead = stalled || child.status == cas_types::AgentStatus::Shutdown
         || child.pid.is_some_and(|pid| {
             if !pid_alive(pid) { return true; }
             child.pid_starttime.or_else(|| child.metadata
@@ -502,6 +508,7 @@ fn launch_with_preparation(
     // The daemon owns this identity and submits the harness's structured
     // verdict. The subprocess never receives a credential or this identity.
     child.pid = Some(std::process::id());
+    child.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
     crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
     child.metadata.insert(OWNER_KEY.into(), live.id.clone());
     child.factory_session = core

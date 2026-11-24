@@ -20,6 +20,29 @@ const commandReceipts = (page: Page) => receiptRegion(page).getByRole("article")
 const conversationLog = (page: Page) => page.getByRole("log");
 const toast = (page: Page, text: string) => page.getByRole("status").filter({ hasText: text });
 
+/** cas-0d58: whether two elements' visible ink overlaps. Text is measured by
+ * its own range, clipped by every overflow-clipping box around it, so text
+ * that spills past a shrunk box counts and text an ellipsis hides does not. */
+async function inkOverlaps(page: Page, a: string, b: string): Promise<boolean> {
+  return page.evaluate(([a, b]) => {
+    const ink = (selector: string) => {
+      const el = document.querySelector(selector);
+      if (!el) throw new Error(`missing ${selector}`);
+      const range = document.createRange(); range.selectNodeContents(el);
+      const text = range.getBoundingClientRect(), box = el.getBoundingClientRect();
+      let { left, top, right, bottom } = { left: Math.min(text.left, box.left), top: Math.min(text.top, box.top), right: Math.max(text.right, box.right), bottom: Math.max(text.bottom, box.bottom) };
+      for (let node: Element | null = el; node && node !== document.body; node = node.parentElement) {
+        if (getComputedStyle(node).overflowX === "visible") continue;
+        const clip = node.getBoundingClientRect();
+        left = Math.max(left, clip.left); right = Math.min(right, clip.right); top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom);
+      }
+      return { left, top, right, bottom };
+    };
+    const [x, y] = [ink(a), ink(b)];
+    return x.left < x.right && y.left < y.right && x.left < y.right - 0.5 && y.left < x.right - 0.5 && x.top < y.bottom - 0.5 && y.top < x.bottom - 0.5;
+  }, [a, b] as const);
+}
+
 async function captureReload(page: Page, name: string, width: number): Promise<void> {
   const dir = process.env.QA_ARTIFACTS;
   if (!dir) return;
@@ -235,6 +258,14 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         // A phone restores the open conversation over the list; a desktop shows both.
         if (await conversationRow(page).isVisible()) await conversationRow(page).click();
         await expect(page.getByTestId("conversation-cassy")).toContainText("9.99.2");
+        // cas-0d58: the badges stay in their own columns, clear of the label and actions.
+        expect(await inkOverlaps(page, "[data-testid=conversation-cassy]", "[data-testid=conversation-header-actions]")).toBe(false);
+        expect(await inkOverlaps(page, "[data-testid=conversation-cassy]", "[data-testid=host-machine]")).toBe(false);
+        if (phone) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+        await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toBeVisible();
+        expect(await inkOverlaps(page, "[aria-current=true] [data-testid=supervisor-version]", "[aria-current=true] [data-testid=conversation-machine-name]")).toBe(false);
+        await captureReload(page, "badges-clear", viewport.width);
+        if (phone) await conversationRow(page).click();
       });
       await journey.stage("Open the header dropdown beside its button, then submit typed reload-cassy without chat", async () => {
         // On a phone the palette opens under the overflow toggle it was chosen from.

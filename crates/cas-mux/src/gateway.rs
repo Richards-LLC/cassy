@@ -16,8 +16,22 @@ use crate::pty::PtyConfig;
 /// Worker transport recorded on the agent row and shown by worker_status.
 pub const TRANSPORT_ENV: &str = "CAS_FACTORY_WORKER_TRANSPORT";
 /// A session's pinned worker route (`gateway` or `direct`), set on the
-/// factory daemon by Commander's New Session. Absent: the project's setting.
+/// factory daemon by Commander's New Session, or by [`pin_at_start`] for any
+/// other start.
 pub const ROUTE_ENV: &str = "CAS_FACTORY_GATEWAY";
+
+/// A factory daemon fixes its worker route once, when it starts. Commander's
+/// launch already set [`ROUTE_ENV`]; any other start (`cas claude`, `cas
+/// factory`) takes the project's setting now, so a later config edit never
+/// changes this session's workers. The variable survives the daemon's re-exec.
+pub fn pin_at_start(cas_root: &Path) {
+    if std::env::var_os(ROUTE_ENV).is_some() {
+        return;
+    }
+    let route = if merged(cas_root).enabled { "gateway" } else { "direct" };
+    // SAFETY: called while the daemon builds its factory, before it spawns any worker.
+    unsafe { std::env::set_var(ROUTE_ENV, route) };
+}
 const CODEX_PROVIDER: &str = "cas_gateway";
 
 #[derive(Debug, PartialEq, Eq)]

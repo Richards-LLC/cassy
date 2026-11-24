@@ -183,13 +183,19 @@ it("lists hub accounts apart from native profiles, read-only, and only when the 
     accounts: [{ provider: "claude", label: "hel***@example.test", state: "active", recent_requests: 6, recent_failed: 1, recent_minutes: 200 }, { provider: "codex", label: "pro***@example.test", state: "disabled", recent_requests: 0, recent_failed: 0 }] };
   // An older hub's catch-all `{}` must not take the native ledger down with it (lane CI HUB-J13).
   // No route or an unknown answer draws nothing; a machine with no hub says so; a configured hub lists its accounts.
-  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, undefined], [async () => ({}) as GatewayInventory, undefined], [async () => ({ ...hub, status: "off" as const, accounts: [] }), "off"], [async () => hub, "unavailable"]] as const) {
+  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, undefined], [async () => ({}) as GatewayInventory, undefined], [async () => ({ ...hub, status: "off" as const, inventory: "off" as const, accounts: [] }), "off"], [async () => hub, "unavailable"], [async () => ({ ...hub, status: "off" as const, reason: undefined }), "off-listed"]] as const) {
     setup(true, row, undefined, gateway);
     await settle();
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(document.querySelector('.accounts-row[data-login-state="stale_login"]')).not.toBeNull();
     const section = document.querySelector<HTMLElement>('[data-testid="accounts-gateway"]');
-    expect(section?.dataset.gatewayStatus).toBe(shown);
+    expect(section?.dataset.gatewayStatus).toBe(shown === "off-listed" ? "off" : shown);
+    // A dashboard-only machine (routing off) still lists the hub's accounts, read-only.
+    if (section && shown === "off-listed") {
+      expect(section.querySelectorAll(".accounts-hub-row")).toHaveLength(2);
+      expect(section.querySelector('[data-testid="gateway-routing-off"]')).not.toBeNull();
+      expect(section.querySelectorAll("button, input, select")).toHaveLength(0);
+    }
     if (section && shown === "unavailable") {
       expect(section.querySelectorAll(".accounts-hub-row")).toHaveLength(2);
       expect(section.querySelectorAll("button, input, select")).toHaveLength(0);

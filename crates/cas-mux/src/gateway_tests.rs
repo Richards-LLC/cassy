@@ -209,3 +209,42 @@ fn session_pin_overrides_the_project_setting_in_both_directions() {
         assert_eq!(settings.endpoint.is_some(), routed, "project={project} pin={pin:?}");
     }
 }
+
+/// A CLI-started daemon pins the project's route at startup; flipping the
+/// project setting afterwards never changes what its next worker gets. Runs
+/// in a child process because the pin is process environment.
+#[test]
+fn a_cli_started_daemon_keeps_its_startup_route_after_the_project_setting_flips() {
+    const CHILD: &str = "CAS_TEST_GATEWAY_PIN_CHILD";
+    let Ok(start) = std::env::var(CHILD) else {
+        for start in ["true", "false"] {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "gateway::tests::a_cli_started_daemon_keeps_its_startup_route_after_the_project_setting_flips", "--nocapture"])
+                .env(CHILD, start)
+                .env_remove(ROUTE_ENV)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "start={start}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"), "start={start}: child ran no test");
+        }
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join(".cas");
+    let account = temp.path().join("account");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::create_dir_all(&account).unwrap();
+    let endpoint = hub();
+    let key = key_file(temp.path(), "client.key", KEY, 0o600);
+    let hub_settings = format!("endpoint = \"{endpoint}/\"\nkey_file = \"{}\"\n", key.display());
+    write_config(&cas_root, &format!("enabled = {start}\n{hub_settings}"));
+    // The daemon starts (the same hook fork_first and app init call), then the project flips.
+    pin_at_start(&cas_root);
+    let flipped = if start == "true" { "false" } else { "true" };
+    write_config(&cas_root, &format!("enabled = {flipped}\n{hub_settings}"));
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let worker = build(cli, &cas_root, &account);
+        let routed = transport(&worker) == Some(format!("gateway {endpoint}").as_str());
+        assert_eq!(routed, start == "true", "{cli:?}: startup route must hold after the flip");
+    }
+}

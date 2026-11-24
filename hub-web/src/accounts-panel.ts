@@ -53,13 +53,15 @@ const HUB_STATE: Record<string, [string, string]> = { active: ["Active", "active
 /**
  * The hub's own accounts, a sibling ledger on the same grid as the native one.
  * Nothing here is selectable; a native profile never pins one of these.
- * An older hub (no route) or an unknown answer draws nothing; a machine with
- * no hub configured says so in one quiet line.
+ * An older hub (no route) or an unknown answer draws nothing. Routing and
+ * the hub's account list are independent: a machine with only the dashboard
+ * keys says routing is off and still lists the hub's accounts read-only.
  */
 export function gatewaySection(machine: AccountsMachine, gateway: GatewayInventory | undefined): string {
   if (!gateway || !["off", "ready", "unavailable"].includes(gateway.status) || !Array.isArray(gateway.accounts)) return "";
   const name = escapeHtml(machine.label);
-  if (gateway.status === "off") return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="off" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider">Home gateway · Off</h4></div><p class="accounts-quiet">Gateway routing is off on ${name}. Workers run direct.</p></section>`;
+  const off = gateway.status === "off";
+  if (off && gateway.inventory === "off") return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="off" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider">Home gateway · Off</h4></div><p class="accounts-quiet">Gateway routing is off on ${name}. Workers run direct.</p></section>`;
   const ready = gateway.status === "ready";
   const where = gateway.host === "loopback" ? "on this machine" : gateway.host === "tailnet" ? "on the tailnet" : "";
   const reason = gateway.reason ? `<p class="accounts-flag" data-testid="gateway-reason">${escapeHtml(gateway.reason)}. Gateway-routed workers start direct until the hub is ready.</p>` : "";
@@ -70,8 +72,9 @@ export function gatewaySection(machine: AccountsMachine, gateway: GatewayInvento
       const [label, tone] = HUB_STATE[account.state] ?? ["State unknown", "open"];
       const provider = HARNESS_NAME[account.provider as keyof typeof HARNESS_NAME] ?? account.provider;
       return `<li class="accounts-row accounts-hub-row" data-testid="gateway-row" data-hub-state="${escapeHtml(account.state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.label)}">${escapeHtml(account.label)}</strong><span class="accounts-sub">${escapeHtml(provider)}</span></div></div><div class="accounts-cell"><span class="status-chip status-chip--${tone}">${label}</span></div><div class="accounts-cell accounts-num"><span>${account.recent_requests} request${account.recent_requests === 1 ? "" : "s"}</span>${account.recent_failed ? `<span class="accounts-flag"> · ${account.recent_failed} failed</span>` : ""}</div></li>`;
-    }).join("")}</ul>` : `<p class="accounts-quiet">No accounts on the hub.</p>`;
-  return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="${gateway.status}" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider" title="${escapeHtml(`${where ? `${where} · ` : ""}gateway-routed workers draw on these; the hub picks per request`)}">Home gateway · ${ready ? "Ready" : "Not ready"}</h4></div>${reason}${rows}${team}</section>`;
+    }).join("")}</ul><p class="accounts-quiet" data-testid="gateway-attribution">Which hub account served each worker is shown in the hub's own dashboard.</p>` : `<p class="accounts-quiet">No accounts on the hub.</p>`;
+  const routing = off ? `<p class="accounts-quiet" data-testid="gateway-routing-off">Gateway routing is off on ${name}; its workers run direct. The hub's accounts are listed read-only.</p>` : "";
+  return `<section class="accounts-gateway" data-testid="accounts-gateway" data-gateway-status="${gateway.status}" aria-label="Home gateway on ${name}"><div class="accounts-group-head"><h4 class="accounts-provider" title="${escapeHtml(off ? "read-only hub inventory" : `${where ? `${where} · ` : ""}gateway-routed workers draw on these; the hub picks per request`)}">Home gateway · ${off ? "Routing off" : ready ? "Ready" : "Not ready"}</h4></div>${routing}${reason}${rows}${team}</section>`;
 }
 
 /** Body-mounted modal: shell redraws do not destroy edits or confirmations. */

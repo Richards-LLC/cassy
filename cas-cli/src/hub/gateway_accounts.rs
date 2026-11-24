@@ -81,17 +81,25 @@ pub(crate) struct GatewayInventory {
 }
 
 pub(crate) fn inventory() -> GatewayInventory {
-    let settings = cas_mux::gateway::user_settings();
-    let Some(endpoint) = settings.endpoint.as_deref().filter(|endpoint| !endpoint.trim().is_empty()) else {
-        return GatewayInventory { status: "off", inventory: "off", ..Default::default() };
-    };
-    let readiness = cas_mux::gateway::readiness(&settings);
-    let mut inventory = GatewayInventory {
-        status: if readiness.is_ok() { "ready" } else { "unavailable" },
-        reason: readiness.err().map(|reason| home_relative(&reason)),
-        host: cas_mux::gateway::host_kind(endpoint),
-        inventory: "off",
-        ..Default::default()
+    inventory_with(&cas_mux::gateway::user_settings())
+}
+
+/// Routing readiness and the hub's accounts are independent: a machine with
+/// only the dashboard keys (no endpoint) routes nothing, yet still lists the
+/// hub's accounts read-only.
+fn inventory_with(settings: &cas_types::factory_gateway::FactoryGatewayConfig) -> GatewayInventory {
+    let mut inventory = match settings.endpoint.as_deref().filter(|endpoint| !endpoint.trim().is_empty()) {
+        None => GatewayInventory { status: "off", inventory: "off", ..Default::default() },
+        Some(endpoint) => {
+            let readiness = cas_mux::gateway::readiness(settings);
+            GatewayInventory {
+                status: if readiness.is_ok() { "ready" } else { "unavailable" },
+                reason: readiness.err().map(|reason| home_relative(&reason)),
+                host: cas_mux::gateway::host_kind(endpoint),
+                inventory: "off",
+                ..Default::default()
+            }
+        }
     };
     let Some(dashboard) = settings.dashboard.as_deref().filter(|url| !url.trim().is_empty()) else {
         return inventory;
@@ -414,6 +422,40 @@ mod tests {
             ..Default::default()
         };
         assert!(cas_mux::gateway::readiness(&dashboard_only).is_err());
+    }
+
+    /// prowl's approved setup: dashboard keys, no routing endpoint. The real
+    /// `/v1/accounts/gateway` body reports routing off and still lists the
+    /// hub's accounts from the dashboard.
+    #[test]
+    fn a_dashboard_only_machine_lists_hub_accounts_with_routing_off() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dashboard = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut request = [0u8; 2048];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let authorized = String::from_utf8_lossy(&request[..read]).contains("Bearer admin-key");
+                let body = serde_json::json!({"files": [{"provider": "claude", "email": "hello@example.com", "recent_requests": []}]}).to_string();
+                let status = if authorized { "200 OK" } else { "401 Unauthorized" };
+                let _ = stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let key = temp.path().join("admin.key");
+        std::fs::write(&key, "admin-key\n").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let settings = cas_types::factory_gateway::FactoryGatewayConfig {
+            dashboard: Some(dashboard),
+            dashboard_key_file: Some(key.display().to_string()),
+            ..Default::default()
+        };
+        let inventory = inventory_with(&settings);
+        assert_eq!((inventory.status, inventory.inventory), ("off", "ok"));
+        assert_eq!(inventory.accounts.len(), 1);
+        assert!(cas_mux::gateway::readiness(&settings).is_err(), "no endpoint: this machine's workers stay direct");
     }
 
     /// Team plans are counted, never listed; labels are masked.

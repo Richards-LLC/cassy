@@ -10681,10 +10681,11 @@ impl CasCore {
                     && verdict.status == VerificationStatus::Approved
                     && !no_code_review_covers_current_proof(&task, &dispatch.id)
                 {
-                    close_notes.record(&mut task, &format!(
+                    let stale_note = format!(
                         "Approval {} (dispatch {}) covers an earlier no-code proof than {}; a new independent verdict is required.",
                         verdict.id, dispatch.id, task.external_ref.as_deref().unwrap_or("<none>"),
-                    ));
+                    );
+                    close_notes.record(&mut task, &stale_note);
                     superseded_approved_verdict_id = Some(verdict.id);
                     cas_store::invalidate_verification_dispatch_for_repository_drift(&self.cas_root, &dispatch.id)
                         .map_err(|error| McpError {

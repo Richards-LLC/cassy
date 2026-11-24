@@ -912,9 +912,15 @@ mod tests {
                 let check = || qa_evidence_close_gate_for_paths(
                     &root, &task, repo, target, Some(&head), Some(&changed), Some(&base),
                 );
-                let result = check();
                 let batch_park = expected == crate::config::QaMode::Batch
                     && integration != Some(true);
+                if batch_park {
+                    cas_store::waive_qa_pass(
+                        &root, &task.id, "supervisor", "worker", "factory/worker", &head,
+                        "Reviewed the exact delivery", chrono::Utc::now(),
+                    ).unwrap();
+                }
+                let result = check();
                 assert_eq!(result.is_ok(), batch_park,
                     "mode={expected}, integration={integration:?}: {result:?}");
                 assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
@@ -932,6 +938,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn batch_park_requires_a_changed_state_visual_capture() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        env.set_current_dir(repo);
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base = commit_file(repo, "README.md", "base\n");
+        git(repo, &["switch", "-q", "-c", "factory/worker"]);
+        let head = commit_file(repo, "hub-web/src/Ranking.vue", "<template>Ranking</template>\n");
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[qa]\nmode='batch'\napi_paths=['server/**']\n").unwrap();
+        let task = Task::new("cas-0304-replay".into(), "Ranking panel".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let park = || qa_evidence_close_gate_for_paths(&root, &task, repo, "main", Some(&head), None, Some(&base));
+        let refused = || assert_eq!(crate::gates::codes_in(&park().unwrap_err()), ["G-171"]);
+        refused();
+
+        let dir = task_evidence_dir(&root, &task).unwrap();
+        let sweep = dir.join("visual-qa");
+        std::fs::create_dir_all(&sweep).unwrap();
+        let report = |status, urls, findings| serde_json::json!({
+            "status": status, "strict": true, "generatedAt": chrono::Utc::now().to_rfc3339(),
+            "urls": [urls], "findings": findings,
+            "screenshots": [{"path": "ranking.png", "url": urls, "state": "ranking"}]
+        });
+        let tip_report = sweep.join("visual-qa.json");
+        let url = "http://localhost:8180/ranking";
+        std::fs::write(&tip_report, report("PASS", url, serde_json::json!([])).to_string()).unwrap();
+        let capture = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/ranking.after.png"));
+        std::fs::write(sweep.join("ranking.png"), capture).unwrap();
+        std::fs::write(dir.join("unrelated.png"), capture).unwrap();
+
+        let ledger = dir.join("LEDGER.md");
+        let write_row = |verdict: &str, evidence: &str| {
+            let passed = usize::from(verdict == "PASS");
+            std::fs::write(&ledger, format!(
+                "cells=1; PASS={passed}; FAIL=0; NOT EXERCISED={}\nlabels: real-build=1\n{}\n| M01 | Ranking panel | Ranking visible | Ranking visible | {verdict} | real-build | {evidence} | - |\n",
+                1 - passed, crate::qa_ledger::HEADER,
+            )).unwrap();
+        };
+        write_row("NOT EXERCISED: deferred to batch", "-");
+        refused();
+        write_row("PASS", "unrelated.png");
+        refused();
+        write_row("PASS", "visual-qa/visual-qa.json");
+        refused();
+        assert!(!cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
+
+        write_row("PASS", "visual-qa/ranking.png");
+        assert!(park().is_ok());
+        assert!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
+
+        let baseline = dir.join("visual-qa-baseline");
+        std::fs::create_dir_all(&baseline).unwrap();
+        let findings = serde_json::json!([{"type": "contrast", "selector": ".caption"}]);
+        std::fs::write(baseline.join("visual-qa.json"), report("FAIL", "http://localhost:8181/ranking", findings.clone()).to_string()).unwrap();
+        std::fs::write(tip_report, report("FAIL", url, findings).to_string()).unwrap();
+        assert!(park().is_ok());
+
+        git(repo, &["switch", "--detach", "-q", &base]);
+        let api_head = commit_file(repo, "server/routes/ranking.ts", "export const ranking = [];\n");
+        let api_task = Task::new("cas-0304-api".into(), "Ranking API".into());
+        crate::store::open_task_store(&root).unwrap().add(&api_task).unwrap();
+        assert!(qa_evidence_close_gate_for_paths(&root, &api_task, repo, "main", Some(&api_head), None, Some(&base)).is_ok());
     }
 
     #[test]

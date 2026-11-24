@@ -242,6 +242,33 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
         .unwrap().unwrap().staging_sha, synthetic);
 }
 
+#[test]
+fn production_waiver_does_not_carry_to_a_new_base() {
+    let _env = TestEnvGuard::temp_home();
+    let (dir, _origin) = repo_with_origin();
+    let repo = dir.path();
+    let cas_dir = train(repo, &[("cas-a", TaskStatus::AwaitingMerge)]);
+    std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='candidate-fixture'\n").unwrap();
+    merge_child(repo, &cas_dir, "cas-a", &["index.html"]);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get("cas-a").unwrap();
+    task.origin_project = Some("candidate-fixture".into());
+    let source = run(repo, &["rev-parse", "factory/cas-a"]);
+    task.deliverables.factory_branch_anchor = Some(source.clone());
+    tasks.update(&task).unwrap();
+    cas_store::defer_qa_batch_evidence(&cas_dir, &task.id, &source).unwrap();
+    cas_store::waive_qa_pass(&cas_dir, &task.id, "sup-id", "worker-cas-a-id", "factory/cas-a",
+        &source, "Approve the candidate on the current production base", Utc::now()).unwrap();
+    let base = run(repo, &["rev-parse", "main"]);
+    let moved = run(repo, &["commit-tree", &format!("{base}^{{tree}}"), "-p", &base, "-m", "advance production"]);
+    run(repo, &["update-ref", "refs/heads/main", &moved, &base]);
+    let candidate = cas_store::ProductionCandidate {
+        base_sha: moved, source_sha: source.clone(), tree: run(repo, &["rev-parse", &format!("{source}^{{tree}}")]),
+    };
+    let refused = crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate, Some(&source), Some(&task.id)).unwrap_err();
+    assert_eq!(refused.split_ascii_whitespace().next(), Some("PRODUCTION_BATCH_QA_REQUIRED"));
+}
+
 /// GH #1635: no notice asks for a cut without a green verdict at the tip.
 /// cas-0fc56: an unfrozen train has no train suite, so its notice asks for
 /// the freeze that starts one; once frozen, only green at the current tip notifies.

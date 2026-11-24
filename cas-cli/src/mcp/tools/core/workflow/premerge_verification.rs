@@ -2137,7 +2137,9 @@ mod tests {
                 stale_child.pid_starttime = Some(123);
                 let mut stale_legacy = child.clone();
                 stale_legacy.metadata.insert("pid_starttime".into(), "456".into());
-                for (observed_owner, observed_child) in [(&stale_owner, &child), (&owner, &stale_child), (&owner, &stale_legacy)] {
+                let mut stale_heartbeat = child.clone();
+                stale_heartbeat.last_heartbeat -= chrono::Duration::seconds(1);
+                for (observed_owner, observed_child) in [(&stale_owner, &child), (&owner, &stale_child), (&owner, &stale_legacy), (&owner, &stale_heartbeat)] {
                     let fenced = cas_store::recover_expired_dead_verifier_dispatch(&root, &dispatch.id,
                         observed_owner, observed_child, chrono::Utc::now()).unwrap();
                     assert_eq!(serde_json::to_value(fenced).unwrap(), serde_json::to_value(&before).unwrap());

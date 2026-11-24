@@ -36,6 +36,7 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     let candidate = candidate_for_dispatch(&core.cas_root, dispatch)?;
     let inherited = candidate.as_ref().and_then(|candidate| candidate.inherited_supervisor_call.as_ref());
     use crate::mcp::tools::core::task::lifecycle::qa_evidence_gate as evidence_gate;
+    let evidence_dir = evidence_gate::task_evidence_dir(&core.cas_root, task)?;
     let config = core.load_config();
     let qa = config.qa();
     let scope = candidate.as_ref().filter(|_| qa.mode == crate::config::QaMode::Batch).and_then(|candidate| {
@@ -57,7 +58,6 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     });
     let rendered_surface = scope.as_ref().map(|(rendered, _, _)| *rendered);
     let visual_evidence_present = if let Some((true, base, candidate)) = scope {
-        let evidence_dir = evidence_gate::task_evidence_dir(&core.cas_root, task)?;
         evidence_gate::check_batch_visual_evidence(task, &evidence_dir, &candidate.repository, &candidate.source_sha, Some(&base)).is_ok()
     } else {
         false

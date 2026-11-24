@@ -9076,19 +9076,15 @@ impl CasCore {
         // bound to that still-valid dispatch in the identity set so a
         // supervisor-created merge receipt is not mistaken for unrelated
         // history solely because its epoch precedes the newest lease.
-        if let Some(approval) = report_gate.approval() {
-            include_approved_verification_delivery_commits(
-                &mut task_commit_identity,
-                &task.id,
-                Some(&approval.dispatch),
-                Some(&approval.verdict),
-            );
-        } else {
-            let approved_dispatch =
-                cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
-                    .ok()
-                    .flatten();
-            let approved_verification = approved_dispatch
+        let approved_dispatch = match report_gate.approval() {
+            Some(approval) => Some(approval.dispatch.clone()),
+            None => cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+                .ok()
+                .flatten(),
+        };
+        let approved_verification = match report_gate.approval() {
+            Some(approval) => Some(approval.verdict.clone()),
+            None => approved_dispatch
                 .as_ref()
                 .filter(|dispatch| {
                     dispatch.state == cas_types::VerificationDispatchState::Resolved
@@ -9097,14 +9093,14 @@ impl CasCore {
                     cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                         .ok()
                         .flatten()
-                });
-            include_approved_verification_delivery_commits(
-                &mut task_commit_identity,
-                &task.id,
-                approved_dispatch.as_ref(),
-                approved_verification.as_ref(),
-            );
-        }
+                }),
+        };
+        include_approved_verification_delivery_commits(
+            &mut task_commit_identity,
+            &task.id,
+            approved_dispatch.as_ref(),
+            approved_verification.as_ref(),
+        );
         // A supplied commit_receipt is not durable evidence until the close
         // gates accept it. It may still be needed to recognize a delivery
         // from an earlier continuation, though, because the latest lease

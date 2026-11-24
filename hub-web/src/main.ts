@@ -4725,7 +4725,10 @@ function render(captureDraft = true, stoppedSelection = false): void {
     pairingStepChanged: pairingView !== lastPairingView,
     focusInPairingDialog: composing && document.querySelector("#pair-dialog")?.contains(active) === true,
   });
-  if (decision !== "shell") {
+  const previousCommands = slashCommands;
+  const restoreConfirmation = decision === "shell" && !stoppedSelection && selectedThreadKey && previousCommands?.thread === selectedThreadKey
+    && previousCommands.birth === selectedHubSession?.started_at ? previousCommands.palette.preserveConfirmation() : undefined;
+  if (decision !== "shell" || (restoreConfirmation && deferredRender.deferDuringGesture())) {
     // A deferred rebuild is owed to a structural change that arrived while the
     // operator was mid-sentence; it runs the moment the field is left.
     if (decision === "defer") deferredRender.defer();
@@ -4733,9 +4736,6 @@ function render(captureDraft = true, stoppedSelection = false): void {
     return;
   }
   deferredRender.settled();
-  const previousCommands = slashCommands;
-  const restoreConfirmation = !stoppedSelection && selectedThreadKey && previousCommands?.thread === selectedThreadKey
-    && previousCommands.birth === selectedHubSession?.started_at ? previousCommands.palette.preserveConfirmation() : undefined;
   // A lease/connection change can rebuild the shell while the same notice
   // is being copied. Keep that view's panel so payload reconciliation can
   // retain its actual Details and Copy nodes, not only restore their focus.

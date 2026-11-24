@@ -1977,9 +1977,12 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
 async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
     use cas_store::VerificationStore;
     let mut env = TestEnvGuard::temp_home();
-    // A mechanical no-code chore keeps its approval across a revised proof.
+    // A mechanical no-code chore keeps its approval across a revised proof. A
+    // demo deliverable is covered like a spike, and an approval of an artifact
+    // whose bytes changed under the same reference never closes the task.
     for (case, task_type) in [
         ("approved", TaskType::Spike), ("rejected", TaskType::Spike), ("chore", TaskType::Chore),
+        ("demo-feature", TaskType::Feature), ("artifact-bytes-changed", TaskType::Spike),
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -1990,8 +1993,16 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         let mut spike = assigned(id, task_type, "main");
         spike.execution_note = Some("no-code".into());
         spike.external_ref = Some(PROOF.into());
+        if case == "demo-feature" {
+            spike.demo_statement = "Operators read the published report".into();
+        }
         f.put(&spike);
         claim(&f, id);
+        let published = "a".repeat(64);
+        cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().record_local(&cas_store::NewArtifact {
+            id: "art-2372-report".into(), task_id: id.into(), name: "report.md".into(),
+            mime: "text/markdown".into(), size_bytes: 12, sha256: published,
+        }).unwrap();
         let request = serde_json::json!({"action": "close", "id": id, "reason": "Report published"});
         let pending = call(&f.worker, request.clone()).await;
         let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
@@ -2014,7 +2025,12 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         ).unwrap();
         // The worker revises the report and parks it for the supervisor.
         let mut revised = f.task(id);
-        revised.external_ref = Some("https://example.test/deploys/revised".into());
+        if case == "artifact-bytes-changed" {
+            // Same reference, different bytes behind the same artifact id.
+            conn.execute("UPDATE artifacts SET sha256 = ?1 WHERE id = 'art-2372-report'", ["b".repeat(64)]).unwrap();
+        } else {
+            revised.external_ref = Some("https://example.test/deploys/revised".into());
+        }
         revised.status = TaskStatus::AwaitingMerge;
         f.put(&revised);
         let response = call(&f.supervisor, request).await;
@@ -2024,7 +2040,7 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         }
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{case}: {response}");
         let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
-        if case == "approved" {
+        if case != "rejected" {
             assert_ne!(latest.id, reviewed.id, "a new review is dispatched: {response}");
         }
     }

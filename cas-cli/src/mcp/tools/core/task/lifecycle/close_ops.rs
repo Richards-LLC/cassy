@@ -3,6 +3,7 @@ pub(crate) mod gate_text;
 mod loaded_proof;
 mod registry_upkeep;
 mod report_quality;
+mod ac_checklist;
 mod fast_lane_gate;
 mod proof_claims;
 pub(crate) mod gate_preflight;
@@ -9778,6 +9779,12 @@ impl CasCore {
                 )
             });
             if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, false) {
+                gate_refusals.push(message);
+            }
+            // GH #2401: judged at park only; a parked delivery keeps its checklist.
+            if task.status == TaskStatus::InProgress
+                && let Err(message) = ac_checklist::at_park(&self.cas_root, &task)
+            {
                 gate_refusals.push(message);
             }
             let fast_lane_qa = match &fast_lane_stage {

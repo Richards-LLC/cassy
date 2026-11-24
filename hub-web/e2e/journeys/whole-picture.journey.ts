@@ -44,10 +44,6 @@ const history = {
 
 // A row is named "<project> on <machine>, …"; the row's own controls are not.
 const conversationRow = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /^cas-src on / });
-// The header's Show work switch sits in the overflow menu, which may be closed.
-const showWorkToggle = (page: Page) => page.getByTestId("conversation-heading").getByRole("button", { name: "Show work", exact: true, includeHidden: true });
-// A work block is a thread group named "<speaker>, work[, <time>]".
-const workBlocks = (page: Page) => page.getByRole("log").getByRole("group", { name: /, work(?:, |$)/ });
 const workRows = (scope: Locator) => scope.getByTestId("work-row");
 
 async function openConversation(page: Page, journey: Journey): Promise<void> {
@@ -59,148 +55,6 @@ async function openConversation(page: Page, journey: Journey): Promise<void> {
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
   test.describe(`whole picture ${width} ${colorScheme} cas_ff22`, () => {
     test.use({ viewport: { width, height: 844 }, colorScheme, ...(width === 390 ? { hasTouch: true, isMobile: true } : {}) });
-
-    const showWork = async ({ page, journey }: { page: Page; journey: Journey }) => {
-      const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], history, work: { [PELICAN]: work() } });
-      const thread = page.getByRole("log");
-      const toggle = showWorkToggle(page);
-      const blocks = workBlocks(page);
-      const workRequests = () => hub.frames.filter((frame) => frame.kind === "WorkEventsRequest").length;
-
-      await journey.stage("Show work is off and the thread is replies only", async () => {
-        await openConversation(page, journey);
-        await expect(thread).toContainText("The stream is parked for merge.");
-        await expect(toggle).toHaveAttribute("aria-pressed", "false");
-        await expect(blocks).toHaveCount(0);
-        expect(workRequests(), "a thread with Show work off reads no work").toBe(0);
-      });
-
-      await journey.stage("Turn Show work on", async () => {
-        await clickConversationHeaderAction(page, "#conversation-show-work");
-        await expect(toggle).toHaveAttribute("aria-pressed", "true");
-        // The work between the two replies is one collapsed block, in order,
-        // with its task chip showing and its rows not.
-        await expect(blocks).toHaveCount(1);
-        const order = await thread.locator(":scope > *").evaluateAll((nodes) => nodes.map((node) => node.classList.contains("work-turn") ? "work" : node.textContent?.includes("parked for merge.") ? "after" : node.textContent?.includes("Starting") ? "before" : "other").filter((kind) => kind !== "other"));
-        expect(order).toEqual(["before", "work", "after"]);
-        const summary = blocks.getByRole("button", { name: /Reasoning, ran 1 tool \(1 failed\)/ });
-        await expect(summary).toHaveAttribute("aria-expanded", "false");
-        // cas-943b: the chip leads with the task title; its id stays in the title attribute.
-        await expect(blocks.getByRole("list", { name: "Task events" }).getByRole("listitem")).toHaveAttribute("title", /cas-42/);
-        await expect(workRows(blocks)).toHaveCount(0);
-        // The worker's own tool call belongs to its timeline, not the thread.
-        await expect(thread).not.toContainText("limits.rs");
-      });
-
-      await journey.stage("Open the work and one tool call's detail", async () => {
-        const summary = blocks.getByRole("button", { name: /Reasoning, ran 1 tool \(1 failed\)/ });
-        await summary.focus();
-        await page.keyboard.press("Enter");
-        await expect(summary).toBeFocused();
-        await expect(summary).toHaveAttribute("aria-expanded", "true");
-        await expect(workRows(blocks)).toHaveCount(3);
-        const tool = blocks.getByRole("button", { name: /Bash: Run the tests failed/ });
-        await tool.focus();
-        await page.keyboard.press("Enter");
-        await expect(tool).toBeFocused();
-        const detail = blocks.getByTestId("work-detail");
-        await expect(detail).toContainText("cargo test <b>-p cas</b>");
-        await expect(detail.locator("b"), "agent text is never parsed as markup").toHaveCount(0);
-        expect(hub.frames.filter((frame) => frame.kind === "WorkEventDetailRequest").map((frame) => (frame.body as { event_id: string }).event_id)).toEqual(["t:sup:2:0"]);
-      });
-
-      await journey.stage("Read the published reasoning summary in place", async () => {
-        const row = workRows(blocks).filter({ has: page.getByRole("button", { name: /Reasoning summary/ }) });
-        const toggle = row.getByRole("button", { name: /Reasoning summary/ });
-        await expect(toggle).toHaveAttribute("aria-expanded", "false");
-        await expect(toggle).toContainText("Checking the lane");
-        await toggle.focus();
-        const before = (await toggle.boundingBox())!.y;
-        await page.keyboard.press("Enter");
-        // Only the formatted summary's bold run reads exactly "the lane".
-        await expect(row.getByText("the lane", { exact: true })).toHaveText("the lane");
-        await expect(row.locator("img")).toHaveCount(0);
-        await expect(toggle).toBeFocused();
-        expect(Math.abs((await toggle.boundingBox())!.y - before)).toBeLessThanOrEqual(1);
-        await row.getByText("Raw summary", { exact: true }).click();
-        await expect(row.getByTestId("work-record")).toContainText("**the lane**");
-        await toggle.click(); await toggle.click();
-        await expect(row.getByRole("group")).toHaveAttribute("open", "");
-        expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest" && (frame.body as { event_id: string }).event_id === "t:sup:1:0")).toHaveLength(1);
-      });
-
-      await journey.stage("New work arrives live without redrawing the thread", async () => {
-        const reply = thread.getByTestId("conversation-turn").filter({ hasText: "Starting the stream review." });
-        await reply.evaluate((node) => { (node as HTMLElement & { journeyMark?: boolean }).journeyMark = true; });
-        hub.appendWork(PELICAN, event("t:sup:3:0", "tool", "Bash: Merge the lane", -1_000));
-        await expect(blocks.last()).toContainText("1");
-        expect(await reply.evaluate((node) => (node as HTMLElement & { journeyMark?: boolean }).journeyMark === true), "the earlier reply is the same node").toBe(true);
-      });
-
-      await journey.stage("Read typed work scope", async () => {
-        const typed = [
-          event("typed-start", "notice", "Turn started", -900, { has_detail: false, lifecycle: { id: "typed-turn", stage: "start" } }),
-          event("typed-read", "tool", "Read files", -800, { lifecycle: { id: "read", stage: "start" }, tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),
-          event("typed-search", "tool", "Find the renderer", -700, { tool: { name: "Grep", operation: "search", targets: ["src"], counts: { matches: 7 } } }),
-          event("typed-command", "tool", "Check the build", -600, { tool: { name: "Bash", operation: "command", targets: [], command: "npm run check", cwd: "/project", exit_code: 2 }, lifecycle: { id: "check", stage: "end", outcome: "error" } }),
-          event("typed-edit", "tool", "Update the renderer", -500, { tool: { name: "Edit", operation: "edit", targets: ["src/a.ts", "src/b.ts"], counts: { files: 2 } }, lifecycle: { id: "edit", stage: "end", outcome: "success" } }),
-          event("typed-other", "tool", "functions.exec: inspect the work", -400, { tool: { name: "functions.exec", operation: "other", targets: [] } }),
-          event("typed-end", "notice", "Turn completed", -300, { has_detail: false, lifecycle: { id: "typed-turn", stage: "end", outcome: "unknown" } }),
-        ];
-        const exact = "Read\n\nInput:\n{\"file\":\"src/a.ts\"}\n\nResult:\nexport const literal = '<script>neverRun()</script>';";
-        for (const row of typed) hub.appendWork(PELICAN, row, row.id === "typed-read" ? exact : `${row.label}\n\nInput:\nraw arguments\n\nResult:\nexact ${row.id} output`);
-        const block = blocks.last();
-        // Collapsed, the block's one "Ran …" button is its summary.
-        await block.getByRole("button", { name: /^Ran \d+ tools?\b/ }).click();
-        await expect(block.getByRole("button", { name: "Read · 3 files", exact: true })).toBeVisible();
-        await expect(block.getByRole("button", { name: "Search · 7 matches", exact: true })).toBeVisible();
-        await expect(block.getByRole("button", { name: /^Ran command · exit 2\b/ })).toBeVisible();
-        await expect(block.getByRole("button", { name: "Edited 2 files", exact: true })).toBeVisible();
-        await expect(block.getByRole("button", { name: "functions.exec: inspect the work", exact: true })).toBeVisible();
-        await expect(workRows(block).filter({ hasText: "Turn started" })).toHaveCount(0);
-        await expect(workRows(block).filter({ hasText: "Turn completed" })).toHaveCount(0);
-        const read = block.getByRole("button", { name: "Read · 3 files", exact: true });
-        const liveGutter = read.getByTestId("work-row-gutter");
-        // is-live has no accessible or test-id form; it is the row's live state.
-        await expect(workRows(block).and(block.locator(".is-live"))).toHaveCount(1);
-        expect(await read.evaluate(node => node.getBoundingClientRect().height)).toBe(24);
-        await page.emulateMedia({ reducedMotion: "reduce" });
-        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
-        await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "active" });
-        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
-        await page.emulateMedia({ forcedColors: "none" });
-        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("work-live-shine");
-        await read.focus(); await page.keyboard.press("Enter");
-        await expect(read).toBeFocused();
-        // Its button is renamed below when the metadata changes; the event id is not.
-        const detail = workRows(block).and(block.locator('[data-event-id="typed-read"]')).getByTestId("work-detail");
-        await expect(detail.getByRole("listitem")).toHaveText(["src/a.ts", "src/b.ts", "src/c.ts"]);
-        await expect(detail.getByTestId("work-record")).toHaveText(exact);
-        await expect(detail.locator("script")).toHaveCount(0);
-        // The same event ID receives new metadata while its detail is open.
-        await detail.focus();
-        hub.appendWork(PELICAN, { ...typed[1]!, lifecycle: { id: "read", stage: "end", outcome: "success" }, tool: { name: "Read", operation: "read", targets: ["src/a.ts"], counts: { files: 1 } } } as WorkEventWire, exact);
-        await expect(block.getByRole("button", { name: "Read · 1 file", exact: true })).toHaveAttribute("aria-expanded", "true");
-        await expect(detail).toBeFocused();
-        await expect(workRows(block).and(block.locator(".is-live"))).toHaveCount(0);
-        await expect(detail.getByTestId("work-record")).toHaveText(exact);
-      });
-
-      await journey.stage("Show work stays as set on this device", async () => {
-        await page.reload();
-        // A phone reopens the conversation it had open; the desktop lists it.
-        const row = conversationRow(page);
-        const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
-        await expect(send.or(row).first()).toBeVisible();
-        if (!(await send.isVisible())) await row.click();
-        await expect(send).toBeVisible();
-        await expect(toggle).toHaveAttribute("aria-pressed", "true");
-        await expect(blocks.first()).toBeVisible();
-        await clickConversationHeaderAction(page, "#conversation-show-work");
-        await expect(toggle).toHaveAttribute("aria-pressed", "false");
-        await expect(blocks).toHaveCount(0);
-      });
-    };
 
     const timeline = async ({ page, journey }: { page: Page; journey: Journey }) => {
       const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], history, work: { [PELICAN]: work() }, fleet: { [PELICAN]: fleet() } });
@@ -350,8 +204,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
     });
 
     // One catalog journey (HUB-J25), run as a part per surface and width.
-    // The 390 dark show-work case was a release-path flake (v4.40, cas-94a8; family cas-d755): removed.
-    if (width === 1280) test(`HUB-J25 show work ${width} ${colorScheme} cas_ff22`, journeyPart, showWork);
+    // Both show-work cases were release-path flakes (390 dark: v4.40, cas-94a8;
+    // 1280 light: cas-929df; family cas-d755) and are removed.
     test(`HUB-J25 worker timeline ${width} ${colorScheme} cas_ff22`, journeyPart, timeline);
   });
 }

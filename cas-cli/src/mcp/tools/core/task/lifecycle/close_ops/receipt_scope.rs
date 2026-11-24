@@ -1391,6 +1391,29 @@ mod tests {
         assert_eq!(stability::missing(&passing, &[other, sibling]), vec![Identity::exact(path, "other")]);
     }
 
+    /// GH #2223: a receipt that ran one test and left an environment-gated
+    /// sibling inactive covers both; a failed rerun of the inactive sibling
+    /// withdraws its credit and keeps the executed test's.
+    #[test]
+    fn failed_rerun_of_an_inactive_sibling_withdraws_its_coverage_gh2223() {
+        use crate::factory_worker_check::{PassingTests, stability::{self, Identity, Proof}};
+        let repo = changelog_fixture();
+        let head = commit_changelog_fixture(repo.path(), "head");
+        let path = "owned.test.js";
+        let ran = Identity::exact(path, "executed");
+        let gated = Identity { environment_gated: true, ..Identity::exact(path, "live eval") };
+        let root = tempfile::tempdir().unwrap();
+        stability::record(root.path(), repo.path(), &head, Proof {
+            runner: "jest".into(), tests: vec![ran.clone()], consecutive_passes: 5, elapsed_ms: 0,
+            inactive: vec![gated.clone()],
+        }).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert!(stability::missing(&passing, &[ran.clone(), gated.clone()]).is_empty());
+        stability::invalidate(root.path(), repo.path(), &head, std::slice::from_ref(&gated)).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert_eq!(stability::missing(&passing, &[ran, gated.clone()]), vec![gated]);
+    }
+
     /// cas-769b at 5ddb6860: the delivery edited a test, the target rewrote
     /// it, and the sync resolved to the target side. Park walked the delivery
     /// range and still owed that test 5x while the runner, reading the net

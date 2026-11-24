@@ -85,20 +85,11 @@ fn slug(value: &str) -> Option<String> {
     cas_store::is_slug(value).then(|| value.to_owned())
 }
 
-fn harness_name(cli: cas_mux::SupervisorCli) -> &'static str {
-    match cli {
-        cas_mux::SupervisorCli::Claude => "claude",
-        cas_mux::SupervisorCli::Codex => "codex",
-        cas_mux::SupervisorCli::Grok => "grok",
-        cas_mux::SupervisorCli::OpenCode => "opencode",
-    }
-}
-
-/// The one task a worker holds, or none when it holds several or none.
-fn active_task(root: &Path, worker: &str) -> Option<String> {
+/// The one task a worker holds, by name or id, or none when it holds several or none.
+fn active_task(root: &Path, worker: &[&str]) -> Option<String> {
     let tasks = crate::store::open_task_store_local(root).ok()?;
     let mut ids = tasks
-        .ids_by_assignees_and_statuses(&[worker], &[crate::types::TaskStatus::InProgress])
+        .ids_by_assignees_and_statuses(worker, &[crate::types::TaskStatus::InProgress])
         .ok()?;
     (ids.len() == 1).then(|| ids.remove(0))
 }
@@ -538,7 +529,7 @@ impl Cursor {
         let recorded = |observed: &Option<String>, current: &Option<String>| observed.as_deref().and_then(slug)
             .or_else(|| current.as_deref().filter(|_| self.since.is_none()).and_then(slug));
         let spend = TurnSpend {
-            harness: Some(harness_name(self.source.cli).to_owned()),
+            harness: Some(self.source.cli.backend().name().to_owned()),
             model: recorded(&turn.model, &self.identity.model),
             effort: recorded(&turn.effort, &self.identity.effort),
             cached_input_tokens: cached,
@@ -565,7 +556,7 @@ impl Cursor {
         event.actor = Some(self.source.agent_id.clone());
         // A replayed history cannot say which task a worker held then.
         if self.since.is_none() && let Some(worker) = &self.worker_name {
-            event.task_id = active_task(root, worker);
+            event.task_id = active_task(root, &[worker, &self.source.agent_id]);
         }
         self.outbox.push_back(event);
         self.flush(root);

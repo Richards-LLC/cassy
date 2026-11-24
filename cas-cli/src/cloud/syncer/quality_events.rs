@@ -100,7 +100,7 @@ impl CloudSyncer {
     }
 
     /// One bounded push-and-pull round. `force` is an explicit request
-    /// (`cas cloud sync`, `cas ledger report`), which skips the daemon's pacing.
+    /// (`cas cloud sync`, `cas scorecard`), which skips the daemon's pacing.
     // gate-audit[force]: selector Requests a sync despite a cooldown; no policy request is admitted by the cooldown.
     pub fn sync_quality_events(&self, force: bool) -> Result<QualitySyncSummary, CasError> {
         let mut summary = QualitySyncSummary::default();

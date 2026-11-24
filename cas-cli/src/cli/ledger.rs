@@ -1353,7 +1353,10 @@ pub(crate) fn quality_reports(cas_root: &Path, published: usize) -> Result<serde
     let reports: Vec<LedgerReport> = std::thread::scope(|scope| {
         let builds: Vec<_> = releases
             .iter()
-            .map(|release| scope.spawn(move || build_report(cas_root, repo, release.as_deref())))
+            .map(|release| scope.spawn(move || build_report(cas_root, repo, release.as_deref()).map(|mut report| {
+                report.health = health::assess(&report);
+                report
+            })))
             .collect();
         builds.into_iter().filter_map(|build| build.join().ok()?.ok()).collect()
     });

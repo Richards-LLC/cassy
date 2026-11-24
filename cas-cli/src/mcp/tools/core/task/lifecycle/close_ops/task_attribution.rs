@@ -4564,7 +4564,7 @@ mod tests {
         assert_eq!(javascript::changed_tests(p, &base, &tip, &paths, None).unwrap(), owned);
         let root = tempfile::tempdir().unwrap();
         stability::record(root.path(), p, &tip, Proof { runner: "jest".into(), tests: owned.clone(),
-            consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+            consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
         let passing = PassingTests::new(root.path(), p, &tip).with_target("epic");
         assert!(stability::missing(&passing, &owned).is_empty());
     }

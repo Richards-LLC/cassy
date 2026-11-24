@@ -16,6 +16,58 @@ effort = "high"
 model = "qwencloud/qwen3.8-max"
 effort = "medium"
 
+# Model ids: `gpt-6.2-sol` is the slug the OpenAI Responses API accepted (HTTP 200,
+# artifact cas-ae4e judging/gpt-01-response-1.json, 2026-11-19); the Codex 0.169.0
+# bundled catalogue (`codex debug models`) on this Mac lists gpt-6.1-sol and gpt-6-sol but not
+# 6.2, so a Codex account whose catalogue lacks it is skipped and the lane falls through.
+# `claude-fable-5-2` and `claude-sonnet-5-5` are listed in the Claude Code model
+# catalogue (cache/model-catalog/*-cc.json; Fable 5.2 needs Claude Code >= 2.1.290).
+[recipes.codex_sol_6_2]
+harness = "codex"
+provider = "openai"
+model = "gpt-6.2-sol"
+default_effort = "xhigh"
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+status = "active"
+required_capability = "codex-account"
+
+[recipes.codex_sol_6_2_high]
+harness = "codex"
+provider = "openai"
+model = "gpt-6.2-sol"
+default_effort = "high"
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+status = "active"
+required_capability = "codex-account"
+
+[recipes.codex_sol_6_2_low]
+harness = "codex"
+provider = "openai"
+model = "gpt-6.2-sol"
+default_effort = "low"
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+status = "active"
+required_capability = "codex-account"
+
+[recipes.claude_sonnet_5_5_high]
+harness = "claude"
+provider = "anthropic"
+model = "claude-sonnet-5-5"
+default_effort = "high"
+allowed_efforts = ["medium", "high", "max"]
+status = "active"
+required_capability = "claude-account"
+
+[recipes.claude_fable_5_2_high]
+harness = "claude"
+provider = "anthropic"
+model = "claude-fable-5-2"
+default_effort = "high"
+# `max` per the Claude effort doc (cas-556a); explicit request only.
+allowed_efforts = ["medium", "high", "max"]
+status = "active"
+required_capability = "claude-account"
+
 [recipes.codex_sol_6_1]
 harness = "codex"
 provider = "openai"
@@ -23,6 +75,7 @@ model = "gpt-6.1-sol"
 default_effort = "high"
 allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
+reason = "Deprecated upstream; no lane routes to it. Stays active so the stock default and explicit gpt-6.1-sol spawns keep working."
 required_capability = "codex-account"
 
 [recipes.codex_sol_6]
@@ -152,17 +205,18 @@ reason = "Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explic
 required_capability = "qwencloud-token-plan-key"
 
 [lanes.light]
-candidates = ["codex_luna_6"]
-fallbacks = ["claude_opus_5_5_low"]
+candidates = ["codex_sol_6_2_low"]
+fallbacks = ["codex_luna_6", "claude_opus_5_5_low"]
 
+# Codex out falls to Sonnet 5.5/high, never Fable (operator, 2026-11-24).
 [lanes.standard]
-candidates = ["codex_sol_6_1"]
-fallbacks = ["codex_sol_6"]
+candidates = ["codex_sol_6_2"]
+fallbacks = ["codex_sol_6_2_high", "claude_sonnet_5_5_high"]
 
 [lanes.taste]
-candidates = ["claude_opus_5_5"]
-# An unavailable Opus 5.5 falls back loudly to the existing Opus 5/high route.
-fallbacks = ["claude_opus"]
+candidates = ["claude_fable_5_2_high"]
+# An unavailable Fable 5.2 falls back loudly to Opus 5.5/high, then Opus 5/high.
+fallbacks = ["claude_opus_5_5", "claude_opus"]
 no_fallback = false
 
 [lanes.supervisor]
@@ -171,5 +225,5 @@ fallbacks = ["claude_fable_high"]
 no_fallback = false
 
 [lanes.heavy]
-candidates = ["claude_opus_5_5"]
-fallbacks = ["codex_astra_high"]
+candidates = ["claude_fable_5_2_high"]
+fallbacks = ["claude_opus_5_5", "codex_astra_high"]

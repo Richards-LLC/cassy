@@ -411,7 +411,10 @@ impl RelayJobs {
     }
 
     /// Git/start reconciliation runs on the external lane, never the loop
-    /// or the SQLite writer lane. Durable queue state survives any dropped job.
+    /// or the SQLite writer lane. Durable queue state survives any dropped
+    /// job, so it is `Latest`: a resubmit after the in-flight timeout replaces
+    /// the one waiting behind a slow lane instead of stacking (GH #2327), and
+    /// reexec abandons it instead of waiting on it.
     pub(crate) fn submit_worker_task_queue_reconciliation(
         &mut self, jobs: &mut QueueJobs, root: PathBuf, session: String,
     ) -> bool {
@@ -419,7 +422,7 @@ impl RelayJobs {
         if self.in_flight.contains_key(key) { return false; }
         let spec = JobSpec {
             kind: RELAY_READ, key: key.into(), lane: Lane::External,
-            criticality: Criticality::Critical, generation: self.next_generation(),
+            criticality: Criticality::Latest, generation: self.next_generation(),
             budget: Duration::from_secs(30),
         };
         let runtime = tokio::runtime::Handle::current();

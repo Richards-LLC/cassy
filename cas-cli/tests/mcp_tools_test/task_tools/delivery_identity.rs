@@ -120,7 +120,30 @@ impl Fixture {
         assert_eq!(tasks.get(&id).unwrap().status, TaskStatus::InProgress, "{started}");
         id
     }
+
+    /// Register `new-worker` with its own linked checkout, and its service.
+    fn receiver(&self) -> (tempfile::TempDir, CasService) {
+        let clone = tempfile::TempDir::new().unwrap();
+        git(self.repo(), &["worktree", "add", "-q", "-b", "factory/new-worker", clone.path().to_str().unwrap(), "main"]);
+        let mut receiver = Agent::new_with_role("new-worker-id".into(), "new-worker".into(), AgentRole::Worker);
+        receiver.metadata.insert("clone_path".into(), clone.path().display().to_string());
+        open_agent_store(&self.cas_dir()).unwrap().register(&receiver).unwrap();
+        let core = cas::mcp::CasCore::with_daemon(self.cas_dir(), None, None);
+        core.set_agent_id_for_testing("new-worker-id".into());
+        (clone, CasService::new(core, None))
+    }
+
+    async fn adopt(&mut self, id: &str) -> String {
+        self.as_supervisor(serde_json::json!({
+            "action": "transfer", "id": id, "to_agent": "new-worker", "adopt_branch": true,
+            "supervisor_override": true, "reason": "Hand the delivery over",
+        })).await
+    }
 }
+
+/// How a legacy row (no recorded prior-target list) leaves its start.
+#[derive(PartialEq)]
+enum Legacy { No, Rebind, Adopt }
 
 #[tokio::test]
 async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
@@ -128,9 +151,9 @@ async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
         name: &'static str,
         created_on: &'static str,
         epic_owns_train_a: bool,
-        // 6456's row predates the recorded prior-target list; it then goes
-        // through an explicit rebind_branch before close.
-        legacy_row: bool,
+        // 6456's row predates the recorded prior-target list; its start,
+        // the only record of train A, is then replaced before close.
+        legacy: Legacy,
         // GH #2307: the successor target is deleted before close.
         delete_successor: bool,
         parks: bool,
@@ -138,10 +161,11 @@ async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
     for row in [
         // GH ef8f is the same shape: briefed onto a train, laned off its tip,
         // then G-100 moves the task to the successor cut from main.
-        Row { name: "eea8 briefed train, G-100 successor", created_on: "main", epic_owns_train_a: true, legacy_row: false, delete_successor: false, parks: true },
-        Row { name: "6456 start recorded on the old train", created_on: "epic/train-a", epic_owns_train_a: true, legacy_row: true, delete_successor: false, parks: true },
-        Row { name: "control: a plain branch is not upstream", created_on: "main", epic_owns_train_a: false, legacy_row: false, delete_successor: false, parks: false },
-        Row { name: "2307 deleted successor target", created_on: "main", epic_owns_train_a: true, legacy_row: false, delete_successor: true, parks: false },
+        Row { name: "eea8 briefed train, G-100 successor", created_on: "main", epic_owns_train_a: true, legacy: Legacy::No, delete_successor: false, parks: true },
+        Row { name: "6456 legacy row, then rebind_branch", created_on: "epic/train-a", epic_owns_train_a: true, legacy: Legacy::Rebind, delete_successor: false, parks: true },
+        Row { name: "6456 legacy row, then transfer adopt_branch", created_on: "epic/train-a", epic_owns_train_a: true, legacy: Legacy::Adopt, delete_successor: false, parks: true },
+        Row { name: "control: a plain branch is not upstream", created_on: "main", epic_owns_train_a: false, legacy: Legacy::No, delete_successor: false, parks: false },
+        Row { name: "2307 deleted successor target", created_on: "main", epic_owns_train_a: true, legacy: Legacy::No, delete_successor: true, parks: false },
     ] {
         let mut fx = fixture(row.epic_owns_train_a);
         let repo = fx.repo().to_path_buf();
@@ -168,15 +192,17 @@ async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
             tasks.get(&id).unwrap().deliverables.work_target.map(|t| t.target_branch).as_deref(),
             Some("epic/train-b"), "{}: {moved}", row.name,
         );
-        if row.legacy_row {
+        let mut closer = None;
+        if row.legacy != Legacy::No {
             let conn = rusqlite::Connection::open(fx.cas_dir().join("cas.db")).unwrap();
             conn.execute(
                 "UPDATE tasks SET deliverables = json_remove(deliverables, '$.prior_work_targets') WHERE id = ?1",
                 [&id],
             ).unwrap();
             assert!(tasks.get(&id).unwrap().deliverables.prior_work_targets.is_empty());
-            // Then the supervisor approves a recovery lane: the start that
-            // alone names train A is replaced, so the writer must keep it.
+        }
+        if row.legacy == Legacy::Rebind {
+            // The supervisor approves a recovery lane.
             let recovery = format!("factory/test-agent-{id}");
             git(&repo, &["checkout", "-qb", &recovery]);
             git(&repo, &["push", "-q", "origin", &recovery]);
@@ -187,11 +213,21 @@ async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
             let start = tasks.get(&id).unwrap().deliverables.factory_branch_start.unwrap();
             assert_eq!(start.branch, recovery, "{}: {rebound}", row.name);
         }
+        if row.legacy == Legacy::Adopt {
+            // The supervisor hands the delivery to another worker.
+            let (clone, receiver) = fx.receiver();
+            let adopted = fx.adopt(&id).await;
+            let lane = format!("factory/new-worker-{id}");
+            assert_eq!(git(clone.path(), &["branch", "--show-current"]), lane, "{}: {adopted}", row.name);
+            call(&receiver, serde_json::json!({"action": "start", "id": id})).await;
+            git(clone.path(), &["push", "-q", "origin", &lane]);
+            closer = Some((clone, receiver));
+        }
         if row.delete_successor {
             git(&repo, &["push", "-q", "origin", "--delete", "epic/train-b"]);
             git(&repo, &["branch", "-qD", "epic/train-b"]);
         }
-        let closed = call(&fx.worker, serde_json::json!({
+        let closed = call(closer.as_ref().map_or(&fx.worker, |(_, receiver)| receiver), serde_json::json!({
             "action": "close", "id": id, "reason": "identity replay",
         })).await;
         let status = tasks.get(&id).unwrap().status;
@@ -211,24 +247,13 @@ async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
     // its next commit is the anchor its park records.
     let mut fx = fixture(false);
     let repo = fx.repo().to_path_buf();
-    let receiver_clone = tempfile::TempDir::new().unwrap();
-    git(&repo, &["worktree", "add", "-q", "-b", "factory/new-worker", receiver_clone.path().to_str().unwrap(), "main"]);
-    let agents = open_agent_store(&fx.cas_dir()).unwrap();
-    let mut receiver = Agent::new_with_role("new-worker-id".into(), "new-worker".into(), AgentRole::Worker);
-    receiver.metadata.insert("clone_path".into(), receiver_clone.path().display().to_string());
-    agents.register(&receiver).unwrap();
+    let (receiver_clone, receiver_service) = fx.receiver();
     let id = fx.create_and_start("main").await;
     commit(&repo, "first.rs", &format!("fix({id}): first half"));
     git(&repo, &["push", "-q", "origin", "factory/test-agent"]);
-    let adopted = fx.as_supervisor(serde_json::json!({
-        "action": "transfer", "id": id, "to_agent": "new-worker", "adopt_branch": true,
-        "supervisor_override": true, "reason": "Hand the delivery over",
-    })).await;
+    let adopted = fx.adopt(&id).await;
     let lane = format!("factory/new-worker-{id}");
     assert_eq!(git(receiver_clone.path(), &["branch", "--show-current"]), lane, "{adopted}");
-    let receiver_core = cas::mcp::CasCore::with_daemon(fx.cas_dir(), None, None);
-    receiver_core.set_agent_id_for_testing("new-worker-id".into());
-    let receiver_service = CasService::new(receiver_core, None);
     let started = call(&receiver_service, serde_json::json!({"action": "start", "id": id})).await;
     let tasks = open_task_store(&fx.cas_dir()).unwrap();
     let task = tasks.get(&id).unwrap();

@@ -107,16 +107,11 @@ enum CloseVerificationDispatch {
     AlreadyActive(cas_types::VerificationDispatch),
 }
 
-/// Whether a no-code task's report is its deliverable: a spike, or any task
-/// that demos one. A mechanical no-code chore keeps the ordinary exemption.
 pub(super) fn no_code_report_is_deliverable(task: &Task) -> bool {
     task.execution_note.as_deref() == Some("no-code")
         && (task.task_type == TaskType::Spike || !task.demo_statement.trim().is_empty())
 }
 
-/// GH #2417: what an independent review of a no-code deliverable covers: its
-/// proof reference and the id and SHA-256 of each artifact published on it,
-/// read from the artifact store. `None` for any other task.
 fn no_code_reviewed_proof(cas_root: &std::path::Path, task: &Task) -> Option<String> {
     if !no_code_report_is_deliverable(task) {
         return None;
@@ -168,10 +163,8 @@ fn request_close_verification_dispatch(
             Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => (*dispatch, true),
             Err(error) => return Err(error),
         };
-        // GH #2417: only the dispatch this close created records what it reviews.
-        if let Some(reviewed_proof) = reviewed_proof
-            && prior_dispatch_id.as_deref() != Some(dispatch.id.as_str())
-        {
+        let created_by_this_close = prior_dispatch_id.as_deref() != Some(dispatch.id.as_str());
+        if let Some(reviewed_proof) = reviewed_proof.filter(|_| created_by_this_close) {
             cas_store::bind_verification_dispatch_reviewed_proof_with_conn(&tx, &dispatch.id, reviewed_proof)?;
         }
         // An existing cycle keeps its requester, owner and proof immutable.
@@ -10705,9 +10698,6 @@ impl CasCore {
                     typed_dispatch = None;
                 }
 
-                // GH #2417: an approval covers only the proof and artifacts its
-                // dispatch recorded at creation. Anything else, or no record,
-                // clears the typed slot so this close mints a new dispatch.
                 if no_code_report_is_deliverable(&task)
                     && let Some(dispatch) = typed_dispatch.as_ref()
                     && dispatch.state == cas_types::VerificationDispatchState::Resolved

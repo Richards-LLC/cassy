@@ -1,4 +1,3 @@
-//! Record on a verification dispatch what its review covers (GH #2417).
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {

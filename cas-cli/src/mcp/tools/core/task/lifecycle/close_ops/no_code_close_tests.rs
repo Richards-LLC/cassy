@@ -1912,10 +1912,6 @@ async fn parked_ops_task_closes_by_evidence_on_its_pull_request_cas_b38a() {
     );
 }
 
-/// GH #2417: a no-code spike's deliverable is its report, so a docs-only
-/// report in the repository is still reviewed by an independent verdict. A
-/// supervisor's ordinary close of the parked spike never closes it unreviewed,
-/// whether it was never verified or its last verdict rejected an earlier report.
 #[tokio::test]
 async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417() {
     use cas_store::VerificationStore;
@@ -1970,9 +1966,6 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
     }
 }
 
-/// GH #2417 (cas-2372): a verdict covers the report it reviewed. Once a no-code
-/// spike's or demo's report is revised, an earlier approval or rejection does
-/// not authorize a supervisor's ordinary close; an unrevised report still closes.
 #[tokio::test]
 async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
     use cas_store::VerificationStore;
@@ -1998,12 +1991,12 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         f.put(&spike);
         claim(&f, id);
         if case == "demo-feature" {
-            // An audit-style ledger that declares no QA matrix passes the G-52 preflight.
             let dir = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
                 &f.cas_dir(), &f.task(id),
             ).unwrap();
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("LEDGER.md"), "# Report notes\n").unwrap();
+            let audit_ledger_without_qa_matrix = "# Report notes\n";
+            std::fs::write(dir.join("LEDGER.md"), audit_ledger_without_qa_matrix).unwrap();
         }
         cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().record_local(&cas_store::NewArtifact {
             id: "art-2372-report".into(), task_id: id.into(), name: "report.md".into(),
@@ -2029,16 +2022,13 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         cas_store::resolve_verification_dispatch_with_conn(
             &conn, &reviewed.id, "nocode-supervisor-session", None, true,
         ).unwrap();
-        // The worker revises the report and parks it for the supervisor.
         if matches!(case, "artifact-bytes-changed" | "notes-marker") {
-            // Same reference, different bytes behind the same artifact id.
-            let revised = "b".repeat(64);
-            conn.execute("UPDATE artifacts SET sha256 = ?1 WHERE id = 'art-2372-report'", [&revised]).unwrap();
+            let revised_digest = "b".repeat(64);
+            conn.execute("UPDATE artifacts SET sha256 = ?1 WHERE id = 'art-2372-report'", [&revised_digest]).unwrap();
             if case == "notes-marker" {
-                // The caller claims in a task note that the old review covers the new bytes.
                 call(&f.worker, serde_json::json!({
                     "action": "notes", "id": id, "note_type": "progress",
-                    "notes": format!("NO-CODE REVIEW BOUND dispatch {}: {PROOF} artifacts=art-2372-report:{revised}", reviewed.id),
+                    "notes": format!("NO-CODE REVIEW BOUND dispatch {}: {PROOF} artifacts=art-2372-report:{revised_digest}", reviewed.id),
                 })).await;
             }
         }
@@ -2050,8 +2040,8 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         f.put(&parked);
         let response = call(&f.supervisor, request).await;
         let closed = f.task(id).status == TaskStatus::Closed;
-        // An unrevised report and a mechanical chore keep their approval.
-        if closed != matches!(case, "unchanged" | "chore") {
+        let approval_still_covers = matches!(case, "unchanged" | "chore");
+        if closed != approval_still_covers {
             wrong.push(format!("{case}: closed={closed}: {response}"));
         } else if !closed && case != "rejected"
             && cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id == reviewed.id

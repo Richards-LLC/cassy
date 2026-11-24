@@ -255,8 +255,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_dispatches_active_task
 pub const VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT: &str =
     "ALTER TABLE verification_dispatches ADD COLUMN repository_proof TEXT";
 
-/// Additive m302 upgrade, shared by the store-open repair and the numbered
-/// migration like m230.
 pub const VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT: &str =
     "ALTER TABLE verification_dispatches ADD COLUMN reviewed_proof TEXT";
 
@@ -1056,8 +1054,6 @@ pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result
     ).map_err(StoreError::Database)
 }
 
-/// Record what a dispatch's review covers, in the transaction that created it.
-/// The first record stands; a later call never replaces it.
 pub fn bind_verification_dispatch_reviewed_proof_with_conn(
     conn: &Connection,
     dispatch_id: &str,

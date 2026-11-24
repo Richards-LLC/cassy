@@ -1,0 +1,4 @@
+title: Commander reload for same-version rebuilds
+tasks: [cas-e122]
+journeys: [HUB-J27]
+invariants: [HUB-J27-CARD-RELOAD]

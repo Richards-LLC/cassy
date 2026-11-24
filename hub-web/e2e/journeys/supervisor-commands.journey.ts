@@ -313,7 +313,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
     });
     test("HUB-J27 reload Cassy on a Codex supervisor only after confirming its restart", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "codex" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       await journey.stage("The Codex card names the restart before anything is sent", async () => {
@@ -333,7 +333,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "submitted", detail: "Restarting the Codex supervisor on the installed build; workers keep running.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         await expect(receipt.locator(".reload-wait")).toBeVisible();
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "unconfirmed", detail: "Cassy reconnected but runs 9.99.1, not the installed 9.99.2. Check which cas is first on PATH, then Reload Cassy again.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "unconfirmed", detail: "Cassy reconnected but runs 9.99.2 (old-build), not the installed 9.99.2 (new-build). Check which cas is first on PATH, then Reload Cassy again.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
         await expect(receipt.locator(".reload-wait")).toHaveCount(0);
         await captureReload(page, "codex-mismatch", viewport.width);

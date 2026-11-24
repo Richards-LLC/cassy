@@ -63,6 +63,7 @@ export interface ConversationRow {
   /** When that MCP process loaded its build (cas-8c4f). */
   mcp_loaded_at?: string;
   installed_version?: string;
+  mcp_reload_needed?: boolean;
   reloadReceipt?: CommandReceipt;
   reloadPending?: boolean;
   reloadUnavailable?: string;
@@ -468,7 +469,7 @@ export class ConversationList {
         if (!confirming) this.reloadConfirming.delete(row.key);
         const direct = control.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
         const confirm = control.querySelector<HTMLButtonElement>('[data-reload-cassy="confirm"]')!;
-        direct.hidden = !rowVersion(row)?.update;
+        direct.hidden = !(row.mcp_reload_needed ?? rowVersion(row)?.update);
         confirm.hidden = !confirming;
         direct.textContent = confirming ? "Cancel" : "Reload Cassy";
         for (const action of [direct, confirm]) action.disabled = Boolean(unavailable || pending);

@@ -503,6 +503,12 @@ fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)
     bail!("Worker test refused: package {package} not found in workspace")
 }
 
+fn same_workspace_package(repo: &Path, left: &str, right: &str) -> bool {
+    left == right || (package_selector(left).map(|(name, _)| name) == package_selector(right).map(|(name, _)| name)
+        && package_manifest(repo, left).ok().zip(package_manifest(repo, right).ok())
+            .is_some_and(|((left, _), (right, _))| left == right))
+}
+
 /// Receipt keys follow the registered worker's actual checkout, including
 /// recovered clones. Reading proof does not require its current branch to
 /// remain the delivered branch; callers validate the task's repository.
@@ -1258,11 +1264,14 @@ pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>
         }
         let matched = self.records().iter().any(|(_, package, test)| {
             let Some(proof) = test.stability.as_ref().filter(|proof| stability::valid(proof)) else { return false; };
+            if let RedFirstFailure::Rust { package: failed_package, harness, .. } = &record.failure
+                && (proof.runner != "nextest" || &test.harness != harness
+                    || !package.as_deref().is_some_and(|package| same_workspace_package(&repo, package, failed_package)))
+            {
+                return false;
+            }
             proof.tests.iter().filter(|identity| delivered.contains(identity)).any(|identity| match &record.failure {
                 RedFirstFailure::Rust { package: failed_package, harness, names } => {
-                    if proof.runner != "nextest" || package.as_ref() != Some(failed_package) || &test.harness != harness {
-                        return false;
-                    }
                     if names.contains(&identity.name) { return true; }
                     names.iter().any(|name| name.strip_prefix(&identity.name)
                         .is_some_and(|suffix| suffix.starts_with("::")))

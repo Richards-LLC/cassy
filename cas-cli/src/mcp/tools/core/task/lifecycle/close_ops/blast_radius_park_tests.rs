@@ -1128,6 +1128,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
     let cargo = Path::new(env!("CARGO"));
     let nextest = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::regression)"];
     let parameterized = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear::regression)"];
+    let mut versioned = parameterized;
+    versioned[2] = "widget@0.1.0";
     let unrelated = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::unrelated)"];
     let check = ["-p", "widget", "--tests"];
     let node = ["node", "--test", "gear.test.mjs"];
@@ -1151,7 +1153,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("node regression failure", Some("test-first"), Some(("HEAD^", &node[..])), true),
         ("node inactive regression", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("nextest timeout", Some("test-first"), Some(("HEAD^", &nextest[..])), true),
-        ("parameterized Rust failure", Some("test-first"), Some(("HEAD^", &parameterized[..])), true),
+        ("parameterized Rust failure", Some("test-first"), Some(("HEAD^", &versioned[..])), true),
         ("test at tip", Some("test-first"), Some(("HEAD", &nextest[..])), false),
     ] {
         let f = fixture_with_gear(&mut env, if case == "compile failure at base" { &broken } else { &red }, &checkpoint);
@@ -1182,7 +1184,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
             std::fs::write(f.worker_path.join("Cargo.lock"),
                 include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"))).unwrap();
             std::fs::write(f.worker_path.join("crates/widget/Cargo.toml"),
-                "[package]\nname = 'widget'\n[dev-dependencies]\nrstest = { version = '=0.24.0', default-features = false }\n").unwrap();
+                "[package]\nname = 'widget'\nversion = '0.1.0'\n[dev-dependencies]\nrstest = { version = '0.24', default-features = false }\n").unwrap();
             std::fs::write(&gear_path, source(1)).unwrap();
             git(&f.worker_path, &["commit", "-qam", "test(cas-br01): reproduce the parameterized regression"]);
             green_source = source(2).replace("assert_eq!(turn(), expected)", "assert_eq!(expected, turn())");
@@ -1200,8 +1202,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
                     "test('gear node regression', () => {});\n",
                 ),
                 "node before hook failure" => (
-                    "import { before } from 'node:test';\nbefore(() => { throw Error('setup failed'); });\ntest('gear node regression', () => {});\n",
-                    "test('gear node regression', () => {});\n",
+                    "import { before, describe } from 'node:test';\nbefore(() => { throw Error('setup failed'); });\ntest('gear node regression', () => { throw Error('direct body ran'); });\ndescribe('gear', () => { test('nested regression', () => { throw Error('nested body ran'); }); });\n",
+                    "import { describe } from 'node:test';\ntest('gear node regression', () => {});\ndescribe('gear', () => { test('nested regression', () => {}); });\n",
                 ),
                 _ => (
                     "test('gear node regression', () => { throw Error('gear is stuck'); });\n",

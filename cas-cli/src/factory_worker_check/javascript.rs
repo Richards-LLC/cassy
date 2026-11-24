@@ -154,6 +154,7 @@ const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
     file.assertionResults.push({
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
       fileFailure: failed && data.nesting === 0 && data.name === data.file,
+      failureType: failed ? data.details?.error?.failureType : undefined,
       status: data.skip ? 'skipped' : data.todo ? 'todo' : failed ? 'failed' : 'passed',
     });
   }
@@ -2206,16 +2207,17 @@ fn execute_selection(
         };
         let (ran, skipped) = if widened.is_some() && runner == "playwright" {
             let (success, report) = run(0)?;
-            // A run that found no test is no failure to attribute.
-            let mut ran_a_test = false;
-            let _ = walk_playwright_specs(&report["suites"], &[], &mut |_, _| {
-                ran_a_test = true;
-                Ok(())
-            });
-            if !ran_a_test && found_no_tests(runner, success, &report) {
-                bail!(ZeroTests::new(format!("{runner} executed zero tests")));
-            }
             let inherited = if success { BTreeSet::new() } else {
+                if playwright_found_no_tests(&report) {
+                    let mut has_specs = false;
+                    let _ = walk_playwright_specs(&report["suites"], &[], &mut |_, _| {
+                        has_specs = true;
+                        Ok(())
+                    });
+                    if !has_specs {
+                        bail!(ZeroTests::new(format!("{runner} executed zero tests")));
+                    }
+                }
                 let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
                     &executable, &config, &report, &environment, high)
                     .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-61", format!("{error:#}"))))?;
@@ -2443,7 +2445,8 @@ fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value, selected: 
             for test in rows(&file["assertionResults"]) {
                 if test["status"] == "failed" && test["fileFailure"] != true
                     && let Some(name) = test["fullName"].as_str()
-                    && (runner != "node" || (name != raw && name != path))
+                    && (runner != "node" || (name != raw && name != path
+                        && !matches!(test["failureType"].as_str(), Some("hookFailed" | "cancelledByParent"))))
                 {
                     failed.insert(Identity::exact(path.clone(), name));
                 }
@@ -2883,7 +2886,8 @@ mod tests {
             "HUB-J13 read a project's quality trend from the palette");
         let other = id(&timeout.path, "another spec");
         assert_eq!(failed_javascript_tests("playwright", Path::new("/project"), &report,
-            &[timeout.clone(), other]), BTreeSet::from([timeout]));
+            &[timeout.clone(), other.clone()]), BTreeSet::from([timeout]));
+        assert!(failed_javascript_tests("playwright", Path::new("/project"), &report, &[other]).is_empty());
     }
 
     /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`

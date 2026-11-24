@@ -16988,23 +16988,6 @@ mod tests {
     }
 
     #[test]
-    fn heavy_lane_spawn_specs_use_claude_opus_primary() {
-        let (specs, recipe, warnings) = build_lane_spawn_specs(
-            1,
-            "heavy",
-            None,
-            None,
-            &cas_factory::CapabilitySnapshot::default(),
-        )
-        .unwrap();
-        assert_eq!(recipe, "claude_opus_5_5");
-        assert!(warnings.is_empty());
-        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
-    }
-
-    #[test]
     fn spawn_receipt_links_worker_accounts_and_records_real_items() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();

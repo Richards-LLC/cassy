@@ -205,10 +205,11 @@ fn listed_park_refusals(
                 (Vec::new(), Vec::new())
             }
         };
-        // GH #2362, #2380: a registered journey follows its declared lane, so
-        // neither it nor a helper only journeys import owes a worker run here.
+        // GH #2362, #2380: a registered journey against a deployed host follows
+        // its declared lane, so neither it nor a helper only such journeys
+        // import owes a worker run here; a locally served journey stays owed.
         use crate::factory_worker_check::widened::{self as widen, Scope};
-        let journeys = widen::journey_specs(cas_root, proof_repo, head);
+        let journeys = widen::deployed_journey_specs(cas_root, proof_repo, head);
         tests.retain(|test| !journeys.contains(&test.path));
         let widened: Vec<Scope> = widened.into_iter().flat_map(|scope| match &scope {
             Scope::File(spec) if journeys.contains(spec) => Vec::new(),
@@ -2563,10 +2564,10 @@ sys.exit(0 if ok else 1)
         // `related` finds no importer; a named run matches no runtime name;
         // the package run passes.
         const VITEST: &str = "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nrelated = 'related' in args\nnamed = '--testNamePattern' in args\nresults = [] if related else [{'name': str(Path('pages/index.test.ts').resolve()), 'status': 'passed',\n    'assertionResults': [{'fullName': 'renders at runtime' if named else 'renders', 'status': 'skipped' if named else 'passed'}]}]\nPath(args[args.index('--outputFile') + 1]).write_text(json.dumps({'success': not related, 'testResults': results}))\nraise SystemExit(1 if related else 0)\n";
-        const REGISTRY: &str = "journeys:\n- id: join\n  status: live\n  spec: tests/journeys/join.spec.ts\n- id: delete\n  status: live\n  spec: tests/journeys/O1.spec.ts\n- id: audit\n  status: live\n  spec: tests/journeys/Q1.spec.ts\n";
+        const REGISTRY: &str = "journeys:\n- id: join\n  status: live\n  spec: tests/journeys/join.spec.ts\n- id: delete\n  status: live\n  spec: tests/journeys/O1.spec.ts\n- id: audit\n  status: live\n  spec: tests/journeys/Q1.spec.ts\n- id: pair\n  status: live\n  spec: hub-web/e2e/journeys/pair.journey.ts\n";
         let pw = "import { test } from '@playwright/test';\n";
         // (issue, base files, delivered files, deleted files)
-        let rows: [(&str, Vec<(&str, String)>, Vec<(&str, String)>, Vec<&str>); 7] = [
+        let rows: [(&str, Vec<(&str, String)>, Vec<(&str, String)>, Vec<&str>); 8] = [
             ("#2380", vec![
                 ("package.json", "{}".into()), ("playwright.config.ts", "export default {};\n".into()),
                 ("docs/qa/journeys.yaml", REGISTRY.into()),
@@ -2605,6 +2606,14 @@ sys.exit(0 if ok else 1)
                 ("tests/journeys/flows.ts", "export const flow = () => 2;\n".into()),
                 ("tests/journeys/O1.spec.ts", format!("{pw}import {{ flow }} from './flows';\ntest('deletes workspace', () => {{ flow(); flow(); }});\n")),
             ], vec![]),
+            // A registered journey against a locally served app stays owed.
+            ("local journey", vec![
+                ("docs/qa/journeys.yaml", REGISTRY.into()),
+                ("hub-web/package.json", "{}".into()),
+                ("hub-web/playwright.base.ts", "export default { webServer: { command: 'npm run preview' } };\n".into()),
+                ("hub-web/playwright.config.ts", "import base from './playwright.base';\nexport default base;\n".into()),
+                ("hub-web/e2e/journeys/pair.journey.ts", format!("{pw}test('pairs a device', () => {{}});\n")),
+            ], vec![("hub-web/e2e/journeys/pair.journey.ts", format!("{pw}test('pairs a device', () => {{ 1; }});\n"))], vec![]),
             // A named Rust selection that runs zero tests.
             ("rust", vec![
                 ("Cargo.toml", "[package]\nname='fixture'\nversion='0.1.0'\nautotests=false\n".into()),
@@ -2702,6 +2711,17 @@ sys.exit(0 if ok else 1)
                         scope: widened::Scope::Package(String::new()), reason: String::new(), configs: Default::default() }, 1).unwrap();
                 }
                 "#2362" => {}
+                "local journey" => {
+                    let journey = "hub-web/e2e/journeys/pair.journey.ts";
+                    if prescribed.iter().map(|run| (run.runner, run.files.clone())).collect::<Vec<_>>() != [("playwright", vec![journey.to_string()])] {
+                        failures.push((issue, held));
+                        continue;
+                    }
+                    crate::factory_worker_check::stability::record(root.path(), &repo, &head, crate::factory_worker_check::stability::Proof {
+                        runner: "playwright".into(), consecutive_passes: crate::factory_worker_check::stability::REQUIRED_PASSES, elapsed_ms: 1,
+                        tests: vec![crate::factory_worker_check::stability::Identity::exact(journey, "pairs a device")],
+                    }).unwrap();
+                }
                 "rust" => {
                     // nextest's own zero-selection status for the named run;
                     // the crate run (no filter) passes.

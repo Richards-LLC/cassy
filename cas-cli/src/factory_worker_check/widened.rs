@@ -109,16 +109,34 @@ pub(crate) fn package_proves(passing: &PassingTests<'_>, path: &str) -> bool {
 /// The recorded reason of a crate run that replaced a zero-test selection.
 pub(crate) const ZERO_SELECTION_REASON: &str = "widened:zero-test selection";
 
-/// The test files the journey registry declares at `head`. Their declared lane
-/// (batch QA against the deployed target) proves them, never a worker's capped
-/// run (GH #2362, #2380).
-pub(crate) fn journey_specs(cas_root: &Path, repo: &Path, head: &str) -> BTreeSet<String> {
+/// The journey specs the registry declares at `head` whose Playwright config
+/// targets a deployed host: it starts no local `webServer`, itself or through
+/// a config it imports. Their declared lane (batch QA against that host)
+/// proves them, never a worker's capped run (GH #2362, #2380). A journey
+/// against a locally served app stays owed by the worker.
+pub(crate) fn deployed_journey_specs(cas_root: &Path, repo: &Path, head: &str) -> BTreeSet<String> {
     let registry = crate::config::Config::load(cas_root).map(|config| config.qa().registry.path)
         .unwrap_or_else(|_| crate::qa_registry::DEFAULT_PATH.into());
     git(repo, &["show", &format!("{head}:{registry}")]).ok()
         .and_then(|contents| crate::qa_registry::parse(&contents).ok())
-        .map(|registry| registry.journeys.into_iter().filter_map(|journey| journey.spec).collect())
+        .map(|registry| registry.journeys.into_iter().filter_map(|journey| journey.spec)
+            .filter(|spec| targets_deployed_host(repo, spec)).collect())
         .unwrap_or_default()
+}
+
+fn targets_deployed_host(repo: &Path, spec: &str) -> bool {
+    let Some(config) = javascript::runner_root(repo, spec, "playwright").ok().and_then(|(_, config)| config) else {
+        return false;
+    };
+    let import = regex::Regex::new(r#"(?:\bfrom|\bimport)\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).expect("import pattern");
+    let source = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let config_source = source(&config);
+    let imported = import.captures_iter(&config_source).filter_map(|capture| {
+        let base = config.parent()?.join(&capture[1]);
+        std::iter::once(base.clone()).chain(["ts", "mts", "cts", "js", "mjs", "cjs"].iter()
+            .map(|ext| PathBuf::from(format!("{}.{ext}", base.display())))).find(|path| path.is_file())
+    }).map(|path| source(&path)).collect::<Vec<_>>();
+    !std::iter::once(&config_source).chain(&imported).any(|text| text.contains("webServer"))
 }
 
 /// What resolved for one widened package's changed inputs (GH #2224, #2266).

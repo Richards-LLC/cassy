@@ -1966,7 +1966,7 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
     let mut env = TestEnvGuard::temp_home();
     for prior in [
         "never-verified", "light-depth", "rejected-earlier-report", "approval-unreadable",
-        "legacy-approved", "legacy-skipped",
+        "legacy-approved", "legacy-skipped", "legacy-approved-update-route",
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -2030,10 +2030,14 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
             without_dispatch.summary = "No dispatch recorded".into();
             cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&without_dispatch).unwrap();
         }
-        let response = call(&f.supervisor, serde_json::json!({
-            "action": "close", "id": id, "reason": "Report accepted",
-        })).await;
+        let by_update = prior == "legacy-approved-update-route";
+        let response = call(&f.supervisor, if by_update {
+            serde_json::json!({"action": "update", "id": id, "status": "closed"})
+        } else {
+            serde_json::json!({"action": "close", "id": id, "reason": "Report accepted"})
+        }).await;
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{prior}: {response}");
+        assert!(!by_update || response.contains("G-68"), "{prior}: {response}");
     }
 }
 

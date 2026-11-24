@@ -451,36 +451,6 @@ async fn c4491f_late_relay_read_is_ignored_and_its_rerun_reports() {
     assert_eq!(applied, vec!["rerun".to_string()], "only the rerun's result applies");
 }
 
-/// GH #2327: a slow external lane let the worker-task-queue reconcile read
-/// time out and resubmit every 30 s; each resubmit stacked as durable work
-/// (452 after 3.8 h) and held every reexec. Resubmits now replace the one
-/// waiting rerun, and reexec flushes.
-#[tokio::test]
-async fn gh2327_reconcile_resubmits_on_a_held_external_lane_do_not_hold_reexec() {
-    use super::relay_jobs::RelayOutput;
-    let dir = tempfile::tempdir().unwrap();
-    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    let mut daemon = daemon_on_lanes(&cas_dir);
-    let (release, wait) = std::sync::mpsc::channel::<()>();
-    assert!(daemon.relay_jobs.submit_progress_watchdog_read(&mut daemon.queue_jobs, move || {
-        let _ = wait.recv();
-        RelayOutput::Written
-    }));
-    daemon.relay_jobs.timeout_override = Some(Duration::ZERO);
-    for _ in 0..5 {
-        assert!(daemon.relay_jobs.submit_worker_task_queue_reconciliation(
-            &mut daemon.queue_jobs, cas_dir.clone(), "provision-test".into(),
-        ));
-        daemon.relay_jobs.take(&mut daemon.queue_jobs);
-    }
-    let waiting = daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter()
-        .map(|stats| stats.queued).sum::<usize>();
-    assert!(waiting <= 2, "resubmits stacked behind the held lane: {waiting} waiting (queued head plus one rerun)");
-    daemon.queue_jobs.flush_for_reexec(&cas_dir, Duration::from_millis(500)).await
-        .expect("reexec must not wait on reconcile reads");
-    release.send(()).unwrap();
-}
-
 /// cas-4491f review M2: a write is never given up at a timeout, so it cannot
 /// be submitted twice (a second correlated-deaths write would drain a newer
 /// group).

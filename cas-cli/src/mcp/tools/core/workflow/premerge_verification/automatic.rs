@@ -14,7 +14,7 @@ pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
     })
 }
 
-fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
+pub(crate) fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
     // No-code close reviews bypass candidate preparation. Resolve committed

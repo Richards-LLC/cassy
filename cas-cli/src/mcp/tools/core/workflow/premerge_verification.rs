@@ -253,6 +253,8 @@ struct Promotion {
 mod peer;
 mod carryover;
 mod automatic;
+#[cfg(test)]
+pub(crate) use automatic::prompt as verifier_prompt;
 #[cfg(unix)]
 mod factory_launch;
 #[cfg(unix)]

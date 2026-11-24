@@ -1930,6 +1930,12 @@ async fn publish_report(f: &Fixture, cloud: &wiremock::MockServer, task_id: &str
         }))).up_to_n_times(1).mount(cloud).await;
     Mock::given(method("PUT")).and(path(format!("/blob/{cloud_id}")))
         .respond_with(ResponseTemplate::new(200)).mount(cloud).await;
+    Mock::given(method("GET")).and(path(format!("/api/artifacts/{cloud_id}/url")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "artifact_id": cloud_id, "url": format!("{}/blob/{cloud_id}", cloud.uri()), "size_bytes": body.len()
+        }))).mount(cloud).await;
+    Mock::given(method("GET")).and(path(format!("/blob/{cloud_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes().to_vec())).mount(cloud).await;
     Mock::given(method("POST")).and(path(format!("/api/artifacts/{cloud_id}/complete")))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
         .mount(cloud).await;
@@ -1958,7 +1964,10 @@ async fn publish_report(f: &Fixture, cloud: &wiremock::MockServer, task_id: &str
 async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417() {
     use cas_store::VerificationStore;
     let mut env = TestEnvGuard::temp_home();
-    for prior in ["never-verified", "rejected-earlier-report", "legacy-approved", "legacy-skipped"] {
+    for prior in [
+        "never-verified", "light-depth", "rejected-earlier-report", "approval-unreadable",
+        "legacy-approved", "legacy-skipped",
+    ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
@@ -1981,16 +1990,23 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
         spike.status = TaskStatus::AwaitingMerge;
         spike.deliverables.factory_branch_anchor = Some(anchor);
         spike.deliverables.parked_branch = Some(lane);
+        if prior == "light-depth" {
+            spike.depth = cas_types::TaskDepth::Light;
+        }
         f.put(&spike);
-        if prior == "rejected-earlier-report" {
+        if matches!(prior, "rejected-earlier-report" | "approval-unreadable") {
             let dispatch = cas_store::create_verification_dispatch_bound(
                 &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
                 &cas_types::VerificationProofBoundary::task(),
                 chrono::Utc::now() + chrono::Duration::minutes(10), false,
             ).unwrap();
             let mut verdict = cas_types::Verification::new("ver-2417-rejected".into(), id.into());
-            verdict.status = cas_types::VerificationStatus::Rejected;
-            verdict.summary = "Earlier report version rejected".into();
+            verdict.status = if prior == "approval-unreadable" {
+                cas_types::VerificationStatus::Approved
+            } else {
+                cas_types::VerificationStatus::Rejected
+            };
+            verdict.summary = "Earlier report version reviewed".into();
             verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
             verdict.agent_id = Some("nocode-supervisor-session".into());
             verdict.issuer_agent_id = verdict.agent_id.clone();
@@ -2000,6 +2016,9 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
             cas_store::resolve_verification_dispatch_with_conn(
                 &conn, &dispatch.id, "nocode-supervisor-session", None, true,
             ).unwrap();
+            if prior == "approval-unreadable" {
+                conn.execute("UPDATE verifications SET confidence = 'unreadable' WHERE id = ?1", [&verdict.id]).unwrap();
+            }
         }
         if prior.starts_with("legacy-") {
             let mut without_dispatch = cas_types::Verification::new(format!("ver-2417-{prior}"), id.into());
@@ -2021,7 +2040,7 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
 #[tokio::test]
 async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_gh2417() {
     let mut env = TestEnvGuard::temp_home();
-    for case in ["unchanged", "republished"] {
+    for case in ["unchanged", "light-depth", "republished"] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
@@ -2034,6 +2053,9 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
         spike.task_type = TaskType::Spike;
         spike.execution_note = Some("no-code".into());
         spike.external_ref = Some(PROOF.into());
+        if case == "light-depth" {
+            spike.depth = cas_types::TaskDepth::Light;
+        }
         f.put(&spike);
         std::fs::create_dir_all(checkout.join("docs")).unwrap();
         std::fs::write(checkout.join("docs/spike-report.md"), "# Spike report\n").unwrap();
@@ -2067,7 +2089,7 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
             "action": "close", "id": id, "reason": "Report accepted",
         })).await;
         let closed = f.task(id).status == TaskStatus::Closed;
-        if case == "unchanged" {
+        if case != "republished" {
             assert!(closed, "{case}: {response}");
         } else {
             assert!(!closed && response.contains("G-70"), "{case}: {response}");
@@ -2085,6 +2107,8 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         ("peer-report-imported", TaskType::Spike), ("approved", TaskType::Spike),
         ("rejected", TaskType::Spike), ("chore", TaskType::Chore), ("demo-feature", TaskType::Feature),
         ("report-republished", TaskType::Spike), ("notes-marker", TaskType::Spike),
+        ("published-before-launch", TaskType::Spike), ("peer-report-importing", TaskType::Spike),
+        ("report-revoked", TaskType::Spike),
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -2116,15 +2140,31 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
             cloud_url: None, slack_permalink: None, created_at: chrono::Utc::now().to_rfc3339(),
             revocation: None,
         };
-        if case == "peer-report-imported" {
+        let published = if case.starts_with("peer-report-import") {
             crate::artifacts::proof::record_published(&f.cas_dir(), &peer_report).unwrap();
+            peer_report.clone()
         } else {
-            publish_report(&f, &cloud, id, "report v1\n").await;
-        }
+            publish_report(&f, &cloud, id, "report v1\n").await
+        };
         let request = serde_json::json!({"action": "close", "id": id, "reason": "Report published"});
         let pending = call(&f.worker, request.clone()).await;
         let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
             .unwrap_or_else(|| panic!("{case}: {pending}"));
+        if case == "published-before-launch" {
+            let later = publish_report(&f, &cloud, id, "report v2\n").await;
+            let (core, task, dispatch) = (CasCore::with_daemon(f.cas_dir(), None, None), f.task(id), reviewed.clone());
+            let input = tokio::task::spawn_blocking(move || {
+                crate::mcp::tools::core::workflow::premerge_verification::verifier_prompt(&core, &task, &dispatch)
+            }).await.unwrap().unwrap_or_else(|error| panic!("{case}: {error}"));
+            let inputs: serde_json::Value = input.lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .find(|value: &serde_json::Value| value.get("artifacts").is_some()).unwrap();
+            let shown: Vec<_> = inputs["artifacts"].as_array().unwrap().iter()
+                .filter_map(|artifact| artifact["artifact_id"].as_str()).collect();
+            if shown != [published.id.as_str()] {
+                wrong.push(format!("{case}: verifier shown {shown:?}, dispatched {} (later {})", published.id, later.id));
+            }
+        }
         let mut verdict = cas_types::Verification::new(format!("ver-2372-{case}"), id.into());
         verdict.status = if case == "rejected" {
             cas_types::VerificationStatus::Rejected
@@ -2149,13 +2189,18 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
                     mime: "text/markdown".into(), size_bytes: 9, sha256: "d".repeat(64),
                 }).unwrap();
             }
-            "peer-report-imported" => {
+            "peer-report-imported" | "peer-report-importing" => {
                 artifacts.record_local(&cas_store::NewArtifact {
                     id: peer_report.id.clone(), task_id: id.into(), name: peer_report.name.clone(),
                     mime: peer_report.mime.clone(), size_bytes: peer_report.size_bytes, sha256: peer_report.sha256.clone(),
                 }).unwrap();
-                artifacts.mark_uploaded(&peer_report.id, "cloud-peer").unwrap();
-                artifacts.mark_committed(&peer_report.id, None).unwrap();
+                if case == "peer-report-imported" {
+                    artifacts.mark_uploaded(&peer_report.id, "cloud-peer").unwrap();
+                    artifacts.mark_committed(&peer_report.id, None).unwrap();
+                }
+            }
+            "report-revoked" => {
+                artifacts.revoke(&published.id, "nocode-supervisor-session", "Report withdrawn").unwrap();
             }
             "report-republished" | "notes-marker" => {
                 let republished = publish_report(&f, &cloud, id, "report v2\n").await;
@@ -2177,7 +2222,9 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         f.put(&parked);
         let response = call(&f.supervisor, request).await;
         let closed = f.task(id).status == TaskStatus::Closed;
-        let approval_still_covers = matches!(case, "unchanged" | "unpublished-draft" | "peer-report-imported" | "chore");
+        let approval_still_covers = matches!(
+            case, "unchanged" | "unpublished-draft" | "peer-report-imported" | "peer-report-importing" | "chore"
+        );
         if closed != approval_still_covers {
             wrong.push(format!("{case}: closed={closed}: {response}"));
         } else if !closed && case != "rejected"

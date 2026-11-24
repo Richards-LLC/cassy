@@ -20,17 +20,23 @@ pub const TRANSPORT_ENV: &str = "CAS_FACTORY_WORKER_TRANSPORT";
 /// other start.
 pub const ROUTE_ENV: &str = "CAS_FACTORY_GATEWAY";
 
+/// The route a daemon fixed at startup when nothing set [`ROUTE_ENV`].
+static STARTUP_ROUTE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
 /// A factory daemon fixes its worker route once, when it starts. Commander's
 /// launch already set [`ROUTE_ENV`]; any other start (`cas claude`, `cas
 /// factory`) takes the project's setting now, so a later config edit never
-/// changes this session's workers. The variable survives the daemon's re-exec.
+/// changes this session's workers. The daemon's re-exec carries
+/// [`pinned_route`] forward in [`ROUTE_ENV`].
 pub fn pin_at_start(cas_root: &Path) {
-    if std::env::var_os(ROUTE_ENV).is_some() {
-        return;
+    if std::env::var_os(ROUTE_ENV).is_none() {
+        STARTUP_ROUTE.get_or_init(|| if merged(cas_root).enabled { "gateway" } else { "direct" });
     }
-    let route = if merged(cas_root).enabled { "gateway" } else { "direct" };
-    // SAFETY: called while the daemon builds its factory, before it spawns any worker.
-    unsafe { std::env::set_var(ROUTE_ENV, route) };
+}
+
+/// This process's pinned worker route: Commander's, else the one fixed at startup.
+pub fn pinned_route() -> Option<String> {
+    std::env::var(ROUTE_ENV).ok().or_else(|| STARTUP_ROUTE.get().map(|route| route.to_string()))
 }
 const CODEX_PROVIDER: &str = "cas_gateway";
 
@@ -44,7 +50,7 @@ enum Plan {
 /// Route a Claude or Codex worker through the hub when its project opted in.
 pub(crate) fn apply(config: &mut PtyConfig, cas_root: Option<&PathBuf>, worker: &str) {
     let cli = config.effective_command().to_string();
-    let pin = std::env::var(ROUTE_ENV).ok();
+    let pin = pinned_route();
     let settings = load(cas_root.map(PathBuf::as_path), pin.as_deref());
     apply_plan(config, &cli, worker, plan(&settings, &cli, probe));
 }

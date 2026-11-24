@@ -11,15 +11,17 @@ The table is generated from the embedded `cas-factory` registry; change policy i
 <!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->
 | Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback | Notes |
 |---|---|---|---|---|---|---|---|---|
-| `light` | `codex_luna_6` | `openai` | `codex` | `gpt-6-luna` | `xhigh` | `active` | `fallback: claude_opus_5_5_low` |  |
-| `standard` | `codex_sol_6_1` | `openai` | `codex` | `gpt-6.1-sol` | `high` | `active` | `fallback: codex_sol_6` |  |
-| `taste` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_opus` |  |
-| `heavy` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: codex_astra_high` |  |
+| `light` | `codex_sol_6_2_low` | `openai` | `codex` | `gpt-6.2-sol` | `low` | `active` | `fallback: codex_luna_6, claude_opus_5_5_low` |  |
+| `standard` | `codex_sol_6_2` | `openai` | `codex` | `gpt-6.2-sol` | `xhigh` | `active` | `fallback: codex_sol_6_2_high, claude_sonnet_5_5_high` |  |
+| `taste` | `claude_fable_5_2_high` | `anthropic` | `claude` | `claude-fable-5-2` | `high` | `active` | `fallback: claude_opus_5_5, claude_opus` |  |
+| `heavy` | `claude_fable_5_2_high` | `anthropic` | `claude` | `claude-fable-5-2` | `high` | `active` | `fallback: claude_opus_5_5, codex_astra_high` |  |
 | `supervisor` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_fable_high` |  |
 | `— (explicit only)` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_astra` | `openai` | `codex` | `gpt-6-astra` | `medium` | `active` | `not lane-routed` | Heavy route; excluded from supervisor and taste after the observed 2026-09-05 stall holding finished workers and stopping epic drive. |
 | `— (explicit only)` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `not lane-routed` |  |
+| `— (explicit only)` | `codex_sol_6` | `openai` | `codex` | `gpt-6-sol` | `medium` | `active` | `not lane-routed` |  |
+| `— (explicit only)` | `codex_sol_6_1` | `openai` | `codex` | `gpt-6.1-sol` | `high` | `active` | `not lane-routed` | Deprecated upstream; no lane routes to it. Stays active so the stock default and explicit gpt-6.1-sol spawns keep working. |
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 
@@ -33,12 +35,14 @@ Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not
 Score each task while breaking down the EPIC:
 
 - `task_type=chore`, bounded chores or mechanical, non-public docs → **light**
-- Priority 0–1 on the critical path, or work touching 3+ modules or shared traits: cross-cutting refactors, concurrency/lifecycle code, migrations → **heavy**
-- Public docs, skills, prompts, naming, release notes and other taste or general-judgment work → **taste**, even when the diff is small
+- **heavy** only when you mark the task heavy: priority 0–1 on the critical path, or work touching 3+ modules or shared traits (cross-cutting refactors, concurrency/lifecycle code, migrations)
+- UI and visual judgment → **taste**, even when the diff is small
 - Architecture, safety, rescue or independent challenge → **taste** for the decision, **heavy** for the implementation
-- Everything else → **standard**, the floor for normal feature and bug work
+- Everything else → **standard**, the floor for normal feature and bug work. QA passes, release mechanics (notes, Slack, changelog, release prep) and docs or skills are standard, never heavy or taste.
 
-`effort=high` is the ceiling except for the light lane's Luna/xhigh and an explicit operator request for `max` on a recipe that lists it, after a task already failed at `high`/`xhigh`. Claude Sonnet is not a worker lane. If a route is unavailable, report it and choose another active registry lane deliberately; never invent a fallback.
+Why: Oct 24 to Nov 24, 183 of 563 spawns were Opus 5.5 high, and about 20% of those were QA passes, release mechanics or docs.
+
+`effort=high` is the ceiling except for the standard lane's Sol/xhigh and an explicit operator request for `max` on a recipe that lists it, after a task already failed at `high`/`xhigh`. Claude Sonnet is a worker only as the standard lane's Codex-out fallback. If a route is unavailable, report it and choose another active registry lane deliberately; never invent a fallback.
 
 ## Workflow
 

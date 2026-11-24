@@ -1,5 +1,5 @@
 import { AccountUsageChecks, type CheckAccountUsage, type CheckedAccountUsage } from "./account-usage-check";
-import { capacityLine, fillMeters, localReadLine, meterMarkup, pickReason, readings, type PickReason, type WindowReading } from "./account-meters";
+import { capacityLine, exclusionText, fillMeters, localReadLine, meterMarkup, pickReason, readings, type PickReason, type WindowReading } from "./account-meters";
 import type { AccountWindow, UsageSource } from "./accounts-model";
 // New session (cas-0f51): start a factory session on a paired machine from
 // Commander — machine → project → supervisor → start — and land on its
@@ -330,7 +330,7 @@ export function launchSheetMarkup(): string {
     <header class="launch-head"><h2 id="launch-title">New session</h2><button type="button" class="launch-close" data-launch-action="close" aria-label="Close new session">×</button></header>
     <label class="launch-machine" data-launch-machine-field>Machine<select name="launch-machine"></select></label>
     <section class="launch-view" data-testid="launch-view" data-launch-view="form" aria-labelledby="launch-title">
-      <section class="launch-plan" data-testid="launch-plan" aria-label="This session" aria-live="polite"><div data-plan="project"><p class="launch-plan-k">Project</p><p class="launch-plan-v"></p></div><div data-plan="supervisor"><p class="launch-plan-k"></p><p class="launch-plan-v"></p><p class="launch-plan-meta"></p></div><div data-plan="workers"><p class="launch-plan-k">Workers</p><p class="launch-plan-v"></p><p class="launch-plan-meta"></p></div></section>
+      <section class="launch-plan" data-testid="launch-plan" aria-label="This session" aria-live="polite"><div data-plan="project"><p class="launch-plan-k">Project</p><p class="launch-plan-v"></p></div><div data-plan="supervisor"><p class="launch-plan-k"></p><p class="launch-plan-v"></p><p class="launch-plan-meta"></p></div><div data-plan="workers"><p class="launch-plan-k">Workers</p><p class="launch-plan-v"></p></div></section>
       <fieldset class="launch-project">
         <legend>Project</legend>
         <div class="launch-tabs" role="tablist" aria-label="How to find the project">
@@ -666,13 +666,14 @@ export class LaunchSheet {
     const offered = step.entry.profiles.filter((profile) => !notOffered(profile));
     const hidden = step.entry.profiles.filter(notOffered);
     const usage = (profile: LaunchProfile) => this.usageChecks.result(this.machineId!, `${this.cli}:${profile.name}`);
-    const candidates = offered.map((profile) => ({ name: profile.name, list: profileReadings(profile, usage(profile)), exclusion: exclusionText(profile.exclusion) }));
+    const label = this.machine()?.label;
+    const candidates = offered.map((profile) => ({ name: profile.name, list: profileReadings(profile, usage(profile), label), exclusion: exclusionText(profile.exclusion) }));
     // An older hub sends no windows: its own reason is all there is.
     const reasonFor = (profile: LaunchProfile, index: number) => !profile.recommendation ? undefined
       : profile.windows || usage(profile) ? pickReason(candidates[index]!, candidates.filter((_, other) => other !== index)) : { text: profile.recommendation, low: false };
     // A window no offered login reports is left out rather than repeated as "Not reported" on every row.
     const silent = new Set(candidates.length ? ["5h", "week"].filter((slot) => candidates.every((candidate) => candidate.list.find((reading) => reading.slot === slot)?.kind === "missing")) : []);
-    const rows = offered.map((profile, index) => accountRowMarkup(profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), usage(profile), reasonFor(profile, index), silent)).join("");
+    const rows = offered.map((profile, index) => accountRowMarkup(profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), usage(profile), reasonFor(profile, index), silent, label)).join("");
     const more = hidden.length ? `<details class="launch-not-offered" data-testid="launch-not-offered"><summary>${hidden.length} not offered</summary>${hidden.map((profile) => notOfferedMarkup(this.cli, profile)).join("")}</details>` : "";
     body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${rows || `<p class="launch-empty">No ${escapeHtml(supervisorCliLabel(this.cli))} account here can start a session.</p>`}</div>${more}`;
     fillMeters(body);
@@ -696,15 +697,13 @@ export class LaunchSheet {
     set("supervisor", ".launch-plan-k", `Supervisor · ${supervisorCliLabel(this.cli)}`);
     set("supervisor", ".launch-plan-v", profile?.name ?? (ACCOUNT_CLIS.includes(this.cli) ? "Machine default account" : "One account"));
     const checked = profile && this.usageChecks.result(this.machineId!, `${this.cli}:${profile.name}`);
-    const list = profile && readings(checked?.windows ?? profile.windows, checked ? checked.observed_at : profile.usage_observed_at, Date.now(), checked ? undefined : profile.usage_source);
+    const list = profile && profileReadings(profile, checked, this.machine()?.label);
     set("supervisor", ".launch-plan-meta", !profile || !(checked || profile.windows) ? "" : !checked && profile.usage_source === "local" ? localReadLine(list!, profile.usage_observed_at) : capacityLine(list!));
     const workers = parseWorkers((this.$("input[name=launch-workers]") as HTMLInputElement).value);
     const count = workers.ok ? workers.workers ?? 0 : 0;
     const route = this.chosenRoute();
     set("workers", ".launch-plan-k", `Workers · ${count}`);
     set("workers", ".launch-plan-v", !count ? "Supervisor alone" : route === "gateway" ? "Through the home gateway" : "Direct");
-    const step = this.routeStep();
-    set("workers", ".launch-plan-meta", count && step.kind === "choice" && route === "gateway" ? step.scope : "");
   }
 
   private async loadCatalog(machineId: string): Promise<void> {
@@ -1116,30 +1115,16 @@ export function commandTokensMarkup(command: string): string {
     .join(" ");
 }
 
-/**
- * An exclusion in the meters' own terms. The selector reports a threshold in
- * used percent ("weekly at 87% (threshold 85%); resets …"); the row speaks
- * percent left and leaves the reset to the meter, so nothing contradicts it.
- * "resets later than …" only restates the meters and is dropped.
- */
-export function exclusionText(exclusion: string | undefined): string | undefined {
-  if (!exclusion || exclusion.startsWith("resets later than ")) return undefined;
-  const threshold = /^(\S+) at (\d+)% \(threshold (\d+)%\)/.exec(exclusion);
-  if (!threshold) return exclusion;
-  const [, window, used, limit] = threshold;
-  const name = window === "weekly" ? "week" : window;
-  return `${100 - Number(used)}% ${name} left, under the ${100 - Number(limit)}% floor`;
-}
-
 /** The readings a profile's row draws: an explicit check's, else the listed ones. */
-export function profileReadings(profile: LaunchProfile, usage: CheckedAccountUsage | undefined): WindowReading[] {
-  return readings(usage?.windows ?? profile.windows, usage ? usage.observed_at : profile.usage_observed_at, Date.now(), usage ? undefined : profile.usage_source);
+export function profileReadings(profile: LaunchProfile, usage: CheckedAccountUsage | undefined, machine?: string): WindowReading[] {
+  // With a hub configured, this machine's own check isn't the shared number: it draws muted, named.
+  return readings(usage?.windows ?? profile.windows, usage ? usage.observed_at : profile.usage_observed_at, Date.now(), usage ? undefined : profile.usage_source, usage && profile.usage_source ? machine ?? "this machine" : undefined);
 }
 
 /** One pickable account: radio, name, why it leads (from its own readings), two brief meters, and ↻. */
-function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup: string, usage: CheckedAccountUsage | undefined, reason: PickReason | undefined, silent: ReadonlySet<string> = new Set()): string {
+function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup: string, usage: CheckedAccountUsage | undefined, reason: PickReason | undefined, silent: ReadonlySet<string> = new Set(), machine?: string): string {
   const name = escapeHtml(profile.name);
-  const list = profileReadings(profile, usage);
+  const list = profileReadings(profile, usage, machine);
   const pick = profile.recommendation ? '<small class="launch-account-pick" data-testid="account-recommended">Recommended</small>' : "";
   const exclusion = exclusionText(profile.exclusion);
   const why = reason ? `<small class="launch-account-why${reason.low ? " launch-account-low" : ""}" data-testid="account-pick-reason"${reason.reset ? ` data-reset="${reason.reset}"` : ""}${reason.soonest === undefined ? "" : ` data-soonest="${reason.soonest}"`}>${escapeHtml(reason.text)}</small>`

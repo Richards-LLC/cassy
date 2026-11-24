@@ -1,5 +1,5 @@
 import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
-import { fillMeters, localReadLine, meterMarkup, pickReason, readings, type PickReason, type WindowReading } from "./account-meters";
+import { exclusionText, fillMeters, localReadLine, meterMarkup, pickReason, readings, type PickReason, type WindowReading } from "./account-meters";
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
@@ -22,10 +22,9 @@ export interface AccountsHost {
 }
 const ACTIONS: Record<AccountOperation, string> = { set_default: "Set default", rename: "Rename", disable: "Disable", enable: "Enable", remove: "Remove" };
 const CLEANUP_WORD = "clean up";
-/** The account New session preselects for a provider: its recommendation, else the logged-in default, else the first logged-in one. */
-function nextLaunch(rows: readonly AccountRow[]): AccountRow | undefined {
-  const usable = rows.filter(row => row.login_state === "logged_in" && !row.disabled);
-  return usable.find(row => row.recommendation) ?? usable.find(row => row.is_default) ?? usable[0];
+/** The login the recommender would start for a provider, as New session marks it. */
+function recommended(rows: readonly AccountRow[]): AccountRow | undefined {
+  return rows.find(row => row.recommendation && row.login_state === "logged_in" && !row.disabled);
 }
 const PROVIDERS = [["claude", "Claude"], ["codex", "Codex"], ["grok", "Grok"]] as const;
 /** Removable stale logins and duplicates sort into one cleanup group per machine; protected accounts stay in their provider group. */
@@ -240,12 +239,12 @@ export class AccountsSheet {
     const groups = PROVIDERS.map(([provider, label]) => {
       const listed = catalog.accounts.filter(row => row.provider === provider);
       if (!listed.length) return "";
-      const next = nextLaunch(listed);
-      // Next launch first, cleanup last, then by name: the order holds whatever the usage state.
-      const accounts = listed.sort((a, b) => Number(b === next) - Number(a === next) || Number(needsCleanup(a)) - Number(needsCleanup(b)) || a.display_name.localeCompare(b.display_name) || a.name.localeCompare(b.name));
+      const next = recommended(listed);
+      // Cleanup last, then by name: one order whatever the usage state; the recommendation is marked, never moved.
+      const accounts = listed.sort((a, b) => Number(needsCleanup(a)) - Number(needsCleanup(b)) || a.display_name.localeCompare(b.display_name) || a.name.localeCompare(b.name));
       const shown = new Map(accounts.map(account => [account, this.shown(machine, account)]));
       const usable = accounts.filter(row => row.login_state === "logged_in" && !row.disabled && !row.duplicate_of);
-      const reason = next?.recommendation ? pickReason({ name: next.display_name, list: shown.get(next)! }, usable.filter(row => row !== next).map(row => ({ name: row.display_name, list: shown.get(row)! }))) : undefined;
+      const reason = next ? pickReason({ name: next.display_name, list: shown.get(next)! }, usable.filter(row => row !== next).map(row => ({ name: row.display_name, list: shown.get(row)!, exclusion: exclusionText(row.exclusion) }))) : undefined;
       // A window no login in this group reports leaves its column empty rather than repeating "Not reported".
       const silent = new Set(["5h", "week"].filter(slot => accounts.every(row => shown.get(row)!.find(reading => reading.slot === slot)?.kind === "missing")));
       return `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${HARNESS_NAME[provider]} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts, account === next, shown.get(account)!, account === next ? reason : undefined, silent)).join("")}</ul></section>`;
@@ -263,7 +262,8 @@ export class AccountsSheet {
   /** The readings a row draws: an explicit check's, else the listed ones. */
   private shown(machine: AccountsMachine, account: AccountRow): WindowReading[] {
     const checked = this.usageChecks.result(machine.id, account.key);
-    return readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at, Date.now(), checked ? undefined : account.usage_source);
+    // With a hub configured, this machine's own check isn't the shared number: it draws muted, named.
+    return readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at, Date.now(), checked ? undefined : account.usage_source, checked && account.usage_source ? machine.label : undefined);
   }
 
   /** Other paired machines holding the same login, by provider and login name. */
@@ -280,15 +280,14 @@ export class AccountsSheet {
     const lookalike = harnessLookalike(account) ? ` · ${HARNESS_NAME[account.provider]} profile` : "";
     const flag = !account.duplicate_of && account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
     // The reason comes from the same readings as the meters; it is the tag's tooltip, and spoken on the row only when the pick is low.
-    const nextTag = next ? `<span class="accounts-next" data-testid="account-next"${reason?.reset ? ` data-reset="${reason.reset}"` : ""} title="${escapeHtml(reason?.text ?? "Default profile")}">Next launch</span>` : "";
+    const nextTag = next ? `<span class="accounts-next" data-testid="account-next"${reason?.reset ? ` data-reset="${reason.reset}"` : ""} title="${escapeHtml(reason?.text ?? "")}">Recommended</span>` : "";
     const lowTag = reason?.low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(reason.text)}</span>` : "";
     const others = this.elsewhere(machine, account);
     const lives = others.length ? `<span class="accounts-sub" data-testid="account-elsewhere">also on ${escapeHtml(others.join(", "))}</span>` : "";
     // With a hub configured, a number that isn't the hub's says whose it is.
-    const local = checked && account.usage_source ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own check</span>` : "";
     // The profile, not its folder: the folder repeats the email; the whole path is the tooltip.
     const profile = account.name !== account.display_name && account.provider !== "grok" ? `<code class="accounts-sub" title="${escapeHtml(account.location ?? account.key)} on ${escapeHtml(machine.label)}">${escapeHtml(account.name)}</code>` : "";
-    const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, flag, local, profile, lives].filter(Boolean).join("");
+    const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, flag, profile, lives].filter(Boolean).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];

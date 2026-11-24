@@ -15,7 +15,7 @@ export const SLOT_LABEL: Record<WindowSlot, string> = { "5h": "5h", week: "Week"
 export const STALE_MS = 60 * 60_000;
 
 export type WindowReading =
-  | { slot: WindowSlot; kind: "live" | "stale"; left: number; reset?: string; resetsIn?: string; resetAt?: string; age?: string }
+  | { slot: WindowSlot; kind: "live" | "stale" | "local"; left: number; reset?: string; resetsIn?: string; resetAt?: string; age?: string }
   | { slot: WindowSlot; kind: "reset" | "unknown" | "missing" | "unreachable" };
 
 const slotOf = (name: string): WindowSlot | undefined => /week|7d|seven/i.test(name) ? "week" : /^5h$|five|session/i.test(name) ? "5h" : undefined;
@@ -39,7 +39,12 @@ export function readAge(instant: string, now = Date.now()): string | undefined {
 }
 
 /** Both slots, always in order, from whatever windows the source reported. An unreachable hub has no number to show. */
-export function readings(windows: readonly AccountWindow[] | undefined, observed: string | null | undefined, now = Date.now(), source?: UsageSource): WindowReading[] {
+/**
+ * `checkedOn` names the machine whose own ↻ check these windows came from
+ * while a hub is configured: such a number isn't the shared one, so it draws
+ * muted and says whose check it was and when.
+ */
+export function readings(windows: readonly AccountWindow[] | undefined, observed: string | null | undefined, now = Date.now(), source?: UsageSource, checkedOn?: string): WindowReading[] {
   if (source === "hub_unreachable") return SLOTS.map(slot => ({ slot, kind: "unreachable" }));
   const observedAt = observed ? new Date(observed).getTime() : NaN;
   const stale = Number.isFinite(observedAt) && now - observedAt > STALE_MS;
@@ -50,12 +55,13 @@ export function readings(windows: readonly AccountWindow[] | undefined, observed
     if (reset !== undefined && Number.isFinite(reset) && reset <= now) return { slot, kind: "reset" };
     const used = window.used_percent;
     if (used === null || !Number.isFinite(used) || used < 0 || used > 100) return { slot, kind: "unknown" };
+    const ago = observed ? readAge(observed, now)?.replace(/^read /, "") : undefined;
     return {
-      slot, kind: stale ? "stale" : "live", left: Math.round(100 - used),
+      slot, kind: checkedOn ? "local" : stale ? "stale" : "live", left: Math.round(100 - used),
       reset: window.resets_at && reset !== undefined && Number.isFinite(reset) ? accountTime(window.resets_at) : undefined,
       resetsIn: window.resets_at ? relativeIn(window.resets_at, now) : undefined,
       resetAt: window.resets_at && reset !== undefined && Number.isFinite(reset) ? new Date(reset).toISOString() : undefined,
-      age: stale && observed ? readAge(observed, now) : undefined,
+      age: checkedOn ? `${checkedOn}'s check${ago ? `, ${ago}` : ""}` : stale && observed ? readAge(observed, now) : undefined,
     };
   });
 }
@@ -70,9 +76,9 @@ export const tone = (left: number): "ok" | "low" | "crit" => left < 10 ? "crit" 
 export function meterMarkup(reading: WindowReading, options: { labelled: boolean; brief?: boolean }): string {
   const label = options.labelled ? `<span class="meter-window">${SLOT_LABEL[reading.slot]}</span>` : "";
   const name = SLOT_LABEL[reading.slot];
-  if (reading.kind === "live" || reading.kind === "stale") {
+  if (reading.kind === "live" || reading.kind === "stale" || reading.kind === "local") {
     const value = reading.kind === "stale" ? `≤ ${reading.left}%` : `${reading.left}%`;
-    const when = reading.kind === "stale" ? `<span class="meter-age">${escapeHtml(reading.age ?? "")}</span>` : reading.resetsIn ? `<span class="meter-in">${escapeHtml(reading.resetsIn)}</span>` : "";
+    const when = reading.kind !== "live" ? `<span class="meter-age">${escapeHtml(reading.age ?? "")}</span>` : reading.resetsIn ? `<span class="meter-in">${escapeHtml(reading.resetsIn)}</span>` : "";
     const at = !options.brief && reading.reset ? `<span class="meter-at">${when ? " · " : ""}resets ${escapeHtml(reading.reset)}</span>` : "";
     const aria = `${name}: ${reading.kind === "stale" ? "at most " : ""}${reading.left}% left${reading.reset ? `, resets ${reading.reset}` : ""}${reading.age ? `, ${reading.age}` : ""}`;
     return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" data-left="${reading.left}"${reading.resetAt ? ` data-reset="${reading.resetAt}"` : ""} data-tone="${tone(reading.left)}" role="img" aria-label="${escapeHtml(aria)}">${label}<span class="meter-bar" aria-hidden="true"><span data-fill="${reading.left}"></span></span><span class="meter-value">${value}<span class="meter-unit"> left</span></span><span class="meter-when">${when}${at}</span></div>`;
@@ -90,7 +96,7 @@ export function leastLeft(list: readonly WindowReading[]): number | undefined {
 }
 /** Below this, a recommended account says on its row why it is still first. */
 export const LOW_PICK = 20;
-type Known = Extract<WindowReading, { kind: "live" | "stale" }>;
+type Known = Extract<WindowReading, { kind: "live" | "stale" | "local" }>;
 const weekOf = (list: readonly WindowReading[]): Known | undefined => list.find((reading): reading is Known => reading.slot === "week" && "left" in reading);
 export interface PickCandidate { name: string; list: readonly WindowReading[]; exclusion?: string }
 export interface PickReason { text: string; low: boolean; reset?: string; soonest?: boolean }
@@ -105,10 +111,15 @@ export function pickReason(pick: PickCandidate, others: readonly PickCandidate[]
   const left = leastLeft(pick.list) ?? week.left;
   const at = (reading: Known | undefined) => reading?.resetAt ? Date.parse(reading.resetAt) : Infinity;
   const sooner = others.map(other => ({ other, week: weekOf(other.list) })).filter(item => at(item.week) < at(week)).sort((a, b) => at(a.week) - at(b.week))[0];
-  const resets = week.resetsIn ? `week resets ${week.resetsIn}` : "weekly reset unknown";
+  const resets = week.resetsIn ? `resets ${week.resetsIn}` : "reset unknown";
   const low = left < LOW_PICK;
-  const text = !sooner ? `${low ? `Only ${left}% left, but its` : "Its"} ${resets}, the soonest here, so its capacity is used before it expires`
-    : `${low ? `Only ${left}% left; ` : ""}${resets}. ${sooner.other.name} resets sooner (${sooner.week?.resetsIn ?? "unknown"})${sooner.other.exclusion ? ` but is excluded: ${sooner.other.exclusion}` : " but wasn't chosen"}`;
+  const lead = low ? `Only ${left}% left; ${resets}.` : `Week ${resets}.`;
+  const earlier = others.filter(other => at(weekOf(other.list)) < at(week));
+  const why = !sooner ? " Soonest here, so it's used before it expires."
+    : earlier.every(other => other.exclusion?.includes("floor")) ? ` Sooner login${earlier.length === 1 ? " is" : "s are"} under the floor.`
+    : earlier.every(other => other.exclusion) ? ` Sooner login${earlier.length === 1 ? " is" : "s are"} excluded.`
+    : " A sooner login wasn't chosen.";
+  const text = `${lead}${why}`;
   return { text, low, reset: week.resetAt, soonest: !sooner };
 }
 
@@ -117,17 +128,33 @@ export function pickReason(pick: PickCandidate, others: readonly PickCandidate[]
  * is muted text with its date, never a meter.
  */
 export function localReadLine(list: readonly WindowReading[], observed: string | null | undefined, now = Date.now()): string {
-  const known = list.filter(reading => "left" in reading);
+  const known = list.filter((reading): reading is Known => "left" in reading);
   const age = observed ? readAge(observed, now) : undefined;
-  return `Not on the hub${known.length ? ` · this machine's ${age ?? "last read"}: ${known.map(reading => `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}`).join(", ")}` : ""}`;
+  return `Not on the hub${known.length ? ` · ${known.map(reading => `${reading.kind === "stale" ? "≤" : ""}${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}`).join(", ")} left${age ? `, ${age}` : ""}` : ""}`;
+}
+
+/**
+ * An exclusion in the meters' own terms. The selector reports a threshold in
+ * used percent ("weekly at 87% (threshold 85%); resets …"); rows speak
+ * percent left and leave the reset to the meter. "resets later than …" only
+ * restates the meters and is dropped.
+ */
+export function exclusionText(exclusion: string | null | undefined): string | undefined {
+  if (!exclusion || exclusion.startsWith("resets later than ")) return undefined;
+  const threshold = /^(\S+) at (\d+)% \(threshold (\d+)%\)/.exec(exclusion);
+  if (!threshold) return exclusion;
+  const [, window, used, limit] = threshold;
+  return `${100 - Number(used)}% ${window === "weekly" ? "week" : window} left, under the ${100 - Number(limit)}% floor`;
 }
 
 /** "77% 5h · 62% week · resets in 2 h": the plan strip's one-line summary. */
 export function capacityLine(list: readonly WindowReading[]): string {
   if (list.every(reading => reading.kind === "unreachable")) return "hub unreachable";
-  const parts = list.map(reading => reading.kind === "live" ? `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "stale" ? `≤${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "missing" ? `${SLOT_LABEL[reading.slot]} not reported` : `${SLOT_LABEL[reading.slot].toLowerCase()} unknown`);
-  const soonest = list.filter((reading): reading is Extract<WindowReading, { kind: "live" | "stale" }> => (reading.kind === "live" || reading.kind === "stale") && Boolean(reading.resetsIn))[0];
-  return `${parts.join(" · ")}${soonest?.resetsIn ? ` · resets ${soonest.resetsIn}` : ""}`;
+  const parts = list.map(reading => reading.kind === "live" || reading.kind === "local" ? `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "stale" ? `≤${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "missing" ? `${SLOT_LABEL[reading.slot]} not reported` : `${SLOT_LABEL[reading.slot].toLowerCase()} unknown`);
+  const known = list.filter((reading): reading is Known => "left" in reading && Boolean(reading.resetsIn));
+  const soonest = known.sort((a, b) => Date.parse(a.resetAt ?? "") - Date.parse(b.resetAt ?? ""))[0];
+  const local = list.find((reading): reading is Known => reading.kind === "local");
+  return `${parts.join(" · ")}${soonest?.resetsIn ? ` · ${SLOT_LABEL[soonest.slot]} resets ${soonest.resetsIn}` : ""}${local?.age ? ` · ${local.age}` : ""}`;
 }
 
 /** Bar widths go through CSSOM: the hub's style-src refuses inline style attributes. */

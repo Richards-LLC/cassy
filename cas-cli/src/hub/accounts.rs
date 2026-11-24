@@ -35,6 +35,9 @@ pub(super) struct Row {
     duplicate_of: Option<String>,
     is_default: bool,
     recommendation: Option<String>,
+    /// Why automatic selection skipped this login (threshold, duplicate, unknown usage), if it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclusion: Option<String>,
     windows: Vec<UsageWindow>,
     usage_observed_at: Option<DateTime<Utc>>,
     /// `hub`, `local` or `hub_unreachable`; absent when no hub is configured.
@@ -83,6 +86,7 @@ pub(super) fn catalog_with(home: &Path, quota: &super::server::gateway_accounts:
                 .map(|r| r.reason.clone());
             let mut row = project(account, &accounts, default, recommendation, home);
             row.usage_source = sources.get(&account.folder).copied();
+            row.exclusion = selection.excluded.iter().find(|(excluded, _)| excluded.name == account.name).map(|(_, reason)| reason.clone());
             rows.push(row);
         }
     }
@@ -97,6 +101,7 @@ pub(super) fn catalog_with(home: &Path, quota: &super::server::gateway_accounts:
         duplicate_of: None,
         is_default: true,
         recommendation: None,
+        exclusion: None,
         windows: Vec::new(),
         usage_observed_at: None,
         usage_source: None,
@@ -154,6 +159,7 @@ fn project(
             .map(|a| format!("{}:{}", a.provider.name(), a.name)),
         is_default: account.name == default,
         recommendation,
+        exclusion: None,
         windows: account.windows.clone(),
         usage_observed_at: account.usage_observed_at,
         usage_source: None,

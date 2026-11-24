@@ -44,8 +44,10 @@
 code.accounts-sub { font-family: var(--font-mono); }
 .accounts-next { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
 .accounts-cell { min-width: 0; }
-/* Desktop names the windows in the column heads; only the phone labels each meter. */
+/* Desktop names the windows in the column heads; only the phone labels each meter.
+   Without a label column the bar starts flush with its header. */
 .accounts-row .meter-window { display: none; }
+.accounts-row .meter { grid-template-columns: minmax(3rem, 1fr) auto; grid-template-areas: "bar value" "when when"; }
 .accounts-why { flex-basis: 100%; font-weight: var(--weight-regular); }
 .accounts-span { grid-column: 2 / -1; display: grid; gap: var(--space-2); }
 .accounts-num { font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
@@ -86,6 +88,7 @@ code.accounts-sub { font-family: var(--font-mono); }
   .accounts-heading { gap: var(--space-2); }
   .accounts-cols { display: none; }
   .accounts-row .meter-window { display: block; }
+  .accounts-row .meter { grid-template-columns: auto minmax(3rem, 1fr) auto; grid-template-areas: "label bar value" "label when when"; }
   /* Each meter gets its own full-width line, starting under the name. */
   .accounts-row { grid-template-columns: minmax(0, 1fr); padding: var(--space-3) var(--space-1); }
   .accounts-row > .accounts-cell { padding-inline-start: calc(40px + var(--space-3)); }

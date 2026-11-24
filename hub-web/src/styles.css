@@ -3769,11 +3769,11 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .meter-bar > span { display: block; block-size: 100%; inline-size: 0; border-radius: inherit; background: var(--state-ok); transition: inline-size 150ms ease-out; }
 .meter[data-tone="low"] .meter-bar > span { background: var(--state-warn); }
 .meter[data-tone="crit"] .meter-bar > span { background: var(--state-crit); }
-.meter[data-state="stale"] .meter-bar > span { background: var(--state-off); }
-.meter-value { grid-area: value; justify-self: end; min-inline-size: 4.5ch; text-align: end; color: var(--ink); white-space: nowrap; font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-mono); font-variant-numeric: tabular-nums; }
+.meter:is([data-state="stale"], [data-state="local"]) .meter-bar > span { background: var(--state-off); }
+.meter-value { grid-area: value; justify-self: end; min-inline-size: 6ch; text-align: end; color: var(--ink); white-space: nowrap; font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-mono); font-variant-numeric: tabular-nums; }
 .meter-value--none { font-family: var(--font-ui); text-align: start; }
 .meter-unit { color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/1 var(--font-ui); }
-.meter[data-state="stale"] .meter-value, .meter-value--none { color: var(--ink-mid); font-weight: var(--weight-regular); }
+.meter:is([data-state="stale"], [data-state="local"]) .meter-value, .meter-value--none { color: var(--ink-mid); font-weight: var(--weight-regular); }
 /* A reading with no number spans the bar and value columns: one quiet line. */
 .meter-value--none { grid-column: bar / value; grid-row: 1; justify-self: start; z-index: 0; overflow: hidden; text-overflow: ellipsis; }
 .meter:has(.meter-value--none) .meter-bar { visibility: hidden; }
@@ -3841,5 +3841,5 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @media (prefers-reduced-motion: reduce) { .account-refresh { transition: none; } .account-refresh[aria-busy="true"] svg { animation: none; } }
 /* New session rows are narrow: the value says "77%", the column already means left. */
 .launch-meters .meter-unit { display: none; }
-/* The Start bar matches the dialog's rounding instead of a square inset slab. */
-.launch-sheet .launch-actions { border-radius: var(--radius-card); }
+/* The Start bar matches the dialog's rounding instead of a square inset slab; its summary sits on the bar's inner padding. */
+.launch-sheet .launch-actions { border-radius: var(--radius-card); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4); }

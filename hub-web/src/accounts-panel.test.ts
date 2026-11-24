@@ -113,10 +113,10 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   const { host, sheet } = setup(true, healthy);
   vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy, protectedMain] });
   sheet.open(); await settle();
-  // One ledger per provider: the next launch (here the first logged-in row) first, then by name, removable cleanup rows last.
+  // One ledger per provider in one stable order: by name, removable cleanup rows last.
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
   expect(groups).toHaveLength(1);
-  expect([...groups[0]!.querySelectorAll<HTMLElement>("[data-account-key]")].map(row => row.dataset.accountKey)).toEqual([tight.key, protectedMain.key, healthy.key, duplicate.key]);
+  expect([...groups[0]!.querySelectorAll<HTMLElement>("[data-account-key]")].map(row => row.dataset.accountKey)).toEqual([protectedMain.key, tight.key, healthy.key, duplicate.key]);
   for (const line of document.querySelectorAll("[data-duplicate-of]")) expect(line.textContent).not.toContain(healthy.key);
   expect(groups[0]!.querySelector('[data-testid="account-meter"][data-tone="crit"]')).not.toBeNull();
   expect(groups[0]!.querySelector(`[data-account-key="${healthy.key}"] [title^="~/.claude-work"]`)).not.toBeNull();

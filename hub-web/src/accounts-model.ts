@@ -7,6 +7,8 @@ export interface AccountRow {
   location?: string;
   login_state: "logged_in" | "logged_out" | "never_logged_in" | "stale_login" | "unknown";
   disabled: boolean; duplicate_of: string | null; is_default: boolean; recommendation: string | null;
+  /** Why automatic selection skipped this login, in the selector's words; older hubs omit it. */
+  exclusion?: string | null;
   windows: AccountWindow[]; usage_observed_at: string | null;
   /** `hub`: the one shared number for this login; `local`: this machine's own read; `hub_unreachable`: none shown. Absent: no hub configured. */
   usage_source?: UsageSource;

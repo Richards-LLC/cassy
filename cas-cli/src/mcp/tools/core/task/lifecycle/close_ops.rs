@@ -310,6 +310,20 @@ tokio::task_local! {
     /// GH #2282: present while Cassy closes a parked delivery it observed
     /// already contained in its recorded target.
     static CONTAINED_RECONCILE_CLOSE: ();
+    /// GH #2383: the exact dispatch owner Cassy acts for while it closes an
+    /// approved verdict's saved close intent.
+    static VERDICT_CLOSE_OWNER: String;
+}
+
+/// GH #2383: run `close` as Cassy's close of an approved exact-dispatch
+/// verdict. Train authority is the dispatch owner Cassy acts for, never the
+/// verifier that recorded the verdict; every other gate is unchanged.
+pub(crate) async fn as_verdict_owner_close<F: std::future::Future>(owner: String, close: F) -> F::Output {
+    VERDICT_CLOSE_OWNER.scope(owner, as_cassy_merge_close(close)).await
+}
+
+fn verdict_close_owner() -> Option<String> {
+    VERDICT_CLOSE_OWNER.try_with(Clone::clone).ok()
 }
 
 /// GH #2282: run `close` as Cassy's reconcile of a parked delivery that
@@ -8193,7 +8207,7 @@ impl CasCore {
             }
         }
 
-        if let Ok(id) = self.get_registered_agent_id_read_only()
+        if let Some(id) = verdict_close_owner().or_else(|| self.get_registered_agent_id_read_only().ok())
             && let Ok(actor) = self.open_agent_store()?.get(&id) && actor.role != cas_types::AgentRole::Worker {
             crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
                 .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
@@ -12615,7 +12629,8 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
         if owner_train.is_some()
             || crate::cloud::peer_mailbox::train_parks::parked(&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some() {
-            let actor = self.open_agent_store()?.get(&self.get_agent_id()?).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e.to_string()))?;
+            let actor_id = match verdict_close_owner() { Some(owner) => owner, None => self.get_agent_id()? };
+            let actor = self.open_agent_store()?.get(&actor_id).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e.to_string()))?;
             // gate-audit[train_owner_park]: G-113 Worker publication waits for
             // the pinned owner; it cannot turn an artifact-only close into a verdict.
             if actor.role == cas_types::AgentRole::Worker

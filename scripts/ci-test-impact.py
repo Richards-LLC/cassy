@@ -122,18 +122,17 @@ def full(plan, reason):
     return plan
 
 
-def integration_text(root, stem):
-    """Conservatively include a suite's Rust modules and shared helpers."""
+def integration_sources(root, stem):
+    """Conservatively map a suite's Rust modules and shared helpers to text."""
     tests = root / "cas-cli/tests"
     pending = [tests / f"{stem}.rs", *sorted((tests / stem).rglob("*.rs"))]
-    seen, texts = set(), []
+    base, sources = root.resolve(), {}
     while pending:
         path = pending.pop().resolve()
-        if path in seen or not path.is_file():
+        key = path.relative_to(base).as_posix() if path.is_relative_to(base) else str(path)
+        if key in sources or not path.is_file():
             continue
-        seen.add(path)
-        text = path.read_text()
-        texts.append(text)
+        text = sources[key] = path.read_text()
         pending.extend(path.parent / relative for matches in re.findall(
             r'#\[path\s*=\s*"([^"]+)"\]|\binclude!\s*\(\s*"([^"]+)"', text)
             for relative in matches if relative)
@@ -141,7 +140,12 @@ def integration_text(root, stem):
             # Both crate-root and ordinary module layouts; over-selection is safe.
             for directory in {path.parent, path.with_suffix("")}:
                 pending.extend([directory / f"{module}.rs", directory / module / "mod.rs"])
-    return "\n".join(texts)
+    return sources
+
+
+# A suite owns a test path it compiles (cas-2f1c) or that sits under its stem.
+def owns(stem, path, files):
+    return path in files or path == f"cas-cli/tests/{stem}.rs" or path.startswith(f"cas-cli/tests/{stem}/")
 
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
@@ -234,7 +238,8 @@ def plan(root, base, zero, history, delivery=False):
         result["paths"] = output.decode().split("\0")[:-1]
         crates, edges = workspace(root)
         mapping = inventory(root, crates["cas"][1])
-        texts = {stem: integration_text(root, stem) for stem in mapping}
+        sources = {stem: integration_sources(root, stem) for stem in mapping}
+        texts = {stem: "\n".join(files.values()) for stem, files in sources.items()}
         # Binary contracts depend on every cas source module, even when a
         # helper hides process construction behind command(). Keep a superset.
         subprocess_stems = sorted(stem for stem, text in texts.items() if re.search(
@@ -283,7 +288,7 @@ def plan(root, base, zero, history, delivery=False):
             direct_modules = {p.split("/")[2].removesuffix(".rs") for p in production}
             changed_modules = closure(direct_modules, modules(root))
             test_paths = [p for p in paths if p.startswith("cas-cli/tests/")]
-            shared_test_input = any(not any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for stem in mapping) for p in test_paths)
+            shared_test_input = any(not any(owns(stem, p, sources[stem]) for stem in mapping) for p in test_paths)
             selected = {stem: "widened:shared-test-input" for stem in mapping} if shared_test_input else {}
             if production:
                 selected.update({stem: "widened:binary-contract" for stem in subprocess_stems})
@@ -291,7 +296,7 @@ def plan(root, base, zero, history, delivery=False):
                 text = texts[stem]
                 imports = set(re.findall(r"\bcas::([A-Za-z_][A-Za-z_0-9]*)::", text))
                 opaque = not imports or re.search(r"\b(?:cargo_bin|Command|assert_cmd)\b|\bcas::(?:[A-Z]|\{|\*|[A-Za-z_]\w*\s*(?:;|,|\bas\b))", text)
-                if any(p.startswith(f"cas-cli/tests/{stem}/") or p == f"cas-cli/tests/{stem}.rs" for p in paths):
+                if any(owns(stem, p, sources[stem]) for p in paths):
                     selected[stem] = "changed-test"
                 elif wide:
                     selected[stem] = "widened:module-scope"
@@ -424,7 +429,8 @@ def lane_split(root, selection):
         for module in modules:
             prove("cas", None, f"{module}::")
         for stem, target in sorted(mapping.items()):
-            if any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for p in paths):
+            files = integration_sources(root, stem)
+            if any(owns(stem, p, files) for p in paths):
                 parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
                 if target == stem:
                     ci_only.append(f"(package(cas) and binary({target}))")

@@ -70,8 +70,9 @@ fn hub() -> String {
             let ok = request.starts_with("get /v1/models ")
                 && request.contains(&format!("authorization: bearer {}", KEY.to_ascii_lowercase()));
             let status = if ok { "200 OK" } else { "401 Unauthorized" };
+            let body = r#"{"data":[{"id":"gpt-6.1-sol","object":"model"}]}"#;
             let _ = stream.write_all(
-                format!("HTTP/1.1 {status}\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{{\"data\":[]}}").as_bytes(),
+                format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes(),
             );
         }
     });
@@ -84,6 +85,30 @@ fn key_file(dir: &Path, name: &str, key: &str, mode: u32) -> PathBuf {
     std::fs::write(&path, format!("{key}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
     path
+}
+
+/// GH #2415: a Codex worker that routes through the hub has no local account
+/// catalogue, so lane recipes are verified against the hub's model listing —
+/// and only when the worker would really route there.
+#[test]
+fn codex_hub_models_are_offered_only_when_a_codex_worker_would_route_through_the_hub() {
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = hub();
+    let good = key_file(temp.path(), "client.key", KEY, 0o600);
+    let wrong = key_file(temp.path(), "wrong.key", "not-the-key", 0o600);
+    let settings = |enabled: bool, key: &Path, clients: Option<&str>| FactoryGatewayConfig {
+        enabled,
+        endpoint: Some(endpoint.clone()),
+        key_file: Some(key.to_string_lossy().into_owned()),
+        clients: clients.map(|c| vec![c.to_string()]),
+        ..Default::default()
+    };
+    let listed = |settings| codex_hub_models_with(&settings, models);
+    assert_eq!(listed(settings(true, &good, None)), Some(vec!["gpt-6.1-sol".to_string()]));
+    assert_eq!(listed(settings(true, &good, Some("codex"))), Some(vec!["gpt-6.1-sol".to_string()]));
+    assert_eq!(listed(settings(false, &good, None)), None, "direct route");
+    assert_eq!(listed(settings(true, &good, Some("claude"))), None, "codex not routed");
+    assert_eq!(listed(settings(true, &wrong, None)), None, "hub refuses the key: the worker starts direct");
 }
 
 #[test]

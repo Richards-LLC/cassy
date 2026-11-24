@@ -1960,6 +1960,20 @@ async fn publish_report(f: &Fixture, cloud: &wiremock::MockServer, task_id: &str
     }).await.unwrap()
 }
 
+fn open_rapid_window(f: &Fixture, id: &str) {
+    assert!(!crate::rapid_response::verification_sampled(id));
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let mut epic = Task::new("cas-0ff6-rapid".into(), "Rapid-response epic".into());
+    epic.task_type = TaskType::Epic;
+    tasks.add(&epic).unwrap();
+    tasks.add_dependency(&Dependency::new(id.into(), epic.id.clone(), DependencyType::ParentChild)).unwrap();
+    crate::rapid_response::enable(
+        &f.cas_dir(), tasks.as_ref(), &epic.id, chrono::Duration::hours(1), "Incident", "Revert the release",
+        chrono::Utc::now(),
+    ).unwrap();
+    assert!(crate::rapid_response::active_for_task_at(&f.cas_dir(), &f.task(id), None).is_some());
+}
+
 #[tokio::test]
 async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417() {
     use cas_store::VerificationStore;
@@ -1967,6 +1981,7 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
     for prior in [
         "never-verified", "light-depth", "rejected-earlier-report", "approval-unreadable",
         "legacy-approved", "legacy-skipped", "legacy-approved-update-route",
+        "inventory-unreadable", "rapid-unsampled", "release-tagged",
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -1994,6 +2009,22 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
             spike.depth = cas_types::TaskDepth::Light;
         }
         f.put(&spike);
+        match prior {
+            "inventory-unreadable" => {
+                cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().record_local(&cas_store::NewArtifact {
+                    id: "art-0ff6c0de".into(), task_id: id.into(), name: "report.md".into(),
+                    mime: "text/markdown".into(), size_bytes: 9, sha256: "e".repeat(64),
+                }).unwrap();
+                rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap()
+                    .execute("UPDATE artifacts SET size_bytes = 'unreadable'", []).unwrap();
+            }
+            "rapid-unsampled" => open_rapid_window(&f, id),
+            "release-tagged" => {
+                git(f.dir.path(), &["tag", "v1.0.0"]);
+                git(f.dir.path(), &["push", "-q", "origin", "v1.0.0"]);
+            }
+            _ => {}
+        }
         if matches!(prior, "rejected-earlier-report" | "approval-unreadable") {
             let dispatch = cas_store::create_verification_dispatch_bound(
                 &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
@@ -2038,13 +2069,20 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
         }).await;
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{prior}: {response}");
         assert!(!by_update || response.contains("G-68"), "{prior}: {response}");
+        if prior == "inventory-unreadable" {
+            assert!(response.contains("G-68"), "{prior}: {response}");
+            assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_none(), "{prior}: {response}");
+        }
     }
 }
 
 #[tokio::test]
 async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_gh2417() {
     let mut env = TestEnvGuard::temp_home();
-    for case in ["unchanged", "light-depth", "republished"] {
+    for case in [
+        "unchanged", "light-depth", "rapid-unsampled", "release-tagged", "republished",
+        "revoked-before-launch", "cloud-unavailable-at-launch",
+    ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
@@ -2066,9 +2104,17 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
         git(&checkout, &["add", "docs/spike-report.md"]);
         git(&checkout, &["commit", "-qm", "docs(cas-2418): spike report"]);
         git(&checkout, &["push", "-q", "origin", &lane]);
-        publish_report(&f, &cloud, id, "report v1\n").await;
+        let published = publish_report(&f, &cloud, id, "report v1\n").await;
         let parked = call(&f.worker, serde_json::json!({"action": "close", "id": id, "reason": "Report published"})).await;
         assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{case}: {parked}");
+        match case {
+            "rapid-unsampled" => open_rapid_window(&f, id),
+            "release-tagged" => {
+                git(&checkout, &["tag", "v1.0.0"]);
+                git(&checkout, &["push", "-q", "origin", "v1.0.0"]);
+            }
+            _ => {}
+        }
 
         let repo = f.dir.path();
         git(repo, &["config", "user.name", "CAS Test"]);
@@ -2080,6 +2126,35 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
             .expect_err("the review is requested before the merge");
         let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
             .unwrap_or_else(|| panic!("{case}: {held:?}"));
+        if matches!(case, "revoked-before-launch" | "cloud-unavailable-at-launch") {
+            use cas_types::VerificationDispatchState::{Invalidated, Pending};
+            if case == "revoked-before-launch" {
+                cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap()
+                    .revoke(&published.id, "nocode-supervisor-session", "Report withdrawn").unwrap();
+            } else {
+                cloud.reset().await;
+                wiremock::Mock::given(wiremock::matchers::any())
+                    .respond_with(wiremock::ResponseTemplate::new(503)).mount(&cloud).await;
+            }
+            let (core, task, dispatch) = (train_owner.clone(), f.task(id), reviewed.clone());
+            let output = f.cas_dir().join("fixture-verdict.json");
+            tokio::task::spawn_blocking(move || {
+                crate::mcp::tools::core::workflow::premerge_verification::launch_verifier_with(
+                    &core, &task, &dispatch, output, |_| Err("stop before the fixture verifier".into()),
+                ).unwrap().unwrap().join().unwrap()
+            }).await.unwrap();
+            let launched = cas_store::get_verification_dispatch(&f.cas_dir(), &reviewed.id).unwrap().state;
+            if case == "cloud-unavailable-at-launch" {
+                assert_eq!(launched, Pending, "{case}");
+            } else {
+                assert_eq!(launched, Invalidated, "{case}");
+                train_owner.prepare_premerge_verification(&f.task(id), repo, &lane, "main")
+                    .expect_err("the retry requests a new review");
+                let fresh = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+                assert!(fresh.id != reviewed.id && fresh.state == Pending, "{case}: {fresh:?}");
+            }
+            continue;
+        }
         f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
             "action": "add", "task_id": id, "dispatch_id": reviewed.id,
             "status": "approved", "summary": "Report reviewed", "confidence": 1.0,
@@ -2112,7 +2187,7 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         ("rejected", TaskType::Spike), ("chore", TaskType::Chore), ("demo-feature", TaskType::Feature),
         ("report-republished", TaskType::Spike), ("notes-marker", TaskType::Spike),
         ("published-before-launch", TaskType::Spike), ("peer-report-importing", TaskType::Spike),
-        ("report-revoked", TaskType::Spike),
+        ("report-revoked", TaskType::Spike), ("reference-revised-before-launch", TaskType::Spike),
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -2154,8 +2229,17 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         let pending = call(&f.worker, request.clone()).await;
         let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
             .unwrap_or_else(|| panic!("{case}: {pending}"));
-        if case == "published-before-launch" {
-            let later = publish_report(&f, &cloud, id, "report v2\n").await;
+        if case == "reference-revised-before-launch" {
+            let mut revised = f.task(id);
+            revised.external_ref = Some("https://example.test/deploys/revised".into());
+            f.put(&revised);
+        }
+        if matches!(case, "published-before-launch" | "reference-revised-before-launch") {
+            let later = if case == "published-before-launch" {
+                publish_report(&f, &cloud, id, "report v2\n").await.id
+            } else {
+                String::new()
+            };
             let (core, task, dispatch) = (CasCore::with_daemon(f.cas_dir(), None, None), f.task(id), reviewed.clone());
             let input = tokio::task::spawn_blocking(move || {
                 crate::mcp::tools::core::workflow::premerge_verification::verifier_prompt(&core, &task, &dispatch)
@@ -2165,8 +2249,11 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
                 .find(|value: &serde_json::Value| value.get("artifacts").is_some()).unwrap();
             let shown: Vec<_> = inputs["artifacts"].as_array().unwrap().iter()
                 .filter_map(|artifact| artifact["artifact_id"].as_str()).collect();
-            if shown != [published.id.as_str()] {
-                wrong.push(format!("{case}: verifier shown {shown:?}, dispatched {} (later {})", published.id, later.id));
+            if shown != [published.id.as_str()] || inputs["task"]["external_ref"] != PROOF {
+                wrong.push(format!(
+                    "{case}: verifier shown {shown:?} at {}, dispatched {} at {PROOF} (later {later})",
+                    inputs["task"]["external_ref"], published.id,
+                ));
             }
         }
         let mut verdict = cas_types::Verification::new(format!("ver-2372-{case}"), id.into());
@@ -2217,7 +2304,9 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
             }
             _ => {}
         }
-        let proof_reference_revised = matches!(case, "approved" | "rejected" | "chore" | "demo-feature");
+        let proof_reference_revised = matches!(
+            case, "approved" | "rejected" | "chore" | "demo-feature" | "reference-revised-before-launch"
+        );
         let mut parked = f.task(id);
         if proof_reference_revised {
             parked.external_ref = Some("https://example.test/deploys/revised".into());

@@ -493,7 +493,7 @@ pub(super) fn launch_local(
     })
 }
 
-fn launch_with_preparation(
+pub(crate) fn launch_with_preparation(
     core: &CasCore,
     task: &Task,
     dispatch: &VerificationDispatch,

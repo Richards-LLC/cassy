@@ -60,7 +60,7 @@ fn check_pr(
         if decided.contains(&task_id) {
             continue;
         }
-        let task_pr: Option<u64> = row.get(2)?;
+        let task_pr = row.get::<_, Option<i64>>(2)?.and_then(|value| u64::try_from(value).ok());
         let source_branch: Option<String> = row.get(3)?;
         let dispatch = cas_store::get_verification_dispatch_with_conn(&conn, &dispatch_id)?;
         if let Some(source_branch) = source_branch {

@@ -2186,6 +2186,10 @@ fn execute_selection(
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
                 })?)?;
+            if iteration == 0 && !success && javascript_report_has_failure(runner, &value) {
+                super::record_red_first_failure(cas_root, repo, head, super::RedFirstFailure::Test,
+                    format!("{runner} {path}"))?;
+            }
             Ok((success, value))
         };
         let (ran, skipped) = if widened.is_some() && runner == "playwright" {
@@ -2463,6 +2467,15 @@ fn validate_declared_discovery(
         }
     }
     Ok(())
+}
+
+fn javascript_report_has_failure(runner: &str, report: &Value) -> bool {
+    if runner == "playwright" {
+        return report.pointer("/stats/unexpected").and_then(Value::as_u64).is_some_and(|count| count != 0);
+    }
+    report.get("testResults").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|file| file.get("assertionResults").and_then(Value::as_array)).flatten()
+        .any(|test| test.get("status").and_then(Value::as_str) == Some("failed"))
 }
 
 fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<bool> {

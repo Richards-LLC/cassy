@@ -1110,34 +1110,62 @@ async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn park_requires_red_first_evidence_gh_2422() {
+    use std::os::unix::fs::PermissionsExt;
+
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
-    let mut task = f.task();
-    task.execution_note = Some("test-first".into());
-    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-        assignee: WORKER.into(),
-        branch: LANE.into(),
-        base_sha: git(&f.worker_path, &["rev-parse", "main"]),
-        work_target: task.deliverables.work_target.clone().unwrap(),
-    });
-    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
-    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    let log = f.dir.path().join(".cas/passing-test.log");
-    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
-    let proof = serde_json::json!({
-        "head": tip, "repo": f.worker_path,
-        "cargo_args": ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear)"],
-        "log_path": log, "exit_code": 0,
-    });
-    let request = serde_json::from_value(serde_json::json!({
-        "action": "record_test_receipt", "task_id": ID, "payload": proof.to_string(),
-    })).unwrap();
-    f.supervisor.factory(Parameters(request)).await.unwrap();
-    let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(crate::gates::codes_in(&refused).contains(&"G-170"), "{refused}");
-    assert_eq!(f.task().status, TaskStatus::InProgress);
+    env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+    let nextest = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear)"];
+    let check = ["-p", "widget", "--tests"];
+    let failed_test = "printf '%s\\n' '     Summary [ 0.01s] 1 test run: 0 passed, 1 failed, 0 skipped'; exit 100";
+    let failed_compile = "printf '%s\\n' 'error: could not compile `widget` (lib) due to 1 previous error' >&2; exit 101";
+    for (case, methodology, failure, parked) in [
+        ("passing only", Some("test-first"), None, false),
+        ("other methodology", None, None, true),
+        ("test at base", Some("test-first"), Some(("main", &nextest[..], failed_test)), true),
+        ("red checkpoint", Some("test-first"), Some(("HEAD^", &nextest[..], failed_test)), true),
+        ("compile failure at base", Some("test-first"), Some(("main", &check[..], failed_compile)), true),
+        ("setup failure at base", Some("test-first"), Some(("main", &check[..], "exit 101")), false),
+        ("test at tip", Some("test-first"), Some(("HEAD", &nextest[..], failed_test)), false),
+    ] {
+        let f = fixture(&mut env);
+        let mut task = f.task();
+        task.execution_note = methodology.map(str::to_string);
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            assignee: WORKER.into(),
+            branch: LANE.into(),
+            base_sha: git(&f.worker_path, &["rev-parse", "main"]),
+            work_target: task.deliverables.work_target.clone().unwrap(),
+        });
+        open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+        std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 2; }\n").unwrap();
+        git(&f.worker_path, &["commit", "-qam", "fix(cas-br01): correct the gear"]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
+        if let Some((revision, args, script)) = failure {
+            git(&f.worker_path, &["checkout", "-q", "--detach", revision]);
+            let cargo = f.cas_dir().join("cargo");
+            std::fs::write(&cargo, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(crate::factory_worker_check::execute_at(&f.cas_dir(),
+                &args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>(), &f.worker_path, &cargo).is_err(), "{case}");
+            git(&f.worker_path, &["checkout", "-q", LANE]);
+        }
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let log = f.cas_dir().join("passing-test.log");
+        std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+        let proof = serde_json::json!({
+            "head": tip, "repo": f.worker_path, "cargo_args": nextest, "log_path": log, "exit_code": 0,
+        });
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "record_test_receipt", "task_id": ID, "payload": proof.to_string(),
+        })).unwrap();
+        f.supervisor.factory(Parameters(request)).await.unwrap();
+        let reply = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+        assert_eq!(crate::gates::codes_in(&reply).contains(&"G-170"), !parked, "{case}: {reply}");
+        assert_eq!(f.task().status, if parked { TaskStatus::AwaitingMerge } else { TaskStatus::InProgress }, "{case}: {reply}");
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

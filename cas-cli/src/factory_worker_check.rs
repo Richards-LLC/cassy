@@ -126,6 +126,21 @@ struct CheckReceipt {
     test: Option<TestReceipt>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum RedFirstFailure {
+    Test,
+    Compile,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedFirstReceipt {
+    head: String,
+    repo: PathBuf,
+    task: String,
+    failure: RedFirstFailure,
+    evidence: String,
+}
+
 impl CheckReceipt {
     fn check_note(&self) -> String {
         format!("check: PASS {} packages={} no_default_features={}",
@@ -290,6 +305,18 @@ fn passing_summary_count(log: &str) -> Result<u64> {
         bail!("log must show a nonzero selection with every executed test passed");
     }
     Ok(count)
+}
+
+fn rust_red_first_failure(targeted: bool, widened: bool, status: Option<i32>, log: &Path) -> Option<RedFirstFailure> {
+    let (failure, pattern) = match (targeted, widened, status) {
+        (true, false, Some(100)) => (RedFirstFailure::Test,
+            r"(?m)^ *Summary +\[[^\r\n]*\] +[1-9][0-9]* tests? run: [0-9]+ passed, [1-9][0-9]* failed(?:,|$)"),
+        (false, _, Some(101)) => (RedFirstFailure::Compile, r"(?m)^error: could not compile `[^`]+`"),
+        _ => return None,
+    };
+    let log = std::fs::read_to_string(log).ok()?;
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").ok()?;
+    regex::Regex::new(pattern).ok()?.is_match(&ansi.replace_all(&log, "")).then_some(failure)
 }
 
 /// cas-289b: a selected-test log's nextest PASS and Summary lines.
@@ -1173,6 +1200,56 @@ fn receipt_path(cas_root: &Path, repo: &Path, head: &str) -> PathBuf {
         .join("worker-checks")
         .join(key)
         .join(format!("{head}.json"))
+}
+
+impl RedFirstReceipt {
+    fn path(&self, cas_root: &Path) -> PathBuf {
+        let kind = match self.failure { RedFirstFailure::Test => "test", RedFirstFailure::Compile => "compile" };
+        let task = hex::encode(Sha256::digest(self.task.as_bytes()));
+        receipt_path(cas_root, &self.repo, &self.head)
+            .with_file_name(format!("{}-red-{kind}-{task}.json", self.head))
+    }
+}
+
+fn record_red_first_failure(cas_root: &Path, repo: &Path, head: &str, failure: RedFirstFailure, evidence: String) -> Result<()> {
+    let Some(task) = crate::factory_capacity_wait::bound_task(cas_root, repo) else { return Ok(()) };
+    if clean_head(repo).ok().as_deref() != Some(head) { return Ok(()) }
+    let record = RedFirstReceipt { head: head.into(), repo: repo.into(), task, failure, evidence };
+    let path = record.path(cas_root);
+    let directory = path.parent().context("receipt directory")?;
+    std::fs::create_dir_all(directory)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(temporary.as_file_mut(), &record)?;
+    temporary.persist(&path)?;
+    println!("red-first: FAIL {head} receipt={}", path.display());
+    Ok(())
+}
+
+pub(crate) fn has_red_first_evidence(
+    cas_root: &Path, repo: &Path, task: &str, start_base: Option<&str>, head: &str,
+    ranges: &[(String, String)],
+) -> bool {
+    let Ok(repo) = repo.canonicalize() else { return false };
+    let path = receipt_path(cas_root, &repo, head);
+    let Some(Ok(entries)) = path.parent().map(std::fs::read_dir) else { return false };
+    let mut checkpoints = BTreeSet::new();
+    for entry in entries.flatten().filter(|entry| {
+        entry.file_name().to_str().is_some_and(|name| name.contains("-red-") && name.ends_with(".json"))
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+    }) {
+        let Some(record) = std::fs::read(entry.path()).ok()
+            .and_then(|bytes| serde_json::from_slice::<RedFirstReceipt>(&bytes).ok()) else { continue };
+        if record.repo != repo || record.task != task || record.head == head || !valid_git_oid(&record.head)
+            || record.evidence.is_empty() || entry.path() != record.path(cas_root) { continue; }
+        if start_base == Some(record.head.as_str()) && receipt_head_is_ancestor(&repo, &record.head, head) {
+            return true;
+        }
+        if record.failure == RedFirstFailure::Test { checkpoints.insert(record.head); }
+    }
+    !checkpoints.is_empty() && ranges.iter().any(|(base, tip)| {
+        git_output(&repo, &["rev-list", "--first-parent", &format!("{base}..{tip}")])
+            .is_some_and(|commits| commits.lines().any(|commit| checkpoints.contains(commit)))
+    })
 }
 
 fn check_receipt_path(cas_root: &Path, repo: &Path, head: &str, no_default_features: bool) -> PathBuf {
@@ -2792,7 +2869,7 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
-    let selected_log = if test.is_some() {
+    let selected_log = {
         // Each attempt keeps its own untouched Cargo output. Keep it beside
         // redirected raw guard evidence, or with receipts for foreground runs.
         let directory = receipt.parent().context("receipt directory")?.join("logs");
@@ -2803,11 +2880,11 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
             .unwrap_or(directory);
         std::fs::create_dir_all(&directory)?;
         let (_, path) = tempfile::Builder::new()
-            .prefix("selected-tests-").suffix(".log")
+            .prefix(if test.is_some() { "selected-tests-" } else { "compile-check-" }).suffix(".log")
             .tempfile_in(directory)?.keep()?;
-        println!("Selected test log: {}", path.display());
-        Some(path)
-    } else { None };
+        println!("{}: {}", if test.is_some() { "Selected test log" } else { "Compile check log" }, path.display());
+        path
+    };
     if let Some(reason) = &host_path_opt_out {
         println!("Worker test PATH: host opt-out: {reason}");
     }
@@ -2842,13 +2919,14 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
         command
             .env("VERIFIED_TEST_REPO_ROOT", &repo)
             .env("VERIFIED_TEST_COUNT_FILE", &count_file)
-            .env("VERIFIED_TEST_LOG", selected_log.as_ref().expect("test log"))
+            .env("VERIFIED_TEST_LOG", &selected_log)
             .env("CARGO", cargo);
         command.env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "120");
         command
     } else {
-        let mut command = Command::new(cargo);
-        command.arg("check");
+        let mut command = Command::new("bash");
+        command.args(["-c", r#""$@" 2>&1 | tee "$VERIFIED_TEST_LOG"; exit "${PIPESTATUS[0]}""#, "worker-compile"])
+            .arg(cargo).arg("check").env("VERIFIED_TEST_LOG", &selected_log);
         // cas-edeb: a nested check must not reuse an outer test's lease runner.
         if let Some(variable) = crate::factory_target_cache::owner::host_runner_env() {
             command.env_remove(variable);
@@ -2957,8 +3035,12 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     drop(worker_signals);
     drop(slot);
     if !status.success() {
-        if let Some(log) = &selected_log {
-            stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, log)?;
+        if test.is_some() {
+            stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, &selected_log)?;
+        }
+        if let Some(failure) = rust_red_first_failure(test.is_some(), widened_proof.is_some(), status.code(), &selected_log) {
+            record_red_first_failure(&cas_root, &repo, &head, failure,
+                format!("{}; log={}", worker_check_command(args), selected_log.display()))?;
         }
         if test.is_some() && !crate_run && status.code() == Some(ZERO_SELECTION_STATUS) {
             bail!(ZeroSelection(crate::gates::tag("G-61", format!("test: ZERO {head}: the selection ran no test"))));
@@ -2995,7 +3077,7 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
                     inactive: Vec::new(),
                 }),
                 widened: widened_proof,
-                selected_log,
+                selected_log: Some(selected_log),
                 host_path_opt_out,
                 supervisor_recorded: None,
             })

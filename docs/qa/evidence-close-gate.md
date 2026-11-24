@@ -61,7 +61,7 @@ SHA, `build.sha256` identifies the candidate, and `observedAssets` must match
 same pages from the measured delivery base into `visual-qa-baseline/`.
 
 In `LEDGER.md`, use the captured URL's path (including query and fragment, if
-present) as the cell name. For a journey state append ` [state]`, for example
+present) as the cell name. For a journey state append the state in brackets, for example
 `/commander/ [ranking expanded]`. A PASS or FAIL row must cite the PNG for
 that cell from `visual-qa/`. Park verifies the capture hash and decodes the
 image, then publishes the ledger, cited PNG and accepted run report(s) at

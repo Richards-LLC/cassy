@@ -9821,8 +9821,14 @@ impl CasCore {
             let fast_lane_qa = match &fast_lane_stage {
                 fast_lane_gate::LaneClose::Off => None,
                 fast_lane_gate::LaneClose::Park => {
-                    close_notes.record(&mut task, "FAST LANE: QA evidence is deferred to the post-merge receipt.");
-                    Some(Ok(Vec::new()))
+                    let proof = super::qa_evidence_gate::fast_lane_visual_park_gate(
+                        &self.cas_root, &task, &evidence_repo, &resolved_parent_branch,
+                        qa_receipt, attributed_paths.as_deref(), qa_base.as_deref(),
+                    );
+                    if proof.is_ok() {
+                        close_notes.record(&mut task, "FAST LANE: QA evidence is deferred to the post-merge receipt.");
+                    }
+                    Some(proof.map_err(|message| crate::gates::tag("G-53", message)))
                 }
                 fast_lane_gate::LaneClose::Merged { .. } => {
                     let ledger = crate::config::Config::load(&self.cas_root)

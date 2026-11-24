@@ -424,18 +424,33 @@ async fn park_for_repeat_review_gh2373(f: &Fixture, id: &str, target: &str, trai
     assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
 }
 
-async fn reject_repeat_review_gh2373(f: &Fixture, id: &str, finding: &str) {
+async fn reject_repeat_review_gh2373(f: &Fixture, id: &str, finding: &str) -> serde_json::Value {
     let owner = "nocode-supervisor-session";
     let dispatch = cas_store::create_verification_dispatch_bound(
         &f.cas_dir(), id, owner, owner, &cas_types::VerificationProofBoundary::task(),
         chrono::Utc::now() + chrono::Duration::minutes(10), false,
     ).unwrap();
-    let response = f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
+    let request = serde_json::json!({
         "action":"add", "task_id":id, "dispatch_id":dispatch.id, "status":"rejected", "summary":finding,
-    })).unwrap())).await.unwrap();
+    });
+    let response = f.supervisor.verification(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap();
     assert_ne!(response.is_error, Some(true), "{response:?}");
     let verdict = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
     assert_eq!(verdict.status, cas_types::VerificationStatus::Rejected);
+    request
+}
+
+async fn link_repeat_review_gh2373(f: &Fixture, id: &str, path: &Path) -> String {
+    f.supervisor.artifact(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"publish", "task_id":id, "path":path,
+    })).unwrap())).await.unwrap();
+    let artifact = cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap()
+        .list_for_task(id).unwrap().into_iter().find(|artifact|
+            Some(artifact.name.as_str()) == path.file_name().and_then(std::ffi::OsStr::to_str)
+        ).unwrap();
+    call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
+        "notes":format!("whole-flow review: {}", artifact.id)})).await;
+    artifact.id
 }
 
 #[tokio::test]
@@ -469,27 +484,48 @@ async fn repeat_rejection_requires_whole_flow_review_gh2373() {
         .await.unwrap_err();
     assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
 
-    let path = f.artifact(id);
-    std::fs::write(&path, "| Actor | Operation | Mismatch |\n| --- | --- | --- |\n| Owner | Abort | Unreachable |\n| Queue | Claim | Stale generation admitted |\n").unwrap();
-    f.supervisor.artifact(Parameters(serde_json::from_value(serde_json::json!({
-        "action":"publish", "task_id":id, "path":path,
-    })).unwrap())).await.unwrap();
-    let artifacts = cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().list_for_task(id).unwrap();
-    let [review] = artifacts.as_slice() else { panic!("expected one review artifact: {artifacts:?}"); };
-    call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
-        "notes":format!("whole-flow review: {}", review.id)})).await;
+    let receipt = f.artifact(id);
+    link_repeat_review_gh2373(&f, id, &receipt).await;
+    let refusal = f.supervisor.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
+        .await.unwrap_err();
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
+
+    let path = receipt.with_file_name("whole-flow-review.md");
+    std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Can abort an open run | Unreachable |\n| Queue | Claim | Only current generation | Stale generation admitted |\n\n## Mismatches\n\n- Owner cannot abort an open run.\n- Queue admits a stale generation.\n").unwrap();
+    let review = link_repeat_review_gh2373(&f, id, &path).await;
     call(&f.supervisor, request).await;
     assert_eq!(f.task(id).status, TaskStatus::Open);
     call(&f.supervisor, assignment).await;
     let returned = f.task(id);
     assert_eq!(returned.assignee.as_deref(), Some("replacement"));
-    assert!(returned.notes.matches(&review.id).count() >= 2);
+    assert!(returned.notes.matches(&review).count() >= 2);
+}
+
+#[tokio::test]
+async fn repeat_rejection_holds_automatic_conflict_return_gh2373() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-2373-conflict";
+    env.set("CAS_AGENT_ROLE", "worker");
+    park_for_repeat_review_gh2373(&f, id, "main", None).await;
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
+    reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+
+    let parked = f.task(id);
+    let refusal = super::super::parked_conflicts::return_to_worker(
+        &f.cas_dir(), &parked, "main", &"a".repeat(40), &["feature.rs".into()], "cassy-conflict-preflight",
+    ).unwrap_err();
+    assert!(crate::gates::codes_in(&refusal.to_string()).contains(&"G-170"), "{refusal:?}");
+    let held = f.task(id);
+    assert_eq!(held.status, TaskStatus::AwaitingMerge);
+    assert_eq!(held.deliverables.factory_branch_anchor, parked.deliverables.factory_branch_anchor);
 }
 
 #[tokio::test]
 async fn repeat_rejection_detaches_release_train_unless_kept_gh2373() {
     let mut env = TestEnvGuard::temp_home();
-    for keep in [false, true] {
+    for (keep, fail_first_notice) in [(false, true), (false, false), (true, false)] {
         let target = "epic/release-train";
         let f = fixture(&mut env, target);
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -512,12 +548,30 @@ async fn repeat_rejection_detaches_release_train_unless_kept_gh2373() {
             call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
                 "notes":format!("keep release train: {}: Required correction for this cut", train.id)})).await;
         }
-        reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+        let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        if fail_first_notice {
+            conn.execute_batch("CREATE TRIGGER fail_repeat_notice BEFORE INSERT ON prompt_queue
+                WHEN NEW.source LIKE 'supervisor-notice:%' AND
+                (NEW.summary = 'repeat-review-train-detached' OR instr(NEW.prompt, 'G-170') > 0)
+                BEGIN SELECT RAISE(ABORT, 'injected repeat notice delivery error'); END;").unwrap();
+        }
+        let verdict = reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
         assert_eq!(store.get_parent_epic(id).unwrap().map(|parent| parent.id), keep.then(|| train.id.clone()));
         assert_eq!(f.task(id).deliverables.work_target.unwrap().target_branch, if keep { target } else { "main" });
-        let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
-        assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row|
-            row.summary.as_deref() == Some("repeat-review-train-detached") && row.target == "supervisor").count(), usize::from(!keep));
+        let detach_notices = || queue.peek_all(50).unwrap().into_iter().filter(|row|
+            row.summary.as_deref() == Some("repeat-review-train-detached") && row.target == "supervisor").collect::<Vec<_>>();
+        if fail_first_notice {
+            assert!(detach_notices().is_empty());
+            conn.execute_batch("DROP TRIGGER fail_repeat_notice").unwrap();
+        }
+        for _ in 0..2 {
+            let retry = f.supervisor.verification(Parameters(serde_json::from_value(verdict.clone()).unwrap())).await.unwrap();
+            assert_ne!(retry.is_error, Some(true), "{retry:?}");
+            let notices = detach_notices();
+            assert_eq!(notices.len(), usize::from(!keep));
+            assert!(notices.iter().all(|row| crate::supervisor_notices::is_action_envelope(&row.prompt)));
+        }
     }
 }
 

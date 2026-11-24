@@ -79,7 +79,10 @@ one.
 Never edit `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`; release prep
 regenerates them. Add a bug case as its own `docs/qa/bug-families/<slug>.yaml`
 and, where `docs/product-overview.d/` exists, product changes as
-`docs/product-overview.d/<task-id>.md`. Park does not check these files.
+`docs/product-overview.d/<task-id>.md`. Park refuses a product delivery
+without its overview fragment (G-167) and a bug fix on a live journey's owned
+files without a bug family naming the task (G-168); escape each with a decision
+note `no overview: <reason>` or `no bug family: <reason>`.
 
 ## Changelog at park
 

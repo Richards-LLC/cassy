@@ -1,0 +1,4 @@
+title: Composer and connection updates do not replace the typed Reload Cassy confirmation
+tasks: [cas-75ce]
+invariants: [HUB-J27-CONFIRM-SHEET, HUB-J27-RELOAD-PROOF]
+journeys: [HUB-J27]

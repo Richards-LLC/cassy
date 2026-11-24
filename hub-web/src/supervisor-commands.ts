@@ -44,6 +44,7 @@ export class SlashCommands {
   private readonly panel: HTMLElement;
   private open = false;
   private escaped = false;
+  private confirming = false;
   private pending = false;
   private anchor?: HTMLElement;
   private readonly events = new AbortController();
@@ -56,9 +57,12 @@ export class SlashCommands {
     input.closest(".message")?.classList.add("has-supervisor-commands");
     input.parentElement!.insertBefore(this.panel, input);
     input.setAttribute("aria-controls", this.panel.id);
-    input.addEventListener("input", () => { this.mountAtComposer(); this.open = false; this.escaped = false; this.sync(); }, { signal: this.events.signal });
+    input.addEventListener("input", () => {
+      if (this.confirming) return;
+      this.mountAtComposer(); this.open = false; this.escaped = false; this.sync();
+    }, { signal: this.events.signal });
     document.addEventListener("pointerdown", event => {
-      if (this.anchor && !this.anchor.contains(event.target as Node) && !this.panel.contains(event.target as Node)) this.close();
+      if (!this.confirming && this.anchor && !this.anchor.contains(event.target as Node) && !this.panel.contains(event.target as Node)) this.close();
     }, { signal: this.events.signal });
     window.addEventListener("resize", () => this.positionDropdown(), { signal: this.events.signal });
     input.addEventListener("keydown", event => {
@@ -95,6 +99,7 @@ export class SlashCommands {
   }
   dispose(): void { this.anchor?.setAttribute("aria-expanded", "false"); this.events.abort(); this.panel.remove(); }
   show(anchor?: HTMLElement): void {
+    if (this.confirming) return;
     if (anchor && this.anchor === anchor && !this.panel.hidden) { this.close(); return; }
     this.anchor = anchor;
     if (anchor) {
@@ -104,7 +109,7 @@ export class SlashCommands {
     this.open = true; this.escaped = false; this.sync(); this.positionDropdown();
     this.panel.querySelector<HTMLButtonElement>("button")?.focus();
   }
-  close(): void { this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false"); }
+  close(): void { this.confirming = false; this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false"); }
   private mountAtComposer(): void {
     this.anchor?.setAttribute("aria-expanded", "false"); this.anchor = undefined;
     this.panel.classList.remove("supervisor-command-dropdown"); this.panel.removeAttribute("style");
@@ -129,6 +134,7 @@ export class SlashCommands {
     this.panel.style.maxHeight = `${Math.max(0, window.innerHeight - top - gap)}px`;
   }
   sync(): void {
+    if (this.confirming) return;
     const query = !this.anchor && this.input.value.startsWith("/") ? this.input.value.slice(1).toLowerCase() : "";
     const suggestion = this.input.value.startsWith("/") && commands.some(command => commandMatches(command.id, query));
     this.panel.hidden = this.escaped || (!this.open && !suggestion);
@@ -150,6 +156,7 @@ export class SlashCommands {
   }
   /** Claim only exact supported command tokens; other text uses the normal send. */
   submit(): boolean {
+    if (this.confirming) return true;
     // The normal composer trims chat text; /mcp must stay semantic even
     // when pasted with surrounding whitespace, rather than open Claude's menu.
     const trimmed = this.input.value.trim();
@@ -171,6 +178,7 @@ export class SlashCommands {
     const unavailable = this.options.unavailable();
     if (unavailable) { this.panel.replaceChildren(); this.notice(unavailable); return; }
     if (!command.confirm) { void this.run(command.id, false); return; }
+    this.confirming = true;
     this.panel.hidden = false; this.panel.replaceChildren();
     const confirmation = document.createElement("div"); confirmation.setAttribute("role", "alertdialog");
     const subject = document.createElement("strong"); subject.textContent = this.options.label();
@@ -189,6 +197,7 @@ export class SlashCommands {
   }
   private async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     if (this.pending) return;
+    this.confirming = false;
     this.pending = true;
     this.panel.querySelectorAll("button").forEach(button => { button.disabled = true; });
     const original = this.input.value;

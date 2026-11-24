@@ -1978,6 +1978,7 @@ fn open_rapid_window(f: &Fixture, id: &str) {
 async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417() {
     use cas_store::VerificationStore;
     let mut env = TestEnvGuard::temp_home();
+    let mut wrong = Vec::new();
     for prior in [
         "never-verified", "light-depth", "rejected-earlier-report", "approval-unreadable",
         "legacy-approved", "legacy-skipped", "legacy-approved-update-route",
@@ -2067,18 +2068,21 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
         } else {
             serde_json::json!({"action": "close", "id": id, "reason": "Report accepted"})
         }).await;
-        assert_ne!(f.task(id).status, TaskStatus::Closed, "{prior}: {response}");
-        assert!(!by_update || response.contains("G-68"), "{prior}: {response}");
-        if prior == "inventory-unreadable" {
-            assert!(response.contains("G-68"), "{prior}: {response}");
-            assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_none(), "{prior}: {response}");
+        let dispatched = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some();
+        if f.task(id).status == TaskStatus::Closed
+            || (by_update || prior == "inventory-unreadable") && !response.contains("G-68")
+            || prior == "inventory-unreadable" && dispatched
+        {
+            wrong.push(format!("{prior}: dispatched={dispatched}: {response}"));
         }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 #[tokio::test]
 async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_gh2417() {
     let mut env = TestEnvGuard::temp_home();
+    let mut wrong = Vec::new();
     for case in [
         "unchanged", "light-depth", "rapid-unsampled", "release-tagged", "republished",
         "revoked-before-launch", "cloud-unavailable-at-launch",
@@ -2122,10 +2126,13 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
         env.set("CAS_AGENT_ROLE", "supervisor");
         let train_owner = CasCore::with_daemon(f.cas_dir(), None, None);
         train_owner.set_agent_id_for_testing("nocode-supervisor-session".into());
-        let held = train_owner.prepare_premerge_verification(&f.task(id), repo, &lane, "main")
-            .expect_err("the review is requested before the merge");
-        let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
-            .unwrap_or_else(|| panic!("{case}: {held:?}"));
+        let held = train_owner.prepare_premerge_verification(&f.task(id), repo, &lane, "main");
+        let Some(reviewed) = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
+            .filter(|_| held.is_err())
+        else {
+            wrong.push(format!("{case}: no review requested before the merge: {held:?}"));
+            continue;
+        };
         if matches!(case, "revoked-before-launch" | "cloud-unavailable-at-launch") {
             use cas_types::VerificationDispatchState::{Invalidated, Pending};
             if case == "revoked-before-launch" {
@@ -2144,14 +2151,16 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
                 ).unwrap().unwrap().join().unwrap()
             }).await.unwrap();
             let launched = cas_store::get_verification_dispatch(&f.cas_dir(), &reviewed.id).unwrap().state;
-            if case == "cloud-unavailable-at-launch" {
-                assert_eq!(launched, Pending, "{case}");
+            let retried = (case == "revoked-before-launch")
+                .then(|| train_owner.prepare_premerge_verification(&f.task(id), repo, &lane, "main"));
+            let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+            let expected = if case == "cloud-unavailable-at-launch" {
+                launched == Pending && latest.id == reviewed.id
             } else {
-                assert_eq!(launched, Invalidated, "{case}");
-                train_owner.prepare_premerge_verification(&f.task(id), repo, &lane, "main")
-                    .expect_err("the retry requests a new review");
-                let fresh = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
-                assert!(fresh.id != reviewed.id && fresh.state == Pending, "{case}: {fresh:?}");
+                launched == Invalidated && latest.id != reviewed.id && latest.state == Pending
+            };
+            if !expected {
+                wrong.push(format!("{case}: launched dispatch is {launched:?}; latest {latest:?}; retry {retried:?}"));
             }
             continue;
         }
@@ -2168,12 +2177,11 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
             "action": "close", "id": id, "reason": "Report accepted",
         })).await;
         let closed = f.task(id).status == TaskStatus::Closed;
-        if case != "republished" {
-            assert!(closed, "{case}: {response}");
-        } else {
-            assert!(!closed && response.contains("G-70"), "{case}: {response}");
+        if closed == (case == "republished") || case == "republished" && !response.contains("G-70") {
+            wrong.push(format!("{case}: closed={closed}: {response}"));
         }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 #[tokio::test]

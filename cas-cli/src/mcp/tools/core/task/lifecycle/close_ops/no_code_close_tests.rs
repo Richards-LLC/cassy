@@ -1912,6 +1912,148 @@ async fn parked_ops_task_closes_by_evidence_on_its_pull_request_cas_b38a() {
     );
 }
 
+/// GH #2417: a no-code spike's deliverable is its report, so a docs-only
+/// report in the repository is still reviewed by an independent verdict. A
+/// supervisor's ordinary close of the parked spike never closes it unreviewed,
+/// whether it was never verified or its last verdict rejected an earlier report.
+#[tokio::test]
+async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417() {
+    use cas_store::VerificationStore;
+    let mut env = TestEnvGuard::temp_home();
+    for prior in ["never-verified", "rejected-earlier-report"] {
+        let f = fixture(&mut env, "main");
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let id = "cas-2417";
+        let (checkout, lane) = issue_delivery(&f, id, "main");
+        std::fs::create_dir_all(checkout.join("docs")).unwrap();
+        std::fs::write(checkout.join("docs/spike-report.md"), "# Spike report\n").unwrap();
+        git(&checkout, &["add", "docs/spike-report.md"]);
+        git(&checkout, &["commit", "-qm", "docs(cas-2417): spike report"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        let anchor = git(&checkout, &["rev-parse", "HEAD"]);
+        git(f.dir.path(), &["merge", "-q", "--ff-only", &lane]);
+        git(f.dir.path(), &["push", "-q", "origin", "main"]);
+        let mut spike = f.task(id);
+        spike.task_type = TaskType::Spike;
+        spike.execution_note = Some("no-code".into());
+        spike.external_ref = Some(PR.into());
+        spike.status = TaskStatus::AwaitingMerge;
+        spike.deliverables.factory_branch_anchor = Some(anchor);
+        spike.deliverables.parked_branch = Some(lane);
+        f.put(&spike);
+        if prior == "rejected-earlier-report" {
+            let dispatch = cas_store::create_verification_dispatch_bound(
+                &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap();
+            let mut verdict = cas_types::Verification::new("ver-2417-rejected".into(), id.into());
+            verdict.status = cas_types::VerificationStatus::Rejected;
+            verdict.summary = "Earlier report version rejected".into();
+            verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+            verdict.agent_id = Some("nocode-supervisor-session".into());
+            verdict.issuer_agent_id = verdict.agent_id.clone();
+            verdict.dispatch_id = Some(dispatch.id.clone());
+            cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+            let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+            cas_store::resolve_verification_dispatch_with_conn(
+                &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+            ).unwrap();
+        }
+        let response = call(&f.supervisor, serde_json::json!({
+            "action": "close", "id": id, "reason": "Report accepted",
+        })).await;
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{prior}: {response}");
+    }
+}
+
+/// GH #2417 (cas-2372): a verdict covers the report it reviewed. After a
+/// no-code spike's report is revised, an earlier approval or rejection does not
+/// authorize a supervisor's ordinary close of the unanchored parked spike.
+#[tokio::test]
+async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
+    use cas_store::VerificationStore;
+    let mut env = TestEnvGuard::temp_home();
+    // A mechanical no-code chore keeps its approval across a revised proof. A
+    // demo deliverable is covered like a spike, and an approval of an artifact
+    // whose bytes changed under the same reference never closes the task.
+    for (case, task_type) in [
+        ("approved", TaskType::Spike), ("rejected", TaskType::Spike), ("chore", TaskType::Chore),
+        ("demo-feature", TaskType::Feature), ("artifact-bytes-changed", TaskType::Spike),
+    ] {
+        let f = fixture(&mut env, "main");
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+        let id = "cas-2372";
+        let mut spike = assigned(id, task_type, "main");
+        spike.execution_note = Some("no-code".into());
+        spike.external_ref = Some(PROOF.into());
+        if case == "demo-feature" {
+            spike.demo_statement = "Operators read the published report".into();
+        }
+        f.put(&spike);
+        claim(&f, id);
+        if case == "demo-feature" {
+            // An audit-style ledger that declares no QA matrix passes the G-52 preflight.
+            let dir = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+                &f.cas_dir(), &f.task(id),
+            ).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("LEDGER.md"), "# Report notes\n").unwrap();
+        }
+        let published = "a".repeat(64);
+        cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().record_local(&cas_store::NewArtifact {
+            id: "art-2372-report".into(), task_id: id.into(), name: "report.md".into(),
+            mime: "text/markdown".into(), size_bytes: 12, sha256: published,
+        }).unwrap();
+        let request = serde_json::json!({"action": "close", "id": id, "reason": "Report published"});
+        let pending = call(&f.worker, request.clone()).await;
+        let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
+            .unwrap_or_else(|| panic!("{case}: {pending}"));
+        let mut verdict = cas_types::Verification::new(format!("ver-2372-{case}"), id.into());
+        verdict.status = if case == "rejected" {
+            cas_types::VerificationStatus::Rejected
+        } else {
+            cas_types::VerificationStatus::Approved
+        };
+        verdict.summary = "Original report reviewed".into();
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some("nocode-supervisor-session".into());
+        verdict.issuer_agent_id = verdict.agent_id.clone();
+        verdict.dispatch_id = Some(reviewed.id.clone());
+        cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(
+            &conn, &reviewed.id, "nocode-supervisor-session", None, true,
+        ).unwrap();
+        // The worker revises the report and parks it for the supervisor.
+        let mut revised = f.task(id);
+        if case == "artifact-bytes-changed" {
+            // Same reference, different bytes behind the same artifact id.
+            conn.execute("UPDATE artifacts SET sha256 = ?1 WHERE id = 'art-2372-report'", ["b".repeat(64)]).unwrap();
+        } else {
+            revised.external_ref = Some("https://example.test/deploys/revised".into());
+        }
+        revised.status = TaskStatus::AwaitingMerge;
+        f.put(&revised);
+        let response = call(&f.supervisor, request).await;
+        if case == "chore" {
+            assert_eq!(f.task(id).status, TaskStatus::Closed, "{case}: {response}");
+            continue;
+        }
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{case}: {response}");
+        let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+        if case != "rejected" {
+            assert_ne!(latest.id, reviewed.id, "a new review is dispatched: {response}");
+        }
+    }
+}
+
 /// cas-b38a: a code methodology keeps the evidence measurement. A test-first
 /// task with no commit of its own is not closed on evidence alone.
 #[tokio::test]

@@ -111,16 +111,19 @@ pub(crate) fn replace_raw_artifact_note(notes: &str, receipt: &str) -> Option<St
     Some(next)
 }
 
+/// A park's evidence-sync summary: its timestamped header, then the manifest.
+pub fn is_evidence_sync_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    is_timestamped_note(block)
+        && lines.next().and_then(|line| line.get(18..))
+            .is_some_and(|rest| rest.trim_start().starts_with("Evidence synced for review on "))
+        && lines.next().is_some_and(|line| line.starts_with("EVIDENCE_SYNC: "))
+}
+
 /// GH #2322: a park's evidence-sync note supersedes every earlier one (readers
 /// take only the newest manifest), so a retried park replaces it.
 pub(crate) fn replace_evidence_sync(notes: &str, note: &str) -> Option<String> {
-    let is_sync = |block: &str| {
-        let mut lines = block.lines();
-        is_timestamped_note(block)
-            && lines.next().and_then(|line| line.get(18..))
-                .is_some_and(|rest| rest.trim_start().starts_with("Evidence synced for review on "))
-            && lines.next().is_some_and(|line| line.starts_with("EVIDENCE_SYNC: "))
-    };
+    let is_sync = is_evidence_sync_block;
     if !is_sync(note) {
         return None;
     }

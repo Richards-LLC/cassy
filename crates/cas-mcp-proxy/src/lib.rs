@@ -1516,9 +1516,7 @@ impl ProxyEngine {
         let result = if violet_message
             && let Some(request_id) = arguments.as_ref().and_then(|args| args.get("request_id")).and_then(Value::as_str)
         {
-            let managed = arguments.as_ref().and_then(|args| args.get("coordination_operation_id"))
-                .and_then(Value::as_str).is_some_and(|id| !id.is_empty());
-            self.reconcile_violet_message(caller, dispatch_kind, request_id, managed, arguments.as_ref(), result).await
+            self.reconcile_violet_message(caller, dispatch_kind, request_id, arguments.as_ref(), result).await
         } else {
             result
         };
@@ -1606,13 +1604,11 @@ impl ProxyEngine {
     /// A lost response is never permission to repeat a write. Reconcile only
     /// the locally retained ID, through the same caller and policy boundary.
     /// `resend` holds the post's arguments while one resend is still allowed.
-    // gate-audit[managed]: selector Chooses which next_action a reasonless not_posted names (new reply intent or new request ID). It never sends, resends or waives a refusal.
     async fn reconcile_violet_message(
         &self,
         caller: &ProxyCaller,
         dispatch_kind: ProxyDispatchKind,
         request_id: &str,
-        managed: bool,
         resend: Option<&serde_json::Map<String, Value>>,
         original: Result<rmcp::model::CallToolResult>,
     ) -> Result<rmcp::model::CallToolResult> {
@@ -1648,7 +1644,7 @@ impl ProxyEngine {
                 let mut params = rmcp::model::CallToolRequestParams::new("violet_post");
                 params.arguments = Some(arguments.clone());
                 let resent = self.call_upstream(config::VIOLET_SERVER, params).await;
-                return Box::pin(self.reconcile_violet_message(caller, dispatch_kind, request_id, managed, None, resent)).await;
+                return Box::pin(self.reconcile_violet_message(caller, dispatch_kind, request_id, None, resent)).await;
             }
             if matches!(state, "posted" | "not_posted") {
                 if let Some(mut receipt) = lookup.get("receipt").filter(|body| body.is_object()).cloned()
@@ -1665,25 +1661,8 @@ impl ProxyEngine {
                     body["ok"] = Value::Bool(false);
                     body["request_id"] = Value::String(request_id.into());
                     if !body["error"].is_object() {
-                        // GH #1968: Violet may confirm not_posted without a
-                        // cause. Name it, and the one safe next step: a
-                        // request Violet never received is resent under its
-                        // own request_id (Violet dedupes by it); a refused one
-                        // needs a new request_id, and a managed reply also a
-                        // new reply intent on the current claim.
-                        let reason = body["reason"].as_str().filter(|reason| !reason.is_empty())
-                            .unwrap_or("provider_unreported").to_string();
-                        let unreceived = reason == "request_not_found";
-                        let (next_action, message) = match (unreceived, managed) {
-                            (true, _) => ("resend_same_request_id",
-                                "Violet never received this request. Retry violet_post with the same request_id and unchanged arguments; never use a new ID."),
-                            (false, true) => ("new_reply_intent",
-                                "Violet confirmed this reply did not post and gave no reason. Register a new factory action=reply_intent on your current claim, then violet_post its fields with a new request_id."),
-                            (false, false) => ("new_request_id",
-                                "Violet confirmed this request did not post and gave no reason. Post again with a new request_id."),
-                        };
-                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": unreceived,
-                            "reason": reason, "next_action": next_action, "message": message});
+                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": false,
+                            "message": "Violet confirmed that this request did not post."});
                     }
                     if let Some(prior) = prior { body["post_response"] = prior; }
                     return Ok(violet_result(body));
@@ -3582,8 +3561,6 @@ for line in sys.stdin:
                 state = mode if mode in ("outcome_unknown", "not_posted") else ("not_posted" if mode == "not_posted_detail" else "posted")
                 with open(state_path, "w") as handle:
                     json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch", "diagnostic": mode == "not_posted_detail"}, handle)
-                if mode == "unreceived":
-                    os.remove(state_path)
                 if mode == "transport_rollback":
                     with open(log + ".schema", "w") as handle:
                         handle.write("legacy")
@@ -3696,7 +3673,6 @@ for line in sys.stdin:
         for (schema, mode, expected) in [("modern", "posted", "posted"), ("modern", "transport", "posted"),
             ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "not_posted", "not_posted"),
             ("modern", "not_posted_detail", "not_posted"),
-            ("modern", "managed_not_posted", "not_posted"), ("modern", "unreceived", "not_posted"),
             ("modern", "post_only", "posted"), ("modern", "post_only_not_posted", "not_posted"),
             ("modern", "post_only_supervisor", "posted"), ("modern", "lookup_denied", "outcome_unknown"),
             ("modern", "rejected", "not_posted"), ("modern", "mismatch", "outcome_unknown"),
@@ -3731,13 +3707,8 @@ for line in sys.stdin:
                 assert!(engine.call_tool(&caller, "violet", "violet_read",
                     Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await.is_err());
             }
-            let text = if matches!(mode, "post_only_not_posted" | "managed_not_posted") { "not_posted" } else { mode };
+            let text = if mode == "post_only_not_posted" { "not_posted" } else { mode };
             let mut args = serde_json::json!({"channel": "C123", "kind": "message", "text": text});
-            if mode == "managed_not_posted" {
-                args["reply_to"] = "1760616000.123456".into();
-                args["coordination_operation_id"] = "00007e91-1111-4111-8111-000000007e91".into();
-                args["expected_generation"] = 5.into();
-            }
             if mode == "transport" {
                 args["request_id"] = Value::String("00000091-2222-4222-8222-000000000091".into());
             }
@@ -3775,19 +3746,6 @@ for line in sys.stdin:
                 assert_eq!(body["error"], serde_json::json!({"code":"occurrence_not_eligible", "retryable":false,
                     "message":"Provider rejected the occurrence", "detail":{"occurrence_id":"fixture-occurrence"}}));
                 assert_eq!(body["post_response"]["error"]["detail"]["stage"], "provider_preflight");
-            }
-            // GH #1968: a not_posted Violet gives no cause for still names one
-            // and the next step; only a request Violet never received is
-            // retried with the same request_id.
-            let next = match mode {
-                "not_posted" | "post_only_not_posted" => Some(("provider_unreported", false, "new_request_id")),
-                "managed_not_posted" => Some(("provider_unreported", false, "new_reply_intent")),
-                "unreceived" => Some(("request_not_found", true, "resend_same_request_id")),
-                _ => None,
-            };
-            if let Some((reason, retryable, action)) = next {
-                assert_eq!((body["error"]["code"].as_str(), body["error"]["reason"].as_str(), body["error"]["retryable"].as_bool(),
-                    body["error"]["next_action"].as_str()), (Some("not_posted"), Some(reason), Some(retryable), Some(action)), "{mode}: {body}");
             }
             assert_eq!(body["request_id"], request_id);
             if mode == "transport" {

@@ -36,7 +36,8 @@ pub(super) fn stabilize(installed: &Path) -> Result<()> {
     let keychain = state.join("cassy.keychain-db");
     let password_file = state.join("password");
     let pending = state.join("setup.pending");
-    if setup_needed(&pending, &keychain, &password_file)? {
+    let fresh_identity = setup_needed(&pending, &keychain, &password_file)?;
+    if fresh_identity {
         DirBuilder::new().mode(0o700).create(&pending)?;
         let setup = create_identity(&pending, &keychain, &password_file);
         setup_needed(&pending, &keychain, &password_file)?;
@@ -72,7 +73,7 @@ pub(super) fn stabilize(installed: &Path) -> Result<()> {
         "multiple local code-signing identities found"
     );
 
-    if verify(installed, hash).is_ok() {
+    if !fresh_identity && verify(installed, hash).is_ok() {
         return Ok(());
     }
     let parent = installed

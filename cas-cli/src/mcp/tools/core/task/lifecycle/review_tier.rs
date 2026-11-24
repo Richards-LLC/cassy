@@ -137,10 +137,6 @@ pub(crate) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<T
         tier = VerificationTier::Standard;
         reason = format!("A supervisor set the {FORCE_VERIFIER_LABEL} label.");
     }
-    if tier == VerificationTier::Mechanical && super::close_ops::no_code_report_is_deliverable(task) {
-        tier = VerificationTier::Standard;
-        reason = "A no-code report is its deliverable and needs an independent verdict.".to_string();
-    }
     Some(TierDecision { tier, reason, tip: tip.to_string() })
 }
 

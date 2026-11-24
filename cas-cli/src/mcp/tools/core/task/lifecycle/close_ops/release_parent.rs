@@ -157,7 +157,9 @@ impl CasCore {
             None,
             None,
             None,
-            no_code_reviewed_proof(&self.cas_root, task).as_deref(),
+            super::super::report_proof::require_report_verdict(&self.cas_root, task, task)?
+                .proof_to_record()
+                .as_deref(),
         )
         .map_err(|e| e.to_string())?
         {

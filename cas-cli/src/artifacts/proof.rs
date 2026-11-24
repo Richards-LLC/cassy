@@ -71,10 +71,16 @@ pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<Arti
     })
 }
 
+impl ArtifactListing {
+    pub fn committed(self) -> Vec<PublishedArtifact> {
+        self.artifacts.into_iter()
+            .filter(|artifact| artifact.access_status() == "committed" && artifact.cloud_artifact_id.is_some())
+            .collect()
+    }
+}
+
 pub fn committed_task_artifacts(cas_root: &Path, task_id: &str) -> anyhow::Result<Vec<PublishedArtifact>> {
-    Ok(list_task_metadata(cas_root, task_id)?.artifacts.into_iter()
-        .filter(|artifact| artifact.access_status() == "committed" && artifact.cloud_artifact_id.is_some())
-        .collect())
+    Ok(list_task_metadata(cas_root, task_id)?.committed())
 }
 
 /// Share every successful publication through the existing trusted task-note

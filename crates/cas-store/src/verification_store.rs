@@ -2078,9 +2078,40 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
             ),
         ));
     }
+    let invalidated = invalidate_drifted_dispatch(&tx, &dispatch)?;
+    tx.commit()?;
+    Ok(invalidated)
+}
+
+/// Retire the latest dispatch of a no-code report whose recorded proof no
+/// longer matches the report, so the next close or merge mints a new review.
+pub fn invalidate_verification_dispatch_for_proof_drift(
+    cas_dir: &Path,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
+        .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
+    let recorded: bool = tx.query_row(
+        "SELECT reviewed_proof IS NOT NULL FROM verification_dispatches WHERE id = ?1",
+        params![dispatch_id], |row| row.get(0),
+    )?;
+    if latest.id != dispatch.id || !recorded {
+        return Err(StoreError::Parse(format!(
+            "proof drift invalidation requires the latest dispatch with a recorded proof (named {}; latest {})",
+            dispatch.id, latest.id
+        )));
+    }
+    let invalidated = invalidate_drifted_dispatch(&tx, &dispatch)?;
+    tx.commit()?;
+    Ok(invalidated)
+}
+
+fn invalidate_drifted_dispatch(conn: &Connection, dispatch: &VerificationDispatch) -> Result<VerificationDispatch> {
     if dispatch.state == VerificationDispatchState::Invalidated {
-        tx.commit()?;
-        return Ok(dispatch);
+        return Ok(dispatch.clone());
     }
     if !matches!(
         dispatch.state,
@@ -2090,42 +2121,25 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
             | VerificationDispatchState::TimedOut
     ) {
         return Err(StoreError::Parse(
-            "repository proof dispatch cannot be invalidated from its current state".to_string(),
+            "drifted proof dispatch cannot be invalidated from its current state".to_string(),
         ));
     }
-
+    retire_dispatch_claim(conn, dispatch)?;
     let now = Utc::now().to_rfc3339();
-    if let Some(capability_id) = dispatch.capability_id.as_deref() {
-        tx.execute(
-            "UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2)
-             WHERE id = ?1",
-            params![capability_id, now],
-        )?;
-        tx.execute(
-            "UPDATE verification_handoffs
-             SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
-             WHERE capability_id = ?1 AND state IN ('pending', 'bound')",
-            params![capability_id, now],
-        )?;
-    }
-    let changed = tx.execute(
+    let changed = conn.execute(
         "UPDATE verification_dispatches
          SET state = 'invalidated', resolved_at = ?2
          WHERE id = ?1 AND state IN ('pending', 'claimed', 'resolved', 'timed_out')",
         params![dispatch.id, now],
     )?;
     if changed != 1 {
-        return Err(StoreError::Parse(
-            "repository proof invalidation raced".to_string(),
-        ));
+        return Err(StoreError::Parse("drifted proof invalidation raced".to_string()));
     }
-    tx.execute(
+    conn.execute(
         "UPDATE tasks SET pending_verification = 0, updated_at = ?2 WHERE id = ?1",
         params![dispatch.task_id, now],
     )?;
-    let invalidated = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
-    tx.commit()?;
-    Ok(invalidated)
+    get_verification_dispatch_with_conn(conn, &dispatch.id)
 }
 
 /// Reopen a closed task and invalidate its reusable proof as one durable mutation.
@@ -2411,7 +2425,12 @@ pub fn carry_forward_approved_verification(cas_dir: &Path, expected: &Task, disp
         "SELECT id,status FROM verifications WHERE task_id=?1 AND dispatch_id=?2 ORDER BY created_at DESC,id DESC LIMIT 1",
         params![expected.id,dispatch_id], |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional()?;
-    if active.id != dispatch_id || !matches!(active.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+    let report_retired: bool = tx.query_row(
+        "SELECT state='invalidated' AND reviewed_proof IS NOT NULL FROM verification_dispatches WHERE id=?1",
+        [dispatch_id], |row| row.get(0),
+    )?;
+    if active.id != dispatch_id || report_retired
+        || !matches!(active.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
         || !verdict.is_some_and(|(id,status)| id == verdict_id && status == "approved") {
         return Err(StoreError::Parse("carry does not name the latest approved verdict".into()));
     }

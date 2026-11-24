@@ -1045,6 +1045,7 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let stored_task = task.clone();
         let review_dispatch_update = req.review_dispatch_id.as_deref()
             .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
         self.ensure_review_assignee(
@@ -2480,19 +2481,23 @@ impl CasCore {
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }
-            if new_status == TaskStatus::Closed
-                && task.status != TaskStatus::Closed
-                && self.load_config().verification_enabled()
-                && super::lifecycle::close_ops::no_code_report_is_deliverable(&task)
-            {
-                return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
-                    "VERIFICATION REQUIRED: task {} is a no-code report, so update status=closed cannot close it. \
-                     Use task action=close, which requires an approved independent verdict for the current report.",
-                    task.id
-                ))));
-            }
-            if new_status == TaskStatus::Closed
-                && task.status != TaskStatus::Closed
+            let closing = new_status == TaskStatus::Closed && task.status != TaskStatus::Closed;
+            let report_gate = if closing {
+                use super::lifecycle::report_proof::{ReportGate, require_report_verdict};
+                match require_report_verdict(&self.cas_root, &stored_task, &task) {
+                    Ok(gate @ (ReportGate::Exempt | ReportGate::Bound { .. })) => gate,
+                    Ok(_) => return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                        "VERIFICATION REQUIRED: task {} is a no-code report without an approved independent verdict for its current report, so update status=closed cannot close it. \
+                         Use task action=close to request that review.",
+                        task.id
+                    )))),
+                    Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-68", message))),
+                }
+            } else {
+                super::lifecycle::report_proof::ReportGate::Exempt
+            };
+            if closing
+                && !report_gate.covered()
                 && self.load_config().verification_enabled()
                 && task.depth != cas_types::TaskDepth::Light
                 && crate::harness_policy::verification_required_for_task_type(task.task_type)

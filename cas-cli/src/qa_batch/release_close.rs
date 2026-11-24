@@ -762,7 +762,12 @@ pub(crate) fn reconcile_members(
                         [&task.id], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())?;
                 }
             }
-            let exempt = delivery.membership != ReleaseMembership::ExplicitNoCode && no_review
+            use crate::mcp::tools::core::task::lifecycle::report_proof::{ReportGate, require_report_verdict};
+            let report = require_report_verdict(root, &task, &task).map_err(|_| "REVIEW_MISSING".to_string())?;
+            if report.covered() && !matches!(report, ReportGate::Bound { .. }) {
+                return Err("REVIEW_MISSING".into());
+            }
+            let exempt = !report.covered() && delivery.membership != ReleaseMembership::ExplicitNoCode && no_review
                 && !task.labels.iter().any(|label| label == review_tier::FORCE_VERIFIER_LABEL)
                 && (tier_zero || task.depth == cas_types::TaskDepth::Light
                     || crate::rapid_response::verification_was_exempted(root, repo, &task));

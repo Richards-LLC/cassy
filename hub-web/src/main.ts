@@ -154,7 +154,7 @@ const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const supervisorCommands = new Map<string, SupervisorCommandSession>();
 let pendingReload: { machineId: string; session: string; birth?: string } | undefined;
-let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
+let slashCommands: { input: HTMLTextAreaElement; thread: string; birth?: string; palette: SlashCommands } | undefined;
 function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
   const key = sessionKey(machineId, session);
   let commands = supervisorCommands.get(key);
@@ -237,7 +237,8 @@ function bindSlashCommands(input: HTMLTextAreaElement): void {
   const machineId = selectedMachineId; const session = selectedSession;
   if (!machineId || !session) return;
   const thread = sessionKey(machineId, session);
-  if (slashCommands?.input === input && slashCommands.thread === thread) return;
+  const birth = sessions.get(machineId)?.find(item => item.name === session)?.started_at;
+  if (slashCommands?.input === input && slashCommands.thread === thread && slashCommands.birth === birth) return;
   slashCommands?.palette.dispose();
   const palette = new SlashCommands(input, {
     harness: () => sessions.get(machineId)?.find(item => item.name === session)?.harness,
@@ -248,7 +249,7 @@ function bindSlashCommands(input: HTMLTextAreaElement): void {
       countUsage("supervisor.command");
     },
   });
-  slashCommands = { input, thread, palette };
+  slashCommands = { input, thread, birth, palette };
 }
 
 bindKeyboardViewport(window);
@@ -4732,6 +4733,9 @@ function render(captureDraft = true, stoppedSelection = false): void {
     return;
   }
   deferredRender.settled();
+  const previousCommands = slashCommands;
+  const restoreConfirmation = !stoppedSelection && selectedThreadKey && previousCommands?.thread === selectedThreadKey
+    && previousCommands.birth === selectedHubSession?.started_at ? previousCommands.palette.preserveConfirmation() : undefined;
   // A lease/connection change can rebuild the shell while the same notice
   // is being copied. Keep that view's panel so payload reconciliation can
   // retain its actual Details and Copy nodes, not only restore their focus.
@@ -4829,6 +4833,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
   if (keepHeaderMenu && phoneLayout() && !contextSheetOpen()) {
     document.getElementById("conversation-more")?.click();
   }
+  if (slashCommands && slashCommands !== previousCommands) restoreConfirmation?.(slashCommands.palette);
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
   // markup until its region shows it (the phone Attention badge, cas-a5c6),

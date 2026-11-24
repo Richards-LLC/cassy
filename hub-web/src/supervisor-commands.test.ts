@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
+import { sendsOnEnter } from "./supervisor-message";
 
 describe("supervisor slash commands", () => {
   it("offers Standby with one confirmation on every supported harness", () => {
@@ -17,15 +18,33 @@ describe("supervisor slash commands", () => {
       const run = vi.fn().mockResolvedValue(undefined);
       const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
       input.value = typed;
-      expect(commands.submit()).toBe(true);
+      const typeAndSubmit = () => {
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+        input.dispatchEvent(enter);
+        expect(enter.defaultPrevented).toBe(true);
+      };
+      typeAndSubmit();
       if (harness === "claude") {
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", false);
         await vi.waitFor(() => expect(input.value).toBe(""));
       } else if (harness === "codex") {
-        // cas-8c4f: a Codex reload restarts the supervisor, so it runs only after confirmation.
+        const panel = document.querySelector<HTMLElement>("#supervisor-command-palette")!;
+        const reload = () => panel.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]');
+        const confirmation = reload();
+        expect(confirmation).not.toBeNull();
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        expect(reload()).toBe(confirmation);
+        commands.sync();
+        expect(reload()).toBe(confirmation);
+        expect(panel.hidden).toBe(false);
+        expect(panel.querySelector("[data-supervisor-command]")).toBeNull();
+        panel.querySelector<HTMLButtonElement>('[role="alertdialog"] button.secondary')!.click();
+        expect(panel.hidden).toBe(true);
         expect(run).not.toHaveBeenCalled();
-        document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!.click();
+        typeAndSubmit();
+        reload()!.click();
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", true);
         await vi.waitFor(() => expect(input.value).toBe(""));
@@ -73,6 +92,34 @@ describe("supervisor slash commands", () => {
     expect(run).toHaveBeenCalledWith("usage", false);
     expect(commandsForHarness("grok")).toEqual([]);
     commands.dispose();
+  });
+
+  it("sends an ordinary chat message with a command confirmation open", () => {
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const input = document.querySelector("textarea")!;
+    const run = vi.fn();
+    const sendChat = vi.fn();
+    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => undefined, label: () => "test supervisor", run });
+    input.onkeydown = event => {
+      if (event.defaultPrevented || !sendsOnEnter(event)) return;
+      event.preventDefault();
+      if (!commands.submit()) sendChat(input.value);
+    };
+    const pressEnter = (text: string) => {
+      input.focus();
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    };
+    try {
+      pressEnter("/reload-cassy");
+      expect(document.querySelector('[data-command-confirm="mcp"]')).not.toBeNull();
+      pressEnter("Continue with the review.");
+      expect(sendChat.mock.calls).toEqual([["Continue with the review."]]);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      commands.dispose();
+    }
   });
 
   it("lets pasted paths and unsupported slash text reach the normal composer send", () => {

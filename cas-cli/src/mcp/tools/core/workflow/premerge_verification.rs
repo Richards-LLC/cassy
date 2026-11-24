@@ -1341,7 +1341,9 @@ impl CasCore {
         let fast_lane =
             crate::fast_lane::owns_review(&self.cas_root, task, repo, Some((source, target)));
         if task.task_type == cas_types::TaskType::Epic
-            || (task.depth == cas_types::TaskDepth::Light && !fast_lane)
+            || (task.depth == cas_types::TaskDepth::Light
+                && !fast_lane
+                && !crate::mcp::tools::core::task::lifecycle::close_ops::no_code_report_is_deliverable(task))
             || !config.verification_enabled()
             || !verification_policy(supervisor_harness_from_env(), worker_harness_from_env())
                 .task_required()

@@ -50,8 +50,12 @@ pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<Arti
                 if validate(&record, task_id).is_err() {
                     warnings.insert("invalid_publication_reference");
                 } else if let Some(local) = records.get(&record.id) {
-                    if !same_artifact(local, &record) {
+                    let mut importing = local.clone();
+                    importing.cloud_artifact_id = importing.cloud_artifact_id.or_else(|| record.cloud_artifact_id.clone());
+                    if !same_artifact(&importing, &record) {
                         warnings.insert("conflicting_publication_reference");
+                    } else if local.status != "committed" {
+                        records.insert(record.id.clone(), record);
                     }
                 } else {
                     records.insert(record.id.clone(), record);
@@ -69,7 +73,7 @@ pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<Arti
 
 pub fn committed_task_artifacts(cas_root: &Path, task_id: &str) -> anyhow::Result<Vec<PublishedArtifact>> {
     Ok(list_task_metadata(cas_root, task_id)?.artifacts.into_iter()
-        .filter(|artifact| artifact.status == "committed" && artifact.cloud_artifact_id.is_some())
+        .filter(|artifact| artifact.access_status() == "committed" && artifact.cloud_artifact_id.is_some())
         .collect())
 }
 

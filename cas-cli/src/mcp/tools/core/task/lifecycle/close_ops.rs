@@ -107,7 +107,7 @@ enum CloseVerificationDispatch {
     AlreadyActive(cas_types::VerificationDispatch),
 }
 
-pub(super) fn no_code_report_is_deliverable(task: &Task) -> bool {
+pub(crate) fn no_code_report_is_deliverable(task: &Task) -> bool {
     task.execution_note.as_deref() == Some("no-code")
         && (task.task_type == TaskType::Spike || !task.demo_statement.trim().is_empty())
 }
@@ -422,10 +422,28 @@ pub(crate) fn close_cycle_verdict(
     dispatch: Option<&cas_types::VerificationDispatch>,
     legacy: Option<&cas_types::Verification>,
 ) -> cas_store::Result<Option<cas_types::Verification>> {
+    select_cycle_verdict(dispatch, resolved_dispatch_verdict(root, dispatch), legacy)
+}
+
+fn resolved_dispatch_verdict(
+    root: &std::path::Path,
+    dispatch: Option<&cas_types::VerificationDispatch>,
+) -> cas_store::Result<Option<cas_types::Verification>> {
     match dispatch {
         Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved => {
             cas_store::get_verification_for_dispatch(root, &dispatch.id)
         }
+        _ => Ok(None),
+    }
+}
+
+fn select_cycle_verdict(
+    dispatch: Option<&cas_types::VerificationDispatch>,
+    resolved: cas_store::Result<Option<cas_types::Verification>>,
+    legacy: Option<&cas_types::Verification>,
+) -> cas_store::Result<Option<cas_types::Verification>> {
+    match dispatch {
+        Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved => resolved,
         None => Ok(legacy.filter(|row| row.dispatch_id.is_none()).cloned()),
         _ => Ok(None),
     }
@@ -10452,7 +10470,8 @@ impl CasCore {
         }
 
         // A trusted fast-lane receipt replaces batch QA, never its own approval.
-        let depth_light = depth_light && !fast_lane_receipt_passed;
+        let report_is_deliverable = no_code_report_is_deliverable(&task);
+        let depth_light = depth_light && !fast_lane_receipt_passed && !report_is_deliverable;
         // Check verification status if enabled
         let config = self.load_config();
         let policy = verification_policy(supervisor_harness_from_env(), worker_harness_from_env());
@@ -10660,11 +10679,9 @@ impl CasCore {
                 };
                 let mut superseded_approved_verdict_id = None;
 
-                let resolved_verdict = typed_dispatch.as_ref()
-                    .filter(|dispatch| dispatch.state == cas_types::VerificationDispatchState::Resolved)
-                    .and_then(|dispatch| cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id).ok().flatten());
+                let resolved_verdict = resolved_dispatch_verdict(&self.cas_root, typed_dispatch.as_ref());
                 if let Some(dispatch) = typed_dispatch.as_ref()
-                    && let Some(verdict) = resolved_verdict.as_ref()
+                    && let Ok(Some(verdict)) = resolved_verdict.as_ref()
                     && verdict.status == VerificationStatus::Approved
                 {
                     self.verify_premerge_promotion(&task, dispatch, &verdict.id)?;
@@ -10680,7 +10697,7 @@ impl CasCore {
                 // especially important for no-code tasks, where the proof
                 // boundary and external_ref can remain byte-for-byte unchanged.
                 if let Some(dispatch) = typed_dispatch.as_ref()
-                    && let Some(verdict) = resolved_verdict.as_ref()
+                    && let Ok(Some(verdict)) = resolved_verdict.as_ref()
                     && verdict.status == VerificationStatus::Rejected
                 {
                     let rejection_note = format!(
@@ -10691,10 +10708,9 @@ impl CasCore {
                     typed_dispatch = None;
                 }
 
-                let report_is_deliverable = no_code_report_is_deliverable(&task);
                 if report_is_deliverable
                     && let Some(dispatch) = typed_dispatch.as_ref()
-                    && let Some(verdict) = resolved_verdict.as_ref()
+                    && let Ok(Some(verdict)) = resolved_verdict.as_ref()
                     && matches!(verdict.status, VerificationStatus::Approved | VerificationStatus::Skipped)
                     && (verdict.status == VerificationStatus::Skipped
                         || cas_store::verification_dispatch_reviewed_proof(&self.cas_root, &dispatch.id)
@@ -10724,15 +10740,13 @@ impl CasCore {
                     )
                     .is_err()
                 {
-                    if dispatch.state == cas_types::VerificationDispatchState::Resolved
-                        && let Ok(Some(verdict)) =
-                            cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                    if let Ok(Some(verdict)) = resolved_verdict.as_ref()
                         && matches!(
                             verdict.status,
                             VerificationStatus::Approved | VerificationStatus::Skipped
                         )
                     {
-                        superseded_approved_verdict_id = Some(verdict.id);
+                        superseded_approved_verdict_id = Some(verdict.id.clone());
                     }
                     cas_store::invalidate_verification_dispatch_for_repository_drift(
                         &self.cas_root,
@@ -10757,9 +10771,9 @@ impl CasCore {
                 // A verdict authorizes only the exact durable proof cycle it
                 // resolved. Task-wide rows remain readable for legacy timeout
                 // diagnostics but can never authorize a current close.
-                let latest = close_cycle_verdict(
-                    &self.cas_root,
+                let latest = select_cycle_verdict(
                     typed_dispatch.as_ref(),
+                    resolved_verdict,
                     task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()).filter(|_| !report_is_deliverable),
                 );
 
@@ -11649,6 +11663,14 @@ impl CasCore {
                                 )
                             }
                         )))));
+                    }
+                    Err(error) if report_is_deliverable => {
+                        return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                            "⚠️ VERIFICATION VERDICT UNREADABLE\n\n\
+                             Task {} is a no-code report whose recorded verdict could not be read: {error}. \
+                             Cassy does not close it without that verdict.",
+                            req.id
+                        ))));
                     }
                     Err(_) => {
                         // Verification store error, proceed anyway

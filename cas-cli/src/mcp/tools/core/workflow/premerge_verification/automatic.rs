@@ -21,12 +21,24 @@ pub(crate) fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatc
     // proof here, on the common launch path, before constructing the verifier
     // command. fetch_task checks task scope, revocation, size and SHA-256 and
     // derives this receiver's project namespace instead of a publisher path.
-    let published = crate::artifacts::proof::committed_task_artifacts(&core.cas_root, &task.id)
-        .map_err(|error| error.to_string())?;
+    #[derive(serde::Deserialize)]
+    struct ReviewedProof { artifacts: Vec<(String, String)> }
+    let inventory = match cas_store::verification_dispatch_reviewed_proof(&core.cas_root, &dispatch.id)
+        .map_err(|error| store_refusal(&error))?
+    {
+        Some(recorded) => serde_json::from_str::<ReviewedProof>(&recorded)
+            .map_err(|error| format!("verifier_dispatch_inventory_unreadable: {error}"))?.artifacts,
+        None => crate::artifacts::proof::committed_task_artifacts(&core.cas_root, &task.id)
+            .map_err(|error| error.to_string())?
+            .into_iter().map(|artifact| (artifact.id, artifact.sha256)).collect(),
+    };
     let mut artifacts = Vec::new();
-    for artifact in published {
-        let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &artifact.id)
-            .map_err(|error| format!("Verifier artifact {} unavailable: {error:#}", artifact.id))?;
+    for (id, sha256) in inventory {
+        let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &id)
+            .map_err(|error| format!("Verifier artifact {id} unavailable: {error:#}"))?;
+        if record.id != id || record.sha256 != sha256 {
+            return Err(format!("verifier_dispatch_inventory_changed: artifact {id} no longer matches the inventory recorded on dispatch {}", dispatch.id));
+        }
         artifacts.push(serde_json::json!({
             "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
         }));

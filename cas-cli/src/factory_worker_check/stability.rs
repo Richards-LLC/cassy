@@ -323,10 +323,11 @@ pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, tests: &[Iden
     if tests.is_empty() { return Ok(()); }
     for (path, record) in records(cas_root, repo, head)? {
         let Some(proof) = record.test.and_then(|test| test.stability) else { continue };
-        if !proof.tests.iter().any(|test| tests.contains(test)) { continue; }
+        if !proof.tests.iter().chain(&proof.inactive).any(|test| tests.contains(test)) { continue; }
         std::fs::remove_file(path)?;
         let mut kept = proof;
         kept.tests.retain(|test| !tests.contains(test));
+        kept.inactive.retain(|test| !tests.contains(test));
         if valid(&kept) { persist(cas_root, &record.repo, &record.head, kept)?; }
     }
     Ok(())

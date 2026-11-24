@@ -3092,8 +3092,8 @@ mod tests {
         let refusal = execute_tests(cas_root.path(), &root, &head, "node", None, &only_gated, None, &[])
             .unwrap_err().to_string();
         assert!(refusal.contains("G-61"), "{refusal}");
-        // An active gated test that fails is a failure.
-        let failed = serde_json::json!({"success":true,"testResults":[{"name":file,"status":"passed",
+        // An active gated test that fails is a failure, in the shape NODE_TEST_REPORTER emits for one.
+        let failed = serde_json::json!({"success":false,"testResults":[{"name":file,"status":"failed",
             "assertionResults":[{"fullName":"live eval","status":"failed"}]}]});
         assert!(validate_report("node", Path::new("/project"), &failed, &only_gated, 1).is_err());
     }

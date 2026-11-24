@@ -108,11 +108,32 @@ enum CloseVerificationDispatch {
 }
 
 /// GH #2417: task-note marker binding a no-code review dispatch to the exact
-/// portable proof it was requested for.
+/// proof and published artifacts it was requested for.
 const NO_CODE_REVIEW_BOUND: &str = "NO-CODE REVIEW BOUND dispatch";
 
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The immutable id and SHA-256 of every artifact published on the task. A
+/// revised report is a new id; a changed byte stream is a new digest.
+fn no_code_artifact_binding(cas_root: &std::path::Path, task_id: &str) -> Option<String> {
+    let listing = crate::artifacts::proof::list_task_metadata(cas_root, task_id).ok()?;
+    let mut artifacts: Vec<_> = listing.artifacts.iter().map(|artifact| format!("{}:{}", artifact.id, artifact.sha256)).collect();
+    artifacts.sort();
+    Some(artifacts.join(","))
+}
+
+/// What a no-code review covers: the portable reference plus the artifacts.
+fn no_code_proof_binding(external_ref: &str, artifacts: &str) -> String {
+    format!("{} artifacts={artifacts}", one_line(external_ref))
+}
+
+/// Whether a no-code task's report is its deliverable: a spike, or any task
+/// that demos one. A mechanical no-code chore keeps the ordinary exemption.
+pub(super) fn no_code_report_is_deliverable(task: &Task) -> bool {
+    task.execution_note.as_deref() == Some("no-code")
+        && (task.task_type == TaskType::Spike || !task.demo_statement.trim().is_empty())
 }
 
 /// The proof recorded when `dispatch_id` was requested, from the task notes.
@@ -121,12 +142,13 @@ fn no_code_review_binding<'a>(notes: &'a str, dispatch_id: &str) -> Option<&'a s
     notes.lines().rev().find_map(|line| line.split_once(marker.as_str()).map(|(_, proof)| proof.trim()))
 }
 
-/// Whether a resolved approval of `dispatch_id` reviewed the proof the task
-/// carries now. An approval of an earlier or unrecorded proof never closes it.
-fn no_code_review_covers_current_proof(task: &Task, dispatch_id: &str) -> bool {
+/// Whether a resolved approval of `dispatch_id` reviewed the proof and
+/// artifacts the task carries now. An approval of anything else never closes it.
+fn no_code_review_covers_current_proof(cas_root: &std::path::Path, task: &Task, dispatch_id: &str) -> bool {
     no_code_review_binding(&task.notes, dispatch_id)
         .zip(task.external_ref.as_deref())
-        .is_some_and(|(bound, current)| bound == one_line(current))
+        .zip(no_code_artifact_binding(cas_root, &task.id))
+        .is_some_and(|((bound, current), artifacts)| bound == no_code_proof_binding(current, &artifacts))
 }
 
 // gate[N-10 notice]: Close-path verification dispatch creation
@@ -141,6 +163,7 @@ fn request_close_verification_dispatch(
     renewal: Option<(&str, &Task, &Task)>,
     no_code_close: Option<(&Task, &Task)>,
 ) -> Result<CloseVerificationDispatch, McpError> {
+    let artifact_binding = no_code_artifact_binding(cas_root, task_id);
     let persist = || -> cas_store::Result<CloseVerificationDispatch> {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
         cas_store::shared_db::install_busy_handler(&conn)?;
@@ -215,9 +238,11 @@ fn request_close_verification_dispatch(
             [task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         if execution_note.as_deref() == Some("no-code")
-            && let Some(proof) = external_ref.as_deref().map(one_line).filter(|proof| !proof.is_empty())
+            && let Some(external_ref) = external_ref.as_deref().filter(|proof| !one_line(proof).is_empty())
+            && let Some(artifacts) = artifact_binding.as_deref()
             && no_code_review_binding(&notes, &dispatch.id).is_none()
         {
+            let proof = no_code_proof_binding(external_ref, artifacts);
             let line = format!("[{}] {NO_CODE_REVIEW_BOUND} {}: {proof}", chrono::Utc::now().format("%Y-%m-%d %H:%M"), dispatch.id);
             let notes = if notes.is_empty() { line } else { format!("{notes}\n\n{line}") };
             tx.execute("UPDATE tasks SET notes = ?1 WHERE id = ?2", rusqlite::params![notes, task_id])?;
@@ -10711,16 +10736,15 @@ impl CasCore {
                 // was requested for. A revised report, or an approval that never
                 // recorded its proof, retires that approval so this close mints a
                 // new dispatch and needs a new passing verdict.
-                if task.task_type == TaskType::Spike
-                    && task.execution_note.as_deref() == Some("no-code")
+                if no_code_report_is_deliverable(&task)
                     && let Some(dispatch) = typed_dispatch.as_ref()
                     && dispatch.state == cas_types::VerificationDispatchState::Resolved
                     && let Ok(Some(verdict)) = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                     && verdict.status == VerificationStatus::Approved
-                    && !no_code_review_covers_current_proof(&task, &dispatch.id)
+                    && !no_code_review_covers_current_proof(&self.cas_root, &task, &dispatch.id)
                 {
                     let stale_note = format!(
-                        "Approval {} (dispatch {}) covers an earlier no-code proof than {}; a new independent verdict is required.",
+                        "Approval {} (dispatch {}) covers an earlier no-code proof or artifact than {}; a new independent verdict is required.",
                         verdict.id, dispatch.id, task.external_ref.as_deref().unwrap_or("<none>"),
                     );
                     close_notes.record(&mut task, &stale_note);

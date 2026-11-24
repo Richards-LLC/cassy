@@ -43,7 +43,9 @@ it("shows read-only pairings their disabled actions and the exact manage-access 
   click("[data-accounts-close]"); expect(host.returnFocus).toHaveBeenCalledOnce();
 });
 
-it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOperation[])("performs %s with required confirmation and invalidates New session", async operation => {
+// Plain literal tables: the worker stability check derives each row from the source.
+it.each(["remove", "disable", "rename", "enable", "set_default"])("performs %s with required confirmation and invalidates New session", async (name: string) => {
+  const operation = name as AccountOperation;
   const { host, sheet } = setup(true, operation === "enable" ? { ...row, disabled: true, capabilities: { ...row.capabilities, enable: null, disable: "Already disabled" } } : row);
   await settle();
   click(`[data-operation="${operation}"]`);
@@ -156,7 +158,8 @@ it("shows the Codex alias and valid login help when identity metadata is unavail
   expect(host.copy).toHaveBeenCalledWith("cas codex login work");
 });
 
-it.each(["claude", "codex"] as const)("rechecks %s usage without management or switching, with dated snapshots and retry", async provider => {
+it.each(["claude", "codex"])("rechecks %s usage without management or switching, with dated snapshots and retry", async (name: string) => {
+  const provider = name as "claude" | "codex";
   const account = { ...row, key: `${provider}:spare`, provider, login_state: "logged_in" as const };
   const { host } = setup(false, account);
   const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();

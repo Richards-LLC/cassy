@@ -13627,10 +13627,11 @@ mod worker_commit_guard_tests {
         crate::test_paths::warm_stub(
             &gh,
             r#"#!/bin/sh
-if [ "$1 $2 $3 $4 $5" = 'repo view old/project --json nameWithOwner' ]; then
-  printf '{"nameWithOwner":"acme/project"}'
-  exit
-fi
+case "$1 $2 $3 $4 $5" in
+  'repo view acme/project --json nameWithOwner'|'repo view old/project --json nameWithOwner')
+    printf '{"nameWithOwner":"acme/project"}'
+    exit;;
+esac
 printf '%s\n' "$*" >> "$CAS_TEST_PR_LOOKUPS"
 branch=$(cat "$CAS_TEST_PR_BRANCH")
 if [ "$1 $2" = 'api graphql' ]; then
@@ -13714,7 +13715,7 @@ printf '}'
             ).unwrap()
         };
         let verdict = |dispatch: &cas_types::VerificationDispatch, status| {
-            let mut verdict = Verification::new(format!("ver-{}", dispatch.id), task.id.clone());
+            let mut verdict = Verification::new(format!("ver-{}", dispatch.id), dispatch.task_id.clone());
             verdict.status = status;
             verdict.provenance = VerificationProvenance::SupervisorDirect;
             verdict.agent_id = Some(supervisor.id.clone());
@@ -13820,12 +13821,13 @@ printf '}'
         run("worker", graphql, None);
 
         git(&["remote", "set-url", "origin", "https://github.com/old/project.git"]);
-        let current = open_task_store(&cas_root).unwrap().get(&task.id).unwrap();
+        let candidate_task = Task::new("cas-candidate-pr".into(), "Candidate-only verifier fixture".into());
+        open_task_store(&cas_root).unwrap().add(&candidate_task).unwrap();
         let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
-        let candidate = core.build_completion_candidate(&current, repo.path(), "factory/proof", "fixture-target").unwrap();
+        let candidate = core.build_completion_candidate(&candidate_task, repo.path(), "factory/proof", "fixture-target").unwrap();
         assert_ne!(candidate.proof.head_commit, head);
         let candidate_dispatch = cas_store::create_verification_dispatch_bound(
-            &cas_root, &task.id, &supervisor.id, &supervisor.id,
+            &cas_root, &candidate_task.id, &supervisor.id, &supervisor.id,
             &VerificationProofBoundary::task_at(candidate.proof),
             chrono::Utc::now() + chrono::Duration::minutes(10), false,
         ).unwrap();

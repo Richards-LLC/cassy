@@ -3198,12 +3198,17 @@ candidate directories use the release-scratch GC naming and ownership protocol.
 
 For example, `cas config set factory.build_guard.max_load_ratio 1.5` changes the
 fallback threshold. PSI limits and `factory.max_concurrent_builders` still apply.
-Invalid hand-edited thresholds use defaults. A denied worker command prints
-`Waiting for build admission` with its measured reason and asks for the same
-capped command to be retried; it does not hold a builder slot while waiting.
+Invalid hand-edited thresholds use defaults. A backgrounded (detached)
+worker command that meets a capacity refusal queues: it prints
+`Waiting for build admission` with its measured reason once, holds no builder
+slot while waiting, re-checks admission every 10 seconds and starts when admitted.
+Its one completion wake names the log holding the result and receipt. It stops waiting if its
+worker is gone; a producer killed while queued is reported once by the daemon's
+detached-run scan. A foreground command is refused at once and names the exact
+backgrounded command that queues.
 Registered workers retain their InProgress task and lease during capacity
 waiting. Each refusal updates one durable worker/task/lease-generation episode,
-with its original start, current cause and next retry (120 seconds). worker_status
+with its original start and current cause. worker_status
 shows that episode once. Higher-priority queue waits never wake the supervisor.
 Disk-watermark waits share one pressure notice per factory session after 20
 minutes, listing waiting workers and reclaimable target caches. The background
@@ -5521,9 +5526,9 @@ alert during the hold; lifting it alone generates no stale READY backlog.
 
 `cas ledger estimate pipeline <stage> --instance <sha>` and MCP `system action=estimate query=pipeline:<stage>:<sha>` record promises from successful measured runs; task/epic lookup uses closed project tasks. `--preview` is read-only. `cas ledger backfill --sync` derives historical facts and synchronizes the ledger without inventing promises. Estimate/outcome kinds use migration m297 and store-open reconciliation, preserving append-only sequence and history. See [ESTIMATES](../../docs/ESTIMATES.md) for endpoints, calibration, outcome semantics and supervisor-owned two-machine backfill proof.
 
-### Delivery detail in the friction ledger
+### Delivery detail in the scorecard
 
-`cas ledger report --release vX.Y.Z` keeps review history per delivery cycle,
+`cas scorecard --release vX.Y.Z` (alias `cas ledger report`) keeps review history per delivery cycle,
 with independent, supervisor-direct or unknown historical provenance. The check
 stage totals retain their release-time window; the dated review rows show the
 complete retained history of those deliveries. Wakes are also grouped by the

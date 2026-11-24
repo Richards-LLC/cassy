@@ -1,4 +1,4 @@
-//! `cas ledger`: north-star numbers and feature verdicts from `quality_events`.
+//! `cas scorecard` (alias `cas ledger report`) and `cas ledger`: north-star numbers and feature verdicts from `quality_events`.
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -15,6 +15,22 @@ use super::Cli;
 mod scorers;
 #[path = "ledger_sensors.rs"]
 mod sensors;
+#[path = "ledger_health.rs"]
+mod health;
+
+/// `cas scorecard`: the per-release report.
+#[derive(Args)]
+pub struct ScorecardArgs {
+    /// Release tag, vX.Y.Z. Omit for work since the last release.
+    #[arg(long)]
+    release: Option<String>,
+    /// Read local rows only; do not pull from Cloud first
+    #[arg(long)]
+    offline: bool,
+    /// Measurement deadline for cross-machine park visibility (never a gate).
+    #[arg(long, default_value_t = 10)]
+    park_visibility_minutes: u32,
+}
 
 #[derive(Args)]
 pub struct LedgerArgs {
@@ -24,18 +40,9 @@ pub struct LedgerArgs {
 
 #[derive(Subcommand)]
 enum LedgerCommand {
-    /// Print wakes, usage, interventions, speed, escapes, friction found and feature verdicts for a release
-    Report {
-        /// Release tag, vX.Y.Z. Omit for work since the last release.
-        #[arg(long)]
-        release: Option<String>,
-        /// Read local rows only; do not pull from Cloud first
-        #[arg(long)]
-        offline: bool,
-        /// Measurement deadline for cross-machine park visibility (never a gate).
-        #[arg(long, default_value_t = 10)]
-        park_visibility_minutes: u32,
-    },
+    /// Alias of `cas scorecard`
+    #[command(hide = true)]
+    Report(ScorecardArgs),
     /// Turn history already on disk into events, including filed Cassy problems (safe to rerun)
     Backfill {
         /// How many days of task notes and verifications to read
@@ -70,24 +77,28 @@ enum LedgerCommand {
     },
 }
 
+pub fn execute_scorecard(args: &ScorecardArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
+    if !args.offline {
+        pull_before_report(cas_root);
+    }
+    let repo = cas_root.parent().unwrap_or(cas_root);
+    let mut report = build_report(cas_root, repo, args.release.as_deref())?;
+    if args.park_visibility_minutes != 10 {
+        report.sensors = sensors::local(cas_root, report.from, report.to, args.park_visibility_minutes);
+    }
+    sensors::external(cas_root, report.from, report.to, args.offline, &mut report.sensors);
+    report.health = health::assess(&report);
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render(&report));
+    }
+    Ok(())
+}
+
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
     match &args.command {
-        LedgerCommand::Report { release, offline, park_visibility_minutes } => {
-            if !offline {
-                pull_before_report(cas_root);
-            }
-            let repo = cas_root.parent().unwrap_or(cas_root);
-            let mut report = build_report(cas_root, repo, release.as_deref())?;
-            if *park_visibility_minutes != 10 {
-                report.sensors = sensors::local(cas_root, report.from, report.to, *park_visibility_minutes);
-            }
-            sensors::external(cas_root, report.from, report.to, *offline, &mut report.sensors);
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", render(&report));
-            }
-        }
+        LedgerCommand::Report(report) => execute_scorecard(report, cli, cas_root)?,
         LedgerCommand::Backfill { days,sync } => {
             let since = Utc::now() - Duration::days(*days);
             let inserted = crate::quality_ledger::backfill(cas_root, since)?;
@@ -152,9 +163,9 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
 /// on a server without the route still leaves a correct local report.
 fn pull_before_report(cas_root: &Path) {
     match sync_ledger(cas_root) {
-        Ok(Some(summary)) if summary.deferred => eprintln!("ledger report: showing local rows; another cloud sync round is running, so fleet rows may be stale"),
+        Ok(Some(summary)) if summary.deferred => eprintln!("scorecard: showing local rows; another cloud sync round is running, so fleet rows may be stale"),
         Ok(_) => {}
-        Err(error) => tracing::warn!(%error,"ledger report: showing local rows; cloud sync failed"),
+        Err(error) => tracing::warn!(%error,"scorecard: showing local rows; cloud sync failed"),
     }
 }
 fn sync_ledger(cas_root:&Path)->Result<Option<crate::cloud::syncer::quality_events::QualitySyncSummary>> {
@@ -588,6 +599,8 @@ struct CheckRow {
     /// Sum of observed durations, absent when none was observed; rows without
     /// one count in `untimed`, never as zero.
     minutes: Option<f64>,
+    /// Longest single observed duration, for spotting impossible samples.
+    max_minutes: Option<f64>,
     timed: u32,
     untimed: u32,
 }
@@ -600,7 +613,10 @@ impl CheckRow {
             CheckOutcome::Flaky => self.flaky += 1,
             CheckOutcome::Error => self.error += 1,
         }
-        if let Some(minutes) = minutes { *self.minutes.get_or_insert(0.0) += minutes; }
+        if let Some(minutes) = minutes {
+            *self.minutes.get_or_insert(0.0) += minutes;
+            self.max_minutes = Some(self.max_minutes.map_or(minutes, |most| most.max(minutes)));
+        }
         self.timed += u32::from(minutes.is_some());
         self.untimed += u32::from(minutes.is_none());
     }
@@ -684,6 +700,45 @@ impl TurnTotals {
     }
 }
 
+/// Tokens and minutes spent, with the cached share of input kept apart.
+/// `input_tokens` includes `cached_input_tokens`, as in `TurnTotals`.
+#[derive(Debug, Default, Serialize)]
+struct Spend {
+    turns: u64,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    minutes: f64,
+}
+
+impl Spend {
+    fn add(&mut self, input: Option<u64>, cached: Option<u64>, output: Option<u64>, minutes: Option<f64>) {
+        self.turns += 1;
+        self.input_tokens = self.input_tokens.saturating_add(input.unwrap_or(0));
+        self.cached_input_tokens = self.cached_input_tokens.saturating_add(cached.unwrap_or(0));
+        self.output_tokens = self.output_tokens.saturating_add(output.unwrap_or(0));
+        self.minutes += minutes.unwrap_or(0.0);
+    }
+}
+
+/// One task's spend, split by `harness/model/effort`.
+#[derive(Debug, Default, Serialize)]
+struct TaskSpend {
+    #[serde(flatten)]
+    total: Spend,
+    by_split: BTreeMap<String, Spend>,
+}
+
+/// How many turns could be attributed, so a mostly-unknown split is visible.
+#[derive(Debug, Default, Serialize)]
+struct SpendCoverage {
+    turns: u64,
+    with_model: u64,
+    with_task: u64,
+}
+
+const NO_TASK: &str = "(no task)";
+
 #[derive(Debug, Serialize)]
 struct ReviewRound {
     verification_id: String,
@@ -748,6 +803,13 @@ struct LedgerReport {
     turns_by_notice_kind: BTreeMap<String, TurnTotals>,
     wake_classification_missing_inputs: BTreeMap<String, usize>,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
+    /// Spend per task (local tasks by id, other projects' as `project/id`), then
+    /// by `harness/model/effort`; turns outside any task sit under `(no task)`.
+    spend_by_task: BTreeMap<String, TaskSpend>,
+    spend_by_split: BTreeMap<String, Spend>,
+    spend_coverage: SpendCoverage,
+    /// Every sensor as ok, empty or broken, with its reason.
+    health: Vec<health::SensorHealth>,
     /// Turns per supervisor (its agent id), then per wake channel.
     turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
     /// Distinct tasks whose delivery merged in the window, from the merge record:
@@ -863,13 +925,14 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
     let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
         QualityPayload::Turn { supersedes, .. } => supersedes.as_ref().map(|id| (e.project_id.clone(), id.clone())), _ => None,
     }).collect();
+    let has_kind = |kind: &Option<String>| kind.as_ref().is_some_and(|k| k != "unknown" && !k.bytes().all(|b| b.is_ascii_digit()));
+    let noticing: std::collections::BTreeSet<_> = events.iter().filter(|e| !superseded.contains(&(e.project_id.clone(), e.id.clone())))
+        .filter(|e| matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if has_kind(notice_kind)))
+        .map(|e| e.project_id.clone()).collect();
     for e in &events {
         if superseded.contains(&(e.project_id.clone(), e.id.clone())) { continue }
-        if matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if notice_kind.as_ref()
-            .is_none_or(|kind| kind == "unknown" || kind.bytes().all(|b| b.is_ascii_digit()))) {
-            let reason = if actors.as_ref().is_none_or(|rows| !rows.iter().any(|a| e.actor.as_deref() == Some(a.id.as_str()))) {
-                "actor_identity_not_retained"
-            } else { "notice_kind_not_recovered_from_retained_inputs" };
+        if matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if !has_kind(notice_kind)) {
+            let reason = wake_gap_reason(e, actors.as_deref(), noticing.contains(&e.project_id));
             *report.wake_classification_missing_inputs.entry(reason.into()).or_default() += 1;
         }
     }
@@ -909,6 +972,17 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
     report.estimate_trend=grouped.into_iter().map(|(release,events)|
         (release,crate::quality_ledger::estimates::calibration(&events))).collect();
     Ok(report)
+}
+
+/// Why a wake has no notice kind. Only this project's own agents can be looked
+/// up in this project's agent store: another project's actor is never there, so
+/// its absence says nothing. Such a project is judged by what it emits instead.
+fn wake_gap_reason(event: &QualityEvent, local_actors: Option<&[cas_types::Agent]>, project_emits_kinds: bool) -> &'static str {
+    if !event.project_id.is_empty() {
+        return if project_emits_kinds { "foreign_wake_notice_missing" } else { "emitting_project_records_no_notice_kind" };
+    }
+    let retained = local_actors.is_some_and(|rows| rows.iter().any(|a| event.actor.as_deref() == Some(a.id.as_str())));
+    if retained { "notice_kind_not_recovered_from_retained_inputs" } else { "actor_identity_not_retained" }
 }
 
 /// Where a task stands: `fixed in vX` once a release tag holds its delivery.
@@ -1017,6 +1091,10 @@ fn aggregate(
         turns_by_notice_kind: BTreeMap::new(),
         wake_classification_missing_inputs: BTreeMap::new(),
         turns_by_channel: BTreeMap::new(),
+        spend_by_task: BTreeMap::new(),
+        spend_by_split: BTreeMap::new(),
+        spend_coverage: SpendCoverage::default(),
+        health: Vec::new(),
         turns_by_actor: BTreeMap::new(),
         deliveries: unknown("no merge record read"),
         merged: Vec::new(),
@@ -1063,7 +1141,22 @@ fn aggregate(
             report.projects.push(project.clone());
         }
         match &event.payload {
-            QualityPayload::Turn { woken_by, notice_kind, no_op, input_tokens, output_tokens, minutes, .. } => {
+            QualityPayload::Turn { woken_by, notice_kind, no_op, input_tokens, output_tokens, minutes, spend, .. } => {
+                let identity = |value: Option<&String>| value.map_or("unknown", String::as_str).to_owned();
+                let split = format!("{}/{}/{}",
+                    identity(spend.as_ref().and_then(|s| s.harness.as_ref())),
+                    identity(spend.as_ref().and_then(|s| s.model.as_ref())),
+                    identity(spend.as_ref().and_then(|s| s.effort.as_ref())));
+                let cached = spend.as_ref().and_then(|s| s.cached_input_tokens);
+                let task = event.task_id.as_ref().map_or_else(|| NO_TASK.to_owned(), |task|
+                    if event.project_id.is_empty() { task.clone() } else { format!("{project}/{task}") });
+                report.spend_coverage.turns += 1;
+                report.spend_coverage.with_model += u64::from(spend.as_ref().is_some_and(|s| s.model.is_some()));
+                report.spend_coverage.with_task += u64::from(event.task_id.is_some());
+                report.spend_by_split.entry(split.clone()).or_default().add(*input_tokens, cached, *output_tokens, *minutes);
+                let row = report.spend_by_task.entry(task).or_default();
+                row.total.add(*input_tokens, cached, *output_tokens, *minutes);
+                row.by_split.entry(split).or_default().add(*input_tokens, cached, *output_tokens, *minutes);
                 report.turns_by_notice_kind.entry(notice_kind.as_ref()
                     .filter(|kind| !kind.bytes().all(|b| b.is_ascii_digit())).cloned()
                     .unwrap_or_else(|| "unknown".into())).or_default()
@@ -1260,7 +1353,10 @@ pub(crate) fn quality_reports(cas_root: &Path, published: usize) -> Result<serde
     let reports: Vec<LedgerReport> = std::thread::scope(|scope| {
         let builds: Vec<_> = releases
             .iter()
-            .map(|release| scope.spawn(move || build_report(cas_root, repo, release.as_deref())))
+            .map(|release| scope.spawn(move || build_report(cas_root, repo, release.as_deref()).map(|mut report| {
+                report.health = health::assess(&report);
+                report
+            })))
             .collect();
         builds.into_iter().filter_map(|build| build.join().ok()?.ok()).collect()
     });
@@ -1293,11 +1389,30 @@ fn duration(minutes: Option<f64>) -> String {
     minutes.map_or_else(|| "not measured".to_string(), |minutes| format!("{minutes:.0} min"))
 }
 
+fn render_spend(out: &mut String, report: &LedgerReport) {
+    use std::fmt::Write;
+    let line = |label: &str, s: &Spend| format!("{label}: {} turns, {} input ({} cached), {} output, {:.1} min",
+        s.turns, s.input_tokens, s.cached_input_tokens, s.output_tokens, s.minutes);
+    let _ = writeln!(out, "\nSpend by harness/model/effort");
+    for (split, spend) in &report.spend_by_split {
+        let _ = writeln!(out, "  {}", line(split, spend));
+    }
+    let _ = writeln!(out, "\nSpend by task");
+    let mut tasks: Vec<_> = report.spend_by_task.iter().collect();
+    tasks.sort_by_key(|(_, t)| std::cmp::Reverse(t.total.input_tokens));
+    for (task, spend) in tasks {
+        let _ = writeln!(out, "  {}", line(task, &spend.total));
+        for (split, part) in &spend.by_split {
+            let _ = writeln!(out, "    {}", line(split, part));
+        }
+    }
+}
+
 fn render(report: &LedgerReport) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let state = if report.published { "" } else { " (in progress)" };
-    let _ = writeln!(out, "Friction ledger: {}{state}", report.release);
+    let _ = writeln!(out, "Scorecard: {}{state}", report.release);
     let window = match (report.from, report.to) {
         (Some(from), Some(to)) => format!("{} to {}", when(from), when(to)),
         (Some(from), None) => format!("since {}", when(from)),
@@ -1310,6 +1425,8 @@ fn render(report: &LedgerReport) -> String {
         report.events,
         report.projects.len()
     );
+
+    health::render(&mut out, &report.health);
 
     let _ = writeln!(out, "\nModel turns: {} wakes, {} no-op wakes", report.turns.wakes, report.turns.no_op_wakes);
     let _ = writeln!(out, "  measured usage: {} input tokens, {} output tokens, {:.2} minutes",
@@ -1330,6 +1447,7 @@ fn render(report: &LedgerReport) -> String {
     for (input, count) in &report.wake_classification_missing_inputs {
         let _ = writeln!(out, "    unknown input {input}: {count} wakes");
     }
+    render_spend(&mut out, report);
     let _ = writeln!(out, "\nDelivery review history");
     for row in &report.reviews {
         let _ = writeln!(out, "  {} {}: {} rounds", row.task, row.cycle_id.as_deref().unwrap_or("cycle unknown"), row.rounds.len());
@@ -1919,7 +2037,7 @@ mod tests {
         ] {
             let mut event = NewQualityEvent::new(key, QualityPayload::Turn { supersedes: None, notice_kind: None,
                 woken_by: channel, actions: if no_op { vec![] } else { vec![cas_store::TurnAction::TaskMutation] },
-                no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
+                no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5), spend: None,
             });
             event.occurred_at = occurred_at;
             event.actor = Some("sup-a".into());
@@ -2068,7 +2186,6 @@ mod tests {
         assert_eq!(shown, ["v1.0.0", "v1.1.0", "unreleased"], "oldest release first, work in progress last");
         let text = render(&report);
         for expected in [
-            "Friction ledger: v1.1.0",
             "Interventions: 1",
             "Model turns: 2 wakes, 1 no-op wakes",
             "measured usage: 30 input tokens, 5 output tokens, 0.50 minutes",
@@ -2102,5 +2219,93 @@ mod tests {
             .find(|event| event.release_version.as_deref() == Some("v1.1.1")).unwrap();
         assert!(matches!(release.payload, QualityPayload::Release { ejections: 2, .. }),
             "release snapshot double-counted the old emitter and recovered alias: {release:?}");
+    }
+    fn turn(project: &str, task: Option<&str>, spend: Option<cas_store::TurnSpend>, input: u64, notice: Option<&str>) -> QualityEvent {
+        QualityEvent {
+            seq: 0,
+            id: format!("turn-{project}-{task:?}-{input}"),
+            occurred_at: Utc::now(),
+            task_id: task.map(str::to_owned),
+            release_version: None,
+            actor: Some("agent-1".into()),
+            title: None,
+            link: None,
+            payload: QualityPayload::Turn {
+                woken_by: cas_store::WakeChannel::Worker, notice_kind: notice.map(str::to_owned), supersedes: None,
+                actions: vec![], no_op: true, input_tokens: Some(input), output_tokens: Some(10), minutes: Some(1.0), spend,
+            },
+            local_note: None,
+            from_cloud: false,
+            project_id: project.into(),
+        }
+    }
+
+    fn spend(harness: &str, model: &str, effort: &str, cached: u64) -> Option<cas_store::TurnSpend> {
+        Some(cas_store::TurnSpend {
+            harness: Some(harness.into()), model: Some(model.into()), effort: Some(effort.into()), cached_input_tokens: Some(cached),
+        })
+    }
+
+    #[test]
+    fn spend_is_split_per_task_and_reconciles_with_the_actor_totals() {
+        let events = [
+            turn("", Some("cas-a"), spend("claude", "claude-opus-5-5", "high", 60), 100, Some("merge_ready")),
+            turn("", Some("cas-a"), spend("codex", "gpt-6.1-sol", "xhigh", 5), 50, Some("merge_ready")),
+            turn("", None, None, 20, Some("merge_ready")),
+            turn("other", Some("cas-a"), spend("claude", "claude-opus-5-5", "high", 0), 7, Some("merge_ready")),
+        ];
+        let report = aggregate("v9.99.0".into(), true, None, None, &events);
+        let a = &report.spend_by_task["cas-a"];
+        assert_eq!((a.total.input_tokens, a.total.cached_input_tokens, a.total.output_tokens), (150, 65, 20));
+        assert_eq!(a.by_split.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["claude/claude-opus-5-5/high", "codex/gpt-6.1-sol/xhigh"]);
+        assert_eq!(report.spend_by_task["other/cas-a"].total.input_tokens, 7, "another project's task id is its own row");
+        assert!(report.spend_by_task[NO_TASK].by_split.contains_key("unknown/unknown/unknown"));
+        assert_eq!(report.spend_by_task.values().map(|t| t.total.input_tokens).sum::<u64>(), report.turns.input_tokens);
+        assert_eq!((report.spend_coverage.turns, report.spend_coverage.with_model, report.spend_coverage.with_task), (4, 3, 3));
+        let health = health::assess(&report);
+        let state = |name: &str| health.iter().find(|h| h.sensor == name).map(|h| h.state).unwrap();
+        assert_eq!(state("turn_spend"), health::Health::Ok);
+        assert_eq!(state("estimates"), health::Health::Empty);
+        assert_eq!(state("feature_feedback"), health::Health::Empty);
+        assert_eq!(state("hosted_runner_losses"), health::Health::Broken, "an unread sensor is not a zero");
+    }
+
+    #[test]
+    fn sensors_that_cannot_be_trusted_are_broken_not_ok() {
+        let run = |minutes| QualityEvent { payload: QualityPayload::CheckRun { review: None, check_id: "task_duration:epic".into(),
+            stage: cas_store::CheckStage::Lane, outcome: CheckOutcome::Pass, sha: None, minutes: Some(minutes) },
+            ..turn("domdms", None, None, 0, None) };
+        let mut report = aggregate("v9.99.0".into(), true, None, None, &[run(120_000.0), run(500.0)]);
+        let mut missing = sensors::RunnerLosses::default();
+        missing.jobs_examined = 100;
+        missing.missing = vec!["job 1: hosted runner allocation not retained".into(); 6];
+        report.sensors.hosted_runner_losses = Measure::Known(missing);
+        let states = |report: &LedgerReport| health::assess(report).into_iter().map(|h| (h.sensor, h.state)).collect::<BTreeMap<_, _>>();
+        assert_eq!(states(&report)["durations"], health::Health::Broken, "a 83-day sample is impossible");
+        assert_eq!(states(&report)["hosted_runner_losses"], health::Health::Broken);
+        if let Measure::Known(r) = &mut report.sensors.hosted_runner_losses { r.missing.truncate(5); }
+        assert_eq!(states(&report)["hosted_runner_losses"], health::Health::Ok, "5 of 100 is within tolerance");
+    }
+
+    #[test]
+    fn an_actor_from_another_project_is_never_blamed_on_this_projects_agent_store() {
+        let wake = |project: &str| turn(project, None, None, 1, None);
+        assert_eq!(wake_gap_reason(&wake("travel-trak"), Some(&[]), false), "emitting_project_records_no_notice_kind");
+        assert_eq!(wake_gap_reason(&wake("travel-trak"), Some(&[]), true), "foreign_wake_notice_missing");
+        assert_eq!(wake_gap_reason(&wake(""), Some(&[]), true), "actor_identity_not_retained");
+        let here = [cas_types::Agent::new("agent-1".into(), "worker".into())];
+        assert_eq!(wake_gap_reason(&wake(""), Some(&here), true), "notice_kind_not_recovered_from_retained_inputs");
+    }
+    #[test]
+    fn scorecard_and_the_old_ledger_report_name_read_the_same_release() {
+        use clap::Parser;
+        let release = |args: &[&str]| match super::super::Cli::try_parse_from(args).unwrap().command {
+            Some(super::super::Commands::Scorecard(a)) => a.release,
+            Some(super::super::Commands::Ledger(LedgerArgs { command: LedgerCommand::Report(a) })) => a.release,
+            _ => panic!("not a report command: {args:?}"),
+        };
+        assert_eq!(release(&["cas", "scorecard", "--release", "v9.99.0"]).as_deref(), Some("v9.99.0"));
+        assert_eq!(release(&["cas", "ledger", "report", "--release", "v9.99.0"]).as_deref(), Some("v9.99.0"));
     }
 }

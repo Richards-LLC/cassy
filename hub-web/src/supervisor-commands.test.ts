@@ -265,6 +265,28 @@ describe("supervisor command receipts", () => {
     expect(document.activeElement).toBe(parent.querySelector("summary"));
   });
 
+  it("keeps a held Reload Cassy's own status through a reconnecting status read (cas-6b21)", async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn().mockReturnValue(true);
+      const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+      await session.run("mcp", true);
+      const ref = [...session.receipts.keys()][0];
+      const reconnecting = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
+      for (const phase of ["queued", "submitted"] as const) {
+        const held = { client_ref: ref, command: "mcp" as const, phase, detail: `daemon ${phase}`, output: "", interactive: false };
+        session.receive(held);
+        expect(session.reject(ref, reconnecting, true)).toBe(true);
+        expect(session.receipts.get(ref)).toEqual(held);
+      }
+      const reads = send.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(send.mock.calls.length).toBeGreaterThan(reads);
+      session.receive({ client_ref: ref, command: "mcp", phase: "observed", detail: "Cassy reloaded", output: "", interactive: false });
+      expect(session.receipts.get(ref)?.phase).toBe("observed");
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
   it("settles a recent Exit after disconnect or late status without claiming other commands completed", async () => {
     vi.useFakeTimers();
     try {

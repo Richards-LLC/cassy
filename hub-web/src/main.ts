@@ -1188,7 +1188,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onMessageRejected: async (session, clientRef, detail, rejection) => {
-      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail)) return;
+      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail, rejection?.retryable === true)) return;
       const key = sessionKey(machine.id, session);
       // cas-0653: the hub could not reach the session's daemon, so the
       // message never arrived there. It waits in the thread and goes out once
@@ -2673,7 +2673,7 @@ function syncCassyBadge(): void {
   let badge = host.querySelector<HTMLElement>(":scope > #conversation-cassy");
   if (!text || !parts) { if (badge) { badge.remove(); scheduleConversationLayout(); } return; }
   if (badge?.dataset.badge === text) return;
-  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "supervisor-version loaded conversation-cassy"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
+  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "supervisor-version loaded"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
   badge.dataset.badge = text; badge.title = text;
   const spoken = (words: string) => { const span = document.createElement("span"); span.className = "sr-only"; span.textContent = words; return span; };
   badge.replaceChildren(spoken("cassy "), `${parts.version} · `, spoken("loaded "), parts.time, spoken(" ET"));

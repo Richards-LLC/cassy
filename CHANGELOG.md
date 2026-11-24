@@ -7,6 +7,140 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.54.0] - 2026-11-24
+
+### Fixed — Factory
+
+- **Codex lanes spawn when workers route through the hub gateway** — Was: with
+  Codex workers on the home gateway, `spawn_workers lane=standard` refused every
+  Codex recipe because it looked for a local `~/.codex/auth.json` that no longer
+  exists. Now: a lane checks each Codex recipe's model against the hub's model
+  listing when the worker would route through the hub, and still uses the
+  account's own catalogue when it would start direct.
+- **Park refuses a delivery missing its doc fragments** — Was: a product
+  delivery without `docs/product-overview.d/<task>.md`, or a bug fix on a live
+  journey's owned files without a bug family naming it, parked and then lost a
+  verifier round to the miss. Now: park lists both misses at once (G-167
+  overview fragment, G-168 bug family), with `no overview: <reason>` and
+  `no bug family: <reason>` decision notes as the escapes; docs- and test-only
+  deliveries are unaffected.
+- **An approved no-code review closes the task by itself** — Was: when a
+  release-train worker's no-code or no-delivery close was approved by Cassy's
+  automatic verifier, the close was refused because the verifier, not the
+  train's owner, ran it. The task stayed Blocked until a supervisor repeated
+  the same close by hand, and the five-minute alert only said the close was
+  "still held". Now: Cassy runs the close for the review's owning supervisor,
+  so the task closes itself. If a real gate still holds it, the gate's code and
+  message are saved on the task, and the alert names that gate.
+- **Class-audit park hint names the right test target** — When park refuses for a missing class-audit receipt, the suggested capped command now uses the Cargo target that registers the class, such as `--test integration_factory`, instead of always `--lib`. When no target can be resolved, it asks for the registered harness.
+- **Reexec no longer refuses behind a pile of reconcile reads** — Was: when the
+  external job lane stayed busy for minutes, the worker-task-queue reconcile read
+  was resubmitted every 30 s and each copy queued as durable work (452 after
+  3.8 h), so `cas factory reexec` refused and only a full restart helped
+  (GH #2327). Now: a resubmit replaces the one waiting, and reexec abandons it
+  like other re-runnable reads.
+
+### Added — Factory delivery
+
+- **Park requires an acceptance-criteria checklist and refuses an unapproved narrowing** — Was: a worker could park a narrower slice than its brief, sometimes recording the narrowing only in a doc, and the verifier found it one round later. Now: park requires `AC-CHECKLIST.md` in the task artifacts with one row per acceptance criterion (`AC1`, `AC2`, …) and per supervisor decision note (`D1`, …). Each row is `MET` with a `file:line` and a receipt, or `NOT MET`/`NARROWED` with a reason. A `NOT MET` or `NARROWED` row parks only after a supervisor decision note names its item; a worker's own decision note does not count. One refusal lists every failing row and the rows to add, and task start names the rows park will require.
+
+### Fixed — CI
+
+- **Case-file edits run their own suite** — Lane test-impact selection attributes a changed integration case file to the suite that compiles it through `#[path]` or `mod`. An edit under a case directory such as `distributed_factory_test_cases/` now runs that suite first instead of widening to every integration suite.
+
+### Changed — Verification
+
+- **One rejection lists every finding** — Was: the task verifier stopped at
+  the first completeness failure, so simplicity and dead-code findings arrived
+  one 15–20 minute round later. Now: it runs every phase on every review and
+  returns all findings in one verdict; any blocking finding still rejects.
+
+### Fixed — Worker sandbox
+
+- **Workers can no longer write to `~/Library/LaunchAgents`** — Was: listing that directory in `write_roots` made it writable inside the macOS worker sandbox, so a file planted there would run at the next login outside the sandbox. Now: the profile always denies it, whatever `write_roots` contains.
+
+### Fixed — Commander
+
+- **Reload Cassy keeps a truthful status through a reconnect** — Was: while a
+  confirmed Codex reload restarted the supervisor, a status check that met the
+  reconnecting session showed "message was not sent. Retry…" as the reload's
+  status, though the reload went on to finish. Now: a command the session
+  already holds keeps its own waiting or restarting status while Commander
+  reconnects, then shows the real outcome.
+- **Reload Cassy sees a same-version rebuild** — Was: reloading a supervisor
+  onto a hotfix or dev build that reports the same version answered "Already
+  current" and sent nothing. Now: Cassy records each running build's hash
+  beside its version, so a different build at the same version reloads, and
+  the reload only counts once the supervisor runs the installed build.
+- **Codex quota stays fresh without Codex traffic** — Was: the hub learned an account's quota only from requests it proxied, so with no Codex work for a few hours Accounts showed Codex logins as "≤ N%" from hours ago. Now: Cassy also reads the hub's own inspection runs, which its timer takes every 15 minutes through the provider's free usage endpoint, and uses whichever read of each login is newer. Both machines still show one number per login. Cassy only reads from the hub and never starts a run.
+
+### Added — Scorecard
+
+- **What each task cost, by model, effort and harness** — Was: the release
+  report totalled tokens by who woke the agent, so Codex and Claude spend per
+  task had to be mined from raw transcripts. Now: each turn records its
+  harness, model, effort, cached input and the task a worker held, and the
+  report adds spend per task and per harness, model and effort, with cached
+  input kept apart.
+- **Sensor health at the top of the report** — Was: a sensor with no samples
+  or a broken input printed a quiet zero. Now: every sensor is listed as OK,
+  EMPTY or BROKEN with its reason first, including the runner-loss, estimate,
+  feedback, cross-machine park, unknown-wake and over-30-day duration cases.
+- **Unknown wakes name their real cause** — Was: wakes from another project
+  were all blamed on a missing local agent. Now: they are reported against the
+  emitting project that records no notice kind, so only this project's own
+  gaps point at its agents.
+- **`cas scorecard` is the report's name** — Was: `cas ledger report`. Now:
+  `cas scorecard --release vX.Y.Z`; `cas ledger report` still works.
+
+### Changed — Factory
+
+- **Lane registry moves to GPT-6.2 Sol and Fable 5.2** — Was: `standard` ran
+  deprecated gpt-6.1-sol with a Codex-only fallback, so the lane died whenever
+  every Codex account was at its weekly limit. Now: `standard` runs GPT-6.2 Sol
+  at xhigh, then high, then Claude Sonnet 5.5 at high; `light` runs GPT-6.2 Sol
+  at low, then Luna 6, then Opus 5.5 low; `heavy` and `taste` run Claude Fable
+  5.2 at high, then Opus 5.5. The supervisor lane is unchanged. The model-
+  selection guide now sends QA passes, release mechanics and docs to `standard`
+  and reserves `heavy` for tasks the supervisor marks heavy.
+- **Capped runs queue for a builder slot** — Was: a backgrounded capped test
+  or check that met a full builder cap, CPU/memory pressure or low disk exited
+  at once, woke its worker, and told it to retry in 120 seconds, so waiting for
+  a build cost two wakes per retry. Now: the run waits in its own session,
+  keeps its place in the priority queue, starts when admitted and wakes its
+  worker once with the result. A run killed while waiting is reported once. A
+  foreground run is still refused, and the refusal names the backgrounded
+  command to run instead.
+
+### Fixed — Environment-gated changed tests in stability proof
+
+- **Changed tests registered as `(env ? it : it.skip)`, `skipIf` or `runIf` no longer block park when their environment is off** — The capped JavaScript stability run records such a case as inactive when every repeat skips it, lists it on its own `stability: INACTIVE` line and in the receipt note, and never counts it as passing. Before this fix, an opt-in live eval skipped by design failed stability on all 5 runs. A run in which every changed test is inactive is still refused with the environment to set, and an active gated test that fails still fails.
+
+### Fixed — Verification
+
+- **An epic's mention of another task's artifact no longer blocks its children's merges** — Was: any `art-` ID in a parent epic's text was treated as the epic's own artifact, so mentioning another task's artifact refused every child merge with "artifact belongs to another task". Now: each cited ID resolves against the task that owns it within the project. A mention that no task in scope owns reaches the verifier as missing context instead of refusing the merge. A resolved artifact must still be available and unrevoked, and its bytes still verify.
+
+### Fixed — Capped Jest runs from the package directory
+
+- **Capped Jest stability runs start in the package that owns the Jest config** — Before this fix, a spec owned by a config kept in `test/` ran from `test/`. Fixture paths relative to the package, such as `prisma/migrations/.../migration.sql`, then failed with ENOENT before any assertion ran, even though the same raw `jest --config test/...` command passed from the package directory. Worker-check now runs Jest from the nearest ancestor of the config that holds a `package.json`, whatever the config's `rootDir`.
+
+### Added — Factory
+
+- **Park names every symbol a delivery leaves without a caller** — Was: a
+  refactor that dropped the last caller of a helper parked cleanly. The
+  verifier then rejected it, one unused helper per round, at about 15 to 20
+  minutes a round. Now: park checks the delivery diff in seconds, with no build
+  and no model call. It refuses with one list of every TS/JS function, method,
+  export or type, Rust `pub` item and CSS class whose last reference the
+  delivery removed. Symbols that were already unused before the delivery
+  are not listed. A class that markup builds from its prefix counts as used. A
+  supervisor can waive a symbol that is only reached at runtime by overriding
+  with a reason.
+
+### Added — Skills
+
+- **`cas-no-comments` skill, and a pre-park pass in the worker skill** — Was: workers parked deliveries with whatever comments they wrote, and nothing reviewed them. Now: the new `cas-no-comments` builtin skill reviews the delivery diff only and deletes comments outside a short keep list (licence headers, forced external behaviour, public API contracts, constraint links, justified suppressions, `// SAFETY:`), or flags the symbol for a reshape. `///` doc comments that clap or schemars turn into `--help` or MCP descriptions are product text and are never deleted. The worker's delivery reference runs it before park, with a subtract-before-you-add check and same-surface proof for bug fixes. Adapted from pstack by Lauren Tan (MIT).
+
 ## [4.53.0] - 2026-11-24
 
 ### Fixed — Commander

@@ -157,6 +157,7 @@ fn listed_park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
+    refusals.extend(super::doc_fragment_gate::park_refusals(cas_root, proof_repo, task, changed_paths, head));
     // Judge the immutable delivery delta as well as caller paths: an earlier
     // push can introduce a retained checkpoint absent from a later path list.
     // A project-owned file already present at the base remains inherited.
@@ -279,8 +280,19 @@ fn listed_park_refusals(
     if let Some(class) = recorded_class_audit(cas_root, &task.id)
         && !crate::mcp::tools::core::task::repair_class::receipts_cover_class(&passing.filters(), &class)
     {
+        // cas-8a5c: name the Cargo targets that register the class; an
+        // integration module is not in --lib.
+        let targets = crate::factory_worker_check::stability::rust::class_targets(proof_repo, head, changed_paths, &class)
+            .unwrap_or_default();
+        let commands = if targets.is_empty() {
+            format!("`cargo nextest run -p <crate> <--lib | --test <harness>> -E '{class}'`, choosing the Cargo target that registers it")
+        } else {
+            targets.iter().map(|(package, harness)| format!("`cargo nextest run -p {package} {} -E '{class}'`",
+                harness.as_ref().map_or_else(|| "--lib".to_owned(), |harness| format!("--test {harness}"))))
+                .collect::<Vec<_>>().join("; ")
+        };
         refusals.push(crate::gates::tag("G-61", format!(
-            "CLASS_AUDIT_REQUIRED: task {} was sent back with class audit `{class}`, and no passing capped receipt at {short} runs all of it. Run it through the capped runner (`cargo nextest run -p <crate> --lib -E '{class}'`), fix what fails, then retry park.",
+            "CLASS_AUDIT_REQUIRED: task {} was sent back with class audit `{class}`, and no passing capped receipt at {short} runs all of it. Run it through the capped runner ({commands}), fix what fails, then retry park.",
             task.id,
         )));
     }
@@ -323,7 +335,7 @@ fn listed_park_refusals(
 }
 
 
-fn product_source_path(path: &str) -> bool {
+pub(super) fn product_source_path(path: &str) -> bool {
     if path.starts_with("cas-cli/src/builtins/skills/") {
         return true;
     }
@@ -418,6 +430,11 @@ pub(super) fn has_fragment_dir_at(repo: &Path, commit: &str, dir: &str) -> bool 
 }
 
 fn has_no_changelog_decision(notes: &str) -> bool {
+    has_reasoned_decision(notes, "no changelog:")
+}
+
+/// A timestamped `✅ DECISION <prefix> <reason>` note with a real reason.
+pub(super) fn has_reasoned_decision(notes: &str, prefix: &str) -> bool {
     notes.lines().any(|line| {
         let Some((stamp, body)) = line
             .strip_prefix('[')
@@ -428,7 +445,7 @@ fn has_no_changelog_decision(notes: &str) -> bool {
         if chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").is_err() {
             return false;
         }
-        body.strip_prefix("no changelog:").is_some_and(|reason| {
+        body.strip_prefix(prefix).is_some_and(|reason| {
             let reason = reason.trim();
             !reason.is_empty() && !is_changelog_template_value(reason)
         })
@@ -1135,6 +1152,42 @@ mod tests {
             "test(=auth) selects one test, not the class");
         record("cas", "test(auth)");
         assert!(park_refusal(&root, repo.path(), &task, &changed, &head, "main", None).is_none());
+
+        // cas-8a5c (cas-b36f): a class registered only in an integration
+        // harness gets that harness's command, which --lib cannot run.
+        let git_repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(git_repo.path())
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        for (path, body) in [
+            ("Cargo.toml", "[workspace]\nmembers = [\"cas-cli\"]\n"),
+            ("cas-cli/Cargo.toml", "[package]\nname = \"cas\"\nautotests = false\n[[test]]\nname = \"integration_factory\"\npath = \"tests/integration/factory.rs\"\n"),
+            ("cas-cli/src/lib.rs", "pub fn f() {}\n"),
+            ("cas-cli/tests/integration/factory.rs", "#[path = \"../factory_mcp_ops_test.rs\"]\nmod factory_mcp_ops_test;\n"),
+            ("cas-cli/tests/factory_mcp_ops_test.rs", "#[test]\nfn test_assignment_allows() {}\n"),
+        ] {
+            std::fs::create_dir_all(git_repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(git_repo.path().join(path), body).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        std::fs::write(git_repo.path().join("cas-cli/src/lib.rs"), "pub fn f() { let _ = 1; }\n").unwrap();
+        git(&["commit", "-qam", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let changed = vec!["cas-cli/src/lib.rs".to_string()];
+        crate::factory_worker_check::record_passing_test_for_tests(&root, git_repo.path(), &head, "cas", "test(worker)");
+        crate::store::open_task_store(&root).unwrap().patch_execution_state(
+            &task.id, &serde_json::json!({"class_audit": "test(factory_mcp_ops_test::test_assignment_) | test(factory_mcp_ops_test::)"}),
+        ).unwrap();
+        let refusals = park_refusals(&root, git_repo.path(), &task, &changed, &head, "main", None);
+        let class = refusals.iter().find(|refusal| refusal.contains("CLASS_AUDIT_REQUIRED")).expect("class refusal");
+        assert!(class.contains("-p cas --test integration_factory -E"), "{class}");
+        assert!(!class.contains("--lib"), "{class}");
     }
 
     #[test]
@@ -1159,10 +1212,10 @@ mod tests {
             let base = commit_changelog_fixture(repo.path(), "base test");
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &base])
                 .current_dir(repo.path()).status().unwrap().success());
-            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true } }
+            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true, environment_gated: false } }
                 else { Identity::exact(path, if rust { "child::owned" } else { "owned" }) };
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             std::fs::write(repo.path().join(path), format!("{old}{added}")).unwrap();
             std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
             let head = commit_changelog_fixture(repo.path(), "add owned test");
@@ -1174,7 +1227,7 @@ mod tests {
             assert!(held.contains(&identity.path) && held.contains(&identity.name), "{runner}: {held}");
             assert!(!held.contains("untouched"));
             stability::record(root.path(), repo.path(), &head, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             let packages = crate::factory_worker_check::passing_test_packages(root.path(), repo.path(), &head);
             assert_eq!(packages, if rust { vec!["fixture".to_string()] } else { vec![] });
             let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
@@ -1209,7 +1262,7 @@ mod tests {
             let held = park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).unwrap();
             assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains(&identity.name), "{held}");
             stability::record(root.path(), repo.path(), &changed, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             assert!(park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).is_none());
             std::fs::write(repo.path().join("README.md"), "after corrected test proof\n").unwrap();
             let retry = commit_changelog_fixture(repo.path(), "docs after corrected test proof");
@@ -1290,7 +1343,7 @@ mod tests {
             let producer = tempfile::tempdir().unwrap();
             stability::record(producer.path(), repo.path(), &head, Proof { runner: "nextest".into(),
                 tests: ["child::planted", "child::gated::nested"].map(|name| Identity::exact("src/child.rs", name)).into(),
-                consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             task.deliverables.test_receipts =
                 crate::factory_worker_check::PassingTests::new(producer.path(), repo.path(), &head).portable();
             let refusals = park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None);
@@ -1331,11 +1384,34 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let sibling = Identity::exact(path, "sibling");
-        let proof = |tests: Vec<Identity>| Proof { runner: "vitest".into(), tests, consecutive_passes: 5, elapsed_ms: 0 };
+        let proof = |tests: Vec<Identity>| Proof { runner: "vitest".into(), tests, consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() };
         stability::record(root.path(), repo.path(), &head, proof(vec![other.clone(), sibling.clone()])).unwrap();
         stability::invalidate(root.path(), repo.path(), &head, std::slice::from_ref(&other)).unwrap();
         let passing = PassingTests::new(root.path(), repo.path(), &head);
         assert_eq!(stability::missing(&passing, &[other, sibling]), vec![Identity::exact(path, "other")]);
+    }
+
+    /// GH #2223: a receipt that ran one test and left an environment-gated
+    /// sibling inactive covers both; a failed rerun of the inactive sibling
+    /// withdraws its credit and keeps the executed test's.
+    #[test]
+    fn failed_rerun_of_an_inactive_sibling_withdraws_its_coverage_gh2223() {
+        use crate::factory_worker_check::{PassingTests, stability::{self, Identity, Proof}};
+        let repo = changelog_fixture();
+        let head = commit_changelog_fixture(repo.path(), "head");
+        let path = "owned.test.js";
+        let ran = Identity::exact(path, "executed");
+        let gated = Identity { environment_gated: true, ..Identity::exact(path, "live eval") };
+        let root = tempfile::tempdir().unwrap();
+        stability::record(root.path(), repo.path(), &head, Proof {
+            runner: "jest".into(), tests: vec![ran.clone()], consecutive_passes: 5, elapsed_ms: 0,
+            inactive: vec![gated.clone()],
+        }).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert!(stability::missing(&passing, &[ran.clone(), gated.clone()]).is_empty());
+        stability::invalidate(root.path(), repo.path(), &head, std::slice::from_ref(&gated)).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert_eq!(stability::missing(&passing, &[ran, gated.clone()]), vec![gated]);
     }
 
     /// cas-769b at 5ddb6860: the delivery edited a test, the target rewrote
@@ -1635,7 +1711,7 @@ raise SystemExit(1 if failed else 0)
             if !tests.is_empty() {
                 assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
                 stability::record(root.path(), repo.path(), &head, stability::Proof {
-                    runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1,
+                    runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1, inactive: Vec::new(),
                 }).unwrap();
             }
             assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");

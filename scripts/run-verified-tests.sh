@@ -32,14 +32,18 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
+# An explicit template keeps temporaries in the capped runner's TMPDIR; a bare
+# `mktemp` on recent macOS uses the per-user /var/folders directory instead,
+# which a sandboxed worker cannot write (cas-fa0f).
+tmp_template="${TMPDIR:-/tmp}/verified-tests.XXXXXX"
 if [[ -n "${VERIFIED_TEST_LOG:-}" ]]; then
     log="${VERIFIED_TEST_LOG}"
     : >"${log}"
-    clean_log="$(mktemp)"
+    clean_log="$(mktemp "${tmp_template}")"
     trap 'rm -f "${clean_log}"' EXIT
 else
-    log="$(mktemp)"
-    clean_log="$(mktemp)"
+    log="$(mktemp "${tmp_template}")"
+    clean_log="$(mktemp "${tmp_template}")"
     trap 'rm -f "${log}" "${clean_log}"' EXIT
 fi
 

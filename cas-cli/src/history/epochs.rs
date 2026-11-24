@@ -361,6 +361,8 @@ pub fn current_daemon_epoch(started_at: &str) -> HistoryEpoch {
         pid: Some(std::process::id() as i64),
         exe_deleted,
         recorded_at: started_at.to_string(),
+        // cas-724e: what `cas --version` prints in parentheses for this build.
+        build: option_env!("CAS_GIT_HASH").map(str::to_owned),
     }
 }
 
@@ -493,6 +495,7 @@ mod tests {
             pid: Some(pid),
             exe_deleted: false,
             recorded_at: started.to_string(),
+            build: None,
         }
     }
 

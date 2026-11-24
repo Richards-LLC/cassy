@@ -818,18 +818,13 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - **Touches:** `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`
 - **Suite:** `hub-web/e2e/journeys/whole-picture.journey.ts`
 - **Gaps:** the work-event stream is a protocol double; the daemon's transcript indexing, redaction, change probe and the hub's follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests`)
+- **Not exercised:** the Show work steps (off by default, turn it on, open a tool call's detail, live new work, the setting surviving a reload, typed work scope) have no journey case: both show-work cases were release-path flakes (cas-94a8, cas-929df); race-free rewrite pending. `work-picture.test.ts` still covers the typed work renderer.
 
 #### Steps
 
-1. Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is read
-2. Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and its rows not; a worker's own tool call stays in its timeline
-3. Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand and markup in it reads as text
-4. New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the earlier reply keeps its node
-5. Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies only
-6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
-7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
-8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
-9. Read typed work scope — reads, searches, commands and edits expose explicit v2 scope and retain their exact raw record; failed exit codes are named, unknown exec wrappers stay readable, routine turn notices collapse together, and an open row retains focus and expansion through a same-ID metadata update
+1. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
+2. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
+3. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
 
 #### Expected experience
 

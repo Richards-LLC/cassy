@@ -11,6 +11,15 @@ use crate::mcp::tools::core::imports::*;
 
 use super::close_ops::{ALREADY_CLOSED_PREFIX, as_cassy_merge_close};
 
+/// GH #2383: task-note marker for the gate holding Cassy's no-delivery close.
+const NO_DELIVERY_CLOSE_HELD: &str = "CASSY NO-DELIVERY CLOSE HELD on dispatch";
+
+/// The latest recorded gate holding Cassy's no-delivery close of `dispatch_id`.
+pub(crate) fn no_delivery_close_hold<'a>(notes: &'a str, dispatch_id: &str) -> Option<&'a str> {
+    let marker = format!("{NO_DELIVERY_CLOSE_HELD} {dispatch_id}: ");
+    notes.lines().rev().find_map(|line| line.split_once(marker.as_str()).map(|(_, reason)| reason.trim()))
+}
+
 /// Read-only admission shared by receipt close and release backfill preview.
 /// `Some` retains the task's own ordinary review path; `None` lets the release
 /// verdict authorize it. Neither result bypasses the remaining close gates.
@@ -470,7 +479,7 @@ impl CasCore {
         if intent.dispatch_id != dispatch_id { return Ok(None); }
         // A saved intent never falls back to a forbidden worker retry, even
         // when a successor or independent hold now prevents its completion.
-        let held = |reason: &str| Some(format!("\nCassy no-delivery close of {task_id} is held: {reason}. No worker close retry was queued."));
+        let held = |reason: &str| Some(self.hold_no_delivery_close(store.as_ref(), task_id, dispatch_id, reason));
         let latest = cas_store::get_latest_verification_dispatch(&self.cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let approved = cas_store::get_verification_for_dispatch(&self.cas_root, dispatch_id)
@@ -532,7 +541,10 @@ impl CasCore {
             stranded_branch_override: None, supervisor_override: None, search_manifest: None, commit_receipt: None,
         };
         let close = crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)));
-        let result = as_cassy_merge_close(close).await;
+        // GH #2383: the verifier recorded the verdict; Cassy closes for the
+        // dispatch owner, which is the train owner a train delivery requires.
+        let owner = latest.as_ref().map(|dispatch| dispatch.owner_agent_id.clone()).unwrap_or_default();
+        let result = super::close_ops::as_verdict_owner_close(owner, close).await;
         let text = match result {
             Ok(result) => result.content.iter().filter_map(|content| match content {
                 rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
@@ -541,8 +553,11 @@ impl CasCore {
         };
         let current = store.get(task_id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         if current.status != TaskStatus::Closed {
-            let outcome = self.held_after_verdict(store.as_ref(), task_id, Some(release), text);
-            return Ok(Some(format!("{}\nNo worker close retry was queued.", outcome.receipt(task_id))));
+            let held = match self.held_after_verdict(store.as_ref(), task_id, Some(release), text) {
+                CassyMergeClose::Held(text) => text,
+                other => other.receipt(task_id),
+            };
+            return Ok(Some(self.hold_no_delivery_close(store.as_ref(), task_id, dispatch_id, &held)));
         }
         let unrecorded = self.record_verdict_release(store.as_ref(), &current, &release);
         let notice = super::supervisor_push::queue_no_delivery_close_notice(&self.cas_root, &current, dispatch_id)
@@ -550,6 +565,20 @@ impl CasCore {
             .unwrap_or_else(|error| format!("worker notice failed: {error}"));
         Ok(Some(format!("\nCassy closed task {task_id} on its approved close intent; {notice}.{}",
             if unrecorded.is_empty() { String::new() } else { format!(" NOT RECORDED: {}", unrecorded.join("; ")) })))
+    }
+
+    /// GH #2383: a held automatic close names its real gate on the task, where
+    /// the supervisor's deadline alert reads it, because a daemon-recorded
+    /// verdict has no caller to return it to.
+    fn hold_no_delivery_close(
+        &self, store: &dyn cas_store::TaskStore, task_id: &str, dispatch_id: &str, reason: &str,
+    ) -> String {
+        let reason: String = reason.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(800).collect();
+        let note = format!("[{}] {NO_DELIVERY_CLOSE_HELD} {dispatch_id}: {reason}", chrono::Utc::now().format("%Y-%m-%d %H:%M"));
+        if let Err(error) = store.append_note(task_id, &note) {
+            tracing::warn!(%task_id, %error, "held no-delivery close reason not recorded");
+        }
+        format!("\nCassy no-delivery close of {task_id} is held: {reason}. No worker close retry was queued.")
     }
 
     /// Close a delivery that carries a recorded green merge, with the parked

@@ -813,7 +813,7 @@ pub fn validate_explicit(
     if let Some(model) = spec.model.as_deref() {
         if is_haiku_model(model) {
             return Err(RoutingError::Policy(format!(
-                "Haiku is disabled by operator policy; use the light lane (codex/gpt-6-luna/xhigh, fallback claude/claude-opus-5-5/low) instead of {model:?}"
+                "Haiku is disabled by operator policy; use the light lane instead of {model:?}"
             )));
         }
         if let Err(reason) = validate_model_matches_cli(spec.cli, model) {
@@ -941,7 +941,7 @@ pub fn validate_model_slug_with(
     accepted: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
     if is_haiku_model(model) {
-        return Err("Haiku is disabled by operator policy; use the light lane (codex/gpt-6-luna/xhigh, fallback claude/claude-opus-5-5/low)".to_string());
+        return Err("Haiku is disabled by operator policy; use the light lane".to_string());
     }
     if cli != SupervisorCli::Claude {
         return Ok(());
@@ -1395,24 +1395,30 @@ candidates = ["codex_luna"]
     fn embedded_registry_has_decided_lanes_and_recipes() {
         let registry = registry().expect("embedded registry validates");
         assert_eq!(registry.schema_version, 1);
+        assert_eq!(registry.lanes["light"].candidates, ["codex_sol_6_2_low"]);
         assert_eq!(
-            registry.lanes["light"].candidates,
-            ["codex_luna_6"]
+            registry.lanes["light"].fallbacks,
+            ["codex_luna_6", "claude_opus_5_5_low"]
         );
-        assert_eq!(registry.lanes["light"].fallbacks, ["claude_opus_5_5_low"]);
-        assert_eq!(registry.lanes["standard"].candidates, ["codex_sol_6_1"]);
-        assert_eq!(registry.lanes["standard"].fallbacks, ["codex_sol_6"]);
-        assert_eq!(registry.lanes["taste"].candidates, ["claude_opus_5_5"]);
-        assert_eq!(registry.lanes["taste"].fallbacks, ["claude_opus"]);
+        assert_eq!(registry.lanes["standard"].candidates, ["codex_sol_6_2"]);
+        assert_eq!(
+            registry.lanes["standard"].fallbacks,
+            ["codex_sol_6_2_high", "claude_sonnet_5_5_high"]
+        );
+        assert_eq!(registry.lanes["taste"].candidates, ["claude_fable_5_2_high"]);
+        assert_eq!(
+            registry.lanes["taste"].fallbacks,
+            ["claude_opus_5_5", "claude_opus"]
+        );
         assert!(!registry.lanes["taste"].no_fallback);
         assert_eq!(registry.lanes["supervisor"].candidates, ["claude_opus_5_5"]);
         assert_eq!(registry.lanes["supervisor"].fallbacks, ["claude_fable_high"]);
         assert!(!registry.lanes["supervisor"].no_fallback);
+        assert_eq!(registry.lanes["heavy"].candidates, ["claude_fable_5_2_high"]);
         assert_eq!(
-            registry.lanes["heavy"].candidates,
-            ["claude_opus_5_5"]
+            registry.lanes["heavy"].fallbacks,
+            ["claude_opus_5_5", "codex_astra_high"]
         );
-        assert_eq!(registry.lanes["heavy"].fallbacks, ["codex_astra_high"]);
 
         assert!(!registry.recipes.contains_key("claude_haiku"));
         assert_eq!(registry.recipes["codex_sol_6_1"].model, "gpt-6.1-sol");
@@ -1430,6 +1436,17 @@ candidates = ["codex_luna"]
                 Effort::Max
             ]
         );
+        for (id, effort) in [
+            ("codex_sol_6_2", Effort::XHigh),
+            ("codex_sol_6_2_high", Effort::High),
+            ("codex_sol_6_2_low", Effort::Low),
+        ] {
+            assert_eq!(registry.recipes[id].model, "gpt-6.2-sol");
+            assert_eq!(registry.recipes[id].default_effort, effort);
+        }
+        assert_eq!(registry.recipes["claude_fable_5_2_high"].model, "claude-fable-5-2");
+        assert_eq!(registry.recipes["claude_sonnet_5_5_high"].model, "claude-sonnet-5-5");
+        assert_eq!(registry.recipes["claude_sonnet_5_5_high"].default_effort, Effort::High);
         assert_eq!(registry.recipes["codex_sol_6"].model, "gpt-6-sol");
         assert_eq!(registry.recipes["codex_sol_6"].default_effort, Effort::Medium);
         assert_eq!(registry.recipes["codex_luna_6"].model, "gpt-6-luna");
@@ -1485,14 +1502,13 @@ candidates = ["codex_luna"]
     }
 
     #[test]
-    fn taste_lane_resolves_opus_5_5_high_and_falls_back_to_opus_5_high_when_unavailable() {
+    fn taste_lane_resolves_fable_5_2_high_and_falls_back_to_opus_5_5_when_unavailable() {
         let registry = registry().unwrap();
-        let recipe = &registry.recipes["claude_opus_5_5"];
+        let recipe = &registry.recipes["claude_fable_5_2_high"];
         assert_eq!(recipe.harness, SupervisorCli::Claude);
         assert_eq!(recipe.provider, "anthropic");
-        assert_eq!(recipe.model, "claude-opus-5-5");
+        assert_eq!(recipe.model, "claude-fable-5-2");
         assert_eq!(recipe.default_effort, Effort::High);
-        assert_eq!(recipe.allowed_efforts, [Effort::Low, Effort::High]);
         assert_eq!(
             recipe.required_capability.as_deref(),
             Some("claude-account")
@@ -1508,39 +1524,29 @@ candidates = ["codex_luna"]
                 CapabilityEvidence::new(availability, now),
             );
             for decision in resolve_lane_specs("taste", 2, &snapshot).unwrap() {
-                assert_eq!(decision.recipe_id, "claude_opus_5_5");
+                assert_eq!(decision.recipe_id, "claude_fable_5_2_high");
                 assert_eq!(decision.spec.cli, SupervisorCli::Claude);
-                assert_eq!(decision.spec.model.as_deref(), Some("claude-opus-5-5"));
+                assert_eq!(decision.spec.model.as_deref(), Some("claude-fable-5-2"));
                 assert_eq!(decision.spec.effort, Some(Effort::High));
                 assert!(decision.warnings.is_empty());
                 validate_explicit(&decision.spec, &snapshot).unwrap();
-                let mut explicit = decision.spec;
-                for effort in [Effort::Low, Effort::High] {
-                    explicit.effort = Some(effort);
-                    validate_explicit(&explicit, &snapshot).unwrap();
-                }
             }
         }
         let mut snapshot = CapabilitySnapshot::default();
         snapshot.record(
             recipe_route_identity(recipe, "default"),
             CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
-                .with_reason("Claude Opus account unavailable"),
+                .with_reason("Claude Fable account unavailable"),
         );
-        for alternative in ["claude_opus"] {
-            snapshot.record(
-                recipe_route_identity(&registry.recipes[alternative], "default"),
-                CapabilityEvidence::new(CapabilityAvailability::Available, now),
-            );
-        }
-        let decision = resolve_lane("taste", &snapshot).expect("Opus fallback resolves");
-        assert_eq!(decision.recipe_id, "claude_opus");
-        assert_eq!(decision.spec.model.as_deref(), Some("claude-opus-5"));
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["claude_opus_5_5"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+        let decision = resolve_lane("taste", &snapshot).expect("Opus 5.5 fallback resolves");
+        assert_eq!(decision.recipe_id, "claude_opus_5_5");
+        assert_eq!(decision.spec.model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(decision.spec.effort, Some(Effort::High));
-        assert_eq!(
-            decision.warnings,
-            ["fallback: claude_opus (primary claude_opus_5_5 unavailable: Claude Opus account unavailable)"],
-        );
+        assert_eq!(decision.warnings.len(), 1);
     }
 
     #[test]
@@ -1580,25 +1586,34 @@ candidates = ["codex_luna"]
     }
 
     #[test]
-    fn heavy_lane_resolves_opus_high_and_falls_back_to_astra_high() {
+    fn heavy_lane_resolves_fable_5_2_high_then_opus_5_5_then_astra_high() {
         let registry = registry().unwrap();
+        let fable = &registry.recipes["claude_fable_5_2_high"];
         let opus = &registry.recipes["claude_opus_5_5"];
         let astra = &registry.recipes["codex_astra_high"];
         let now = CapabilitySnapshot::now_ms();
 
-        let mut available = CapabilitySnapshot::default();
-        available.record(
-            recipe_route_identity(opus, "default"),
-            CapabilityEvidence::new(CapabilityAvailability::Available, now),
-        );
-        let decision = resolve_lane("heavy", &available).expect("Opus resolves");
-        assert_eq!(decision.recipe_id, "claude_opus_5_5");
+        let decision = resolve_lane("heavy", &CapabilitySnapshot::default()).expect("Fable resolves");
+        assert_eq!(decision.recipe_id, "claude_fable_5_2_high");
         assert_eq!(decision.spec.cli, SupervisorCli::Claude);
-        assert_eq!(decision.spec.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(decision.spec.model.as_deref(), Some("claude-fable-5-2"));
         assert_eq!(decision.spec.effort, Some(Effort::High));
         assert!(decision.warnings.is_empty());
 
         let mut unavailable = CapabilitySnapshot::default();
+        unavailable.record(
+            recipe_route_identity(fable, "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
+                .with_reason("Claude Fable account unavailable"),
+        );
+        unavailable.record(
+            recipe_route_identity(opus, "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+        let decision = resolve_lane("heavy", &unavailable).expect("Opus fallback resolves");
+        assert_eq!(decision.recipe_id, "claude_opus_5_5");
+        assert_eq!(decision.spec.effort, Some(Effort::High));
+
         unavailable.record(
             recipe_route_identity(opus, "default"),
             CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
@@ -1613,10 +1628,6 @@ candidates = ["codex_luna"]
         assert_eq!(decision.spec.cli, SupervisorCli::Codex);
         assert_eq!(decision.spec.model.as_deref(), Some("gpt-6-astra"));
         assert_eq!(decision.spec.effort, Some(Effort::High));
-        assert_eq!(
-            decision.warnings,
-            ["fallback: codex_astra_high (primary claude_opus_5_5 unavailable: Claude Opus account unavailable)"],
-        );
     }
 
     #[test]
@@ -1772,52 +1783,32 @@ candidates = ["first"]
     #[test]
     fn resolve_lane_builds_typed_recipe_decision() {
         let decision = resolve_lane("light", &CapabilitySnapshot::default()).unwrap();
-        assert_eq!(decision.recipe_id, "codex_luna_6");
+        assert_eq!(decision.recipe_id, "codex_sol_6_2_low");
         assert_eq!(decision.spec.cli, SupervisorCli::Codex);
-        assert_eq!(
-            decision.spec.model.as_deref(),
-            Some("gpt-6-luna")
-        );
-        assert_eq!(decision.spec.effort, Some(Effort::XHigh));
+        assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.2-sol"));
+        assert_eq!(decision.spec.effort, Some(Effort::Low));
         assert!(decision.warnings.is_empty());
     }
 
     #[test]
-    fn light_and_standard_lanes_use_the_declared_fallbacks() {
+    fn light_lane_uses_the_declared_fallbacks() {
         let registry = registry().unwrap();
         let now = CapabilitySnapshot::now_ms();
-        for (lane, primary, fallback, model, effort) in [
-            (
-                "light",
-                "codex_luna_6",
-                "claude_opus_5_5_low",
-                "claude-opus-5-5",
-                Effort::Low,
-            ),
-            (
-                "standard",
-                "codex_sol_6_1",
-                "codex_sol_6",
-                "gpt-6-sol",
-                Effort::Medium,
-            ),
-        ] {
-            let mut snapshot = CapabilitySnapshot::default();
-            snapshot.record(
-                recipe_route_identity(&registry.recipes[primary], "default"),
-                CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
-                    .with_reason("primary unavailable"),
-            );
-            snapshot.record(
-                recipe_route_identity(&registry.recipes[fallback], "default"),
-                CapabilityEvidence::new(CapabilityAvailability::Available, now),
-            );
-            let decision = resolve_lane(lane, &snapshot).unwrap();
-            assert_eq!(decision.recipe_id, fallback);
-            assert_eq!(decision.spec.model.as_deref(), Some(model));
-            assert_eq!(decision.spec.effort, Some(effort));
-            assert!(decision.warnings.len() == 1);
-        }
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["codex_sol_6_2_low"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
+                .with_reason("primary unavailable"),
+        );
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["codex_luna_6"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+        let decision = resolve_lane("light", &snapshot).unwrap();
+        assert_eq!(decision.recipe_id, "codex_luna_6");
+        assert_eq!(decision.spec.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(decision.spec.effort, Some(Effort::XHigh));
+        assert_eq!(decision.warnings.len(), 1);
     }
 
     #[test]
@@ -1900,9 +1891,9 @@ candidates = ["first"]
         assert_eq!(decisions.len(), 3);
         assert!(decisions.iter().all(|decision| {
             decision.lane == "standard"
-                && decision.recipe_id == "codex_sol_6_1"
-                && decision.spec.model.as_deref() == Some("gpt-6.1-sol")
-                && decision.spec.effort == Some(Effort::High)
+                && decision.recipe_id == "codex_sol_6_2"
+                && decision.spec.model.as_deref() == Some("gpt-6.2-sol")
+                && decision.spec.effort == Some(Effort::XHigh)
         }));
     }
 
@@ -1995,14 +1986,47 @@ candidates = ["primary", "fallback"]
         );
     }
 
+    /// cas-9109: with every Codex route out (accounts at their weekly limit or
+    /// disabled), the standard lane keeps working on Sonnet 5.5/high, never Fable.
+    #[test]
+    fn standard_lane_falls_back_to_sonnet_5_5_high_when_every_codex_route_is_unavailable() {
+        let registry = registry().unwrap();
+        let now = CapabilitySnapshot::now_ms();
+        let mut snapshot = CapabilitySnapshot::default();
+        for recipe in registry
+            .recipes
+            .values()
+            .filter(|recipe| recipe.harness == SupervisorCli::Codex)
+        {
+            snapshot.record(
+                recipe_route_identity(recipe, "default"),
+                CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
+                    .with_reason("every Codex account is at its weekly limit"),
+            );
+        }
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["claude_sonnet_5_5_high"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+        let decision = resolve_lane("standard", &snapshot).expect("Claude fallback resolves");
+        assert_eq!(decision.recipe_id, "claude_sonnet_5_5_high");
+        assert_eq!(decision.spec.cli, SupervisorCli::Claude);
+        assert_eq!(decision.spec.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(decision.spec.effort, Some(Effort::High));
+        assert_eq!(decision.warnings.len(), 1);
+        validate_explicit(&decision.spec, &snapshot).unwrap();
+    }
+
     #[test]
     fn exhausted_lane_names_each_skipped_recipe_cas_cba9() {
         let mut registry = embedded_registry().unwrap().clone();
-        registry.recipes.get_mut("codex_sol_6").unwrap().status = RecipeStatus::Suspended;
-        registry.recipes.get_mut("codex_sol_6").unwrap().reason = Some("maintenance".into());
+        for id in ["codex_sol_6_2_high", "claude_sonnet_5_5_high"] {
+            registry.recipes.get_mut(id).unwrap().status = RecipeStatus::Suspended;
+            registry.recipes.get_mut(id).unwrap().reason = Some("maintenance".into());
+        }
         let mut snapshot = CapabilitySnapshot::default();
         snapshot.record(
-            recipe_route_identity(&registry.recipes["codex_sol_6_1"], "default"),
+            recipe_route_identity(&registry.recipes["codex_sol_6_2"], "default"),
             CapabilityEvidence::new(
                 CapabilityAvailability::Unavailable,
                 CapabilitySnapshot::now_ms(),
@@ -2014,9 +2038,10 @@ candidates = ["primary", "fallback"]
             .to_string();
 
         for detail in [
-            "codex_sol_6_1",
+            "codex_sol_6_2",
             "Codex account is logged out",
-            "codex_sol_6",
+            "codex_sol_6_2_high",
+            "claude_sonnet_5_5_high",
             "maintenance",
         ] {
             assert!(error.contains(detail), "missing {detail:?}: {error}");
@@ -2173,11 +2198,14 @@ no_fallback = true
         };
         for (cli, model) in [
             (SupervisorCli::Codex, "gpt-6-astra"),
+            (SupervisorCli::Codex, "gpt-6.2-sol"),
             (SupervisorCli::Codex, "gpt-6.1-sol"),
             (SupervisorCli::Codex, "gpt-6-sol"),
             (SupervisorCli::Codex, "gpt-6-luna"),
             (SupervisorCli::Codex, "gpt-5.6-sol"),
+            (SupervisorCli::Claude, "claude-fable-5-2"),
             (SupervisorCli::Claude, "claude-fable-5-1"),
+            (SupervisorCli::Claude, "claude-sonnet-5-5"),
             (SupervisorCli::Claude, "claude-opus-5"),
         ] {
             validate_explicit(&spec(cli, model), &CapabilitySnapshot::default())

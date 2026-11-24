@@ -1859,7 +1859,7 @@ mod tests {
         let (identity, evidence) = snapshot
             .availability
             .iter()
-            .find(|(identity, _)| identity.model == "claude-fable-5-1")
+            .find(|(identity, _)| identity.model == "claude-fable-5-2")
             .expect("doctor/preflight must collect the registry's taste recipe");
         assert_eq!(identity.harness, "claude");
         assert_eq!(identity.provider, "anthropic");
@@ -1882,8 +1882,8 @@ mod tests {
             let decision = cas_factory::resolve_lane("standard", &snapshot)
                 .expect("a logged-out default must not hide a usable registered Codex account");
             assert_eq!(decision.spec.cli, cas_mux::SupervisorCli::Codex);
-            assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.1-sol"));
-            assert_eq!(decision.spec.effort, Some(cas_mux::Effort::High));
+            assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.2-sol"));
+            assert_eq!(decision.spec.effort, Some(cas_mux::Effort::XHigh));
             assert!(
                 decision.spec.config_dir.is_none()
                     || decision.spec.config_dir.as_deref() == account.to_str(),

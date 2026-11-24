@@ -1539,7 +1539,13 @@ not yet parked, an expired task-only dispatch requests a fresh pending review
 on the next close, even if ordinary verification configuration changed. It
 never grants approval. A no-code report can supply a corrected portable
 `external_ref` inline on that close; its reference and fresh dispatch are saved
-together. Active cycles remain immutable, and receipt-bound delivery or epic
+together. For a no-code spike, or a no-code task with a demo statement, the close
+that creates a dispatch also records on it the proof reference and the id and
+SHA-256 of each unrevoked artifact in the artifact store (`reviewed_proof`,
+migration m302). An approval closes the task only while that record equals the
+current reference and artifacts; otherwise, or when the dispatch has no record,
+the close requests a new review. Task notes are never read for it, and mechanical
+no-code chores are exempt. Active cycles remain immutable, and receipt-bound delivery or epic
 timeout recovery still requires the existing supervisor path. Measured Tier 0,
 light-depth and other existing policy exemptions remain explicit in close output;
 identity availability is reported separately from the exemption actually applied.

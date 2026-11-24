@@ -227,7 +227,8 @@ CREATE TABLE IF NOT EXISTS verification_dispatches (
     requested_at TEXT NOT NULL,
     deadline_at TEXT NOT NULL,
     resolved_at TEXT,
-    recovery_action TEXT NOT NULL DEFAULT 'supervisor_redispatch_or_direct'
+    recovery_action TEXT NOT NULL DEFAULT 'supervisor_redispatch_or_direct',
+    reviewed_proof TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_verifications_task ON verifications(task_id);
@@ -253,6 +254,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_dispatches_active_task
 /// the exact same DDL.
 pub const VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT: &str =
     "ALTER TABLE verification_dispatches ADD COLUMN repository_proof TEXT";
+
+/// Additive m302 upgrade, shared by the store-open repair and the numbered
+/// migration like m230.
+pub const VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT: &str =
+    "ALTER TABLE verification_dispatches ADD COLUMN reviewed_proof TEXT";
 
 const VERIFIER_CAPABILITY_TTL_MINUTES: i64 = 30;
 const SERVER_HANDOFF_ID_PREFIX: &str = "vhnd-";
@@ -1047,6 +1053,29 @@ pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM verification_dispatches WHERE task_id = ?1 AND state IN ('pending', 'claimed'))",
         params![task_id], |row| row.get(0),
+    ).map_err(StoreError::Database)
+}
+
+/// Record what a dispatch's review covers, in the transaction that created it.
+/// The first record stands; a later call never replaces it.
+pub fn bind_verification_dispatch_reviewed_proof_with_conn(
+    conn: &Connection,
+    dispatch_id: &str,
+    reviewed_proof: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE verification_dispatches SET reviewed_proof = ?2 WHERE id = ?1 AND reviewed_proof IS NULL",
+        params![dispatch_id, reviewed_proof],
+    )?;
+    Ok(())
+}
+
+pub fn verification_dispatch_reviewed_proof(cas_dir: &Path, dispatch_id: &str) -> Result<Option<String>> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
+    conn.query_row(
+        "SELECT reviewed_proof FROM verification_dispatches WHERE id = ?1",
+        params![dispatch_id], |row| row.get(0),
     ).map_err(StoreError::Database)
 }
 
@@ -3954,6 +3983,12 @@ impl VerificationStore for SqliteVerificationStore {
                 "verification_dispatches",
                 "repository_proof",
                 VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "verification_dispatches",
+                "reviewed_proof",
+                VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT,
             )?;
 
             // Serve-first startup can open current store code against a legacy

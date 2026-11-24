@@ -114,6 +114,23 @@ pub(super) fn no_code_report_is_deliverable(task: &Task) -> bool {
         && (task.task_type == TaskType::Spike || !task.demo_statement.trim().is_empty())
 }
 
+/// GH #2417: what an independent review of a no-code deliverable covers: its
+/// proof reference and the id and SHA-256 of each artifact published on it,
+/// read from the artifact store. `None` for any other task.
+fn no_code_reviewed_proof(cas_root: &std::path::Path, task: &Task) -> Option<String> {
+    if !no_code_report_is_deliverable(task) {
+        return None;
+    }
+    let mut artifacts: Vec<_> = cas_store::SqliteArtifactStore::open(cas_root).ok()?
+        .list_for_task(&task.id).ok()?
+        .into_iter()
+        .filter(|artifact| artifact.revocation.is_none())
+        .map(|artifact| (artifact.id, artifact.sha256))
+        .collect();
+    artifacts.sort();
+    Some(serde_json::json!({"external_ref": task.external_ref, "artifacts": artifacts}).to_string())
+}
+
 // gate[N-10 notice]: Close-path verification dispatch creation
 fn request_close_verification_dispatch(
     cas_root: &std::path::Path,
@@ -125,11 +142,13 @@ fn request_close_verification_dispatch(
     no_delivery_intent: Option<(&str, Option<&str>)>,
     renewal: Option<(&str, &Task, &Task)>,
     no_code_close: Option<(&Task, &Task)>,
+    reviewed_proof: Option<&str>,
 ) -> Result<CloseVerificationDispatch, McpError> {
     let persist = || -> cas_store::Result<CloseVerificationDispatch> {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
         cas_store::shared_db::install_busy_handler(&conn)?;
         let tx = cas_store::shared_db::begin_immediate_with_retry(&conn)?;
+        let prior_dispatch_id = cas_store::get_latest_verification_dispatch_with_conn(&tx, task_id)?.map(|prior| prior.id);
         if let Some((expired_id, _, _)) = renewal {
             let current = cas_store::get_latest_verification_dispatch_with_conn(&tx, task_id)?
                 .ok_or_else(|| cas_store::StoreError::Other("Expired verification changed; retry close".into()))?;
@@ -149,6 +168,12 @@ fn request_close_verification_dispatch(
             Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => (*dispatch, true),
             Err(error) => return Err(error),
         };
+        // GH #2417: only the dispatch this close created records what it reviews.
+        if let Some(reviewed_proof) = reviewed_proof
+            && prior_dispatch_id.as_deref() != Some(dispatch.id.as_str())
+        {
+            cas_store::bind_verification_dispatch_reviewed_proof_with_conn(&tx, &dispatch.id, reviewed_proof)?;
+        }
         // An existing cycle keeps its requester, owner and proof immutable.
         // Matching proof may still acquire this assignee's close declaration.
         let matching_proof = dispatch.owner_agent_id == owner_id
@@ -271,6 +296,7 @@ mod verification_dispatch_tests {
                     requested,
                     false,
                     Some(("Measured no source delivery", Some("worker"))),
+                    None,
                     None,
                     None,
                 )
@@ -10679,6 +10705,26 @@ impl CasCore {
                     typed_dispatch = None;
                 }
 
+                // GH #2417: an approval covers only the proof and artifacts its
+                // dispatch recorded at creation. Anything else, or no record,
+                // clears the typed slot so this close mints a new dispatch.
+                if no_code_report_is_deliverable(&task)
+                    && let Some(dispatch) = typed_dispatch.as_ref()
+                    && dispatch.state == cas_types::VerificationDispatchState::Resolved
+                    && let Ok(Some(verdict)) = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                    && verdict.status == VerificationStatus::Approved
+                    && cas_store::verification_dispatch_reviewed_proof(&self.cas_root, &dispatch.id)
+                        .ok().flatten()
+                        .is_none_or(|reviewed| Some(reviewed) != no_code_reviewed_proof(&self.cas_root, &task))
+                {
+                    close_notes.record(&mut task, &format!(
+                        "Approval {} (dispatch {}) does not cover the current no-code proof and artifacts; a new independent verdict is required.",
+                        verdict.id, dispatch.id,
+                    ));
+                    superseded_approved_verdict_id = Some(verdict.id);
+                    typed_dispatch = None;
+                }
+
                 // gate[G-69 close-after-merge integrity]: Repository-proof revalidation after verdict
                 if let Some(dispatch) = typed_dispatch.as_ref()
                     && let Some(repository) = dispatch.repository.as_ref()
@@ -11364,6 +11410,7 @@ impl CasCore {
                             (no_delivery_declared || no_code_close.is_some()).then_some((req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
                             renew_expired_task_dispatch.as_deref().map(|id| (id, &close_snapshot, &task)),
                             no_code_close,
+                            no_code_reviewed_proof(&self.cas_root, &task).as_deref(),
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {

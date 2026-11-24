@@ -9545,7 +9545,7 @@ impl CasCore {
                 reviewed = None;
             }
             if let Some(reviewed) = reviewed.as_ref() {
-                match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed) {
+                match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed, commit_receipt_window.as_ref()) {
                     Ok(Some(current)) => task = current,
                     Ok(None) => {}
                     Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, error))),

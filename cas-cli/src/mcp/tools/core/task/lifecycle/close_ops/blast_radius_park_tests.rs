@@ -69,6 +69,10 @@ impl Fixture {
 /// A workspace with crate `widget`; the worker's pushed, unmerged lane
 /// changes `widget::gear`; its task declares only an unrelated target.
 pub(super) fn fixture(env: &mut TestEnvGuard) -> Fixture {
+    fixture_with_gear(env, "pub fn turn() {}\n", "pub fn turn() { let _ = 1; }\n")
+}
+
+fn fixture_with_gear(env: &mut TestEnvGuard, base: &str, checkpoint: &str) -> Fixture {
     // Task identity precedes its delivery; store setup can exceed the
     // attribution clock-skew allowance on a busy disk.
     let mut task = Task::new(ID.into(), "turn the gear".into());
@@ -77,7 +81,7 @@ pub(super) fn fixture(env: &mut TestEnvGuard) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), ".cas/\n/Cargo.lock\n/target/\n").unwrap();
     std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
     std::fs::create_dir_all(repo.join("crates/widget/src")).unwrap();
     std::fs::write(repo.join("crates/widget/Cargo.toml"), "[package]\nname = \"widget\"\n").unwrap();
@@ -89,13 +93,13 @@ pub(super) fn fixture(env: &mut TestEnvGuard) -> Fixture {
     std::fs::write(repo.join("crates/widget/src/embedded.md"), "embedded prompt v1\n").unwrap();
     std::fs::create_dir_all(repo.join("docs")).unwrap();
     std::fs::write(repo.join("docs/RELEASE_SLACK_RUBRIC.md"), "release rubric v1\n").unwrap();
-    std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() {}\n").unwrap();
+    std::fs::write(repo.join("crates/widget/src/gear.rs"), base).unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-q", "-m", "seed"]);
     git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
     git(repo, &["push", "-q", "origin", "main"]);
     git(repo, &["checkout", "-q", "-b", LANE]);
-    std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 1; }\n").unwrap();
+    std::fs::write(repo.join("crates/widget/src/gear.rs"), checkpoint).unwrap();
     git(repo, &["commit", "-q", "-am", &format!("fix({ID}): turn the gear")]);
     git(repo, &["push", "-q", "origin", LANE]);
     git(repo, &["checkout", "-q", "main"]);
@@ -1108,6 +1112,83 @@ async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
     assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn park_requires_red_first_evidence_gh_2422() {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let rustup = std::env::var_os("RUSTUP_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".rustup"));
+    let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".cargo"));
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+    env.set("RUSTUP_HOME", rustup);
+    env.set("CARGO_HOME", cargo_home);
+    let cargo = Path::new(env!("CARGO"));
+    let nextest = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::regression)"];
+    let unrelated = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::unrelated)"];
+    let check = ["-p", "widget", "--tests"];
+    let node = ["node", "--test", "gear.test.mjs"];
+    let gear = |turn: &str, regression: &str| format!(
+        "pub fn turn() -> u8 {{ {turn} }}\n#[test]\nfn regression() {{ {regression} }}\n#[test]\nfn unrelated() {{ assert_eq!(turn(), 0); }}\n"
+    );
+    let red = gear("1", "assert_eq!(turn(), 2);");
+    let checkpoint = gear("1", "assert_eq!(turn(), 2, \"gear turns\");");
+    let green = gear("2", "let expected = if std::env::var(\"CI\").as_deref() == Ok(\"fixture-red-tip\") { 3 } else { 2 };\n    assert_eq!(turn(), expected);");
+    let broken = gear("\"not a u8\"", "assert_eq!(turn(), 2);");
+    for (case, methodology, failure, parked) in [
+        ("passing only", Some("test-first"), None, false),
+        ("other methodology", None, None, true),
+        ("test at base", Some("test-first"), Some(("main", &nextest[..])), true),
+        ("red checkpoint", Some("test-first"), Some(("HEAD^", &nextest[..])), true),
+        ("compile failure at base", Some("test-first"), Some(("main", &check[..])), true),
+        ("unrelated failure at base", Some("test-first"), Some(("main", &unrelated[..])), false),
+        ("node file setup failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
+        ("node regression failure", Some("test-first"), Some(("HEAD^", &node[..])), true),
+        ("test at tip", Some("test-first"), Some(("HEAD", &nextest[..])), false),
+    ] {
+        let f = fixture_with_gear(&mut env, if case == "compile failure at base" { &broken } else { &red }, &checkpoint);
+        let run = |args: &[&str]| crate::factory_worker_check::execute_at(&f.cas_dir(),
+            &args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>(), &f.worker_path, cargo);
+        let mut task = f.task();
+        task.execution_note = methodology.map(str::to_string);
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            assignee: WORKER.into(),
+            branch: LANE.into(),
+            base_sha: git(&f.worker_path, &["rev-parse", "main"]),
+            work_target: task.deliverables.work_target.clone().unwrap(),
+        });
+        open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+        if case.starts_with("node ") {
+            let setup = if case == "node file setup failure" { "import './missing-setup.mjs';\n" } else { "" };
+            std::fs::write(f.worker_path.join("package.json"), "{}\n").unwrap();
+            std::fs::write(f.worker_path.join(node[2]), format!(
+                "{setup}import {{ test }} from 'node:test';\ntest('gear node regression', () => {{ throw new Error('gear is stuck'); }});\n"
+            )).unwrap();
+            git(&f.worker_path, &["add", "package.json", node[2]]);
+            git(&f.worker_path, &["commit", "-qm", "test(cas-br01): reproduce the node regression"]);
+            std::fs::write(f.worker_path.join(node[2]), "import { test } from 'node:test';\ntest('gear node regression', () => {});\n").unwrap();
+        }
+        std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), &green).unwrap();
+        git(&f.worker_path, &["commit", "-qam", "fix(cas-br01): correct the gear"]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
+        if let Some((revision, args)) = failure {
+            git(&f.worker_path, &["checkout", "-q", "--detach", revision]);
+            if revision == "HEAD" { env.set("CI", "fixture-red-tip"); }
+            assert!(run(args).is_err(), "{case}");
+            if revision == "HEAD" { env.set("CI", "true"); }
+            let written = std::fs::read_dir(f.cas_dir().join("worker-checks")).into_iter().flatten()
+                .flatten().filter_map(|directory| std::fs::read_dir(directory.path()).ok()).flatten().flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains("-red-"));
+            assert_eq!(written, case != "node file setup failure", "{case}");
+            git(&f.worker_path, &["checkout", "-q", LANE]);
+        }
+        run(&nextest).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
+        if case.starts_with("node ") { run(&node).unwrap_or_else(|error| panic!("{case}: {error:#}")); }
+        let reply = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+        assert_eq!(crate::gates::codes_in(&reply).contains(&"G-170"), !parked, "{case}: {reply}");
+        assert_eq!(f.task().status, if parked { TaskStatus::AwaitingMerge } else { TaskStatus::InProgress }, "{case}: {reply}");
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

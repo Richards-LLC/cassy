@@ -152,6 +152,7 @@ const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
     if (data.details?.type === 'suite') continue;
     file.assertionResults.push({
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
+      fileFailure: type === 'test:fail' && data.nesting === 0 && data.name === data.file,
       status: type === 'test:fail' ? 'failed' : data.skip ? 'skipped' : data.todo ? 'todo' : 'passed',
     });
   }
@@ -1992,6 +1993,7 @@ fn execute_selection(
         &std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
     );
     let mut by_file: BTreeMap<&str, Vec<&Identity>> = BTreeMap::new();
+    let red_task = super::red_first_task(cas_root, repo);
     for test in tests {
         by_file.entry(&test.path).or_default().push(test);
     }
@@ -2095,6 +2097,12 @@ fn execute_selection(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
+        let red_selection = red_task.as_ref().map(|_| {
+            if matches!(widened, Some((super::widened::Scope::File(_), _, _))) {
+                parsed_tests(path, &source, &[(1, source.lines().count())], true).unwrap_or_default()
+                    .into_iter().map(|(identity, ..)| identity).collect()
+            } else { selected.clone() }
+        });
         let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
@@ -2186,6 +2194,13 @@ fn execute_selection(
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
                 })?)?;
+            if !success && let (Some(task), Some(selection)) = (&red_task, &red_selection) {
+                let tests = failed_javascript_tests(runner, repo, &value, selection);
+                if !tests.is_empty() {
+                    super::record_red_first_failure(cas_root, repo, head, &task.id,
+                        super::RedFirstFailure::JavaScript { runner: runner.into(), tests }, format!("{runner} {path}"))?;
+                }
+            }
             Ok((success, value))
         };
         let (ran, skipped) = if widened.is_some() && runner == "playwright" {
@@ -2463,6 +2478,51 @@ fn validate_declared_discovery(
         }
     }
     Ok(())
+}
+
+fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value, selected: &[Identity]) -> BTreeSet<Identity> {
+    fn rows(value: &Value) -> impl Iterator<Item = &Value> { value.as_array().into_iter().flatten() }
+    let mut failed = BTreeSet::new();
+    if selected.is_empty() { return failed; }
+    if runner == "playwright" {
+        let root = report.pointer("/config/rootDir").and_then(Value::as_str).map(Path::new).unwrap_or(repo);
+        let mut pending = vec![(&report["suites"], Vec::<&str>::new())];
+        while let Some((suites, ancestry)) = pending.pop() {
+            for suite in rows(suites) {
+                let mut names = ancestry.clone();
+                if !ancestry.is_empty() || suite["column"].as_u64().unwrap_or(0) != 0 {
+                    names.extend(suite["title"].as_str());
+                }
+                pending.push((&suite["suites"], names.clone()));
+                for spec in rows(&suite["specs"]) {
+                    let (Some(file), Some(title)) = (spec["file"].as_str(), spec["title"].as_str()) else { continue; };
+                    if rows(&spec["tests"]).any(|test| test["expectedStatus"] == "passed"
+                        && rows(&test["results"]).any(|result| result["status"] == "failed"))
+                        && let Ok(path) = report_path(repo, &root.join(file).to_string_lossy())
+                    {
+                        let mut full = names.clone();
+                        full.push(title);
+                        failed.insert(Identity::exact(path, full.join(" ")));
+                    }
+                }
+            }
+        }
+    } else {
+        for file in rows(&report["testResults"]) {
+            let Some(raw) = file["name"].as_str() else { continue; };
+            let Ok(path) = report_path(repo, raw) else { continue; };
+            for test in rows(&file["assertionResults"]) {
+                if test["status"] == "failed" && test["fileFailure"] != true
+                    && let Some(name) = test["fullName"].as_str()
+                    && (runner != "node" || (name != raw && name != path))
+                {
+                    failed.insert(Identity::exact(path.clone(), name));
+                }
+            }
+        }
+    }
+    failed.retain(|identity| selected.iter().any(|test| test.selects(identity)));
+    failed
 }
 
 fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<bool> {

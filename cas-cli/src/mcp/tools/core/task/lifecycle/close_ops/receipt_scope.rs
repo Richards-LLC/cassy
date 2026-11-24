@@ -212,6 +212,23 @@ fn listed_park_refusals(
         use crate::factory_worker_check::widened::{self as widen, Scope};
         let journeys = widen::deployed_journey_specs(cas_root, proof_repo, head);
         tests.retain(|test| !journeys.contains(&test.path));
+        if task.execution_note.as_deref() == Some("test-first") {
+            let start_base = task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str());
+            if !passing.has_red_first_evidence(&task.id, start_base, delivery_ranges.unwrap_or_default(), &tests) {
+                // gate[G-170 park as-of]: Test-first delivery requires a capped failing run before the fix
+                let base = start_base.unwrap_or("the recorded task start base");
+                refusals.push(crate::gates::tag("G-170", format!(
+                    "RED-FIRST EVIDENCE REQUIRED: Task {} declares execution_note=test-first. \
+                     In its assigned checkout, record the delivered regression failing at {base} or at a committed red checkpoint \
+                     in this delivery before {short}. Run `cargo nextest run -p <crate> --lib -E 'test(<name>)'` \
+                     (or `--test <harness>` instead of `--lib`) or a capped JS test, for example \
+                     `cas factory worker-check --cas-root <cas-root> -- node --test <file>`. \
+                     A capped compile failure at {base} also qualifies: run `cargo check -p <crate> --tests`. \
+                     Return to the fixed tip and record passing proof for the same regression before retrying park.",
+                    task.id,
+                )));
+            }
+        }
         let widened: Vec<Scope> = widened.into_iter().flat_map(|scope| match &scope {
             Scope::File(spec) if journeys.contains(spec) => Vec::new(),
             Scope::Related(helper) => match crate::factory_worker_check::javascript::related_tests(proof_repo, helper) {

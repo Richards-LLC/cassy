@@ -2053,7 +2053,7 @@ mod tests {
 
     #[test]
     fn expired_dead_claim_merge_retry_preserves_candidate_cas_de6d() {
-        for case in ["dead", "timedout-dead", "live", "unreadable", "mismatch", "shutdown", "unknown", "foreign", "unexpired", "other-owner"] {
+        for case in ["dead", "timedout-dead", "live", "unreadable", "mismatch", "shutdown", "unknown", "foreign", "unexpired", "other-owner", "stale-heartbeat"] {
             let mut env = crate::test_support::TestEnvGuard::temp_home();
             crate::store::known_repos::ensure_host_schema().unwrap();
             let dir = tempfile::tempdir().unwrap();
@@ -2098,7 +2098,7 @@ mod tests {
             let mut process = std::process::Command::new("true").spawn().unwrap();
             child.pid = Some(process.id());
             process.wait().unwrap();
-            if matches!(case, "live" | "unreadable" | "mismatch" | "shutdown") {
+            if matches!(case, "live" | "unreadable" | "mismatch" | "shutdown" | "stale-heartbeat") {
                 child.pid = Some(std::process::id());
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
                 if case == "mismatch" { child.pid_starttime = Some(child.pid_starttime.expect("readable fixture fingerprint") + 1); }
@@ -2108,6 +2108,20 @@ mod tests {
             let old_capability = cas_store::issue_and_bind_server_verifier_handoff(
                 &root, &task.id, &dispatch.id, "old-attempt", &child,
             ).unwrap();
+            if case == "stale-heartbeat" {
+                let before = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+                assert_eq!(before.state, cas_types::VerificationDispatchState::Claimed);
+                let observed_owner = agents.get(&owner.id).unwrap();
+                let observed_child = agents.get(&child.id).unwrap();
+                agents.heartbeat(&child.id).unwrap();
+                assert!(agents.get(&child.id).unwrap().last_heartbeat > observed_child.last_heartbeat);
+                let fenced = cas_store::recover_expired_dead_verifier_dispatch(
+                    &root, &dispatch.id, &observed_owner, &observed_child,
+                    before.deadline_at + chrono::Duration::seconds(1),
+                ).unwrap();
+                assert_eq!(serde_json::to_value(fenced).unwrap(), serde_json::to_value(before).unwrap(), "{case}");
+                continue;
+            }
             if case == "shutdown" {
                 child.status = cas_types::AgentStatus::Shutdown;
                 agents.update(&child).unwrap();
@@ -2137,9 +2151,7 @@ mod tests {
                 stale_child.pid_starttime = Some(123);
                 let mut stale_legacy = child.clone();
                 stale_legacy.metadata.insert("pid_starttime".into(), "456".into());
-                let mut stale_heartbeat = child.clone();
-                stale_heartbeat.last_heartbeat -= chrono::Duration::seconds(1);
-                for (observed_owner, observed_child) in [(&stale_owner, &child), (&owner, &stale_child), (&owner, &stale_legacy), (&owner, &stale_heartbeat)] {
+                for (observed_owner, observed_child) in [(&stale_owner, &child), (&owner, &stale_child), (&owner, &stale_legacy)] {
                     let fenced = cas_store::recover_expired_dead_verifier_dispatch(&root, &dispatch.id,
                         observed_owner, observed_child, chrono::Utc::now()).unwrap();
                     assert_eq!(serde_json::to_value(fenced).unwrap(), serde_json::to_value(&before).unwrap());

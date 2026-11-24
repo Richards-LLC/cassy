@@ -1119,6 +1119,7 @@ mod tests {
             decode_length, encode_message, gui_socket_path, local_gui_capabilities,
         };
         use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
@@ -1157,65 +1158,55 @@ mod tests {
         let socket = gui_socket_path("gh-2023");
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let (launched, launches) = std::sync::mpsc::channel();
-        let daemon_root = root.clone();
-        std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            let mut attempts = 0;
-            while std::time::Instant::now() < deadline {
-                let Ok((mut client, _)) = listener.accept() else {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
-                };
-                client.set_nonblocking(false).unwrap();
-                client.write_all(&encode_message(&DaemonMessage::Welcome {
-                    session_name: "gh-2023".into(),
-                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
-                        epic_title: None, cols: 80, rows: 24 },
-                    scrollback: None, protocol_version: PROTOCOL_VERSION,
-                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
-                }).unwrap()).unwrap();
-                let mut header = [0; FRAME_HEADER_SIZE];
-                client.read_exact(&mut header).unwrap();
-                let mut body = vec![0; decode_length(&header)];
-                client.read_exact(&mut body).unwrap();
-                let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
-                else {
-                    panic!("unexpected factory control");
-                };
-                attempts += 1;
-                let harness_fails = case == "harness-failure" && attempts == 1;
-                let output = daemon_root.join("verification-runs").join(&dispatch_id)
-                    .join(format!("attempt-{attempts}")).join("verdict.json");
-                std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-                let (resume, provider_held) = std::sync::mpsc::channel::<()>();
-                let started = super::factory_launch::launch_with(&daemon_root, "gh-2023", &dispatch_id,
-                    |core, task, dispatch| launch_with_preparation(core, task, dispatch, output, move |_| {
-                        if harness_fails {
-                            let mut harness = Command::new("sh");
-                            harness.args(["-c", "exit 1"]);
-                            return Ok((harness, None));
-                        }
-                        provider_held.recv().ok();
-                        Err("provider released".into())
-                    }));
-                client.write_all(&encode_message(&match &started {
-                    Ok(_) => DaemonMessage::VerifierLaunched { dispatch_id: dispatch_id.clone() },
-                    Err(message) => DaemonMessage::Error {
-                        message: message.clone(), client_ref: Some(dispatch_id.clone()),
-                    },
-                }).unwrap()).unwrap();
-                let _ = launched.send((dispatch_id, started.map(|review| review.map(|review| (review, resume)))));
-            }
-        });
-        let wait = std::time::Duration::from_secs(10);
+        let serve_launch = |attempt: usize, expected_dispatch: &str| {
+            let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            assert!(unsafe { libc::poll(&mut ready, 1, 10000) } > 0, "{case}: launch {attempt}");
+            let (mut client, _) = listener.accept().unwrap();
+            client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            client.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            client.write_all(&encode_message(&DaemonMessage::Welcome {
+                session_name: "gh-2023".into(),
+                state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                    epic_title: None, cols: 80, rows: 24 },
+                scrollback: None, protocol_version: PROTOCOL_VERSION,
+                capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+            }).unwrap()).unwrap();
+            let mut header = [0; FRAME_HEADER_SIZE];
+            client.read_exact(&mut header).unwrap();
+            let mut body = vec![0; decode_length(&header)];
+            client.read_exact(&mut body).unwrap();
+            let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+            else {
+                panic!("unexpected factory control");
+            };
+            assert_eq!(dispatch_id, expected_dispatch, "{case}");
+            let harness_fails = case == "harness-failure" && attempt == 1;
+            let output = root.join("verification-runs").join(&dispatch_id)
+                .join(format!("attempt-{attempt}")).join("verdict.json");
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            let (resume, provider_held) = std::sync::mpsc::channel::<()>();
+            let started = super::factory_launch::launch_with(&root, "gh-2023", &dispatch_id,
+                |core, task, dispatch| launch_with_preparation(core, task, dispatch, output, move |_| {
+                    if harness_fails {
+                        let mut harness = Command::new("sh");
+                        harness.args(["-c", "exit 1"]);
+                        return Ok((harness, None));
+                    }
+                    provider_held.recv().ok();
+                    Err("provider released".into())
+                }));
+            client.write_all(&encode_message(&match &started {
+                Ok(_) => DaemonMessage::VerifierLaunched { dispatch_id },
+                Err(message) => DaemonMessage::Error {
+                    message: message.clone(), client_ref: Some(dispatch_id),
+                },
+            }).unwrap()).unwrap();
+            started.unwrap().map(|review| (review, resume))
+        };
 
         assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
         let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-        let (requested, first) = launches.recv_timeout(wait).unwrap();
-        assert_eq!(requested, dispatch.id);
-        let (first, resume_first) = first.unwrap().expect("the first request claims the dispatch");
+        let (first, resume_first) = serve_launch(1, &dispatch.id).expect("the first request claims the dispatch");
         let stalled = if case == "harness-failure" {
             first.join().unwrap();
             None
@@ -1251,9 +1242,7 @@ mod tests {
             .err()
             .expect("an unreviewed delivery stays held");
 
-        let (requested, second) = launches.recv_timeout(wait).unwrap();
-        assert_eq!(requested, dispatch.id, "{case}");
-        let second = second.unwrap();
+        let second = serve_launch(2, &dispatch.id);
         let after = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
         let count = |sql: &str| -> i64 {
             rusqlite::Connection::open(root.join("cas.db")).unwrap()

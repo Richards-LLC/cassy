@@ -1110,6 +1110,36 @@ async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
 }
 
+#[tokio::test]
+async fn park_requires_red_first_evidence_gh_2422() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let mut task = f.task();
+    task.execution_note = Some("test-first".into());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        assignee: WORKER.into(),
+        branch: LANE.into(),
+        base_sha: git(&f.worker_path, &["rev-parse", "main"]),
+        work_target: task.deliverables.work_target.clone().unwrap(),
+    });
+    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let log = f.dir.path().join(".cas/passing-test.log");
+    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+    let proof = serde_json::json!({
+        "head": tip, "repo": f.worker_path,
+        "cargo_args": ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear)"],
+        "log_path": log, "exit_code": 0,
+    });
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "record_test_receipt", "task_id": ID, "payload": proof.to_string(),
+    })).unwrap();
+    f.supervisor.factory(Parameters(request)).await.unwrap();
+    let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    assert!(crate::gates::codes_in(&refused).contains(&"G-170"), "{refused}");
+    assert_eq!(f.task().status, TaskStatus::InProgress);
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(bytes))

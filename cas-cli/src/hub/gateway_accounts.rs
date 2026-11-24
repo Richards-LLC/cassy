@@ -332,8 +332,10 @@ mod tests {
         assert!(listener.accept().is_err(), "a refused path must not reach the dashboard");
     }
 
-    /// Two machines hold different local reads of one login; both read the
-    /// same hub and show its one number. A dashboard-only machine can't route.
+    /// Two machines (two homes) each hold the same Claude login; both build
+    /// the real Accounts catalog (`GET /v1/accounts`) from one hub answer and
+    /// show one number for it. An unreachable hub shows none. A dashboard-only
+    /// machine can't route.
     #[test]
     fn two_machines_reading_one_hub_show_one_number_for_one_login() {
         let hub = SharedQuota::Read(quotas(&serde_json::json!({"files": [
@@ -343,32 +345,33 @@ mod tests {
                 "X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Used-Percent": "86", "X-Codex-Primary-Reset-At": "1795702350",
                 "X-Codex-Secondary-Window-Minutes": "0", "X-Codex-Secondary-Used-Percent": "0"}}},
         ]})));
-        let machine = |folder: &str, used: f64, minutes_ago: i64| crate::account_registry::Account {
-            provider: crate::accounts::Provider::Claude,
-            name: "daniel".into(),
-            folder: PathBuf::from(folder),
-            email: Some("daniel@example.com".into()),
-            display_name: "daniel@example.com".into(),
-            identity: None,
-            plan: None,
-            login_state: crate::account_registry::LoginState::LoggedIn,
-            windows: vec![UsageWindow { name: "weekly".into(), used_percent: Some(used), resets_at: None }],
-            usage_observed_at: Some(Utc::now() - chrono::Duration::minutes(minutes_ago)),
-            flags: Default::default(),
+        let machine = || {
+            let home = tempfile::tempdir().unwrap();
+            let dir = home.path().join(".claude-daniel");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join(".claude.json"), serde_json::json!({"oauthAccount": {"emailAddress": "daniel@example.com", "accountUuid": "u1"}}).to_string()).unwrap();
+            std::fs::write(dir.join(crate::accounts::Provider::Claude.credentials()), "{}").unwrap();
+            home
         };
-        let mut soundwave = vec![machine("/home/a/.claude-daniel", 10.0, 3)];
-        let mut prowl = vec![machine("/Users/a/.claude-daniel", 70.0, 600)];
-        assert_eq!(hub.apply(&mut soundwave).values().collect::<Vec<_>>(), [&"hub"]);
-        hub.apply(&mut prowl);
-        assert_eq!(soundwave[0].windows, prowl[0].windows);
-        assert_eq!(soundwave[0].usage_observed_at, prowl[0].usage_observed_at);
-        assert_eq!(soundwave[0].windows[0].used_percent.map(f64::round), Some(20.0));
-        assert_eq!(soundwave[0].windows[0].resets_at, DateTime::from_timestamp(1795986000, 0));
+        let row = |home: &tempfile::TempDir, quota: &SharedQuota| {
+            let catalog = serde_json::to_value(crate::hub::accounts::catalog_with(home.path(), quota).unwrap()).unwrap();
+            let row = catalog["accounts"].as_array().unwrap().iter().find(|row| row["key"] == "claude:daniel").unwrap().clone();
+            (catalog["quota_source"]["state"].clone(), row)
+        };
+        let (soundwave, prowl) = (machine(), machine());
+        let (state, on_soundwave) = row(&soundwave, &hub);
+        let (_, on_prowl) = row(&prowl, &hub);
+        assert_eq!(state, "hub");
+        assert_eq!(on_soundwave["usage_source"], "hub");
+        assert_eq!(on_soundwave["windows"], on_prowl["windows"]);
+        assert_eq!(on_soundwave["usage_observed_at"], on_prowl["usage_observed_at"]);
+        assert_eq!(on_soundwave["windows"][0]["used_percent"].as_f64().map(f64::round), Some(20.0));
 
         // An unreachable hub shows no number rather than the local one.
-        let mut offline = vec![machine("/Users/a/.claude-daniel", 70.0, 600)];
-        SharedQuota::Unreachable("dashboard unreachable".into()).apply(&mut offline);
-        assert!(offline[0].windows.is_empty() && offline[0].usage_observed_at.is_none());
+        let (state, offline) = row(&prowl, &SharedQuota::Unreachable("dashboard unreachable".into()));
+        assert_eq!(state, "unreachable");
+        assert_eq!(offline["usage_source"], "hub_unreachable");
+        assert!(offline["windows"].as_array().unwrap().is_empty() && offline["usage_observed_at"].is_null());
 
         // Reading quota needs only the dashboard keys; without an endpoint the machine can't route.
         let dashboard_only = cas_types::factory_gateway::FactoryGatewayConfig {

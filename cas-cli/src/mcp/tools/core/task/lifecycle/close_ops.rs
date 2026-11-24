@@ -3354,7 +3354,7 @@ pub(crate) mod lifecycle_race_hook {
         fire_at(task_id, Phase::BeforeLease);
     }
 
-    pub(super) fn fire(task_id: &str) {
+    pub(crate) fn fire(task_id: &str) {
         fire_at(task_id, Phase::BeforeWrite);
     }
 

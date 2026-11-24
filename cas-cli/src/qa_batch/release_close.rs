@@ -811,6 +811,8 @@ pub(crate) fn reconcile_members(
             if !approved { return Err("REVIEW_MISSING".into()); }
             if already_closed { return Ok(CassyMergeClose::AlreadyClosed); }
             if write {
+                #[cfg(test)]
+                crate::mcp::tools::core::task::lifecycle::close_ops::lifecycle_race_hook::fire(&task.id);
                 let mut closed = task.clone();
                 closed.status = TaskStatus::Closed;
                 closed.closed_at = Some(chrono::Utc::now());

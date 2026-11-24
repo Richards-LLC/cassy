@@ -857,6 +857,79 @@ fn published_train_closes_members_independently_cas_734b() {
     assert!(complete.complete, "{complete:?}");
     assert!(complete.residuals.is_empty());
     assert!(!complete.exceptions.is_empty());
+    use crate::mcp::tools::core::task::lifecycle::{close_ops::lifecycle_race_hook, report_proof::require_report_verdict};
+    let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+    let mut report_proofs = BTreeMap::new();
+    let mut reviews = BTreeMap::new();
+    for id in ["cas-bound-report", "cas-revised-report", "cas-revoked-report"] {
+        let mut report = Task::new(id.into(), id.into());
+        report.origin_project = Some("close-fixture".into());
+        report.task_type = cas_types::TaskType::Spike;
+        report.execution_note = Some("no-code".into());
+        report.external_ref = Some("https://example.test/reports/1".into());
+        report.status = TaskStatus::AwaitingMerge;
+        tasks.add(&report).unwrap();
+        let artifact = id.replacen("cas", "art", 1);
+        artifacts.record_local(&cas_store::NewArtifact {
+            id: artifact.clone(), task_id: id.into(), name: "report.md".into(),
+            mime: "text/markdown".into(), size_bytes: 10, sha256: "c".repeat(64),
+        }).unwrap();
+        artifacts.mark_uploaded(&artifact, &id.replacen("cas", "cloud", 1)).unwrap();
+        artifacts.mark_committed(&artifact, None).unwrap();
+        let report = tasks.get(id).unwrap();
+        let reviewed = require_report_verdict(&root, &report, &report).unwrap().proof_to_record().unwrap();
+        let dispatch = cas_store::create_verification_dispatch_reviewing_with_conn(
+            &conn, id, "supervisor", "supervisor", &cas_types::VerificationProofBoundary::task(),
+            Some(&reviewed), chrono::Utc::now() + chrono::Duration::hours(1), false,
+        ).unwrap();
+        let mut verdict = cas_types::Verification::new(format!("ver-{id}"), id.into());
+        verdict.status = cas_types::VerificationStatus::Approved;
+        verdict.summary = "Report reviewed".into();
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some("supervisor".into());
+        verdict.issuer_agent_id = verdict.agent_id.clone();
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        cas_store::VerificationStore::add(&cas_store::SqliteVerificationStore::open(&root).unwrap(), &verdict).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "supervisor", None, true).unwrap();
+        report_proofs.insert(id.to_string(), vec![ReleaseProofRef {
+            kind: ReleaseProofKind::Report, artifact_id: artifact, sha256: "c".repeat(64), size_bytes: 10,
+            reviewed_sha: anchor.clone(), receipt_id: None,
+        }]);
+        reviews.insert(id, dispatch.id);
+    }
+    cas_store::import_qa_batch_receipt(&root, &QaBatchReceipt {
+        id: "qab-reports".into(),
+        task_heads: report_proofs.keys().map(|id| (id.clone(), anchor.clone())).collect(),
+        ..later
+    }).unwrap();
+    let mut revised = tasks.get("cas-revised-report").unwrap();
+    revised.external_ref = Some("https://example.test/reports/2".into());
+    tasks.update(&revised).unwrap();
+    let mut reports = scope.clone();
+    reports.included_task_ids = report_proofs.keys().cloned().collect();
+    reports.no_code_members = report_proofs;
+    let report_inventory = resolve_release_inventory(&root, &repo, &reports).unwrap();
+    let before = snapshot(&root);
+    let shown = crate::release_reconcile::preview_release(&root, &repo, &report_inventory).unwrap();
+    assert_eq!(snapshot(&root), before);
+    for id in ["cas-bound-report", "cas-revoked-report"] {
+        assert!(matches!(shown.get(id), Some(CassyMergeClose::Closed { .. })), "{id}: {:?}", shown.get(id));
+    }
+    assert!(matches!(shown.get("cas-revised-report"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
+    assert_eq!(
+        cas_store::get_verification_dispatch(&root, &reviews["cas-revised-report"]).unwrap().state,
+        cas_types::VerificationDispatchState::Resolved,
+    );
+    let withdrawn = root.clone();
+    lifecycle_race_hook::before_terminal_write("cas-revoked-report", move || {
+        cas_store::SqliteArtifactStore::open(&withdrawn).unwrap()
+            .revoke("art-revoked-report", "supervisor", "Report withdrawn").unwrap();
+    });
+    let applied = reconcile_members(&root, &repo, &report_inventory, true, &mut |_, _| Ok(())).unwrap();
+    assert!(matches!(applied.get("cas-bound-report"), Some(CassyMergeClose::Closed { .. })), "{:?}", applied.get("cas-bound-report"));
+    assert_eq!(tasks.get("cas-bound-report").unwrap().status, TaskStatus::Closed);
+    assert!(matches!(applied.get("cas-revoked-report"), Some(CassyMergeClose::Held(_))), "{:?}", applied.get("cas-revoked-report"));
+    assert_eq!(tasks.get("cas-revoked-report").unwrap().status, TaskStatus::AwaitingMerge);
 }
 
 /// cas-692a7: cas-23a6 shipped in a release holding an approved, receipt-less

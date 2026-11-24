@@ -77,14 +77,13 @@ async fn park_names_every_symbol_the_delivery_left_without_a_caller_cas_d68f() {
                 ("crates/widget/src/gauge.rs", "pub fn gauge() -> u32 { crate::meter::meter_width() }\n"),
             ],
             &[&[
-                ("hub-web/src/accounts-panel.ts", "import { accountLabel } from \"./accounts-model\";\nexport function panel(name: string): string { return `<div class=\"accounts-ledger\">${accountLabel(name)}</div>`; }\nexport function accountCapacity(used: number): number { return used; }\n"),
+                ("hub-web/src/accounts-panel.ts", "import { accountLabel } from \"./accounts-model\";\nexport function panel(name: string): string { return `<div class=\"accounts-ledger\">${accountLabel(name)}</div>`; }\n"),
                 ("crates/widget/src/gauge.rs", "pub fn gauge() -> u32 { 4 }\n"),
             ]],
             &[
                 "crates/widget/src/meter.rs meter_width",
                 "hub-web/src/accounts-model.ts accountMeters",
                 "hub-web/src/accounts-panel.css accounts-bar",
-                "hub-web/src/accounts-panel.ts accountCapacity",
             ],
         ),
         (

@@ -6,10 +6,9 @@
 //! export or type, a Rust `pub` item, or a CSS class selector. A reference is
 //! any other occurrence of its name; for a CSS class, any occurrence outside a
 //! stylesheet. The delivery is blamed for a symbol with no reference at its
-//! head when the delivery removed its last reference, or when it added the
-//! function, export, type or Rust item with none. Methods and CSS classes can
-//! be reached by a computed name, so only a lost reference counts for them,
-//! and a class whose prefix markup builds (`chip--${tone}`) is referenced.
+//! head only when the delivery removed its last reference: a new definition
+//! with no caller yet is left to the compiler and linters. A class whose
+//! prefix markup builds (`chip--${tone}`) is referenced.
 //! Base counts are the head counts minus the added lines plus the removed
 //! lines, so the base tree is never read, and a symbol already unreferenced at
 //! the base is never blamed.
@@ -47,9 +46,8 @@ fn lang(path: &str) -> Option<Lang> {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Kind {
-    /// Function, export, type or Rust `pub` item: blamed when added unused.
-    Item,
-    Method,
+    /// Function, method, export, type or Rust `pub` item.
+    Code,
     Class,
 }
 
@@ -79,17 +77,11 @@ const NOT_METHODS: &[&str] = &[
 fn definitions(lang: Lang, line: &str) -> Vec<(String, Kind)> {
     let first = |regex: &Regex| regex.captures(line).map(|caps| caps[1].to_string());
     match lang {
-        Lang::Rust => first(&RUST_ITEM).map(|name| vec![(name, Kind::Item)]).unwrap_or_default(),
-        Lang::Script => {
-            if let Some(name) = SCRIPT_ITEMS.iter().find_map(first) {
-                vec![(name, Kind::Item)]
-            } else {
-                first(&SCRIPT_METHOD)
-                    .filter(|name| !NOT_METHODS.contains(&name.as_str()))
-                    .map(|name| vec![(name, Kind::Method)])
-                    .unwrap_or_default()
-            }
-        }
+        Lang::Rust => first(&RUST_ITEM).map(|name| vec![(name, Kind::Code)]).unwrap_or_default(),
+        Lang::Script => SCRIPT_ITEMS.iter().find_map(first)
+            .or_else(|| first(&SCRIPT_METHOD).filter(|name| !NOT_METHODS.contains(&name.as_str())))
+            .map(|name| vec![(name, Kind::Code)])
+            .unwrap_or_default(),
         Lang::Style => {
             // Only the selector part: declarations carry values like `.5em`.
             let selector = match line.split_once('{') {
@@ -139,15 +131,14 @@ fn class_byte(byte: u8) -> bool {
 struct Counts {
     ident: i64,
     class_ref: i64,
-    items: i64,
-    methods: i64,
+    defs: i64,
 }
 
 impl Counts {
     fn refs(&self, kind: Kind) -> i64 {
         match kind {
             Kind::Class => self.class_ref,
-            Kind::Item | Kind::Method => self.ident - self.items - self.methods,
+            Kind::Code => self.ident - self.defs,
         }
     }
 }
@@ -160,8 +151,7 @@ fn tally(counts: &mut HashMap<String, Counts>, names: &HashSet<String>, lang: La
     };
     for (name, kind) in defs {
         match kind {
-            Kind::Item => add(name, &|c| c.items += sign),
-            Kind::Method => add(name, &|c| c.methods += sign),
+            Kind::Code => add(name, &|c| c.defs += sign),
             Kind::Class => {}
         }
     }
@@ -209,8 +199,6 @@ struct Diff {
     /// Removed lines add and added lines subtract: head + delta = base.
     delta: HashMap<String, Counts>,
     candidates: HashSet<String>,
-    /// Head (path, line) of every added line.
-    added: HashSet<(String, usize)>,
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -232,24 +220,16 @@ fn read_diff(repo: &Path, base: &str, head: &str) -> Result<Diff, String> {
     let text = String::from_utf8_lossy(&git(repo, &args)?).into_owned();
     // Lines are judged once the candidate set is known.
     let mut lines: Vec<(Lang, &str, i64)> = Vec::new();
-    let mut added = HashSet::new();
     let mut candidates = HashSet::new();
-    let (mut path, mut file_lang, mut head_line) = (String::new(), None, 0usize);
+    let mut file_lang = None;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("+++ ") {
-            path = rest.strip_prefix("b/").unwrap_or_default().to_string();
-            file_lang = lang(&path);
-        } else if line.starts_with("--- ") || line.starts_with("diff ") || line.starts_with("index ") {
-        } else if let Some(header) = line.strip_prefix("@@ ") {
-            head_line = header.split(' ').nth(1)
-                .and_then(|range| range.trim_start_matches('+').split(',').next()?.parse().ok())
-                .unwrap_or(0);
+            file_lang = rest.strip_prefix("b/").and_then(lang);
+        } else if line.starts_with("--- ") || line.starts_with("diff ") || line.starts_with("index ") || line.starts_with("@@ ") {
         } else if let (Some(lang), Some(body)) = (file_lang, line.strip_prefix('+')) {
-            added.insert((path.clone(), head_line));
-            head_line += 1;
-            candidates.extend(definitions(lang, body).into_iter().map(|(name, _)| name));
             lines.push((lang, body, -1));
         } else if let (Some(lang), Some(body)) = (file_lang, line.strip_prefix('-')) {
+            // A lost reference is a removed occurrence outside a stylesheet.
             if lang != Lang::Style {
                 candidates.extend(identifiers(body).map(str::to_string));
                 candidates.extend(tokens(body, class_byte).map(str::to_string));
@@ -261,7 +241,7 @@ fn read_diff(repo: &Path, base: &str, head: &str) -> Result<Diff, String> {
     for (lang, body, sign) in lines {
         tally(&mut delta, &candidates, lang, body, &definitions(lang, body), sign);
     }
-    Ok(Diff { delta, candidates, added })
+    Ok(Diff { delta, candidates })
 }
 
 /// One symbol the delivery left without a reference.
@@ -270,7 +250,6 @@ struct Orphan {
     path: String,
     line: usize,
     name: String,
-    added: bool,
     kind: Kind,
 }
 
@@ -335,12 +314,9 @@ fn orphans(repo: &Path, base: &str, head: &str) -> Result<Vec<Orphan>, String> {
             let base = Counts {
                 ident: head_counts.ident + delta.ident,
                 class_ref: head_counts.class_ref + delta.class_ref,
-                items: head_counts.items + delta.items,
-                methods: head_counts.methods + delta.methods,
+                defs: head_counts.defs + delta.defs,
             };
-            let lost = base.refs(kind) > 0;
-            let added = kind == Kind::Item && base.items <= 0 && diff.added.contains(&(path.clone(), line));
-            (lost || added).then_some(Orphan { path, line, name, added: !lost, kind })
+            (base.refs(kind) > 0).then_some(Orphan { path, line, name, kind })
         })
         .collect();
     found.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
@@ -365,12 +341,10 @@ pub(super) fn at_park(repo: &Path, target: &str, head: Option<&str>) -> Result<O
         .iter()
         .map(|orphan| {
             let kind = match orphan.kind {
-                Kind::Item => "definition",
-                Kind::Method => "method",
+                Kind::Code => "definition",
                 Kind::Class => "CSS class",
             };
-            let why = if orphan.added { "added with no caller" } else { "the delivery removed its last reference" };
-            format!("- {}:{} {} ({kind}): {why}", orphan.path, orphan.line, orphan.name)
+            format!("- {}:{} {} ({kind}): the delivery removed its last reference", orphan.path, orphan.line, orphan.name)
         })
         .collect::<Vec<_>>()
         .join("\n");

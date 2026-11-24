@@ -1,7 +1,7 @@
 title: The first violet_post after a fresh claim and reply_intent returns not_posted, and a second intent posts
 statement: When Violet's lookup has no record of the request for this caller (request_not_found), not_posted is retryable and says to resend with the same request id and arguments, instead of steering the caller to a new reply intent.
 found: '2026-11-15'
-fixed_by: [31bab36ff9]
+fixed_by: [31bab36ff9, 9a79067944]
 tasks: [cas-71bf, cas-4c2b]
 invariants: []
 journeys: [FACTORY-SUPERVISE]

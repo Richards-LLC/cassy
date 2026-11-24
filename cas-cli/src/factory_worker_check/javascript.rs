@@ -153,7 +153,6 @@ const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
     if (data.details?.type === 'suite') continue;
     file.assertionResults.push({
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
-      fileFailure: failed && data.nesting === 0 && data.name === data.file,
       failureType: failed ? data.details?.error?.failureType : undefined,
       status: data.skip ? 'skipped' : data.todo ? 'todo' : failed ? 'failed' : 'passed',
     });
@@ -2443,10 +2442,10 @@ fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value, selected: 
             let Some(raw) = file["name"].as_str() else { continue; };
             let Ok(path) = report_path(repo, raw) else { continue; };
             for test in rows(&file["assertionResults"]) {
-                if test["status"] == "failed" && test["fileFailure"] != true
+                if test["status"] == "failed"
                     && let Some(name) = test["fullName"].as_str()
                     && (runner != "node" || (name != raw && name != path
-                        && !matches!(test["failureType"].as_str(), Some("hookFailed" | "cancelledByParent"))))
+                        && !matches!(test["failureType"].as_str(), Some("hookFailed" | "cancelledByParent" | "testAborted"))))
                 {
                     failed.insert(Identity::exact(path.clone(), name));
                 }

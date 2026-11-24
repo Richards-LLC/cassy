@@ -317,14 +317,17 @@ fn rust_red_first_failure(test: Option<&TargetedTest>, status: Option<i32>, log:
             .is_match(&log).then_some(RedFirstFailure::Compile);
     }
     let test = test.filter(|_| status == Some(100))?;
-    if regex::Regex::new(r"(?m)^[ \t]*Summary +\[[^\]\r\n]*\] +[1-9][0-9]* tests? run: [^\r\n]+$").ok()?.find_iter(&log).count() != 1 {
+    let summary = regex::Regex::new(r"(?m)^─+\r?\n([ \t]*Summary +)\[[^\]\r\n]*\] +[1-9][0-9]* tests? run: [^\r\n]+\r?$").ok()?;
+    let mut summaries = summary.captures_iter(&log);
+    let status_width = summaries.next()?[1].len();
+    if summaries.next().is_some() {
         return None;
     }
     let (package, _) = package_selector(&test.package)?;
     let binary = test.harness.as_ref().map_or_else(|| package.to_string(), |harness| format!("{package}::{harness}"));
-    let names = regex::Regex::new(r"(?m)^[ \t]*(?:FAIL|TIMEOUT)[ \t]+\[[^\]\r\n]*\][ \t]+(?:\([ \t]*[0-9]+/[ \t]*[0-9]+\)[ \t]+)?(\S+)[ \t]+(\S+)[ \t]*$").ok()?
-        .captures_iter(&log).filter(|row| row[1] == binary && stability::rust::filter_matches(&test.filter, &row[2]))
-        .map(|row| row[2].to_string()).collect::<BTreeSet<_>>();
+    let names = regex::Regex::new(r"(?m)^([ \t]*(?:FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK-FAIL)[ \t]+)\[[^\]\r\n]*\][ \t]+(?:\([ \t]*[0-9]+/[ \t]*[0-9]+\)[ \t]+)?(\S+)[ \t]+(\S+)[ \t]*\r?$").ok()?
+        .captures_iter(&log).filter(|row| row[1].len() == status_width && row[2] == binary && stability::rust::filter_matches(&test.filter, &row[3]))
+        .map(|row| row[3].to_string()).collect::<BTreeSet<_>>();
     (!names.is_empty()).then(|| RedFirstFailure::Rust { package: test.package.clone(), harness: test.harness.clone(), names })
 }
 

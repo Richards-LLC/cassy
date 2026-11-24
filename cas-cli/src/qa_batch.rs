@@ -1,6 +1,6 @@
 //! Validation shared by batch recording and close. No process or polling work.
 pub(crate) mod release_close;
-mod production;
+pub(crate) mod production;
 use crate::mcp::tools::core::task::lifecycle::close_ops::{
     TaskCommitReceiptWindow, squash_receipt_qa_anchor,
 };
@@ -1300,20 +1300,27 @@ fn walk_receipts(
                 break 'judge None;
             }
             if !known { break 'judge Some("ANCHOR_MISMATCH"); }
+            let landed = if integration_state(repo, &receipt.staging_sha, target) != Some(true) {
+                production::integrated_candidate(repo, target, &receipt)
+                    .or_else(|| production::integrated_candidate(repo, &format!("origin/{target}"), &receipt))
+            } else {
+                None
+            };
+            let staging = landed.as_deref().unwrap_or(&receipt.staging_sha);
             let inside_review = active == Some(reviewed.as_str())
                 || head == reviewed
-                || ancestor(repo, head, &receipt.staging_sha) == Some(true);
+                || ancestor(repo, head, staging) == Some(true);
             if !inside_review { break 'judge Some("HEAD_OUTSIDE_REVIEW"); }
             if receipt.project_id != project { break 'judge Some("PROJECT_MISMATCH"); }
             if ancestor(repo, reviewed, head) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_HEAD"); }
             if ancestor(repo, reviewed, &receipt.staging_sha) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_STAGING"); }
-            if !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
-                || (ancestor(repo, &receipt.staging_sha, head) == Some(true)
+            if !(ancestor(repo, head, staging) == Some(true)
+                || (ancestor(repo, staging, head) == Some(true)
                     && integration_state(repo, head, target) == Some(true)))
             {
                 break 'judge Some("STAGING_NOT_COVERING_HEAD");
             }
-            if integration_state(repo, &receipt.staging_sha, target) != Some(true) {
+            if integration_state(repo, staging, target) != Some(true) {
                 break 'judge Some("STAGING_NOT_ON_TARGET");
             }
             // cas-26ac: lineage can grow after recording, so recheck the author.

@@ -5833,6 +5833,7 @@ impl CasCore {
         let mut pushed_source_note = String::new();
         let mut unpublished_merge_base = None;
         let mut early_target_push = None;
+        let mut production_batch_checked = false;
         let mut merge_commit = if reconciled_delivery {
             crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                 &cwd,
@@ -5972,8 +5973,45 @@ impl CasCore {
                 approval.validate_for_merge(&cas_root, &current)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
             }
+            let production_batch = if crate::qa_batch::production::branch(&cas_root, &cwd).as_deref()
+                == Some(worktree.parent_branch.as_str())
+            {
+                let target = &worktree.parent_branch;
+                let source = parked_source_tip.as_deref().or(observed_source_tip.as_deref())
+                    .and_then(|sha| manager.git().resolve_commit(sha))
+                    .or_else(|| manager.git().resolve_commit(&worktree.branch));
+                let base = manager.git().resolve_commit(target);
+                if let (Some(source), Some(base)) = (source, base)
+                    && !crate::qa_batch::production::affected(&cas_root, &cwd, target, &base, &source)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_SCOPE_UNRESOLVED candidate_sha={source}: {error}")))?.is_empty()
+                {
+                    let refusal = |head| Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={head}"));
+                    let built;
+                    let reviewed = match &premerge_approval {
+                        Some(approval) => &approval.candidate,
+                        None => {
+                            let task = scoped_task.as_deref().ok_or_else(|| refusal(&source))?;
+                            built = self.build_verification_candidate_for_batch(task, &cwd, &worktree.branch, target)?;
+                            &built
+                        }
+                    };
+                    let head = &reviewed.proof.head_commit;
+                    if reviewed.source_sha != source || reviewed.target_sha != base {
+                        return Err(refusal(head));
+                    }
+                    let candidate = cas_store::ProductionCandidate { source_sha: source, base_sha: base, tree: reviewed.tree.clone() };
+                    crate::qa_batch::production::admit(&cas_root, &cwd, target, &candidate, Some(head), task_id)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    Some((candidate, head.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             // A confirmed default-branch queue requires a PR. Route it before
             // target mutation, after the same review/CI/source admission as a merge.
+            production_batch_checked = production_batch.is_some();
             let default_target = worktree.parent_branch == manager.git().detect_default_branch();
             // cas-662e: no slug is "not GitHub" only when origin says so. A
             // GitHub origin whose canonical lookup (or the CI walk before it)
@@ -6012,6 +6050,12 @@ impl CasCore {
                 ).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
                     crate::gates::tag("G-111", format!("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR: {error}. Local target and source retained."))))?;
                 if let Some(pr) = pr {
+                    if let Some((candidate, head)) = &production_batch
+                        && (source != candidate.source_sha || manager.git().fetch_merge_target(&worktree.parent_branch)
+                            .ok().flatten().as_deref() != Some(candidate.base_sha.as_str()))
+                    {
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={head}")));
+                    }
                     if manager.git().resolve_commit(&worktree.branch).is_some_and(|head| head != source) {
                         return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-111", "PR source moved before auto-merge; no auto-merge was enabled")));
                     }
@@ -6088,10 +6132,17 @@ impl CasCore {
             };
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
             unpublished_merge_base = attempted_target_tip.clone();
-            let merge_result = if publish_before_ref {
+            let merge_result = if publish_before_ref || production_batch.is_some() {
                 let branch = worktree.parent_branch.clone();
                 let publication_source = parked_source_tip.as_deref().unwrap_or(&worktree.branch).to_string();
                 let mut publish = |head: &str, base: &str| {
+                    if let Some((candidate, reviewed)) = &production_batch {
+                        crate::qa_batch::production::validate_landing(&cwd, candidate, reviewed, head, base)
+                            .map_err(crate::worktree::GitError::CommandFailed)?;
+                        if !publish_before_ref {
+                            return Ok(head.to_string());
+                        }
+                    }
                     if let Some((receipt, _)) = transactional_delivery.as_ref() {
                         if base != receipt.target_sha {
                             return Err(crate::worktree::GitError::TargetTipChanged {
@@ -6120,7 +6171,7 @@ impl CasCore {
                         return Err(crate::worktree::GitError::CommandFailed(crate::gates::tag("G-110", message)));
                     }
                     let outcome = manager.git().publish_merge_candidate(
-                        &branch, head, premerge_approval.is_none() && transactional_delivery.is_none(),
+                        &branch, head, premerge_approval.is_none() && transactional_delivery.is_none() && production_batch.is_none(),
                     );
                     let published = match &outcome {
                         crate::worktree::git::TargetPushOutcome::Pushed { sha }
@@ -6457,6 +6508,24 @@ impl CasCore {
             {
                 return Ok(Self::tool_error(crate::gates::tag("G-110", message)));
             }
+            if reconciled_delivery && reconciled_publication.is_none() && pr_landed_sha.is_none()
+                && crate::qa_batch::production::branch(&cas_root, &cwd).as_deref() == Some(receipt.target_branch.as_str())
+                && manager.git().has_origin_remote()
+            {
+                let required = || Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={target_tip}"));
+                let base = manager.git().fetch_merge_target(&receipt.target_branch).ok().flatten().ok_or_else(required)?;
+                if !manager.git().is_ancestor(&target_tip, &base) {
+                    let tree = crate::git_evidence::git_text(&cwd, &["rev-parse", &format!("{target_tip}^{{tree}}")]).ok_or_else(required)?;
+                    let candidate = cas_store::ProductionCandidate { base_sha: base, source_sha: receipt.commit_sha.clone(), tree };
+                    if !crate::qa_batch::production::affected(&cas_root, &cwd, &receipt.target_branch, &candidate.base_sha, &candidate.source_sha)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_empty()
+                    {
+                        crate::qa_batch::production::validate_landing(&cwd, &candidate, &target_tip, &target_tip, &candidate.base_sha)
+                            .and_then(|()| crate::qa_batch::production::admit(&cas_root, &cwd, &receipt.target_branch, &candidate, None, task_id))
+                            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    }
+                }
+            }
             let push_outcome = if let Some((_, outcome)) = early_target_push.take() {
                 outcome
             } else if let Some((_, published)) = reconciled_publication.as_ref() {
@@ -6649,7 +6718,7 @@ impl CasCore {
             let branch = worktree.parent_branch.clone();
             // Peer reconciliation would change the reviewed tree. A reviewed
             // candidate publishes exactly once; a raced push holds its lane.
-            let outcome = if premerge_approval.is_some() {
+            let outcome = if premerge_approval.is_some() || production_batch_checked {
                 manager.git().publish_branch_to_origin(&branch)
             } else {
                 manager.git().publish_merge_target_with_retry(&branch)

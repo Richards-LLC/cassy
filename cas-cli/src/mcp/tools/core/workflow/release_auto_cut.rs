@@ -224,6 +224,10 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: b
             Some(format!("auto-cut: {count} changelog fragments at {tip}").as_str()),
         )?;
     }
+    if let Err(reason) = crate::train_guardrails::admit_cut_candidate(root, train, tip) {
+        tracing::debug!(%reason, %lane, "production auto-cut held");
+        return Ok(Outcome::Handled);
+    }
     let draft = notes_draft(root, &train.id)?;
     if !draft.is_file() {
         let deadline = crate::cli::release_report::eastern_time(now + Duration::minutes(NOTES_DEADLINE_MINUTES));

@@ -347,6 +347,15 @@ fn tip_verdict(cas_dir: &Path, epic: &Task, train: &str) -> Option<(String, bool
     Some((tip, green))
 }
 
+pub(crate) fn admit_cut_candidate(cas_dir: &Path, epic: &Task, tip: &str) -> Result<(), String> {
+    let repo = train_repo_root(cas_dir, epic).map_err(|error| error.to_string())?;
+    let Some(target) = crate::qa_batch::production::branch(cas_dir, &repo) else { return Ok(()) };
+    let base = crate::qa_batch::commit(&repo, &format!("refs/remotes/origin/{target}"))
+        .or_else(|| crate::qa_batch::commit(&repo, &format!("refs/heads/{target}")))
+        .ok_or_else(|| format!("PRODUCTION_BATCH_QA_CANDIDATE_UNRESOLVED candidate_sha={tip}"))?;
+    crate::qa_batch::production::admit_tip(cas_dir, &repo, &target, &base, tip, Some(&epic.id))
+}
+
 /// The train's admitted deliveries, oldest first (GH #1826): each task's
 /// newest recorded merge into `train` while that merge is still the task's
 /// delivery. A merged delivery that awaits its verdict or batch QA counts like
@@ -404,6 +413,10 @@ pub(crate) fn notify_train_cuts(
         // tip; a red is the train_ci_red notice's.
         let frozen = crate::mcp::tools::core::workflow::release_freeze::active(cas_dir, &epic).is_some();
         if frozen && !green {
+            continue;
+        }
+        if frozen && let Err(reason) = admit_cut_candidate(cas_dir, &epic, &tip) {
+            tracing::debug!(%reason, %train, "production cut proposal held");
             continue;
         }
         // cas-e060: a train with changelog fragments is frozen and cut by

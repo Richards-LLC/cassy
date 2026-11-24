@@ -266,7 +266,7 @@ pub(crate) const VERIFIER_FACTORY_STORE_BUDGET: std::time::Duration = std::time:
 pub(crate) mod cycle;
 pub(crate) use peer::legacy_peer_approval;
 
-const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
+pub(crate) const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
 fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
     let message = git(
@@ -1599,6 +1599,12 @@ impl CasCore {
         )?;
         candidate.validate(&self.cas_root, task).map_err(fail)?;
         Ok(candidate)
+    }
+
+    pub(super) fn build_verification_candidate_for_batch(
+        &self, task: &Task, repo: &Path, source: &str, target: &str,
+    ) -> Result<Candidate, McpError> {
+        self.build_verification_candidate(task, repo, source, target, context_digest(&self.cas_root, task).map_err(fail)?, None)
     }
 
     fn build_verification_candidate(

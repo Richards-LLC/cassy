@@ -180,7 +180,7 @@ pub use qa_batch_store::{
     RELEASE_TAG_VERDICT_SCHEMA, RELEASE_VERDICT_SCHEMA,
     defer_qa_batch_evidence, get_qa_batch_receipt,
     has_qa_batch_deferral, import_qa_batch_receipt,
-    list_qa_batch_receipts, pending_qa_batch_deferrals, qa_batch_receipts_for_task,
+    list_qa_batch_receipts, pending_qa_batch_deferrals, production_qa_batch_deferrals, qa_batch_receipts_for_task,
     qa_task_implementation_actors,
     record_qa_batch_receipt, release_verdicts_for_task,
 };

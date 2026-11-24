@@ -156,7 +156,9 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     let (dir, _origin) = repo_with_origin();
     let repo = dir.path();
     let cas_dir = train(repo, &[("cas-a", TaskStatus::AwaitingMerge)]);
-    std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='candidate-fixture'\n[release]\nauto_cut_max_per_day=0\n").unwrap();
+    let config = "[project]\ncanonical_id='candidate-fixture'\n[release]\nauto_cut_max_per_day=0\n";
+    let configure = |extra: &str| std::fs::write(cas_dir.join("config.toml"), format!("{config}{extra}")).unwrap();
+    configure("");
     merge_child(repo, &cas_dir, "cas-a", &["index.html"]);
     let stale = run(repo, &["rev-parse", TRAIN]);
     run(repo, &["commit", "--allow-empty", "-qm", "refresh candidate"]);
@@ -180,7 +182,7 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     let receive = |head: &str, build: &str, passed: bool| {
         let ledger = repo.join("LEDGER.md");
         let (count, row) = if passed {
-            ("PASS=1; NOT EXERCISED=0", "| M01 | browser | page visible | visible: page | PASS | real-build | capture.png | - |")
+            ("PASS=1; NOT EXERCISED=0", "| M01 | browser | page visible (index.html:1) | visible: page | PASS | real-build | capture.png | - |")
         } else {
             ("PASS=0; NOT EXERCISED=1", "| M01 | browser | page visible | not run | NOT EXERCISED: browser unavailable | real-build | - | - |")
         };
@@ -199,6 +201,12 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     };
     let propose = || notify_train_cuts(&cas_dir, &BTreeSet::new(), Utc::now() + chrono::Duration::hours(3)).unwrap();
 
+    configure("[qa]\napi_paths=['index.html']\n");
+    admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap();
+    configure("[factory]\nepic_base_branch='staging'\n");
+    admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap();
+    configure("");
+    assert!(admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap_err().contains(&format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={candidate}")));
     assert_eq!(propose(), 0);
     receive(&stale, &stale, true).unwrap();
     assert_eq!(propose(), 0);
@@ -206,9 +214,27 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     assert!(receive(&candidate, &candidate, false).unwrap_err().contains("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED"));
     receive(&candidate, &candidate, true).unwrap();
     assert_eq!(propose(), 1);
+    let base = run(repo, &["rev-parse", "main"]);
+    let tree = run(repo, &["rev-parse", &format!("{candidate}^{{tree}}")]);
+    let candidate_tree = cas_store::ProductionCandidate { base_sha: base.clone(), source_sha: candidate.clone(), tree };
+    let synthetic = run(repo, &["commit-tree", &candidate_tree.tree, "-p", &base, "-p", &candidate,
+        "-m", &format!("{}fixture", crate::mcp::tools::core::workflow::premerge_verification::CANDIDATE_COMMIT_PREFIX)]);
+    receive(&synthetic, &synthetic, true).unwrap();
+    crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate_tree, Some(&synthetic), None).unwrap();
+    crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate_tree, None, None).unwrap();
+    let moved = run(repo, &["commit-tree", &format!("{base}^{{tree}}"), "-p", &base, "-m", "advance production"]);
+    run(repo, &["update-ref", "refs/heads/main", &moved, &base]);
+    assert!(admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap_err().contains(&format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={candidate}")));
+    let moved_candidate = cas_store::ProductionCandidate { base_sha: moved.clone(), ..candidate_tree.clone() };
+    assert!(crate::qa_batch::production::admit(&cas_dir, repo, "main", &moved_candidate, None, None)
+        .unwrap_err().contains("PRODUCTION_BATCH_QA_REQUIRED"));
+    run(repo, &["update-ref", "refs/heads/main", &base, &moved]);
     run(repo, &["checkout", "-q", "main"]);
-    run(repo, &["merge", "--ff-only", TRAIN]);
-    assert!(crate::qa_batch::satisfying_deferred_receipt(&cas_dir, &task, repo, "main", &anchor).unwrap().is_some());
+    run(repo, &["merge", "--no-ff", "-m", "land the checked tree", TRAIN]);
+    let landed = run(repo, &["rev-parse", "HEAD"]);
+    crate::qa_batch::production::validate_landing(repo, &candidate_tree, &synthetic, &landed, &base).unwrap();
+    assert_eq!(crate::qa_batch::satisfying_deferred_receipt(&cas_dir, &task, repo, "main", &landed)
+        .unwrap().unwrap().staging_sha, synthetic);
 }
 
 /// GH #1635: no notice asks for a cut without a green verdict at the tip.

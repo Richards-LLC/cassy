@@ -393,7 +393,7 @@ prepare() {
 pr_number=""
 
 open_or_update_pr() {
-    local version="$1" title body
+    local version="$1" title body candidate_sha base_sha
     title="Release v$version: $branch"
     body="$(mktemp)"
     {
@@ -420,7 +420,17 @@ open_or_update_pr() {
     # Build concurrency stays independent; only landing must be a singleton.
     singleton_queue <<<"$state"
     if ! admitted <<<"$state"; then
-        "$gh_bin" pr merge "$pr_number" --auto --merge >/dev/null
+        fetch_base
+        candidate_sha="$(git rev-parse HEAD)"
+        base_sha="$(git rev-parse "$remote/$base")"
+        local qa_train=()
+        if "$train_tracking"; then
+            qa_train=(--train "$(jq -er .train_id <<<"$context")")
+        fi
+        CAS_ROOT="$release_store_root" "${release_candidate:-$cas_bin}" qa admit-production \
+            --target "$base" --base "$base_sha" --head "$candidate_sha" "${qa_train[@]}" \
+            || die "production candidate $candidate_sha was not admitted; PR #$pr_number was not enqueued"
+        "$gh_bin" pr merge "$pr_number" --auto --merge --match-head-commit "$candidate_sha" >/dev/null
         state="$(pr_state)"
         singleton_queue <<<"$state"
     fi

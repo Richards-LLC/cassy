@@ -163,6 +163,17 @@ pub enum QaCommand {
     Ledger(super::qa_ledger::LedgerArgs),
     /// Build an exact-revision binary for a task's real-build QA evidence
     Candidate(CandidateArgs),
+    #[command(hide = true)]
+    AdmitProduction {
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        base: String,
+        #[arg(long)]
+        head: String,
+        #[arg(long)]
+        train: Option<String>,
+    },
     /// Map a diff to journeys and unowned CODEMAP areas
     Impact(super::qa_impact::ImpactArgs),
     /// List an epic's warning findings from approved verdicts, by file
@@ -281,6 +292,12 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
     match command {
         QaCommand::Ledger(args) => super::qa_ledger::execute(args, cli, cas_root),
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
+        QaCommand::AdmitProduction { target, base, head, train } => {
+            let root = cas_root.context("production batch QA requires the project store")?;
+            let repo = std::env::current_dir()?;
+            crate::qa_batch::production::admit_tip(root, &repo, target, base, head, train.as_deref())
+                .map_err(anyhow::Error::msg)
+        },
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
         QaCommand::Polish(args) => super::qa_polish::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),

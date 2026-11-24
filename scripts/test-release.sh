@@ -95,6 +95,7 @@ case "$1 $2" in
        review_missing:held("REVIEW_MISSING"),lane_ci_missing:held("LANE_CI_MISSING"),members_by_id:$m}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$(dirname "$0")/cas-candidate" ;; *) exit 2 ;; esac ;;
+  "qa admit-production") exit "${FAKE_ADMIT_EXIT:-0}" ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
   # The installed CLI predates `release refused`; the cut's candidate has it (GH #2027).
   "release refused")

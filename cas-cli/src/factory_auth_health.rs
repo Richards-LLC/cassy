@@ -330,6 +330,10 @@ pub(crate) fn codex_home_path(account_dir: Option<&str>) -> Option<std::path::Pa
     }
 }
 
+/// Marks lane evidence that came from the hub's model listing rather than a
+/// local Codex account catalogue.
+pub(crate) const HUB_CATALOGUE_EVIDENCE: &str = "hub-catalogue";
+
 /// Resolve a lane only after its account has been selected. General capability
 /// evidence can describe another Codex home; replace it with this account's
 /// model evidence before applying the registry's fallback order. Unverified
@@ -361,22 +365,21 @@ pub(crate) fn resolve_lane_account_models(
             let binary_available = installed().is_some();
             account_snapshot.availability.retain(|identity, _| identity.harness != "codex");
             for recipe in registry.recipes.values().filter(|recipe| recipe.harness == cas_mux::SupervisorCli::Codex) {
-                let support = if let Some(listed) = hub_models {
-                    match listed.iter().any(|slug| slug.eq_ignore_ascii_case(recipe.model.trim())) {
-                        true => CodexModelSupport::Supported,
-                        false => CodexModelSupport::Unsupported { catalog: std::path::PathBuf::from("hub /v1/models"), listed: listed.to_vec() },
-                    }
-                } else if binary_available {
-                    codex_account_model_support(&home, &recipe.model, now, &installed)
+                let (availability, reason) = if let Some(listed) = hub_models {
+                    let listed_here = listed.iter().any(|slug| slug.eq_ignore_ascii_case(recipe.model.trim()));
+                    let availability = if listed_here { CapabilityAvailability::Available } else { CapabilityAvailability::Unavailable };
+                    (availability, format!("{HUB_CATALOGUE_EVIDENCE}: {} {}", if listed_here { "lists" } else { "does not list" }, recipe.model))
                 } else {
-                    CodexModelSupport::Unverified("installed Codex version is unavailable".into())
-                };
-                let (availability, reason) = match support {
-                    CodexModelSupport::Supported if hub_models.is_some() => (CapabilityAvailability::Available, format!("the hub catalogue lists {}", recipe.model)),
-                    CodexModelSupport::Unsupported { .. } if hub_models.is_some() => (CapabilityAvailability::Unavailable, format!("the hub catalogue does not list {}", recipe.model)),
-                    CodexModelSupport::Supported => (CapabilityAvailability::Available, format!("{} supports {}", home.display(), recipe.model)),
-                    CodexModelSupport::Unsupported { .. } => (CapabilityAvailability::Unavailable, format!("{} does not list {}", home.display(), recipe.model)),
-                    CodexModelSupport::Unverified(reason) => (CapabilityAvailability::Unavailable, format!("{} cannot verify {}: {reason}; refresh the account catalogue with the installed Codex and retry", home.display(), recipe.model)),
+                    let support = if binary_available {
+                        codex_account_model_support(&home, &recipe.model, now, &installed)
+                    } else {
+                        CodexModelSupport::Unverified("installed Codex version is unavailable".into())
+                    };
+                    match support {
+                        CodexModelSupport::Supported => (CapabilityAvailability::Available, format!("{} supports {}", home.display(), recipe.model)),
+                        CodexModelSupport::Unsupported { .. } => (CapabilityAvailability::Unavailable, format!("{} does not list {}", home.display(), recipe.model)),
+                        CodexModelSupport::Unverified(reason) => (CapabilityAvailability::Unavailable, format!("{} cannot verify {}: {reason}; refresh the account catalogue with the installed Codex and retry", home.display(), recipe.model)),
+                    }
                 };
                 account_snapshot.record(cas_factory::recipe_route_identity(recipe, "default"),
                     CapabilityEvidence::new(availability, CapabilitySnapshot::now_ms()).with_reason(reason));

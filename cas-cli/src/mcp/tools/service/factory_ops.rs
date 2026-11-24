@@ -14084,7 +14084,9 @@ mod spawn_lifecycle_tests {
         let hub = |models: &[&str]| models.iter().map(|m| m.to_string()).collect::<Vec<_>>();
         assert_eq!(resolve(Some(&hub(&["gpt-6.1-sol", "gpt-6-sol"]))).unwrap().0, "codex_sol_6_1");
         assert_eq!(resolve(Some(&hub(&["gpt-6-sol"]))).unwrap().0, "codex_sol_6", "falls back past a model the hub lacks");
-        assert!(resolve(Some(&hub(&["gpt-5.6-sol"]))).is_err(), "a hub listing without either model still refuses");
+        let refusal = resolve(Some(&hub(&["gpt-5.6-sol"]))).unwrap_err();
+        assert!(refusal.contains(crate::factory_auth_health::HUB_CATALOGUE_EVIDENCE), "refusal must cite the hub catalogue: {refusal}");
+        assert!(!refusal.contains("auth.json"), "the local account file is not the evidence: {refusal}");
     }
 
     /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex

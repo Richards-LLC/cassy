@@ -258,6 +258,8 @@ cargo build -p cas --profile release-fast
 # Install to ~/.local/bin/ (no sudo). Create the dir if it doesn't exist.
 mkdir -p ~/.local/bin
 install -m 0755 target/release-fast/cas ~/.local/bin/cas
+"$HOME/.local/bin/cas" --internal-sign-installed ||
+  printf '%s\n' 'Warning: signing did not complete; the installed binary was kept.' >&2
 ```
 
 Add `~/.local/bin` to PATH if it isn't already:
@@ -357,6 +359,8 @@ git pull origin main
 git submodule update --init --recursive   # if the submodule moved
 cargo build -p cas --profile release-fast
 install -m 0755 target/release-fast/cas ~/.local/bin/cas
+"$HOME/.local/bin/cas" --internal-sign-installed ||
+  printf '%s\n' 'Warning: signing did not complete; the installed binary was kept.' >&2
 
 cas --version   # confirm new build
 cas update --all-projects   # refresh every local project without downloading a release
@@ -370,16 +374,16 @@ Subsequent rebuilds are seconds (incremental cargo), unless `vendor/ghostty` cha
 
 Published releases are ad-hoc signed. Without a stable identity, macOS can ask
 again for previously granted access, such as access to the Desktop folder, after
-an update. The installer and `cas update` now sign the per-user install with a
-local identity. Setup works over SSH without an Apple Developer account, your
-login password, or a keychain dialog. Cassy uses a separate keychain and a
-generated password in `~/.cas/macos-signing`; it doesn't change your login
-keychain or system trust settings.
+an update. The installer, `cas update`, and the source-install steps above sign
+the per-user install with a local identity. Setup works over SSH without an
+Apple Developer account, your login password, or a keychain dialog. Cassy uses
+a separate keychain and a generated password in `~/.cas/macos-signing`; it
+doesn't change your login keychain or system trust settings.
 
 You may need to approve access once for the new identity, including if you used
 the old manual login-keychain setup. Keep `~/.cas/macos-signing` between updates
 to keep using the same certificate. If signing fails, Cassy warns and keeps the
-downloaded binary. Check the installed signature with
+installed binary. Check the installed signature with
 `codesign -d -r- ~/.local/bin/cas`: a stable signature names
 `identifier "dev.cassy.cas"` and a certificate leaf instead of a `cdhash`.
 

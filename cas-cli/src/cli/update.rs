@@ -563,6 +563,10 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // the desired binary. It deliberately does the same complete sweep that a
     // successful ordinary `cas update` performs below.
     if args.all_projects {
+        #[cfg(target_os = "macos")]
+        if !args.dry_run {
+            sign_installed_macos()?;
+        }
         let mut steps = UpdateStepTracker::new(1, !cli.json);
         run_refresh_phase(&mut steps, cli, true, || {
             refresh_all_projects(args, cli, cas_root, None, None, None)

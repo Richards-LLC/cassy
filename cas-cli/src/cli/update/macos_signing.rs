@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -35,22 +35,19 @@ pub(super) fn stabilize(installed: &Path) -> Result<()> {
 
     let keychain = state.join("cassy.keychain-db");
     let password_file = state.join("password");
-    if !keychain.try_exists()? && !password_file.try_exists()? {
-        create_identity(&state, &keychain, &password_file)?;
+    let pending = state.join("setup.pending");
+    if setup_needed(&pending, &keychain, &password_file, delete_keychain)? {
+        DirBuilder::new().mode(0o700).create(&pending)?;
+        let setup = create_identity(&pending, &keychain, &password_file);
+        setup_needed(&pending, &keychain, &password_file, delete_keychain)?;
+        setup?;
+    } else {
+        let password =
+            fs::read_to_string(&password_file).context("could not read signing password")?;
+        let password = password.trim();
+        ensure!(!password.is_empty(), "the signing password is empty");
+        unlock_keychain(&keychain, password)?;
     }
-    ensure!(
-        keychain.symlink_metadata()?.is_file() && password_file.symlink_metadata()?.is_file(),
-        "the local signing keychain and password must be regular files"
-    );
-    let password = fs::read_to_string(&password_file).context("could not read signing password")?;
-    let password = password.trim();
-    ensure!(!password.is_empty(), "the signing password is empty");
-    run(
-        Command::new(SECURITY)
-            .args(["unlock-keychain", "-p", password])
-            .arg(&keychain),
-        "unlock local signing keychain",
-    )?;
     let listing = run(
         Command::new(SECURITY)
             .args(["find-identity", "-p", "codesigning"])
@@ -96,8 +93,70 @@ pub(super) fn stabilize(installed: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_identity(state: &Path, keychain: &Path, password_file: &Path) -> Result<()> {
-    let materials = tempfile::tempdir_in(state)?;
+fn setup_needed(
+    pending: &Path,
+    keychain: &Path,
+    password_file: &Path,
+    delete_keychain: impl FnOnce(&Path) -> Result<()>,
+) -> Result<bool> {
+    let mut has_keychain = regular_file_exists(keychain)?;
+    let has_password = regular_file_exists(password_file)?;
+    match pending.symlink_metadata() {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_dir(),
+                "the pending signing setup is not a directory"
+            );
+            if has_keychain && !has_password {
+                delete_keychain(keychain)?;
+                has_keychain = false;
+            }
+            fs::remove_dir_all(pending)?;
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    ensure!(
+        has_keychain == has_password,
+        "the local signing identity is incomplete"
+    );
+    Ok(!has_password)
+}
+
+fn regular_file_exists(path: &Path) -> Result<bool> {
+    match path.symlink_metadata() {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file(),
+                "{} is not a regular file",
+                path.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn delete_keychain(keychain: &Path) -> Result<()> {
+    run(
+        Command::new(SECURITY).arg("delete-keychain").arg(keychain),
+        "remove incomplete signing keychain",
+    )?;
+    Ok(())
+}
+
+fn unlock_keychain(keychain: &Path, password: &str) -> Result<()> {
+    run(
+        Command::new(SECURITY)
+            .args(["unlock-keychain", "-p", password])
+            .arg(keychain),
+        "unlock local signing keychain",
+    )?;
+    Ok(())
+}
+
+fn create_identity(materials: &Path, keychain: &Path, password_file: &Path) -> Result<()> {
     let password = run(
         Command::new(OPENSSL).args(["rand", "-hex", "32"]),
         "generate signing password",
@@ -107,10 +166,11 @@ fn create_identity(state: &Path, keychain: &Path, password_file: &Path) -> Resul
         !password.is_empty(),
         "could not generate the signing password"
     );
-    let mut saved_password = tempfile::NamedTempFile::new_in(&materials)?;
+    let mut saved_password = tempfile::NamedTempFile::new_in(materials)?;
     saved_password.write_all(password.as_bytes())?;
+    saved_password.as_file().sync_all()?;
     fs::write(
-        materials.path().join("cert.cnf"),
+        materials.join("cert.cnf"),
         format!(
             "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN={LOCAL_IDENTITY}\n\
                   [ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\n\
@@ -118,7 +178,7 @@ fn create_identity(state: &Path, keychain: &Path, password_file: &Path) -> Resul
         ),
     )?;
     run(
-        Command::new(OPENSSL).current_dir(&materials).args([
+        Command::new(OPENSSL).current_dir(materials).args([
             "req", "-batch", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-keyout",
             "key.pem", "-out", "cert.pem", "-days", "3650", "-config", "cert.cnf",
         ]),
@@ -126,7 +186,7 @@ fn create_identity(state: &Path, keychain: &Path, password_file: &Path) -> Resul
     )?;
     run(
         Command::new(OPENSSL)
-            .current_dir(&materials)
+            .current_dir(materials)
             .args([
                 "pkcs12",
                 "-export",
@@ -143,50 +203,36 @@ fn create_identity(state: &Path, keychain: &Path, password_file: &Path) -> Resul
         "package local code-signing identity",
     )?;
 
-    let setup = (|| {
-        run(
-            Command::new(SECURITY)
-                .args(["create-keychain", "-p", password])
-                .arg(keychain),
-            "create local signing keychain",
-        )?;
-        run(
-            Command::new(SECURITY)
-                .args(["unlock-keychain", "-p", password])
-                .arg(keychain),
-            "unlock new signing keychain",
-        )?;
-        run(
-            Command::new(SECURITY)
-                .current_dir(&materials)
-                .args(["import", "identity.p12", "-k"])
-                .arg(keychain)
-                .args(["-P", password, "-T", CODESIGN]),
-            "import local code-signing identity",
-        )?;
-        run(
-            Command::new(SECURITY)
-                .args([
-                    "set-key-partition-list",
-                    "-S",
-                    "apple-tool:,apple:,codesign:",
-                    "-s",
-                    "-k",
-                    password,
-                ])
-                .arg(keychain),
-            "allow codesign to use the key non-interactively",
-        )?;
-        saved_password.persist_noclobber(password_file)?;
-        Ok(())
-    })();
-    if setup.is_err() && keychain.exists() {
-        run(
-            Command::new(SECURITY).arg("delete-keychain").arg(keychain),
-            "remove incomplete signing keychain",
-        )?;
-    }
-    setup
+    run(
+        Command::new(SECURITY)
+            .args(["create-keychain", "-p", password])
+            .arg(keychain),
+        "create local signing keychain",
+    )?;
+    unlock_keychain(keychain, password)?;
+    run(
+        Command::new(SECURITY)
+            .current_dir(materials)
+            .args(["import", "identity.p12", "-k"])
+            .arg(keychain)
+            .args(["-P", password, "-T", CODESIGN]),
+        "import local code-signing identity",
+    )?;
+    run(
+        Command::new(SECURITY)
+            .args([
+                "set-key-partition-list",
+                "-S",
+                "apple-tool:,apple:,codesign:",
+                "-s",
+                "-k",
+                password,
+            ])
+            .arg(keychain),
+        "allow codesign to use the key non-interactively",
+    )?;
+    saved_password.persist_noclobber(password_file)?;
+    Ok(())
 }
 
 fn requirement(hash: &str) -> String {
@@ -246,6 +292,31 @@ fn run(command: &mut Command, operation: &str) -> Result<Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retries_interrupted_setup_without_discarding_an_established_identity() {
+        let state = tempfile::tempdir().unwrap();
+        let pending = state.path().join("setup.pending");
+        let keychain = state.path().join("cassy.keychain-db");
+        let password_file = state.path().join("password");
+        let remove_fixture = |path: &Path| Ok(fs::remove_file(path)?);
+
+        fs::write(&keychain, b"keychain").unwrap();
+        assert!(setup_needed(&pending, &keychain, &password_file, remove_fixture).is_err());
+        assert!(keychain.exists());
+
+        fs::create_dir(&pending).unwrap();
+        fs::write(pending.join("identity.p12"), b"temporary identity").unwrap();
+        assert!(setup_needed(&pending, &keychain, &password_file, remove_fixture).unwrap());
+        assert!(!keychain.exists() && !pending.exists());
+
+        fs::create_dir(&pending).unwrap();
+        fs::write(&keychain, b"established keychain").unwrap();
+        fs::write(&password_file, b"password").unwrap();
+        assert!(!setup_needed(&pending, &keychain, &password_file, remove_fixture).unwrap());
+        assert_eq!(fs::read(&keychain).unwrap(), b"established keychain");
+        assert!(!pending.exists());
+    }
 
     #[test]
     fn signs_with_the_dedicated_keychain_and_stable_requirement() {

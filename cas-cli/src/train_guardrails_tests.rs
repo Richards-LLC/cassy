@@ -150,6 +150,54 @@ fn tip_receipt(repo: &Path, cas_dir: &Path, outcome: &str) {
     std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
 }
 
+#[test]
+fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
+    let _env = TestEnvGuard::temp_home();
+    let (dir, _origin) = repo_with_origin();
+    let repo = dir.path();
+    let cas_dir = train(repo, &[("cas-a", TaskStatus::Closed)]);
+    std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='candidate-fixture'\n[release]\nauto_cut_max_per_day=0\n").unwrap();
+    merge_child(repo, &cas_dir, "cas-a", &[]);
+    let stale = run(repo, &["rev-parse", TRAIN]);
+    run(repo, &["commit", "--allow-empty", "-qm", "refresh candidate"]);
+    let candidate = run(repo, &["rev-parse", TRAIN]);
+    crate::mcp::tools::core::workflow::release_freeze::freeze(&cas_dir, EPIC, "operator", None).unwrap();
+    tip_receipt(repo, &cas_dir, "PASS");
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get("cas-a").unwrap();
+    task.origin_project = Some("candidate-fixture".into());
+    task.deliverables.factory_branch_anchor = Some(run(repo, &["rev-parse", "factory/cas-a"]));
+    tasks.update(&task).unwrap();
+    let mut epic = tasks.get(EPIC).unwrap();
+    epic.origin_project = task.origin_project;
+    tasks.update(&epic).unwrap();
+    let recorder = open_agent_store(&cas_dir).unwrap().get("sup-id").unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    let approve = |head: &str| {
+        let ledger = repo.join("LEDGER.md");
+        std::fs::write(&ledger, format!("schema: 2\nbuild: {head}\ncovers: cas-a\ncells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: fixture=1\n{}\n| M01 | delivery | written | present | PASS | fixture | cas-a.txt | - |\n", crate::qa_ledger::HEADER)).unwrap();
+        let context = crate::artifacts::PublishContext {
+            store: &artifacts,
+            roots: crate::artifacts::paths::PublishRoots::new(&cas_dir, &repo.join("artifacts"), EPIC),
+            task_id: EPIC.into(), cloud: None,
+        };
+        let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
+        let receipt = crate::qa_batch::prepare_receipt(
+            &cas_dir, &recorder, "external-reviewer", &["cas-a".into()], head, &artifact.id,
+            &ledger, cas_store::QA_BATCH_RECEIPT_SCHEMA,
+        ).unwrap();
+        cas_store::record_qa_batch_receipt(&cas_dir, &receipt).unwrap();
+    };
+    let propose = || notify_train_cuts(&cas_dir, &BTreeSet::new(), Utc::now()).unwrap();
+
+    assert_eq!(propose(), 0);
+    approve(&stale);
+    assert_eq!(propose(), 0);
+    approve(&candidate);
+    assert_eq!(propose(), 1);
+}
+
 /// GH #1635: no notice asks for a cut without a green verdict at the tip.
 /// cas-0fc56: an unfrozen train has no train suite, so its notice asks for
 /// the freeze that starts one; once frozen, only green at the current tip notifies.
@@ -159,6 +207,8 @@ fn frozen_train_cut_notice_waits_for_green_at_its_tip_gh_1635() {
     let (dir, _origin) = repo_with_origin();
     let repo = dir.path();
     let cas_dir = train(repo, &[("cas-a", TaskStatus::Closed), ("cas-b", TaskStatus::InProgress)]);
+    run(repo, &["branch", "staging", "main"]);
+    std::fs::write(cas_dir.join("config.toml"), "[factory]\nepic_base_branch='staging'\n").unwrap();
     merge_child(repo, &cas_dir, "cas-a", &[]);
     let sq = open_supervisor_queue_store(&cas_dir).unwrap();
     let notices = || sq.peek("sup-id", 10).unwrap().len();

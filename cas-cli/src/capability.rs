@@ -993,7 +993,7 @@ mod tests {
             }
             let now = CapabilitySnapshot::now_ms();
             let mut snapshot = CapabilitySnapshot::default();
-            for name in ["codex_sol_6_1", "codex_sol_6"] {
+            for name in ["codex_sol_6_2", "codex_sol_6_2_high"] {
                 let (identity, evidence) = probe_harness(
                     Harness::CodexCli,
                     &registry.recipes[name].model,

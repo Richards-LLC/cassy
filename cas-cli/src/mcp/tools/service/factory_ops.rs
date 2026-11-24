@@ -14012,7 +14012,7 @@ mod spawn_lifecycle_tests {
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
         std::fs::write(other.join("models_cache.json"), serde_json::json!({
-            "fetched_at": chrono::Utc::now(), "client_version":"99.0.0", "models":[{"slug":"gpt-6.1-sol"}]
+            "fetched_at": chrono::Utc::now(), "client_version":"99.0.0", "models":[{"slug":"gpt-6.2-sol"}]
         }).to_string()).unwrap();
         let core = CasCore::with_daemon(root.clone(), None, None);
         #[cfg(feature = "mcp-proxy")]
@@ -14023,10 +14023,9 @@ mod spawn_lifecycle_tests {
         let queue = crate::store::open_spawn_queue_store(&root).unwrap();
         for (case, age, models, explicit, expected) in [
             ("stale", 8, vec!["gpt-6-sol"], false, None),
-            ("fallback", 0, vec!["gpt-6-sol"], false, Some("gpt-6-sol")),
             ("unsupported", 0, vec!["gpt-5.6-sol"], false, None),
             ("explicit", 0, vec!["gpt-6-sol"], true, None),
-            ("primary", 0, vec!["gpt-6.1-sol"], false, Some("gpt-6.1-sol")),
+            ("primary", 0, vec!["gpt-6.2-sol"], false, Some("gpt-6.2-sol")),
         ] {
             std::fs::write(account.join("models_cache.json"), serde_json::json!({
                 "fetched_at": chrono::Utc::now() - chrono::Duration::days(age),
@@ -14046,12 +14045,6 @@ mod spawn_lifecycle_tests {
                 let spec: cas_mux::WorkerSpec = serde_json::from_str(rows.last().unwrap().worker_spec.as_deref().unwrap()).unwrap();
                 assert_eq!(spec.model.as_deref(), Some(model));
                 assert_eq!(spec.config_dir.as_deref(), account.to_str());
-                if case == "fallback" {
-                    let mut resolved = vec![spec];
-                    let (recipe, warnings) = resolve_lane_account_models("standard", &mut resolved, &Default::default(), None).unwrap();
-                    assert_eq!(recipe, "codex_sol_6");
-                    assert!(!warnings.is_empty());
-                }
             } else {
                 assert!(result.is_err(), "{case}: unverified or unsupported lane must refuse before queueing");
                 assert_eq!(queue.peek(10).unwrap().len(), before);
@@ -14082,9 +14075,8 @@ mod spawn_lifecycle_tests {
         };
         assert!(resolve(None).is_err(), "no auth.json and no hub: nothing verifies the model");
         let hub = |models: &[&str]| models.iter().map(|m| m.to_string()).collect::<Vec<_>>();
-        assert_eq!(resolve(Some(&hub(&["gpt-6.1-sol", "gpt-6-sol"]))).unwrap().0, "codex_sol_6_1");
-        assert_eq!(resolve(Some(&hub(&["gpt-6-sol"]))).unwrap().0, "codex_sol_6", "falls back past a model the hub lacks");
-        let refusal = resolve(Some(&hub(&["gpt-5.6-sol"]))).unwrap_err();
+        assert_eq!(resolve(Some(&hub(&["gpt-6.2-sol", "gpt-6-sol"]))).unwrap().0, "codex_sol_6_2");
+        let refusal = resolve(Some(&hub(&["gpt-6.1-sol", "gpt-6-sol"]))).unwrap_err();
         assert!(refusal.contains(crate::factory_auth_health::HUB_CATALOGUE_EVIDENCE), "refusal must cite the hub catalogue: {refusal}");
         assert!(!refusal.contains("auth.json"), "the local account file is not the evidence: {refusal}");
     }
@@ -17016,23 +17008,6 @@ mod tests {
     }
 
     #[test]
-    fn heavy_lane_spawn_specs_use_claude_opus_primary() {
-        let (specs, recipe, warnings) = build_lane_spawn_specs(
-            1,
-            "heavy",
-            None,
-            None,
-            &cas_factory::CapabilitySnapshot::default(),
-        )
-        .unwrap();
-        assert_eq!(recipe, "claude_opus_5_5");
-        assert!(warnings.is_empty());
-        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
-    }
-
-    #[test]
     fn spawn_receipt_links_worker_accounts_and_records_real_items() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
@@ -17285,20 +17260,17 @@ mod tests {
         .expect("lane should resolve");
 
         assert_eq!(specs.0.len(), 2);
-        assert_eq!(specs.1, "codex_luna_6");
+        assert_eq!(specs.1, "codex_sol_6_2_low");
         assert_eq!(specs.0[0].name.as_deref(), Some("research"));
         assert_eq!(specs.0[1].name.as_deref(), Some("review"));
         assert_eq!(specs.0[0].config_dir.as_deref(), Some("~/.claude-alt"));
-        assert_eq!(
-            specs.0[0].model.as_deref(),
-            Some("gpt-6-luna")
-        );
-        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::XHigh));
+        assert_eq!(specs.0[0].model.as_deref(), Some("gpt-6.2-sol"));
+        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::Low));
         assert!(specs.2.is_empty(), "static primary should not warn");
     }
 
     #[test]
-    fn taste_lane_spawn_specs_use_opus_and_explicit_fable_remains_valid() {
+    fn taste_lane_spawn_specs_use_fable_5_2_and_explicit_fable_5_1_remains_valid() {
         let _home = TestEnvGuard::temp_home();
         let (specs, recipe, warnings) = build_lane_spawn_specs(
             2,
@@ -17308,14 +17280,14 @@ mod tests {
             &cas_factory::CapabilitySnapshot::default(),
         )
         .unwrap();
-        assert_eq!(recipe, "claude_opus_5_5");
+        assert_eq!(recipe, "claude_fable_5_2_high");
         assert!(warnings.is_empty());
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].name.as_deref(), Some("taste-a"));
         assert_eq!(specs[1].name.as_deref(), Some("taste-b"));
         for spec in specs {
             assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-            assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+            assert_eq!(spec.model.as_deref(), Some("claude-fable-5-2"));
             assert_eq!(spec.effort, Some(cas_mux::Effort::High));
             assert_eq!(spec.config_dir.as_deref(), Some("~/.claude-alt"));
         }
@@ -17353,18 +17325,18 @@ mod tests {
         let mut snapshot = cas_factory::CapabilitySnapshot::default();
         snapshot.record(
             cas_factory::recipe_route_identity(
-                &registry.recipes["claude_opus_5_5"],
+                &registry.recipes["claude_fable_5_2_high"],
                 "default",
             ),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Unavailable,
                 now,
             )
-            .with_reason("Claude Opus account unavailable"),
+            .with_reason("Claude Fable account unavailable"),
         );
         snapshot.record(
             cas_factory::recipe_route_identity(
-                &registry.recipes["claude_opus"],
+                &registry.recipes["claude_opus_5_5"],
                 "default",
             ),
             cas_factory::CapabilityEvidence::new(
@@ -17381,8 +17353,8 @@ mod tests {
             &snapshot,
         )
         .expect("taste fallback should resolve");
-        assert_eq!(recipe, "claude_opus");
-        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(recipe, "claude_opus_5_5");
+        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
         assert!(!warnings.is_empty());
     }

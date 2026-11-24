@@ -2061,8 +2061,10 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         }
         // GH #1867: a no-code close dispatch has no candidate proof. The same
         // daemon-owned verifier reviews it and records the exact verdict, and
-        // the owner hears about either outcome.
-        for status in ["approved", "rejected"] {
+        // the owner hears about either outcome. GH #2383: an approval closes
+        // the task itself, including after its worker blocked on the wait.
+        for case in ["approved", "blocked", "rejected"] {
+            let status = if case == "rejected" { "rejected" } else { "approved" };
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path();
             super::super::tests::run(repo, &["init", "-q", "-b", "main"]);
@@ -2163,6 +2165,15 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert!(owns(&root, &dispatch));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(worker.id.as_str()));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(owner.id.as_str()));
+            if case == "blocked" {
+                // The worker records the documented verification wait.
+                let wait = crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id);
+                let blocked = runtime.block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(
+                    serde_json::from_value(serde_json::json!({"id": task.id, "status": "blocked", "notes": wait})).unwrap(),
+                ))).unwrap();
+                assert_ne!(blocked.is_error, Some(true), "{blocked:?}");
+                assert_eq!(core.open_task_store().unwrap().get(&task.id).unwrap().status, cas_types::TaskStatus::Blocked);
+            }
             std::fs::write(&gate, "go").unwrap();
             broker.join().unwrap();
             let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
@@ -2173,6 +2184,9 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_eq!(verdict.status.to_string(), status);
             assert_eq!(verdict.agent_id,
                 cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id);
+            let closed = core.open_task_store().unwrap().get(&task.id).unwrap();
+            assert_eq!(closed.status == cas_types::TaskStatus::Closed, status == "approved",
+                "{case}: {:?} notes {}; notices {prompts:?}", closed.status, closed.notes);
             // Approval queues the ordinary close recovery; a held verdict
             // queues its own notice. Either way the owner sees one row.
             assert_eq!(
@@ -2180,7 +2194,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 1,
                 "{status}: {prompts:?}"
             );
-            eprintln!("NO_CODE_CLOSE status={status} dispatch={} verifier={:?} verdict={}",
+            eprintln!("NO_CODE_CLOSE case={case} status={status} dispatch={} verifier={:?} verdict={}",
                 dispatch.id, verdict.agent_id, verdict.id);
         }
         // With no eligible home left, the refusal names each home's state

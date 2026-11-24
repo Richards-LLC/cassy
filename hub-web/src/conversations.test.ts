@@ -50,7 +50,8 @@ it("names the build a supervisor's live MCP loaded and when, in Eastern time (ca
   view.innerHTML = conversationRowMarkup({ ...base, mcp_version: "4.52.0", installed_version: "4.52.0", mcp_loaded_at: "2026-11-23T22:44:00Z" });
   const card = view.querySelector<HTMLElement>("[data-testid=supervisor-version]");
   expect(card?.textContent).toContain("4.52.0");
-  expect(card?.textContent).toContain("5:44 PM");
+  // cas-0d58: the pill holds the version alone; the load time is in its title.
+  expect(card?.title).toContain("5:44 PM");
   view.innerHTML = conversationRowMarkup({ ...base, mcp_version: "4.51.0", installed_version: "4.52.0", mcp_loaded_at: "2026-11-23T22:44:00Z" });
   expect(view.querySelector(".supervisor-version")?.classList.contains("update-available")).toBe(true);
 });

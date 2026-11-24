@@ -43,6 +43,14 @@ async function inkOverlaps(page: Page, a: string, b: string): Promise<boolean> {
   }, [a, b] as const);
 }
 
+/** cas-0d58: a badge is read whole: nothing clipped or ellipsised, and inside the viewport. */
+async function wholeInView(page: Page, selector: string): Promise<boolean> {
+  return page.locator(selector).evaluate(el => {
+    const box = el.getBoundingClientRect();
+    return el.scrollWidth <= el.clientWidth && box.width > 0 && box.left >= 0 && box.right <= window.innerWidth;
+  });
+}
+
 async function captureReload(page: Page, name: string, width: number): Promise<void> {
   const dir = process.env.QA_ARTIFACTS;
   if (!dir) return;
@@ -245,7 +253,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(receipt).toHaveCount(0);
         await captureReload(page, "reloaded-toast", viewport.width);
         // cas-8c4f: the card and the open conversation keep the loaded build and its Eastern load time.
-        await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toHaveCount(1);
+        await expect(versionOnRow("9.99.2")).toHaveCount(1);
         await expect(page.getByTestId("conversation-cassy")).toContainText("9.99.2");
         await expect(page.getByTestId("conversation-cassy")).toContainText("5:44 PM");
         await captureReload(page, "loaded-badge", viewport.width);
@@ -254,16 +262,18 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
       await journey.stage("The loaded-build badge survives a Commander refresh", async () => {
         await page.reload();
-        await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toHaveCount(1);
+        await expect(versionOnRow("9.99.2")).toHaveCount(1);
         // A phone restores the open conversation over the list; a desktop shows both.
         if (await conversationRow(page).isVisible()) await conversationRow(page).click();
         await expect(page.getByTestId("conversation-cassy")).toContainText("9.99.2");
         // cas-0d58: the badges stay in their own columns, clear of the label and actions.
         expect(await inkOverlaps(page, "[data-testid=conversation-cassy]", "[data-testid=conversation-header-actions]")).toBe(false);
         expect(await inkOverlaps(page, "[data-testid=conversation-cassy]", "[data-testid=host-machine]")).toBe(false);
+        expect(await wholeInView(page, "[data-testid=conversation-cassy]")).toBe(true);
         if (phone) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
-        await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toBeVisible();
+        await expect(versionOnRow("9.99.2")).toBeVisible();
         expect(await inkOverlaps(page, "[data-testid=supervisor-version]", ".conversation-row:has([data-testid=supervisor-version]) [data-testid=conversation-machine-name]")).toBe(false);
+        expect(await wholeInView(page, "[data-testid=supervisor-version]")).toBe(true);
         await captureReload(page, "badges-clear", viewport.width);
         if (phone) await conversationRow(page).click();
       });

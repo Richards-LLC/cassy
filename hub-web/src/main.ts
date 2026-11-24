@@ -16,7 +16,7 @@ import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
-import { cassyLoadedBadge, LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
+import { cassyLoaded, cassyLoadedBadge, LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { pendingSessionLabel, reconcileCatalog, sessionReachable, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
@@ -2658,21 +2658,24 @@ function toggleShowWork(): void {
  */
 /**
  * cas-8c4f: the open supervisor's durable Reload Cassy result in its header,
- * "cassy 4.52.0 · loaded 5:44 PM ET", read from the live catalog each sync.
+ * read from the live catalog each sync. cas-0d58: a pill that never shrinks
+ * ("9.99.2 · 5:44 PM"); the machine and codename text beside it truncates
+ * first, and its title and spoken text say "cassy 4.52.0 · loaded 5:44 PM ET".
  */
 function syncCassyBadge(): void {
   const host = document.querySelector<HTMLElement>(".conversation-identity .conversation-host");
   if (!host) return;
   const item = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(session => session.name === selectedSession) : undefined;
-  const text = item && !item.ended && !item.dormant && item.liveness === "live" ? cassyLoadedBadge(item.mcp_version, item.mcp_loaded_at) : undefined;
+  const live = item && !item.ended && !item.dormant && item.liveness === "live";
+  const text = live ? cassyLoadedBadge(item.mcp_version, item.mcp_loaded_at) : undefined;
+  const parts = live ? cassyLoaded(item.mcp_version, item.mcp_loaded_at) : undefined;
   let badge = host.querySelector<HTMLElement>(":scope > #conversation-cassy");
-  if (!text) { if (badge) { badge.remove(); scheduleConversationLayout(); } return; }
+  if (!text || !parts) { if (badge) { badge.remove(); scheduleConversationLayout(); } return; }
   if (badge?.dataset.badge === text) return;
-  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "conversation-cassy"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
+  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "supervisor-version loaded conversation-cassy"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
   badge.dataset.badge = text; badge.title = text;
-  const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
-  const label = document.createElement("span"); label.className = "conversation-cassy-label"; label.textContent = text;
-  badge.replaceChildren(separator, label);
+  const spoken = (words: string) => { const span = document.createElement("span"); span.className = "sr-only"; span.textContent = words; return span; };
+  badge.replaceChildren(spoken("cassy "), `${parts.version} · `, spoken("loaded "), parts.time, spoken(" ET"));
   scheduleConversationLayout();
 }
 

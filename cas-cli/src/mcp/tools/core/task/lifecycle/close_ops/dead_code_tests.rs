@@ -7,11 +7,15 @@ use std::path::Path;
 type Files = &'static [(&'static str, &'static str)];
 
 /// Nov 23 v4.53: the Commander redesign dropped the last `hasResult` caller
-/// and parked; the verifier then rejected it for that one helper.
+/// and parked; the verifier then rejected it for that one helper. The same
+/// redesign dropped the only literal `status-chip--idle`, which markup still
+/// builds from its prefix.
 const NOV23_BASE: Files = &[
     ("hub-web/src/account-usage-check.ts", "export class AccountUsageChecks {\n  private states = new Map<string, { result?: number }>();\n  private key(machine: string, account: string): string { return JSON.stringify([machine, account]); }\n  hasResult(machine: string, account: string): boolean { return Boolean(this.states.get(this.key(machine, account))?.result); }\n  result(machine: string, account: string): number | undefined { return this.states.get(this.key(machine, account))?.result; }\n}\n"),
-    ("hub-web/src/launch-rows.ts", "import { AccountUsageChecks } from \"./account-usage-check\";\nexport function accountRow(checks: AccountUsageChecks, machine: string, account: string): string {\n  const meter = checks.result(machine, account);\n  return checks.hasResult(machine, account) ? `<li class=\"launch-account-label\">${meter}</li>` : \"\";\n}\n"),
-    ("hub-web/src/launch-rows.css", ".launch-account-label { display: flex; }\n"),
+    ("hub-web/src/launch-rows.ts", "import { AccountUsageChecks } from \"./account-usage-check\";\nexport function accountRow(checks: AccountUsageChecks, machine: string, account: string): string {\n  const meter = checks.result(machine, account);\n  return checks.hasResult(machine, account) ? `<li class=\"launch-account-label\">${meter}<span class=\"status-chip status-chip--idle\">Off</span></li>` : \"\";\n}\n"),
+    ("hub-web/src/launch-rows.css", ".launch-account-label { display: flex; }\n.status-chip--idle,\n.status-chip--off { color: gray; }\n"),
+    // Markup builds the other chip classes, so `status-chip--idle` stays in use.
+    ("hub-web/src/status.ts", "export const chip = (state: string): string => `status-chip status-chip--${state}`;\n"),
     ("hub-web/src/main.ts", "import { accountRow } from \"./launch-rows\";\nconsole.log(accountRow);\n"),
 ];
 const NOV23_REDESIGN: Files = &[(

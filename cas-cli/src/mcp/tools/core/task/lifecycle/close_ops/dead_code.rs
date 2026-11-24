@@ -8,7 +8,8 @@
 //! stylesheet. The delivery is blamed for a symbol with no reference at its
 //! head when the delivery removed its last reference, or when it added the
 //! function, export, type or Rust item with none. Methods and CSS classes can
-//! be reached by a computed name, so only a lost reference counts for them.
+//! be reached by a computed name, so only a lost reference counts for them,
+//! and a class whose prefix markup builds (`chip--${tone}`) is referenced.
 //! Base counts are the head counts minus the added lines plus the removed
 //! lines, so the base tree is never read, and a symbol already unreferenced at
 //! the base is never blamed.
@@ -110,6 +111,21 @@ fn tokens(line: &str, word: fn(u8) -> bool) -> impl Iterator<Item = &str> {
         .filter(|token| token.bytes().next().is_some_and(|byte| !byte.is_ascii_digit() && byte != b'-'))
 }
 
+/// Identifiers, except the words of a hyphenated name: `status-chip` is CSS
+/// class text, not a reference to `status` or `chip`.
+fn identifiers(line: &str) -> impl Iterator<Item = &str> {
+    let bytes = line.as_bytes();
+    let joined = move |hyphen: Option<usize>, word: Option<usize>| {
+        hyphen.and_then(|at| bytes.get(at)) == Some(&b'-')
+            && word.and_then(|at| bytes.get(at)).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    };
+    tokens(line, ident_byte).filter(move |token| {
+        let start = token.as_ptr() as usize - line.as_ptr() as usize;
+        let end = start + token.len();
+        !joined(start.checked_sub(1), start.checked_sub(2)) && !joined(Some(end), Some(end + 1))
+    })
+}
+
 fn ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
@@ -150,7 +166,7 @@ fn tally(counts: &mut HashMap<String, Counts>, names: &HashSet<String>, lang: La
         }
     }
     if lang != Lang::Style {
-        for token in tokens(line, ident_byte) {
+        for token in identifiers(line) {
             add(token, &|c| c.ident += sign);
         }
         for token in tokens(line, class_byte) {
@@ -235,7 +251,7 @@ fn read_diff(repo: &Path, base: &str, head: &str) -> Result<Diff, String> {
             lines.push((lang, body, -1));
         } else if let (Some(lang), Some(body)) = (file_lang, line.strip_prefix('-')) {
             if lang != Lang::Style {
-                candidates.extend(tokens(body, ident_byte).map(str::to_string));
+                candidates.extend(identifiers(body).map(str::to_string));
                 candidates.extend(tokens(body, class_byte).map(str::to_string));
             }
             lines.push((lang, body, 1));
@@ -275,6 +291,8 @@ fn orphans(repo: &Path, base: &str, head: &str) -> Result<Vec<Orphan>, String> {
         .map_err(|error| format!("git archive: {error}"))?;
     let mut counts = HashMap::new();
     let mut defined: BTreeMap<(String, Kind), (String, usize)> = BTreeMap::new();
+    // `status-chip--${tone}` reaches every `status-chip--*` class.
+    let mut class_prefixes = HashSet::new();
     let mut archive = tar::Archive::new(child.stdout.take().ok_or("git archive: no output")?);
     for entry in archive.entries().map_err(|error| format!("git archive: {error}"))? {
         let mut entry = entry.map_err(|error| format!("git archive: {error}"))?;
@@ -288,6 +306,11 @@ fn orphans(repo: &Path, base: &str, head: &str) -> Result<Vec<Orphan>, String> {
             let in_fixture = file_lang == Lang::Rust && raw_string_state(line, &mut raw);
             let defs = if in_fixture { Vec::new() } else { definitions(file_lang, line) };
             tally(&mut counts, &diff.candidates, file_lang, line, &defs, 1);
+            if file_lang != Lang::Style {
+                class_prefixes.extend(
+                    tokens(line, class_byte).filter(|token| token.len() > 1 && token.ends_with('-')).map(str::to_string),
+                );
+            }
             for (name, kind) in defs {
                 if diff.candidates.contains(&name) {
                     defined.entry((name, kind)).or_insert_with(|| (path.clone(), index + 1));
@@ -303,7 +326,9 @@ fn orphans(repo: &Path, base: &str, head: &str) -> Result<Vec<Orphan>, String> {
         .into_iter()
         .filter_map(|((name, kind), (path, line))| {
             let head_counts = counts.get(&name).copied().unwrap_or_default();
-            if head_counts.refs(kind) > 0 {
+            if head_counts.refs(kind) > 0
+                || (kind == Kind::Class && class_prefixes.iter().any(|prefix: &String| name.starts_with(prefix.as_str())))
+            {
                 return None;
             }
             let delta = diff.delta.get(&name).copied().unwrap_or_default();

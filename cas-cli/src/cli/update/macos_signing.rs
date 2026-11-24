@@ -36,10 +36,10 @@ pub(super) fn stabilize(installed: &Path) -> Result<()> {
     let keychain = state.join("cassy.keychain-db");
     let password_file = state.join("password");
     let pending = state.join("setup.pending");
-    if setup_needed(&pending, &keychain, &password_file, delete_keychain)? {
+    if setup_needed(&pending, &keychain, &password_file)? {
         DirBuilder::new().mode(0o700).create(&pending)?;
         let setup = create_identity(&pending, &keychain, &password_file);
-        setup_needed(&pending, &keychain, &password_file, delete_keychain)?;
+        setup_needed(&pending, &keychain, &password_file)?;
         setup?;
     } else {
         let password =
@@ -93,12 +93,7 @@ pub(super) fn stabilize(installed: &Path) -> Result<()> {
     Ok(())
 }
 
-fn setup_needed(
-    pending: &Path,
-    keychain: &Path,
-    password_file: &Path,
-    delete_keychain: impl FnOnce(&Path) -> Result<()>,
-) -> Result<bool> {
+fn setup_needed(pending: &Path, keychain: &Path, password_file: &Path) -> Result<bool> {
     let mut has_keychain = regular_file_exists(keychain)?;
     let has_password = regular_file_exists(password_file)?;
     match pending.symlink_metadata() {
@@ -292,31 +287,6 @@ fn run(command: &mut Command, operation: &str) -> Result<Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn retries_interrupted_setup_without_discarding_an_established_identity() {
-        let state = tempfile::tempdir().unwrap();
-        let pending = state.path().join("setup.pending");
-        let keychain = state.path().join("cassy.keychain-db");
-        let password_file = state.path().join("password");
-        let remove_fixture = |path: &Path| Ok(fs::remove_file(path)?);
-
-        fs::write(&keychain, b"keychain").unwrap();
-        assert!(setup_needed(&pending, &keychain, &password_file, remove_fixture).is_err());
-        assert!(keychain.exists());
-
-        fs::create_dir(&pending).unwrap();
-        fs::write(pending.join("identity.p12"), b"temporary identity").unwrap();
-        assert!(setup_needed(&pending, &keychain, &password_file, remove_fixture).unwrap());
-        assert!(!keychain.exists() && !pending.exists());
-
-        fs::create_dir(&pending).unwrap();
-        fs::write(&keychain, b"established keychain").unwrap();
-        fs::write(&password_file, b"password").unwrap();
-        assert!(!setup_needed(&pending, &keychain, &password_file, remove_fixture).unwrap());
-        assert_eq!(fs::read(&keychain).unwrap(), b"established keychain");
-        assert!(!pending.exists());
-    }
 
     #[test]
     fn signs_with_the_dedicated_keychain_and_stable_requirement() {

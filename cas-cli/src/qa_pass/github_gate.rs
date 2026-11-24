@@ -520,7 +520,7 @@ fn graphql_pull_request_id(tokens: &[&str]) -> Option<String> {
         .filter_map(|(index, token)| {
             let field = match *token {
                 "-f" | "-F" | "--raw-field" | "--field" => tokens.get(index + 1).copied(),
-                _ => ["--field=", "--raw-field=", "-f", "-F"].iter()
+                _ => ["--field=", "--raw-field=", "-f", "-F"].into_iter()
                     .find_map(|prefix| token.strip_prefix(prefix)),
             }?;
             field.split_once('=')
@@ -529,7 +529,7 @@ fn graphql_pull_request_id(tokens: &[&str]) -> Option<String> {
         let value = match *token {
             "<<<" | "-d" | "--data" | "--data-raw" | "--data-binary" | "--json" =>
                 tokens.get(index + 1).copied(),
-            _ => ["<<<", "--data=", "--data-raw=", "--data-binary=", "--json=", "-d"].iter()
+            _ => ["<<<", "--data=", "--data-raw=", "--data-binary=", "--json=", "-d"].into_iter()
                 .find_map(|prefix| token.strip_prefix(prefix)),
         }?;
         serde_json::from_str(value).ok()

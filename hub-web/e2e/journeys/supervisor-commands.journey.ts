@@ -232,7 +232,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("The loaded-build badge survives a Commander refresh", async () => {
         await page.reload();
         await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toHaveCount(1);
-        await conversationRow(page).click();
+        // A phone restores the open conversation over the list; a desktop shows both.
+        if (await conversationRow(page).isVisible()) await conversationRow(page).click();
         await expect(page.getByTestId("conversation-cassy")).toContainText("9.99.2");
       });
       await journey.stage("Open the header dropdown beside its button, then submit typed reload-cassy without chat", async () => {

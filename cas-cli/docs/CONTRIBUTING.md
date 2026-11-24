@@ -1547,7 +1547,7 @@ proof reference and the id and SHA-256 of each committed artifact
 dispatch insert, and the automatic verifier is handed that recorded inventory,
 never a later listing; an artifact it can no longer fetch with the recorded
 digest stops the launch. Light depth does not exempt these tasks at close or
-before a merge. An ordinary close of such a task accepts only the latest typed
+before a merge, and `task update status=closed` refuses them (G-68). An ordinary close of such a task accepts only the latest typed
 dispatch, resolved, with an Approved verdict whose record equals the current
 reference and artifacts; the verdict is read once and an unreadable one refuses
 the close (G-68). A missing or different record, a Skipped verdict or a legacy

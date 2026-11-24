@@ -2483,6 +2483,17 @@ impl CasCore {
             if new_status == TaskStatus::Closed
                 && task.status != TaskStatus::Closed
                 && self.load_config().verification_enabled()
+                && super::lifecycle::close_ops::no_code_report_is_deliverable(&task)
+            {
+                return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                    "VERIFICATION REQUIRED: task {} is a no-code report, so update status=closed cannot close it. \
+                     Use task action=close, which requires an approved independent verdict for the current report.",
+                    task.id
+                ))));
+            }
+            if new_status == TaskStatus::Closed
+                && task.status != TaskStatus::Closed
+                && self.load_config().verification_enabled()
                 && task.depth != cas_types::TaskDepth::Light
                 && crate::harness_policy::verification_required_for_task_type(task.task_type)
             {

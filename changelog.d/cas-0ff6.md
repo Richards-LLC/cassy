@@ -12,6 +12,6 @@
   report published after the request is not reviewed under it. A later close
   compares them, so a rejected, revised, republished or revoked report needs a
   new passing verdict, a skipped, dispatch-less or unreadable verdict no longer
-  closes one, and nothing written in task notes changes what an approval
-  covers. Importing a peer's unchanged report keeps its approval throughout the
+  closes one, `task update status=closed` refuses one, and nothing written in
+  task notes changes what an approval covers. Importing a peer's unchanged report keeps its approval throughout the
   import. Mechanical no-code chores are unchanged.

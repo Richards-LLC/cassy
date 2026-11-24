@@ -127,6 +127,7 @@ None of these has a house counterpart; they are the console's own measurements a
 | 67 | `--mobile-attention-label-width` 200px | **keep** | landscape label column |
 | 68 | `--fleet-card-min-width` 260px | **retired** with the fleet grid in Unit 3 (Unit 7 amendment: no interim consumer ever existed; 0 uses) | the session card grid is replaced by the hero figure and the ledger (brief: *Deliberately omitted*) |
 | 72 | `--rail-item-min` 44px | **keep** | phone touch floor (D7) |
+| 72a | `--pill-action-height` 32px | **added** for both schemes (glass sets the same value) | desktop icon pills: account ↻ and ⋯, login Copy |
 | 74 | `--browser-notice-height` 32px | **keep** | unsupported-browser line |
 | 75 | `--attention-payload-max-height` 180px | **keep**; the rule that uses it already declares `overflow: auto` | satisfies `container.text-box-height` (a fixed height with a scroll strategy on the same rule) |
 

@@ -77,6 +77,7 @@ try {
     "--mobile-pane-min-width": "260px",
     "--mobile-attention-label-width": "200px",
     "--rail-item-min": "44px",
+    "--pill-action-height": "32px",
     "--browser-notice-height": "32px",
     // Layout viewport height; the visualViewport fallback overrides it inline while a phone keyboard is up (cas-edc9).
     "--keyboard-viewport-height": "100dvh",

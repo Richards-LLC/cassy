@@ -2900,7 +2900,7 @@ button.chip:disabled { cursor: default; }
 .launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
 .launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
 /* One Copy style for every login command: the outlined pill Accounts uses. */
-.launch-login button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.launch-login button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
 .launch-login button:hover, .accounts-login button:hover { background: var(--bg-hover); }
 .launch-account-note { padding-inline: 0; }
 .launch-retry { justify-self: start; width: auto; min-height: 36px; font-size: var(--fs-meta); }
@@ -3824,7 +3824,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-not-offered[open] > summary { margin-bottom: var(--space-1); }
 /* The ↻ usage check (account-usage-check.ts), shared by Accounts and New session. */
 .account-usage-check { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.account-refresh { display: inline-grid; place-items: center; inline-size: var(--pill-action-height); block-size: var(--pill-action-height); min-width: 0; min-height: 0; padding: 0; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink-mid); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms ease; }
+.account-refresh { display: inline-grid; place-items: center; inline-size: var(--pill-action-height); block-size: var(--pill-action-height); min-width: 0; min-height: 0; padding: 0; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink-mid); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms ease; }
 .account-refresh svg { inline-size: 16px; block-size: 16px; }
 .account-refresh:hover:not(:disabled) { background: var(--bg-hover); color: var(--ink); }
 .account-refresh:active:not(:disabled) { transform: scale(0.94); }

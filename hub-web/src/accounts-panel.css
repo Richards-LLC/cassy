@@ -58,7 +58,7 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-skeleton .accounts-who { grid-template-columns: auto minmax(0, 1fr); }
 .accounts-actions, .accounts-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .accounts-actions { flex-wrap: nowrap; }
-.accounts-menu button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-menu button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
 .accounts-menu button:hover:not(:disabled), .accounts-login button:hover { background: var(--bg-hover); }
 .accounts-actions button[data-operation="remove"] { color: var(--crit-bg); border-color: var(--crit-bg); }
 .accounts-menu button:disabled { cursor: not-allowed; border-style: dashed; color: var(--ink-mid); }
@@ -69,10 +69,10 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-editor { margin-top: var(--space-4); padding: var(--card-padding); border: 2px solid var(--color-action); border-radius: var(--radius-surface); background: var(--bg-raised); }
 .accounts-cleanup-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); padding: var(--space-2) var(--space-2) var(--space-2) var(--card-padding); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-surface); background: var(--bg-raised); font-size: var(--fs-meta); }
 .accounts-cleanup-banner p { margin: 0; }
-.accounts-cleanup-banner button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-cleanup-banner button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
 .accounts-cleanup-banner button:disabled { border-style: dashed; color: var(--ink-mid); cursor: not-allowed; }
 .accounts-more { position: relative; }
-.accounts-more > summary { display: inline-flex; align-items: center; justify-content: center; min-width: var(--pill-action-height); min-height: var(--pill-action-height); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); cursor: pointer; list-style: none; font-size: var(--fs-md); }
+.accounts-more > summary { display: inline-flex; align-items: center; justify-content: center; min-width: var(--pill-action-height); min-height: var(--pill-action-height); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); cursor: pointer; list-style: none; font-size: var(--fs-md); }
 .accounts-more > summary::-webkit-details-marker { display: none; }
 .accounts-more > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .accounts-menu { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
@@ -117,6 +117,6 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-menu > .account-usage-menu { display: none; }
 .accounts-duplicate { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 .accounts-duplicate code { font-family: var(--font-mono); font-size: var(--fs-xs); }
-.accounts-duplicate button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--crit-bg); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--crit-bg); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-duplicate button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--crit-bg); border-radius: var(--radius-pill); background: transparent; color: var(--crit-bg); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
 .accounts-duplicate button:disabled { border-style: dashed; color: var(--ink-mid); border-color: var(--line-strong); cursor: not-allowed; }
 .accounts-row .meter-value--none { color: var(--ink-mid); }

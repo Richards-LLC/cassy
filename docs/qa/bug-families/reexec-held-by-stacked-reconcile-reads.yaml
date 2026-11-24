@@ -1,0 +1,4 @@
+title: Factory reexec refuses behind reconcile reads that stacked while the external lane was held
+found: '2026-11-24'
+tasks: [cas-ef58]
+journeys: [FACTORY-SUPERVISE]

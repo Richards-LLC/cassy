@@ -125,3 +125,5 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-row .meter-value--none { color: var(--ink-mid); }
 .accounts-nowrap { white-space: nowrap; }
 .accounts-sub.accounts-why { white-space: normal; overflow: visible; }
+/* The summary hugs its lines; the cleanup confirmation under the banner takes the full width (the dialog form has no intrinsic width). */
+.accounts-summary > .accounts-editor { justify-self: stretch; }

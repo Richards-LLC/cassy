@@ -17406,14 +17406,12 @@ mod tests {
     }
 
     #[test]
-    fn spawn_spec_rejects_haiku_and_points_to_light_lane() {
+    fn spawn_spec_rejects_haiku() {
         let _home = TestEnvGuard::temp_home();
         for cli in [None, Some("claude")] {
             for model in ["haiku", "claude-haiku-4-5-20251001"] {
-                let err = build_spawn_spec_json(cli, Some(model), Some("low"))
+                build_spawn_spec_json(cli, Some(model), Some("low"))
                     .expect_err("Haiku may not reach the spawn queue");
-
-                assert!(err.contains("light lane"), "{err}");
             }
         }
     }

@@ -1508,13 +1508,15 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
                     &super::lane_lock_path(cas_root, &repo).unwrap_or_default(),
                 )
             })?;
-    let _slot = super::admit_daemon_build(cas_root).map_err(|cause| {
-        super::recorded_refusal(
-            cas_root,
-            &repo,
-            &cause,
-            crate::factory_capacity_wait::CapacityKind::Other,
-        )
+    let _slot = super::admit(&super::queue_command(cas_root, args), || {
+        super::admit_daemon_build(cas_root).map_err(|cause| {
+            super::recorded_refusal(
+                cas_root,
+                &repo,
+                &cause,
+                crate::factory_capacity_wait::CapacityKind::Other,
+            )
+        })
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
     if invocation.runner == "playwright" {

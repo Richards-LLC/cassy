@@ -23,6 +23,7 @@ pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_pat
 pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
+mod doc_fragment_gate;
 mod merge_queue_proof;
 mod verified_delivery;
 mod epic_autoclose;

@@ -32,10 +32,11 @@ mkdir -p target
 cargo check -p affected-crate --tests > target/worker-check.log 2>&1 &
 ```
 
-The PreToolUse hook routes this through the capped runner, which uses your
-private target cache and refuses past the build guard or `max_concurrent_builders`.
-After a refusal retry later; never bypass it with another toolchain, environment
-override, wrapper, broader flags or command. If a check runs as raw `cargo` (no
+Always background capped runs. The PreToolUse hook routes this through the
+capped runner, which uses your private target cache and queues behind the build
+guard and `max_concurrent_builders`: it starts when capacity frees and wakes you
+once with the result, so end your turn. Never bypass the queue with another
+toolchain, environment override, wrapper, broader flags or command. If a check runs as raw `cargo` (no
 `check: PASS` line), stop it and report a blocker. Success records
 `check: PASS <sha>` against the clean commit and close imports it; a changed
 tree needs a new check. Neither shape executes tests.
@@ -101,11 +102,13 @@ on the epic.
 
 ## Capacity waits
 
-A capped refusal for builder slots, CPU/memory pressure or disk headroom is not
-a blocker: keep the task InProgress, arm one retry reminder for the recorded
-retry time, end the turn and retry the same command. Do not set status=blocked
-or page the supervisor for capacity alone; Cassy reports long waits itself.
-Report an actual need for supervisor action through the ordinary blocker path.
+Waiting for builder slots, CPU/memory pressure or disk headroom is not a
+blocker. A backgrounded run queues and wakes you once when it finishes; end the
+turn, with no sleep or retry reminder. A foreground run is refused instead and
+names the backgrounded command to run once. Keep the task InProgress; do not set
+status=blocked or page the supervisor for capacity alone; Cassy reports long
+waits itself. Report an actual need for supervisor action through the ordinary
+blocker path.
 
 ## Browser checks
 

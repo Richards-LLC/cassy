@@ -117,7 +117,7 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-actions .account-usage-result:not(.is-error) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .accounts-tag { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
 /* Desktop keeps ↻ beside ⋯; the menu's copy of the check is for the phone. */
-.accounts-menu > .account-usage-menu { display: none; }
+@media (min-width: 601px) { .accounts-menu > .account-usage-menu { display: none; } }
 .accounts-duplicate { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 .accounts-duplicate code { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .accounts-duplicate button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--crit-bg); border-radius: var(--radius-pill); background: transparent; color: var(--crit-bg); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }

@@ -36,6 +36,16 @@ describe("supervisor slash commands", () => {
       }
       commands.dispose();
     }
+    // An alias needs its slash: "\\reload-cassy" is ordinary chat text.
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const input = document.querySelector("textarea")!;
+    const run = vi.fn().mockResolvedValue(undefined);
+    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    input.value = "\\reload-cassy";
+    expect(commands.submit()).toBe(false);
+    await Promise.resolve();
+    expect(run).not.toHaveBeenCalled();
+    commands.dispose();
   });
   it("filters command suggestions but submits only an exact supported command", async () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';

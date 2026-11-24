@@ -155,7 +155,7 @@ export class SlashCommands {
     const trimmed = this.input.value.trim();
     if (trimmed === "/mcp" || trimmed === "/reload-cassy") this.input.value = trimmed;
     const token = this.input.value.split(/\s/, 1)[0];
-    const command = commands.find(item => `/${item.id}` === token || COMMAND_ALIASES[token.slice(1)] === item.id);
+    const command = commands.find(item => `/${item.id}` === token || (token.startsWith("/") && COMMAND_ALIASES[token.slice(1)] === item.id));
     if (!command) return false;
     this.escaped = false; this.open = true; this.sync();
     if (this.pending || this.options.unavailable()) return true;

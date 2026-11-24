@@ -444,18 +444,6 @@ pub(crate) fn verifier_lane_active(
     })
 }
 
-/// Test fixture: a task's review checkouts last used an hour ago.
-#[cfg(test)]
-pub(crate) fn age_task_checkouts(cas: &Path, task_id: &str) {
-    let cas = cas.canonicalize().unwrap();
-    for entry in fs::read_dir(base(&cas).join(task_id)).unwrap() {
-        let directory = entry.unwrap().path();
-        let mut record = owner(&cas, &directory).unwrap();
-        record.last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
-        write_owner(&directory, &record).unwrap();
-    }
-}
-
 /// A verifier is progressing while its child identity heartbeats or its
 /// verifier lane is active at the bound head. The daemon's deadline extension
 /// and the expired-claim recovery share this one definition.

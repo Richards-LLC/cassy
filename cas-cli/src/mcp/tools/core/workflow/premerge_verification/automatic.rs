@@ -3,7 +3,7 @@
 use super::*;
 use std::process::Stdio;
 
-const OWNER_KEY: &str = "automatic_premerge_dispatch";
+const OWNER_KEY: &str = cas_store::AUTOMATIC_PREMERGE_OWNER_KEY;
 
 pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
     dispatch.verifier_agent_id.as_deref().is_some_and(|id| {
@@ -369,16 +369,23 @@ pub(super) fn recover_expired_claim_with_probes(
     let Some(child) = dispatch.verifier_agent_id.as_deref().and_then(|id| agents.get(id).ok()) else {
         return Ok(dispatch.clone());
     };
-    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str()) {
+    // Only a claim whose child carries this dispatch's daemon marker is daemon
+    // owned. A child registered before the launcher stamped its machine has no
+    // machine id; the marker and a local owner are its proof of locality.
+    let machine = cas_types::Agent::get_or_generate_machine_id();
+    let daemon_owned = child.metadata.get(OWNER_KEY) == Some(&dispatch.id);
+    let local = child.machine_id.as_deref() == Some(machine.as_str())
+        || (child.machine_id.is_none() && daemon_owned && owner.machine_id.as_deref() == Some(machine.as_str()));
+    if !local {
         return Ok(dispatch.clone());
     }
     // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
-    // review authority needs positive death evidence, not that ambiguity.
-    // The daemon-hosted verifier shares its host's pid, so a verifier thread
-    // that vanished inside a live host still reads as alive. Past the deadline
-    // the daemon sweep extends only a progressing review; one with no heartbeat
-    // and no active verifier lane has stopped and cannot record a verdict.
-    let stalled = !crate::factory_review_scratch::verifier_progressing(&core.cas_root, dispatch, Some(&child), now);
+    // review authority needs positive death evidence, not that ambiguity. A
+    // daemon-hosted verifier shares its host's pid, so a stalled attempt inside
+    // a live host reads as alive; the daemon sweep extends only a progressing
+    // review, so one with no heartbeat and no active lane has stopped.
+    let stalled = daemon_owned
+        && !crate::factory_review_scratch::verifier_progressing(&core.cas_root, dispatch, Some(&child), now);
     let confirmed_dead = stalled || child.status == cas_types::AgentStatus::Shutdown
         || child.pid.is_some_and(|pid| {
             if !pid_alive(pid) { return true; }
@@ -507,6 +514,7 @@ fn launch_with_preparation(
     // The daemon owns this identity and submits the harness's structured
     // verdict. The subprocess never receives a credential or this identity.
     child.pid = Some(std::process::id());
+    child.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
     crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
     child.metadata.insert(OWNER_KEY.into(), live.id.clone());
     child.factory_session = core

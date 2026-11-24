@@ -13823,7 +13823,7 @@ printf '}'
         git(&["remote", "set-url", "origin", "https://github.com/old/project.git"]);
         let candidate_task = Task::new("cas-candidate-pr".into(), "Candidate-only verifier fixture".into());
         open_task_store(&cas_root).unwrap().add(&candidate_task).unwrap();
-        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let core = crate::mcp::CasCore::with_daemon(cas_root.clone(), None, None);
         let candidate = core.build_completion_candidate(&candidate_task, repo.path(), "factory/proof", "fixture-target").unwrap();
         assert_ne!(candidate.proof.head_commit, head);
         let candidate_dispatch = cas_store::create_verification_dispatch_bound(

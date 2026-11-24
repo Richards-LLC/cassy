@@ -10735,12 +10735,17 @@ impl CasCore {
                 // A verdict authorizes only the exact durable proof cycle it
                 // resolved. Task-wide rows remain readable for legacy timeout
                 // diagnostics but can never authorize a current close.
-                let latest = if report_covered && !matches!(report_gate, super::report_proof::ReportGate::Bound { .. }) {
-                    Ok(None)
-                } else if typed_dispatch.is_some() {
-                    resolved_verdict
-                } else {
-                    close_cycle_verdict(&self.cas_root, None, task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()))
+                let latest = match &report_gate {
+                    super::report_proof::ReportGate::Exempt if typed_dispatch.is_some() => resolved_verdict,
+                    super::report_proof::ReportGate::Exempt => {
+                        close_cycle_verdict(&self.cas_root, None, task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()))
+                    }
+                    super::report_proof::ReportGate::Bound { dispatch, verdict, .. }
+                        if typed_dispatch.as_ref().is_some_and(|typed| &typed.id == dispatch) =>
+                    {
+                        resolved_verdict.map(|found| found.filter(|found| &found.id == verdict))
+                    }
+                    _ => Ok(None),
                 };
 
                 // Typed state is authoritative for new dispatches. The legacy

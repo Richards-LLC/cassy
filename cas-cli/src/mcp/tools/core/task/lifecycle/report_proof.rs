@@ -14,7 +14,7 @@ pub(crate) struct ReportProof {
 pub(crate) enum ReportGate {
     Exempt,
     Bound { dispatch: String, verdict: String, proof: ReportProof },
-    Held { dispatch: String },
+    Held,
     Mint(ReportProof),
 }
 
@@ -26,7 +26,7 @@ impl ReportGate {
     pub(crate) fn proof_to_record(&self) -> Option<String> {
         match self {
             Self::Mint(proof) | Self::Bound { proof, .. } => serde_json::to_string(proof).ok(),
-            Self::Exempt | Self::Held { .. } => None,
+            Self::Exempt | Self::Held => None,
         }
     }
 }
@@ -90,7 +90,7 @@ pub(crate) fn require_report_verdict(root: &Path, stored: &Task, effective: &Tas
     };
     let active = matches!(dispatch.state, VerificationDispatchState::Pending | VerificationDispatchState::Claimed);
     let Some(recorded) = recorded else {
-        return Ok(if active { ReportGate::Held { dispatch: dispatch.id } } else { ReportGate::Mint(current) });
+        return Ok(if active { ReportGate::Held } else { ReportGate::Mint(current) });
     };
     if recorded != current {
         cas_store::invalidate_verification_dispatch_for_proof_drift(root, &dispatch.id)
@@ -98,7 +98,7 @@ pub(crate) fn require_report_verdict(root: &Path, stored: &Task, effective: &Tas
         return Ok(ReportGate::Mint(current));
     }
     if active {
-        return Ok(ReportGate::Held { dispatch: dispatch.id });
+        return Ok(ReportGate::Held);
     }
     if dispatch.state != VerificationDispatchState::Resolved {
         return Ok(ReportGate::Mint(current));

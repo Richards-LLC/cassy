@@ -137,6 +137,15 @@ pub(crate) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<T
         tier = VerificationTier::Standard;
         reason = format!("A supervisor set the {FORCE_VERIFIER_LABEL} label.");
     }
+    // GH #2417: a no-code spike's report is its whole deliverable, so landing it
+    // as docs never makes it exempt from an independent verdict.
+    if tier == VerificationTier::Mechanical
+        && task.task_type == TaskType::Spike
+        && task.execution_note.as_deref() == Some("no-code")
+    {
+        tier = VerificationTier::Standard;
+        reason = "A no-code spike's report is its deliverable and needs an independent verdict.".to_string();
+    }
     Some(TierDecision { tier, reason, tip: tip.to_string() })
 }
 

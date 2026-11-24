@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    process::Command,
     time::Duration,
 };
 
@@ -11,8 +12,9 @@ use cas_types::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{PrMetadata, origin_identity, repo_identity, same_repository};
+use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 use crate::mcp::tools::core::{
-    task::repo_context::{BoundedRepoProbe, git_layout, resolve_repo_context},
+    task::repo_context::{git_layout, resolve_repo_context},
     workflow::premerge_verification::{
         CANDIDATE_COMMIT_PREFIX, Candidate, original_candidate_at_ref,
     },
@@ -28,7 +30,7 @@ pub(super) fn merge_refusal(
     match check_pr(cas_root, cwd, pr, supervisor) {
         Ok(refusal) => refusal,
         Err(error) => {
-            tracing::warn!(%error, "Raw GitHub merge: verifier state unreadable");
+            tracing::warn!(code = "PR_VERIFIER_STATE_UNREADABLE", %error, "Raw GitHub merge: verifier state unreadable");
             None
         }
     }
@@ -100,27 +102,55 @@ fn source_candidates(cas_root: &Path, cwd: &Path, head: &str, repository: &str) 
     if !cas_root.join("verification-candidates").is_dir() {
         return Vec::new();
     }
-    let mut directories: HashSet<_> = [cas_root, cwd].into_iter()
-        .filter_map(|path| git_layout(path).ok().map(|(root, _)| root)).collect();
-    if let Ok(registry) = open_host_known_repo_store() {
-        if let Ok(repos) = registry.list() {
-            directories.extend(repos.into_iter().map(|repo| repo.path));
-        }
-        if let Ok(bindings) = registry.list_bindings() {
-            directories.extend(bindings.into_iter().map(|binding| binding.repo_root));
+    let mut failures = Vec::new();
+    let mut directories = HashSet::new();
+    for path in [cas_root, cwd] {
+        match git_layout(path) {
+            Ok((root, _)) => { directories.insert(root); }
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
         }
     }
-    let probe = BoundedRepoProbe::new(
-        crate::bounded_process::Deadline::after(Duration::from_secs(4)),
-        Duration::from_secs(1),
-        directories.len(),
-    );
+    match open_host_known_repo_store() {
+        Ok(registry) => {
+            match registry.list() {
+                Ok(repos) => directories.extend(repos.into_iter().map(|repo| repo.path)),
+                Err(error) => failures.push(format!("known-repo registry: {error}")),
+            }
+            match registry.list_bindings() {
+                Ok(bindings) => directories.extend(bindings.into_iter().map(|binding| binding.repo_root)),
+                Err(error) => failures.push(format!("known-repo registry: {error}")),
+            }
+        }
+        Err(error) => failures.push(format!("known-repo registry: {error}")),
+    }
+    let deadline = Deadline::after(Duration::from_secs(4));
+    let total = directories.len();
+    let mut skipped = 0;
     let mut candidates = Vec::new();
-    for directory in directories {
-        let Ok(refs) = probe.output(&directory, &[
+    for (index, directory) in directories.into_iter().enumerate() {
+        let mut command = Command::new("git");
+        command.current_dir(&directory).args([
             "for-each-ref", "--format=%(objectname)%09%(parent)%09%(tree)%09%(refname:strip=3)%09%(subject)",
             "refs/cas/verification-candidates/",
-        ]) else { continue };
+        ]);
+        let output = match run_command(&mut command, deadline, Duration::from_secs(1)) {
+            Ok(output) if output.status.success() => output,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr.lines().find(|line| !line.trim().is_empty()).unwrap_or("no error output");
+                failures.push(format!("{}: {detail}", directory.display()));
+                continue;
+            }
+            Err(BoundedCommandError::TimedOut) if deadline.remaining().is_zero() => {
+                skipped = total - index;
+                break;
+            }
+            Err(error) => {
+                failures.push(format!("{}: {error:?}", directory.display()));
+                continue;
+            }
+        };
+        let refs = String::from_utf8_lossy(&output.stdout);
         let mut matching = refs.lines().filter_map(|line| {
             let mut fields = line.splitn(5, '\t');
             let (commit, parents, tree, key, subject) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?, fields.next()?);
@@ -139,6 +169,11 @@ fn source_candidates(cas_root: &Path, cwd: &Path, head: &str, repository: &str) 
                 Err(error) => tracing::warn!(%commit, %error, "Raw GitHub merge: verifier candidate unreadable"),
             }
         }
+    }
+    if !failures.is_empty() || skipped != 0 {
+        tracing::warn!(code = "PR_VERIFIER_DISCOVERY_FAILED", failed = failures.len(), skipped,
+            first = %failures.first().map(String::as_str).unwrap_or("deadline expired"),
+            "Raw GitHub merge: verifier candidate discovery incomplete");
     }
     candidates
 }
@@ -161,13 +196,11 @@ fn check_pr(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     let candidates = source_candidates(cas_root, cwd, head, &repo);
+    let head_repo = pr.head_repository_identity();
     let mut decided = HashSet::new();
     let mut receipt_repos = HashMap::new();
     for row in dispatch_rows(&conn, head, &candidates)? {
         let DispatchRow { id: dispatch_id, task_id, pr_number, source_branch, binding, .. } = row;
-        if decided.contains(&task_id) || (pr_number != Some(number) && source_branch != branch) {
-            continue;
-        }
         if let Binding::Receipt(target) = &binding {
             let matched = receipt_repos.entry((target.repo_selector.clone(), target.target_branch.clone()))
                 .or_insert_with(|| receipt_repo(cas_root, target)
@@ -176,6 +209,11 @@ fn check_pr(
                 continue;
             }
         }
+        let bound = match pr_number {
+            Some(recorded) => recorded == number,
+            None => source_branch == branch && head_repo.as_deref() == Some(repo.as_str()),
+        };
+        if decided.contains(&task_id) || !bound { continue; }
         let dispatch = cas_store::get_verification_dispatch_with_conn(&conn, &dispatch_id)?;
         if let Binding::Candidate(candidate) = binding
             && dispatch.repository.as_ref() != Some(&candidate.proof) {

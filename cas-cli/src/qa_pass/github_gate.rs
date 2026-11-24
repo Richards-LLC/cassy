@@ -21,14 +21,14 @@
 //!    or any other client is held to the same verdict. Setup:
 //!    `docs/qa/independent-qa-pass.md` ("GitHub required check").
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+use std::time::Duration;
 
 use cas_types::{QaPass, QaPassState, Task, TaskStatus};
 
 use super::{branch_binds_task, gate_applies, merge_gate};
+use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 use crate::config::QaConfig;
 
 mod verifier;
@@ -53,8 +53,7 @@ pub enum MergeSelector {
     CurrentBranch,
     Number(u64),
     Branch(String),
-    /// A merge the command alone cannot map to a PR, such as a GraphQL
-    /// `mergePullRequest` mutation keyed by node id.
+    PullRequestNodes { ids: Vec<String>, host: Option<String> },
     Unresolvable(&'static str),
 }
 
@@ -182,6 +181,10 @@ fn heredocs_opened_by(line: &str) -> Vec<(String, bool, bool)> {
 /// Raw GitHub merges a shell command would perform (cas-2ee2 pre-tool guard).
 /// `gh pr merge --disable-auto` merges nothing and is not reported.
 pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
+    github_merges_in_depth(command, 0)
+}
+
+fn github_merges_in_depth(command: &str, depth: usize) -> Vec<GithubMerge> {
     let mut merges = Vec::new();
     let command = strip_data_heredoc_bodies(command);
     let mut quote = None;
@@ -201,6 +204,13 @@ pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
         }
         false
     }) {
+        let words = shell_words::split(statement).ok();
+        let words = words.as_ref().map(|words| words.iter().map(String::as_str).collect::<Vec<_>>());
+        let invocation = words.as_deref().map(strip_command_prefixes);
+        if depth < 3 && let Some(script) = invocation.and_then(shell_script) {
+            merges.extend(github_merges_in_depth(&script, depth + 1));
+            continue;
+        }
         let tokens: Vec<&str> = statement
             .split_whitespace()
             .map(|token| token.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | '(' | ')')))
@@ -226,20 +236,74 @@ pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
             });
             continue;
         }
-        if ["mergePullRequest", "enablePullRequestAutoMerge"]
+        if ["mergePullRequest", "enablePullRequestAutoMerge", "enqueuePullRequest"]
             .iter()
             .any(|mutation| statement.contains(mutation))
         {
-            merges.push(GithubMerge {
-                transport: MergeTransport::Api,
-                selector: MergeSelector::Unresolvable("a GraphQL merge mutation names no branch"),
-                repo: None,
-                match_head: None,
-                statement: statement_text,
+            let (ids, complete) = invocation.map(graphql_merge_ids).unwrap_or_default();
+            let unresolved = !complete || ids.is_empty();
+            let mut push = |selector| merges.push(GithubMerge {
+                transport: MergeTransport::Api, selector, repo: None, match_head: None,
+                statement: statement_text.clone(),
             });
+            if !ids.is_empty() {
+                push(MergeSelector::PullRequestNodes {
+                    ids, host: invocation.and_then(hostname_flag).map(str::to_owned),
+                });
+            }
+            if unresolved {
+                push(MergeSelector::Unresolvable("a GraphQL merge mutation has an unresolved pull request node"));
+            }
         }
     }
     merges
+}
+
+fn program_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+fn strip_command_prefixes<'a, 'b>(mut words: &'a [&'b str]) -> &'a [&'b str] {
+    while let Some((program, rest)) = words.split_first() {
+        if program.split_once('=').is_some_and(|(name, _)| {
+            let mut bytes = name.bytes();
+            bytes.next().is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+                && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }) {
+            words = rest;
+            continue;
+        }
+        let wrapper = program_name(program);
+        if !matches!(wrapper, "env" | "sudo" | "command" | "exec" | "nohup" | "time" | "timeout") {
+            break;
+        }
+        words = rest;
+        while let Some((flag, after)) = words.split_first() {
+            if !flag.starts_with('-') || *flag == "-" { break; }
+            words = after;
+            if *flag == "--" { break; }
+            if matches!((wrapper, *flag),
+                ("env", "-u" | "--unset" | "-C" | "--chdir")
+                | ("sudo", "-u" | "--user")
+                | ("timeout", "-k" | "--kill-after" | "-s" | "--signal")) {
+                words = words.get(1..).unwrap_or_default();
+            }
+        }
+        if wrapper == "timeout" { words = words.get(1..).unwrap_or_default(); }
+    }
+    words
+}
+
+fn shell_script(words: &[&str]) -> Option<String> {
+    let (program, args) = words.split_first()?;
+    match program_name(program) {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" => args.iter().enumerate()
+            .take_while(|(_, flag)| flag.starts_with('-') && **flag != "--")
+            .find(|(_, flag)| !flag.starts_with("--") && flag.contains('c'))
+            .and_then(|(index, _)| args.get(index + 1)).map(|script| (*script).to_owned()),
+        "eval" => Some(args.join(" ")),
+        _ => None,
+    }
 }
 
 fn parse_pr_merge(args: &[&str], statement: &str) -> Option<GithubMerge> {
@@ -362,65 +426,28 @@ fn hostname_flag<'a>(tokens: &[&'a str]) -> Option<&'a str> {
     })
 }
 
-/// Run a command with a hard deadline; stdout on success.
-fn run_bounded(command: Command, timeout: Duration) -> Option<Vec<u8>> {
-    run_bounded_detailed(command, timeout).ok()
+#[track_caller]
+fn gh_run(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    run_command(command, Deadline::after(timeout), timeout).map_err(|error| {
+        let program = command.get_program().to_string_lossy();
+        match error {
+            BoundedCommandError::TimedOut => format!("`{program}` did not answer within {}s", timeout.as_secs()),
+            BoundedCommandError::Io => format!("`{program}` could not be started or read"),
+        }
+    })
 }
 
-/// [`run_bounded`] that says why it produced nothing: the program could not
-/// start, it timed out, or it exited non-zero (with its first stderr line).
-fn run_bounded_detailed(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
-    let program = command.get_program().to_string_lossy().into_owned();
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("`{program}` could not be started: {error}"))?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    let mut stderr = String::new();
-                    if let Some(mut pipe) = child.stderr.take() {
-                        let _ = pipe.read_to_string(&mut stderr);
-                    }
-                    let detail: String = stderr
-                        .lines()
-                        .map(str::trim)
-                        .find(|line| !line.is_empty())
-                        .unwrap_or("no error output")
-                        .chars()
-                        .take(200)
-                        .collect();
-                    return Err(format!("`{program}` exited with {status}: {detail}"));
-                }
-                let mut stdout = Vec::new();
-                child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| format!("`{program}` produced no output"))?
-                    .read_to_end(&mut stdout)
-                    .map_err(|error| format!("reading `{program}` output failed: {error}"))?;
-                return Ok(stdout);
-            }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "`{program}` did not answer within {}s",
-                    timeout.as_secs()
-                ));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("waiting for `{program}` failed: {error}"));
-            }
-        }
-    }
+fn gh_exit_error(command: &Command, output: &Output) -> String {
+    let detail: String = String::from_utf8_lossy(&output.stderr).lines()
+        .map(str::trim).find(|line| !line.is_empty()).unwrap_or("no error output")
+        .chars().take(200).collect();
+    format!("`{}` exited with {}: {detail}", command.get_program().to_string_lossy(), output.status)
+}
+
+#[track_caller]
+fn gh_output(command: &mut Command, timeout: Duration) -> Result<Vec<u8>, String> {
+    let output = gh_run(command, timeout)?;
+    if output.status.success() { Ok(output.stdout) } else { Err(gh_exit_error(command, &output)) }
 }
 
 #[derive(serde::Deserialize)]
@@ -430,8 +457,16 @@ struct PrMetadata {
     url: Option<String>,
     head_ref_name: Option<String>,
     head_ref_oid: Option<String>,
+    head_repository: Option<HeadRepo>,
+    head_repository_owner: Option<HeadOwner>,
     status_check_rollup: Option<Vec<serde_json::Value>>,
 }
+
+#[derive(serde::Deserialize)]
+struct HeadRepo { name: String }
+
+#[derive(serde::Deserialize)]
+struct HeadOwner { login: String }
 
 impl PrMetadata {
     fn repository(&self) -> Option<String> {
@@ -441,6 +476,13 @@ impl PrMetadata {
 
     fn branch(&self) -> Option<&str> {
         self.head_ref_name.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    }
+
+    fn head_repository_identity(&self) -> Option<String> {
+        let url = url::Url::parse(self.url.as_deref()?).ok()?;
+        let owner = &self.head_repository_owner.as_ref()?.login;
+        let name = &self.head_repository.as_ref()?.name;
+        repo_identity(&format!("{}/{owner}/{name}", url.host_str()?))
     }
 
     fn head(&self) -> Option<&str> {
@@ -454,6 +496,7 @@ impl PrMetadata {
 pub fn merge_pr_number(cwd: &Path, merge: &GithubMerge) -> Result<u64, String> {
     let selector = match &merge.selector {
         MergeSelector::Number(number) => return Ok(*number),
+        MergeSelector::PullRequestNodes { .. } => return Err("a GraphQL merge names pull requests by node id".into()),
         MergeSelector::Unresolvable(why) => return Err((*why).to_string()),
         MergeSelector::CurrentBranch => None,
         MergeSelector::Branch(branch) => Some(branch.as_str()),
@@ -467,7 +510,7 @@ pub fn merge_pr_number(cwd: &Path, merge: &GithubMerge) -> Result<u64, String> {
         command.args(["--repo", repo]);
     }
     command.args(["--json", "number"]).current_dir(cwd);
-    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
+    let stdout = gh_output(&mut command, GH_LOOKUP_TIMEOUT)?;
     serde_json::from_slice::<serde_json::Value>(&stdout)
         .ok()
         .and_then(|value| value.get("number").and_then(serde_json::Value::as_u64))
@@ -479,22 +522,8 @@ fn resolve_pr(cwd: &Path, merge: &GithubMerge) -> Result<PrMetadata, String> {
         MergeSelector::Number(number) => Some(number.to_string()),
         MergeSelector::Branch(branch) => Some(branch.clone()),
         MergeSelector::CurrentBranch => None,
-        MergeSelector::Unresolvable(why) => {
-            let words = shell_words::split(&merge.statement).map_err(|error| error.to_string())?;
-            let tokens: Vec<&str> = words.iter().map(String::as_str).collect();
-            let id = graphql_pull_request_id(&tokens).ok_or_else(|| why.to_string())?;
-            let mut command = Command::new(gh_bin());
-            command.args([
-                "api", "graphql", "-f", "query=query($id: ID!) { node(id: $id) { ... on PullRequest { number url headRefName headRefOid } } }", "-f",
-            ]).arg(format!("id={id}")).current_dir(cwd);
-            if let Some(host) = hostname_flag(&tokens) {
-                command.args(["--hostname", host]);
-            }
-            let bytes = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
-            let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-            return serde_json::from_value(body["data"]["node"].clone())
-                .map_err(|error| format!("GitHub did not resolve the pull request node: {error}"));
-        }
+        MergeSelector::Unresolvable(why) => return Err((*why).into()),
+        MergeSelector::PullRequestNodes { .. } => return Err("a GraphQL merge names pull requests by node id".into()),
     };
     let mut command = Command::new(gh_bin());
     command.args(["pr", "view"]);
@@ -505,17 +534,61 @@ fn resolve_pr(cwd: &Path, merge: &GithubMerge) -> Result<PrMetadata, String> {
         command.args(["--repo", repo]);
     }
     let fields = if merge.transport == MergeTransport::PrCommand {
-        "number,url,headRefName,headRefOid,statusCheckRollup"
+        "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner,statusCheckRollup"
     } else {
-        "number,url,headRefName,headRefOid"
+        "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner"
     };
     command.args(["--json", fields]).current_dir(cwd);
-    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
+    let stdout = gh_output(&mut command, GH_LOOKUP_TIMEOUT)?;
     serde_json::from_slice(&stdout)
         .map_err(|error| format!("`gh pr view` returned unreadable JSON: {error}"))
 }
 
-fn graphql_pull_request_id(tokens: &[&str]) -> Option<String> {
+fn resolve_prs(cwd: &Path, merge: &GithubMerge) -> Vec<Result<PrMetadata, String>> {
+    match &merge.selector {
+        MergeSelector::PullRequestNodes { ids, host } => resolve_nodes(cwd, ids, host.as_deref()),
+        _ => vec![resolve_pr(cwd, merge)],
+    }
+}
+
+fn resolve_nodes(cwd: &Path, ids: &[String], host: Option<&str>) -> Vec<Result<PrMetadata, String>> {
+    let variables = (0..ids.len()).map(|index| format!("$id{index}: ID!")).collect::<Vec<_>>().join(", ");
+    let selections = (0..ids.len()).map(|index| format!("n{index}: node(id: $id{index}) {{ ...pr }}")).collect::<Vec<_>>().join(" ");
+    let mut command = Command::new(gh_bin());
+    command.args(["api", "graphql", "-f"]).arg(format!(
+        "query=query({variables}) {{ {selections} }} fragment pr on PullRequest {{ number url headRefName headRefOid headRepository {{ name }} headRepositoryOwner {{ login }} }}"
+    )).current_dir(cwd);
+    for (index, id) in ids.iter().enumerate() {
+        command.arg("-f").arg(format!("id{index}={id}"));
+    }
+    if let Some(host) = host { command.args(["--hostname", host]); }
+    let fail_all = |error: String| ids.iter().map(|_| Err(error.clone())).collect();
+    let output = match gh_run(&mut command, GH_LOOKUP_TIMEOUT) {
+        Ok(output) => output,
+        Err(error) => return fail_all(error),
+    };
+    let body = serde_json::from_slice::<serde_json::Value>(&output.stdout);
+    let Some(data) = body.as_ref().ok().and_then(|body| body["data"].as_object()) else {
+        let error = if output.status.success() {
+            "`gh api graphql` returned no pull request data".into()
+        } else { gh_exit_error(&command, &output) };
+        return fail_all(error);
+    };
+    let errors = body.as_ref().ok().and_then(|body| body["errors"].as_array());
+    (0..ids.len()).map(|index| {
+        let alias = format!("n{index}");
+        if let Some(value) = data.get(&alias).filter(|value| value.is_object()) {
+            return serde_json::from_value(value.clone()).map_err(|error| format!("Unreadable pull request data: {error}"));
+        }
+        let detail = errors.into_iter().flatten()
+            .find(|error| error["path"][0].as_str() == Some(alias.as_str()))
+            .and_then(|error| error["message"].as_str())
+            .unwrap_or("GitHub did not resolve the pull request node");
+        Err(detail.to_owned())
+    }).collect()
+}
+
+fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
     let fields: std::collections::HashMap<&str, &str> = tokens.iter().enumerate()
         .filter_map(|(index, token)| {
             let field = match *token {
@@ -535,31 +608,38 @@ fn graphql_pull_request_id(tokens: &[&str]) -> Option<String> {
         serde_json::from_str(value).ok()
     });
     let query = match &body {
-        Some(body) => body.get("query")?.as_str()?,
-        None => fields.get("query").copied()?,
+        Some(body) => body.get("query").and_then(serde_json::Value::as_str),
+        None => fields.get("query").copied(),
     };
+    let Some(query) = query else { return (Vec::new(), false); };
     static MERGE_INPUT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(concat!(
-            r"\b(?:mergePull", r"Request|enablePull", r"RequestAutoMerge)\s*\(\s*input\s*:\s*",
-            r#"(?:\$(\w+)|\{[^}]*?\bpullRequestId\s*:\s*(?:\$(\w+)|"([^"]+)"))"#,
+            r"\b(?:mergePull", r"Request|enablePull", r"RequestAutoMerge|enqueuePull", r"Request)\s*\(",
+            r#"(?:\s*input\s*:\s*(?:\$(\w+)|\{[^}]*?\bpullRequestId\s*:\s*(?:\$(\w+)|"([^"]+)")))?"#,
         )).expect("valid GraphQL input pattern")
     });
-    let captures = MERGE_INPUT.captures(query)?;
-    let id = if let Some(name) = captures.get(1) {
-        let name = name.as_str();
-        match &body {
-            Some(body) => body.get("variables")?.get(name)?.get("pullRequestId")?.as_str()?,
-            None => fields.get(format!("{name}[pullRequestId]").as_str()).copied()?,
+    let mut ids = Vec::new();
+    let mut complete = true;
+    for captures in MERGE_INPUT.captures_iter(query) {
+        let id = if let Some(name) = captures.get(1).map(|name| name.as_str()) {
+            match &body {
+                Some(body) => body["variables"][name]["pullRequestId"].as_str(),
+                None => fields.get(format!("{name}[pullRequestId]").as_str()).copied(),
+            }
+        } else if let Some(name) = captures.get(2).map(|name| name.as_str()) {
+            match &body {
+                Some(body) => body["variables"][name].as_str(),
+                None => fields.get(name).copied(),
+            }
+        } else {
+            captures.get(3).map(|id| id.as_str())
+        };
+        match id.filter(|id| !id.is_empty() && !id.starts_with('@')) {
+            Some(id) => ids.push(id.to_owned()),
+            None => complete = false,
         }
-    } else if let Some(name) = captures.get(2) {
-        match &body {
-            Some(body) => body.get("variables")?.get(name.as_str())?.as_str()?,
-            None => fields.get(name.as_str()).copied()?,
-        }
-    } else {
-        captures.get(3)?.as_str()
-    };
-    (!id.is_empty() && !id.starts_with('@')).then(|| id.to_string())
+    }
+    (ids, complete)
 }
 
 fn repo_identity(value: &str) -> Option<String> {
@@ -661,11 +741,12 @@ pub(crate) fn github_merge_refusal_with_supervisor(
 ) -> Option<String> {
     let mut lookups = Vec::new();
     for merge in github_merges_in(command) {
-        let lookup = resolve_pr(cwd, &merge);
-        if let Ok(pr) = &lookup && let Some(refusal) = pr_ci_refusal(pr, &merge) {
-            return Some(refusal);
+        for lookup in resolve_prs(cwd, &merge) {
+            if let Ok(pr) = &lookup && let Some(refusal) = pr_ci_refusal(pr, &merge) {
+                return Some(refusal);
+            }
+            lookups.push((merge.clone(), lookup));
         }
-        lookups.push((merge, lookup));
     }
     if lookups.is_empty() { return None; }
     for (_, lookup) in &lookups {
@@ -673,7 +754,7 @@ pub(crate) fn github_merge_refusal_with_supervisor(
             Ok(pr) => if let Some(refusal) = verifier::merge_refusal(cas_root, cwd, pr, supervisor) {
                 return Some(refusal);
             },
-            Err(error) => tracing::warn!(%error, "Raw GitHub merge: verifier could not resolve PR head"),
+            Err(error) => tracing::warn!(code = "PR_VERIFIER_LOOKUP_FAILED", %error, "Raw GitHub merge: verifier could not resolve PR head"),
         }
     }
     let qa = crate::config::Config::load(cas_root).ok()?.qa();
@@ -1033,16 +1114,17 @@ fn spawn_publish(repo: PathBuf, sha: String, state: QaCommitState, description: 
                 .env("GH_HOST", "github.com")
                 .args(status_publish_args(&publish_repo, &sha, state, &description))
                 .current_dir(&repo);
-            match run_bounded(command, GH_PUBLISH_TIMEOUT) {
-                Some(_) => tracing::info!(
+            match gh_output(&mut command, GH_PUBLISH_TIMEOUT) {
+                Ok(_) => tracing::info!(
                     target: "cas::qa",
                     sha = %sha,
                     state = state.as_str(),
                     context = QA_STATUS_CONTEXT,
                     "cas-2ee2: published independent QA commit status"
                 ),
-                None => tracing::warn!(
+                Err(error) => tracing::warn!(
                     target: "cas::qa",
+                    %error,
                     sha = %sha,
                     state = state.as_str(),
                     repo = %repo.display(),
@@ -1125,10 +1207,10 @@ mod tests {
             "curl -sS -X PUT -H 'Authorization: token t' https://api.github.com/repos/acme/gabber/pulls/9/merge",
         );
         assert_eq!(curl.selector, MergeSelector::Number(9));
-        assert!(matches!(
+        assert_eq!(
             only("gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'").selector,
-            MergeSelector::Unresolvable(_)
-        ));
+            MergeSelector::PullRequestNodes { ids: vec!["PR_x".into()], host: None },
+        );
     }
 
     #[test]
@@ -1282,19 +1364,19 @@ mod tests {
     fn bounded_lookup_failures_say_why() {
         let mut failing = Command::new("sh");
         failing.args(["-c", "echo 'HTTP 401: Bad credentials' >&2; exit 4"]);
-        let error = run_bounded_detailed(failing, Duration::from_secs(5)).unwrap_err();
+        assert!(gh_output(&mut failing, Duration::from_secs(5)).is_err());
 
-        let missing = Command::new("/nonexistent/cas-0169-gh");
-        let error = run_bounded_detailed(missing, Duration::from_secs(5)).unwrap_err();
+        let mut missing = Command::new("/nonexistent/cas-0169-gh");
+        assert!(gh_output(&mut missing, Duration::from_secs(5)).is_err());
 
         let mut slow = Command::new("sh");
         slow.args(["-c", "sleep 5"]);
-        let error = run_bounded_detailed(slow, Duration::from_millis(100)).unwrap_err();
+        assert!(gh_output(&mut slow, Duration::from_millis(100)).is_err());
 
         let mut ok = Command::new("sh");
         ok.args(["-c", "printf done"]);
         assert_eq!(
-            run_bounded_detailed(ok, Duration::from_secs(5)).unwrap(),
+            gh_output(&mut ok, Duration::from_secs(5)).unwrap(),
             b"done"
         );
     }

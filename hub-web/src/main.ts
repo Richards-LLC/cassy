@@ -2669,7 +2669,7 @@ function syncCassyBadge(): void {
   if (!text) { if (badge) { badge.remove(); scheduleConversationLayout(); } return; }
   if (badge?.dataset.badge === text) return;
   if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "conversation-cassy"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
-  badge.dataset.badge = text;
+  badge.dataset.badge = text; badge.title = text;
   const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
   const label = document.createElement("span"); label.className = "conversation-cassy-label"; label.textContent = text;
   badge.replaceChildren(separator, label);

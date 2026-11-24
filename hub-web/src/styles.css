@@ -2009,8 +2009,9 @@ dialog form > *,
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-control { flex: none; white-space: pre; }
 /* cas-0d58: the loaded-build note yields first and ellipsises inside the host
-   line, never under the header actions. */
-#conversation-cassy { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+   line, never under the header actions; its weight, like the card badge's,
+   leaves the machine and codename every pixel. */
+#conversation-cassy { flex: 0 10000000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* cas-e1db: the state chip is one fixed-height line in any font, so swapping
    Live for a reconnecting state cannot change the header's height and move
    the reader's thread. */

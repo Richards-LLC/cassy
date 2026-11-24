@@ -7,6 +7,7 @@ Before work is assigned:
 - **SRP:** split a task with more than one responsibility; "and" in a task description is a red flag.
 - **Dependency ordering:** sequence tasks so no worker blocks on unfinished work.
 - **Scope lock:** the brief freezes at assignment; link the plan section and its metric so workers can check plan fit without expanding scope, and withhold what the task does not need.
+- **Hot files:** list each task's hot files (those other tasks in the plan also edit) and give every shared one a single owner or a fixed order (adapted from pstack by Lauren Tan, MIT).
 
 ## Trajectory Gate
 

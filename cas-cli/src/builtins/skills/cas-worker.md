@@ -47,7 +47,7 @@ post-close summary; after a merge request, wait for the supervisor's response.
 | Test design/review | [Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests) |
 | Before checks/tests | [discipline.md](references/discipline.md) |
 | Browser changes/journeys | [Browser checks](references/discipline.md#browser-checks) |
-| Delivery | [close-gate.md](references/close-gate.md); [Batch QA](references/details.md#batch-qa) when `qa.mode=batch` |
+| Delivery (pre-park comment pass, subtract check, same-surface proof) | [close-gate.md](references/close-gate.md); [Batch QA](references/details.md#batch-qa) when `qa.mode=batch` |
 | Capacity refusal (not a blocker) | [Capacity waits](references/discipline.md#capacity-waits) |
 | Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before blocking the task or notifying the supervisor |
 | Queued, reused or returned branch | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>`; a checkpoint push alone is not a park |

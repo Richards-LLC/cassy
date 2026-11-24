@@ -1049,6 +1049,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    // cas-no-comments: adapted from pstack (MIT, © 2026 Lauren Tan).
+    BuiltinFile { path: "skills/cas-no-comments/SKILL.md", content: include_str!("builtins/skills/cas-no-comments/SKILL.md") },
+    BuiltinFile { path: "skills/cas-no-comments/LICENSE", content: include_str!("builtins/skills/cas-no-comments/LICENSE") },
+    BuiltinFile { path: "skills/cas-no-comments/references/reviewer.md", content: include_str!("builtins/skills/cas-no-comments/references/reviewer.md") },
     BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
@@ -1837,6 +1841,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    // cas-no-comments: adapted from pstack (MIT, © 2026 Lauren Tan).
+    BuiltinFile { path: "skills/cas-no-comments/SKILL.md", content: include_str!("builtins/skills/cas-no-comments/SKILL.md") },
+    BuiltinFile { path: "skills/cas-no-comments/LICENSE", content: include_str!("builtins/skills/cas-no-comments/LICENSE") },
+    BuiltinFile { path: "skills/cas-no-comments/references/reviewer.md", content: include_str!("builtins/skills/cas-no-comments/references/reviewer.md") },
     BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
@@ -2628,6 +2636,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    // cas-no-comments: adapted from pstack (MIT, © 2026 Lauren Tan).
+    BuiltinFile { path: "skills/cas-no-comments/SKILL.md", content: include_str!("builtins/skills/cas-no-comments/SKILL.md") },
+    BuiltinFile { path: "skills/cas-no-comments/LICENSE", content: include_str!("builtins/skills/cas-no-comments/LICENSE") },
+    BuiltinFile { path: "skills/cas-no-comments/references/reviewer.md", content: include_str!("builtins/skills/cas-no-comments/references/reviewer.md") },
     BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },

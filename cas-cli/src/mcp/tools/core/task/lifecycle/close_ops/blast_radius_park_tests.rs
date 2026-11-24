@@ -81,7 +81,7 @@ fn fixture_with_gear(env: &mut TestEnvGuard, base: &str, checkpoint: &str) -> Fi
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join(".gitignore"), ".cas/\n/Cargo.lock\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), ".cas/\n/Cargo.lock\n/target/\n").unwrap();
     std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
     std::fs::create_dir_all(repo.join("crates/widget/src")).unwrap();
     std::fs::write(repo.join("crates/widget/Cargo.toml"), "[package]\nname = \"widget\"\n").unwrap();
@@ -1177,9 +1177,13 @@ async fn park_requires_red_first_evidence_gh_2422() {
             if revision == "HEAD" { env.set("CI", "fixture-red-tip"); }
             assert!(run(args).is_err(), "{case}");
             if revision == "HEAD" { env.set("CI", "true"); }
+            let written = std::fs::read_dir(f.cas_dir().join("worker-checks")).into_iter().flatten()
+                .flatten().filter_map(|directory| std::fs::read_dir(directory.path()).ok()).flatten().flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains("-red-"));
+            assert_eq!(written, case != "node file setup failure", "{case}");
             git(&f.worker_path, &["checkout", "-q", LANE]);
         }
-        run(&nextest).unwrap_or_else(|error| panic!("{case}: {error:#}"));
+        run(&nextest).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
         if case.starts_with("node ") { run(&node).unwrap_or_else(|error| panic!("{case}: {error:#}")); }
         let reply = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
         assert_eq!(crate::gates::codes_in(&reply).contains(&"G-170"), !parked, "{case}: {reply}");

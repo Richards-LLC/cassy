@@ -540,9 +540,20 @@ impl QualityEvent {
             actor: self.actor.clone(),
             title: self.title.clone(),
             link: self.link.clone(),
-            payload: self.payload.clone(),
+            payload: self.wire_payload(),
             project_id: None,
         }
+    }
+
+    /// Cloud accepts only the turn fields it knows and refuses a turn carrying
+    /// anything else, which would park the whole turn lane. Spend stays local
+    /// until Cloud lists it.
+    fn wire_payload(&self) -> QualityPayload {
+        let mut payload = self.payload.clone();
+        if let QualityPayload::Turn { spend, .. } = &mut payload {
+            *spend = None;
+        }
+        payload
     }
 }
 
@@ -1082,5 +1093,24 @@ mod tests {
             minutes: None,
         };
         assert!(record_quality_event(dir.path(), &code).is_err());
+    }
+    #[test]
+    fn a_turn_on_the_wire_carries_only_the_fields_cloud_accepts() {
+        // Cloud's turn whitelist (quality-events.ts TURN_FIELDS).
+        const CLOUD_TURN_FIELDS: [&str; 9] = ["kind", "woken_by", "notice_kind", "supersedes", "actions", "no_op",
+            "input_tokens", "output_tokens", "minutes"];
+        let root = tempfile::tempdir().unwrap();
+        let turn = NewQualityEvent::new("spend-turn", QualityPayload::Turn {
+            woken_by: WakeChannel::Worker, notice_kind: Some("merge_ready".into()), supersedes: None,
+            actions: vec![], no_op: true, input_tokens: Some(10), output_tokens: Some(2), minutes: Some(0.5),
+            spend: Some(TurnSpend { harness: Some("codex".into()), model: Some("gpt-6.1-sol".into()),
+                effort: Some("high".into()), cached_input_tokens: Some(4) }),
+        });
+        assert!(record_quality_event(root.path(), &turn).unwrap());
+        let row = quality_events_after(root.path(), 0, 10).unwrap().pop().unwrap();
+        assert!(matches!(&row.payload, QualityPayload::Turn { spend: Some(_), .. }), "local row keeps its spend");
+        let wire = serde_json::to_value(row.to_wire()).unwrap();
+        let keys: Vec<_> = wire["payload"].as_object().unwrap().keys().filter(|k| !CLOUD_TURN_FIELDS.contains(&k.as_str())).collect();
+        assert!(keys.is_empty(), "fields Cloud would refuse: {keys:?}");
     }
 }

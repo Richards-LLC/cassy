@@ -1212,10 +1212,10 @@ mod tests {
             let base = commit_changelog_fixture(repo.path(), "base test");
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &base])
                 .current_dir(repo.path()).status().unwrap().success());
-            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true } }
+            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true, environment_gated: false } }
                 else { Identity::exact(path, if rust { "child::owned" } else { "owned" }) };
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             std::fs::write(repo.path().join(path), format!("{old}{added}")).unwrap();
             std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
             let head = commit_changelog_fixture(repo.path(), "add owned test");
@@ -1227,7 +1227,7 @@ mod tests {
             assert!(held.contains(&identity.path) && held.contains(&identity.name), "{runner}: {held}");
             assert!(!held.contains("untouched"));
             stability::record(root.path(), repo.path(), &head, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             let packages = crate::factory_worker_check::passing_test_packages(root.path(), repo.path(), &head);
             assert_eq!(packages, if rust { vec!["fixture".to_string()] } else { vec![] });
             let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
@@ -1262,7 +1262,7 @@ mod tests {
             let held = park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).unwrap();
             assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains(&identity.name), "{held}");
             stability::record(root.path(), repo.path(), &changed, Proof { runner: runner.into(),
-                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             assert!(park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).is_none());
             std::fs::write(repo.path().join("README.md"), "after corrected test proof\n").unwrap();
             let retry = commit_changelog_fixture(repo.path(), "docs after corrected test proof");
@@ -1343,7 +1343,7 @@ mod tests {
             let producer = tempfile::tempdir().unwrap();
             stability::record(producer.path(), repo.path(), &head, Proof { runner: "nextest".into(),
                 tests: ["child::planted", "child::gated::nested"].map(|name| Identity::exact("src/child.rs", name)).into(),
-                consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             task.deliverables.test_receipts =
                 crate::factory_worker_check::PassingTests::new(producer.path(), repo.path(), &head).portable();
             let refusals = park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None);
@@ -1384,11 +1384,34 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let sibling = Identity::exact(path, "sibling");
-        let proof = |tests: Vec<Identity>| Proof { runner: "vitest".into(), tests, consecutive_passes: 5, elapsed_ms: 0 };
+        let proof = |tests: Vec<Identity>| Proof { runner: "vitest".into(), tests, consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() };
         stability::record(root.path(), repo.path(), &head, proof(vec![other.clone(), sibling.clone()])).unwrap();
         stability::invalidate(root.path(), repo.path(), &head, std::slice::from_ref(&other)).unwrap();
         let passing = PassingTests::new(root.path(), repo.path(), &head);
         assert_eq!(stability::missing(&passing, &[other, sibling]), vec![Identity::exact(path, "other")]);
+    }
+
+    /// GH #2223: a receipt that ran one test and left an environment-gated
+    /// sibling inactive covers both; a failed rerun of the inactive sibling
+    /// withdraws its credit and keeps the executed test's.
+    #[test]
+    fn failed_rerun_of_an_inactive_sibling_withdraws_its_coverage_gh2223() {
+        use crate::factory_worker_check::{PassingTests, stability::{self, Identity, Proof}};
+        let repo = changelog_fixture();
+        let head = commit_changelog_fixture(repo.path(), "head");
+        let path = "owned.test.js";
+        let ran = Identity::exact(path, "executed");
+        let gated = Identity { environment_gated: true, ..Identity::exact(path, "live eval") };
+        let root = tempfile::tempdir().unwrap();
+        stability::record(root.path(), repo.path(), &head, Proof {
+            runner: "jest".into(), tests: vec![ran.clone()], consecutive_passes: 5, elapsed_ms: 0,
+            inactive: vec![gated.clone()],
+        }).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert!(stability::missing(&passing, &[ran.clone(), gated.clone()]).is_empty());
+        stability::invalidate(root.path(), repo.path(), &head, std::slice::from_ref(&gated)).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert_eq!(stability::missing(&passing, &[ran, gated.clone()]), vec![gated]);
     }
 
     /// cas-769b at 5ddb6860: the delivery edited a test, the target rewrote
@@ -1688,7 +1711,7 @@ raise SystemExit(1 if failed else 0)
             if !tests.is_empty() {
                 assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
                 stability::record(root.path(), repo.path(), &head, stability::Proof {
-                    runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1,
+                    runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1, inactive: Vec::new(),
                 }).unwrap();
             }
             assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");

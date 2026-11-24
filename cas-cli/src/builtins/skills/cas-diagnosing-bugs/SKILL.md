@@ -64,7 +64,7 @@ baseline, then bisect the regression with that measurement before changing code.
 
 Turn the minimized repro into one failing regression per root cause
 ([Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests)), only at a seam that exercises the
-real call-site pattern. If no correct seam exists, record that architectural
+real call-site pattern. Prove the fix on the same surface as the incident: red on its real entry point with the tool it used, then green there (same-surface proof, from pstack by Lauren Tan, MIT). If no correct seam exists, record that architectural
 finding. Otherwise: make the regression fail, fix it, make it pass, then rerun
 the original loop.
 

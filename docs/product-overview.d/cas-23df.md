@@ -1,3 +1,0 @@
-## Core Concepts
-
-- **AC checklist at park** - A factory delivery whose task has acceptance criteria or supervisor decision notes parks only with `AC-CHECKLIST.md` in its task artifacts. It holds one row per acceptance criterion (`AC<n>`) and per supervisor ruling (`D<n>`): `MET` with a `file:line` and a receipt, or `NOT MET`/`NARROWED` with a reason. A narrowing parks only when a supervisor decision note names its item, so scope is asked, never narrowed silently. Supervisor decision notes are recognised from the notes tool's authenticated record, not from note text a worker could write. Task start lists the required rows, and one park refusal lists every failing row.

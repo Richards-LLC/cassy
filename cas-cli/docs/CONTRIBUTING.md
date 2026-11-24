@@ -1542,16 +1542,20 @@ never grants approval. A no-code report can supply a corrected portable
 together. For a no-code spike, or a no-code task with a demo statement, every
 dispatch created by an ordinary close, a release-parent close or a pre-merge
 candidate review records what it reviews (`reviewed_proof`, migration m302): the
-proof reference and the id and SHA-256 of each committed artifact, the same
-inventory the verifier is handed (`artifacts::proof::committed_task_artifacts`).
-The store writes it in the dispatch insert. An ordinary close of such a task
-accepts only the latest typed dispatch, resolved, with an Approved verdict whose
-record equals the current reference and artifacts. A missing or different
-record, a Skipped verdict or a legacy row without a dispatch is diagnostic only:
-the close requests a new review, or G-70 refuses a landed factory delivery.
-Unpublished rows and a peer report's first import never change the inventory,
-task notes other than validated publication records are never read for it, and
-mechanical no-code chores are exempt. Active cycles remain immutable, and receipt-bound delivery or epic
+proof reference and the id and SHA-256 of each committed artifact
+(`artifacts::proof::committed_task_artifacts`). The store writes it in the
+dispatch insert, and the automatic verifier is handed that recorded inventory,
+never a later listing; an artifact it can no longer fetch with the recorded
+digest stops the launch. Light depth does not exempt these tasks at close or
+before a merge. An ordinary close of such a task accepts only the latest typed
+dispatch, resolved, with an Approved verdict whose record equals the current
+reference and artifacts; the verdict is read once and an unreadable one refuses
+the close (G-68). A missing or different record, a Skipped verdict or a legacy
+row without a dispatch is diagnostic only: the close requests a new review, or
+G-70 refuses a landed factory delivery. Unpublished rows and a peer report's
+import, in progress or complete, never change the inventory, a revoked artifact
+leaves it, task notes other than validated publication records are never read
+for it, and mechanical no-code chores are exempt. Active cycles remain immutable, and receipt-bound delivery or epic
 timeout recovery still requires the existing supervisor path. Measured Tier 0,
 light-depth and other existing policy exemptions remain explicit in close output;
 identity availability is reported separately from the exemption actually applied.

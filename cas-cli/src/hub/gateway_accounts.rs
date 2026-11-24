@@ -186,13 +186,15 @@ fn shared_quota_with(settings: &cas_types::factory_gateway::FactoryGatewayConfig
 /// The newest completed codex-inspection run, with its per-account results.
 fn latest_inspection(client: &Dashboard) -> Option<serde_json::Value> {
     let runs = client.get(INSPECTION_RUNS).ok()?;
-    let run = runs["items"].as_array()?.iter().find(|run| run["status"] == "completed")?;
+    let run = runs["items"].as_array()?.iter()
+        .find(|run| run["status"] == "completed" && run["finishedAtMs"].as_i64().is_some_and(|at| at > 0))?;
     client.get(&format!("{INSPECTION_RUN}{}", run["id"].as_u64()?)).ok()
 }
 
 /// An inspection run's quota windows per auth index, with when they were read.
 fn inspection_windows(run: &serde_json::Value) -> HashMap<String, (Vec<UsageWindow>, DateTime<Utc>)> {
-    let finished = run["finishedAtMs"].as_i64().or_else(|| run["run"]["finishedAtMs"].as_i64());
+    // CPA Manager Plus 1.14.10 run detail: {run: {id, status, finishedAtMs}, results}.
+    let finished = run["run"]["finishedAtMs"].as_i64().filter(|at| *at > 0);
     let mut out = HashMap::new();
     for result in run["results"].as_array().into_iter().flatten() {
         let Some(index) = result["authIndex"].as_str().filter(|index| !index.is_empty()) else { continue };
@@ -535,9 +537,9 @@ mod tests {
                     serde_json::json!({"files": [{"provider": "codex", "email": "pip@example.com", "auth_index": "fb45", "id_token": {"chatgpt_account_id": "acct-1"},
                         "quota": {"observed_at": stale, "signals": {"X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Used-Percent": "88"}}}]})
                 } else if line.starts_with("GET /v0/management/codex-inspection/runs?limit=5 ") {
-                    serde_json::json!({"items": [{"id": 7, "status": "running"}, {"id": 6, "status": "completed"}]})
+                    serde_json::json!({"items": [{"id": 8, "status": "completed", "finishedAtMs": 0}, {"id": 7, "status": "running"}, {"id": 6, "status": "completed", "finishedAtMs": fresh_ms}]})
                 } else if line.starts_with("GET /v0/management/codex-inspection/runs/6 ") {
-                    serde_json::json!({"finishedAtMs": fresh_ms, "results": [{"authIndex": "fb45", "quotaWindows": [
+                    serde_json::json!({"run": {"id": 6, "status": "completed", "finishedAtMs": fresh_ms}, "results": [{"authIndex": "fb45", "quotaWindows": [
                         {"limitWindowSeconds": 604800, "usedPercent": 90.0, "resetAtMs": 1795702350000i64},
                         {"limitWindowSeconds": 18000, "usedPercent": 12.0}]}]})
                 } else {

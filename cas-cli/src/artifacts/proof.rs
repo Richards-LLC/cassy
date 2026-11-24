@@ -405,20 +405,22 @@ fn fetch(
     let mut staging = tempfile::NamedTempFile::new_in(task_dir)?;
     std::io::Write::write_all(&mut staging, &bytes)?;
     staging.persist(&destination)?;
-    match existing {
-        None => {
-            store.record_local(&NewArtifact {
-                id: artifact.id.clone(),
-                task_id: artifact.task_id.clone(),
-                name: artifact.name.clone(),
-                mime: artifact.mime.clone(),
-                size_bytes: artifact.size_bytes,
-                sha256: artifact.sha256.clone(),
-            })?;
-            store.mark_uploaded(&artifact.id, cloud_id)?;
-            store.mark_committed(&artifact.id, None)?;
+    // GH #2317: a concurrent restore of the same id may have recorded it while
+    // the bytes downloaded. Its row is this restore's outcome, not a conflict.
+    if existing.is_none() && store.get(&artifact.id)?.is_none() {
+        if let Err(error) = store.record_local(&NewArtifact {
+            id: artifact.id.clone(),
+            task_id: artifact.task_id.clone(),
+            name: artifact.name.clone(),
+            mime: artifact.mime.clone(),
+            size_bytes: artifact.size_bytes,
+            sha256: artifact.sha256.clone(),
+        }) {
+            anyhow::ensure!(store.get(&artifact.id)?.is_some_and(|row| same_artifact(&row, &artifact)), error);
+            return Ok(destination);
         }
-        Some(_) => {}
+        store.mark_uploaded(&artifact.id, cloud_id)?;
+        store.mark_committed(&artifact.id, None)?;
     }
     Ok(destination)
 }
@@ -590,6 +592,12 @@ fn safe_relative(name: &str) -> bool {
         && Path::new(name).components().all(|part| matches!(part, std::path::Component::Normal(_)))
 }
 
+/// The top-level name `fetch_task` gives a downloaded artifact.
+fn fetched_copy(name: &str) -> bool {
+    name.strip_prefix("art-").and_then(|rest| rest.get(..9))
+        .is_some_and(|id| id.ends_with('-') && id[..8].bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 /// Every regular file under `dir`, recursively, by task-relative path.
 fn evidence_files(dir: &Path) -> std::io::Result<(Vec<(String, PathBuf)>, Vec<String>)> {
     let mut files = Vec::new();
@@ -608,8 +616,10 @@ fn evidence_files(dir: &Path) -> std::io::Result<(Vec<(String, PathBuf)>, Vec<St
         }
         let relative = entry.path().strip_prefix(dir).map_err(std::io::Error::other)?;
         // Never recursively publish the previous report or a fetched copy.
+        // A fetched copy (`art-<id>-<name>`, `fetch_task`) is already an
+        // artifact; republishing it nests a new copy on every park (cas-7c35).
         if relative.components().count() == 1 && relative.to_str().is_some_and(|name|
-            name == EVIDENCE_REPORT || (name.starts_with("art-") && name.ends_with(&format!("-{EVIDENCE_REPORT}"))))
+            name == EVIDENCE_REPORT || fetched_copy(name))
         { continue; }
         let name = relative.to_str().filter(|name| safe_relative(name)).ok_or_else(|| {
             std::io::Error::other(format!("{} has no portable task-relative name", entry.path().display()))
@@ -644,6 +654,29 @@ fn cited_token(token: &str, quoted: bool, exists: impl Fn(&str) -> bool) -> &str
         cited = &cited[..cited.len() - 1]; // only ASCII punctuation lies past `stripped`
     }
     value(cited)
+}
+
+/// Directory words prose uses after `target/`, `qa/` or an artifacts path.
+const DIRECTORY_WORDS: [&str; 12] =
+    ["target", "owner", "dist", "build", "out", "logs", "debug", "release", "qa", "terminal-qa", "cited", "artifacts"];
+
+/// GH #2303, #2305, #2337, #2371, cas-4b90: whether a missing close-reason
+/// token cites a concrete evidence file, which a peer then requires. Prose
+/// ("merged target", "writes under target/ci-impact", "target/owner"),
+/// directories and illustrative `{a,b}.log` or `<task>/x` forms never do.
+/// It must lie strictly beneath an evidence root, without `..`, and either
+/// have a file extension or, outside the build tree, be a multi-segment path
+/// whose leaf is not a directory word.
+fn cites_file(token: &str, path: &Path, build_tree: &Path, evidence_dir: &Path) -> bool {
+    if token.ends_with('/') || token.contains(['*', '?', '{', '}', '<', '>', '|', '\u{2026}']) || token.contains("...")
+        || Path::new(token).components().any(|part| part == std::path::Component::ParentDir)
+        || path == build_tree || evidence_dir.starts_with(path)
+    {
+        return false;
+    }
+    let Some(leaf) = path.file_name().and_then(|leaf| leaf.to_str()) else { return false };
+    Path::new(leaf).extension().is_some()
+        || (token.contains('/') && !path.starts_with(build_tree) && !DIRECTORY_WORDS.contains(&leaf))
 }
 
 /// Publish close-reason citations for a reviewer on either machine. Routed
@@ -690,7 +723,10 @@ pub(crate) fn publish_routed_evidence(
             // not silently disappear from the peer's proof (cas-dae1).
             if path.is_dir() { continue; }
             if !path.is_file() {
-                unpublished.push(format!("{}: missing or not a regular file", path.display()));
+                let missing = format!("{}: missing or not a regular file", path.display());
+                if cites_file(token, &path, &proof_repo.join("target"), &dir) && !unpublished.contains(&missing) {
+                    unpublished.push(missing);
+                }
             } else if let Some((name, _)) = paths.iter().find(|(_, existing)| *existing == path) {
                 // A direct close citation makes an already scanned copy
                 // required even when the ledger does not list it.
@@ -838,7 +874,9 @@ pub(crate) fn publish_routed_evidence(
     let note = format!("{note}\n{summary}");
     if note.len() >= EVIDENCE_NOTE_BYTES { return Err(fail("Evidence summary exceeds its byte budget".into())); }
     let tasks = crate::store::open_task_store(cas_root).map_err(|error| fail(error.to_string()))?;
-    tasks.append_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;
+    // GH #2322: the newest manifest is the only one read, so a retried park
+    // replaces its previous evidence-sync note rather than appending another.
+    tasks.append_trusted_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;
     Ok(())
 }
 

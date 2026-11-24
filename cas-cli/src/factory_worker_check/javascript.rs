@@ -3407,8 +3407,9 @@ mod tests {
         // own directory nor the package; Jest never enters rootDir, so the spec reads its
         // migration relative to the package (the raw run's cwd).
         let sibling = test.join("jest-inbox-tools.integration.config.js");
-        write(&sibling, r"module.exports = { rootDir: '../src', testRegex: '.*\\.integration\\.ts$' };");
+        write(&sibling, r"module.exports = { rootDir: '../src', roots: ['<rootDir>/../test'], testRegex: '.*\\.integration\\.ts$' };");
         write(&backend.join("prisma/migrations/20261112200000_workspace_reports/migration.sql"), "SELECT 1;");
+        write(&backend.join("src/index.ts"), "");
         // A stand-in Jest: lists the files its config selects under its rootDir and
         // runs a spec only when its config lists it ("No tests found" otherwise) and
         // its cwd-relative migration opens (ENOENT otherwise).
@@ -3421,7 +3422,8 @@ const root = path.resolve(path.dirname(config), loaded.rootDir || '.');
 if (a.includes('--showConfig')) { console.log(JSON.stringify({ globalConfig: { rootDir: root }, configs: [{ rootDir: root }] })); process.exit(0); }
 const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
   entry.name === 'node_modules' ? [] : entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
-const listed = walk(root).filter((file) => pattern.test(file));
+const roots = (loaded.roots || ['<rootDir>']).map((dir) => path.resolve(root, dir.replace('<rootDir>', '.')));
+const listed = roots.flatMap(walk).filter((file) => pattern.test(file));
 if (a.includes('--listTests')) { console.log(JSON.stringify(listed)); process.exit(0); }
 fs.readFileSync('prisma/migrations/20261112200000_workspace_reports/migration.sql');
 const spec = a[a.indexOf('--runTestsByPath') + 1], ok = listed.includes(spec);
@@ -3431,7 +3433,7 @@ process.exit(ok ? 0 : 1);
 "#);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&jest, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let spec = "apps/backend/src/inbox-analysis-pool.integration.ts";
+        let spec = "apps/backend/test/inbox-analysis-pool.integration.ts";
         let source = |body: &str| format!("describe('pool', () => {{\n  it('drains', () => {{ {body} }});\n}});\n");
         write(&repo.path().join(spec), &source("throw 0;"));
         git(&["add", "."]);

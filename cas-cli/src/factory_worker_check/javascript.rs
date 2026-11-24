@@ -2984,6 +2984,16 @@ mod tests {
         Identity::exact(path, name)
     }
 
+    #[test]
+    fn red_first_playwright_timeout_matches_selected_spec_gh_2422() {
+        let report = serde_json::from_str(include_str!("javascript/playwright-timed-out.txt")).unwrap();
+        let timeout = id("hub-web/e2e/journeys/launch-session.journey.ts",
+            "HUB-J13 read a project's quality trend from the palette");
+        let other = id(&timeout.path, "another spec");
+        assert_eq!(failed_javascript_tests("playwright", Path::new("/project"), &report,
+            &[timeout.clone(), other]), BTreeSet::from([timeout]));
+    }
+
     /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`
     /// files while worker-check refused `node --test`. The changed case runs
     /// five times alone; its unchanged neighbour would fail the proof if run.

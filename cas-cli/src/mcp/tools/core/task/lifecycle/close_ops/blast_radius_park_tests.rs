@@ -1126,6 +1126,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
     env.set("CARGO_HOME", cargo_home);
     let cargo = Path::new(env!("CARGO"));
     let nextest = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::regression)"];
+    let parameterized = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear::regression)"];
     let unrelated = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::unrelated)"];
     let check = ["-p", "widget", "--tests"];
     let node = ["node", "--test", "gear.test.mjs"];
@@ -1136,6 +1137,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
     let checkpoint = gear("1", "assert_eq!(turn(), 2, \"gear turns\");");
     let green = gear("2", "let expected = if std::env::var(\"CI\").as_deref() == Ok(\"fixture-red-tip\") { 3 } else { 2 };\n    assert_eq!(turn(), expected);");
     let broken = gear("\"not a u8\"", "assert_eq!(turn(), 2);");
+    let mut violations = Vec::new();
     for (case, methodology, failure, parked) in [
         ("passing only", Some("test-first"), None, false),
         ("other methodology", None, None, true),
@@ -1145,6 +1147,9 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("unrelated failure at base", Some("test-first"), Some(("main", &unrelated[..])), false),
         ("node file setup failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node regression failure", Some("test-first"), Some(("HEAD^", &node[..])), true),
+        ("node inactive regression", Some("test-first"), Some(("HEAD^", &node[..])), false),
+        ("nextest timeout", Some("test-first"), Some(("HEAD^", &nextest[..])), true),
+        ("parameterized Rust failure", Some("test-first"), Some(("HEAD^", &parameterized[..])), true),
         ("test at tip", Some("test-first"), Some(("HEAD", &nextest[..])), false),
     ] {
         let f = fixture_with_gear(&mut env, if case == "compile failure at base" { &broken } else { &red }, &checkpoint);
@@ -1159,17 +1164,49 @@ async fn park_requires_red_first_evidence_gh_2422() {
             work_target: task.deliverables.work_target.clone().unwrap(),
         });
         open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+        let gear_path = f.worker_path.join("crates/widget/src/gear.rs");
+        let mut passing_rust = &nextest;
+        let mut green_source = green.clone();
+        if case == "nextest timeout" {
+            std::fs::create_dir(f.worker_path.join(".config")).unwrap();
+            std::fs::write(f.worker_path.join(".config/nextest.toml"),
+                "[profile.default]\nslow-timeout = { period = '250ms', terminate-after = 2 }\n").unwrap();
+            std::fs::write(&gear_path, gear("1", "std::thread::sleep(std::time::Duration::from_secs(5));")).unwrap();
+            git(&f.worker_path, &["add", ".config/nextest.toml"]);
+            git(&f.worker_path, &["commit", "-qam", "test(cas-br01): reproduce the timeout"]);
+        }
+        if case == "parameterized Rust failure" {
+            let source = |turn: u8| format!("pub fn turn() -> u8 {{ {turn} }}\n#[rstest::rstest()]\n#[case(2)]\nfn regression(#[case] expected: u8) {{ assert_eq!(turn(), expected); }}\n");
+            std::fs::write(f.worker_path.join("crates/widget/Cargo.toml"),
+                "[package]\nname = 'widget'\n[dev-dependencies]\nrstest = { version = '=0.24.0', default-features = false }\n").unwrap();
+            std::fs::write(&gear_path, source(1)).unwrap();
+            git(&f.worker_path, &["commit", "-qam", "test(cas-br01): reproduce the parameterized regression"]);
+            green_source = source(2).replace("assert_eq!(turn(), expected)", "assert_eq!(expected, turn())");
+            passing_rust = &parameterized;
+        }
         if case.starts_with("node ") {
-            let setup = if case == "node file setup failure" { "import './missing-setup.mjs';\n" } else { "" };
             std::fs::write(f.worker_path.join("package.json"), "{}\n").unwrap();
-            std::fs::write(f.worker_path.join(node[2]), format!(
-                "{setup}import {{ test }} from 'node:test';\ntest('gear node regression', () => {{ throw new Error('gear is stuck'); }});\n"
-            )).unwrap();
+            let (red_node, green_node) = match case {
+                "node inactive regression" => (
+                    "test('gear TODO regression', { todo: true }, () => { throw Error('TODO'); });\ntest('gear skipped regression', { skip: true }, () => { throw Error('skip'); });\ntest('unrelated', () => { throw Error('unrelated'); });\n",
+                    "test('gear TODO regression', () => {});\ntest('gear skipped regression', () => {});\n",
+                ),
+                "node file setup failure" => (
+                    "import './missing-setup.mjs';\ntest('gear node regression', () => { throw Error('gear is stuck'); });\n",
+                    "test('gear node regression', () => {});\n",
+                ),
+                _ => (
+                    "test('gear node regression', () => { throw Error('gear is stuck'); });\n",
+                    "test('gear node regression', () => {});\n",
+                ),
+            };
+            let import = "import { test } from 'node:test';\n";
+            std::fs::write(f.worker_path.join(node[2]), format!("{import}{red_node}")).unwrap();
             git(&f.worker_path, &["add", "package.json", node[2]]);
             git(&f.worker_path, &["commit", "-qm", "test(cas-br01): reproduce the node regression"]);
-            std::fs::write(f.worker_path.join(node[2]), "import { test } from 'node:test';\ntest('gear node regression', () => {});\n").unwrap();
+            std::fs::write(f.worker_path.join(node[2]), format!("{import}{green_node}")).unwrap();
         }
-        std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), &green).unwrap();
+        std::fs::write(&gear_path, green_source).unwrap();
         git(&f.worker_path, &["commit", "-qam", "fix(cas-br01): correct the gear"]);
         git(&f.worker_path, &["push", "-q", "origin", LANE]);
         if let Some((revision, args)) = failure {
@@ -1180,15 +1217,20 @@ async fn park_requires_red_first_evidence_gh_2422() {
             let written = std::fs::read_dir(f.cas_dir().join("worker-checks")).into_iter().flatten()
                 .flatten().filter_map(|directory| std::fs::read_dir(directory.path()).ok()).flatten().flatten()
                 .any(|entry| entry.file_name().to_string_lossy().contains("-red-"));
-            assert_eq!(written, case != "node file setup failure", "{case}");
+            if written != (case != "node file setup failure") {
+                violations.push(format!("{case}: unexpected red receipt presence {written}"));
+            }
             git(&f.worker_path, &["checkout", "-q", LANE]);
         }
-        run(&nextest).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
+        run(passing_rust).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
         if case.starts_with("node ") { run(&node).unwrap_or_else(|error| panic!("{case}: {error:#}")); }
         let reply = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-        assert_eq!(crate::gates::codes_in(&reply).contains(&"G-170"), !parked, "{case}: {reply}");
-        assert_eq!(f.task().status, if parked { TaskStatus::AwaitingMerge } else { TaskStatus::InProgress }, "{case}: {reply}");
+        let status = if parked { TaskStatus::AwaitingMerge } else { TaskStatus::InProgress };
+        if crate::gates::codes_in(&reply).contains(&"G-170") == parked || f.task().status != status {
+            violations.push(format!("{case}: {reply}"));
+        }
     }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

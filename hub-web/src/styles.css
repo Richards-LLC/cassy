@@ -1919,6 +1919,11 @@ dialog form > *,
 .team-identity { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); }
 .team-identity h3 { font: 600 13px var(--font-mono); overflow-wrap: anywhere; margin: 0; }
 .team-model { color: var(--ink-mid); font: 12px var(--font-mono); overflow-wrap: anywhere; }
+/* Worker route: quiet meta beside the model; a gateway fallback takes the
+   needs-attention ink so a worker that started direct is visible at a glance. */
+.team-route { flex-basis: 100%; color: var(--ink-mid); font-size: 12px; overflow-wrap: anywhere; }
+.team-route[data-route="fallback"] { color: var(--state-warn); }
+.team-head .team-routes { margin: 0; color: var(--ink-mid); font-size: 12px; }
 .team-state { max-width: 100%; min-height: 20px; white-space: normal; }
 .team-task { margin: 0; overflow-wrap: anywhere; line-height: 1.35; }
 .team-elapsed { margin: 0; font-family: var(--font-mono); white-space: nowrap; }
@@ -2008,6 +2013,9 @@ dialog form > *,
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-control { flex: none; white-space: pre; }
+/* cas-0d58: the loaded-build pill keeps its size; the machine and codename
+   text beside it truncates first, so it is never cut or under the actions. */
+#conversation-cassy { flex: none; align-self: center; margin-inline-start: var(--space-2); }
 /* cas-e1db: the state chip is one fixed-height line in any font, so swapping
    Live for a reconnecting state cannot change the header's height and move
    the reader's thread. */
@@ -2822,8 +2830,8 @@ button.chip:disabled { cursor: default; }
 .launch-panel { display: grid; gap: var(--space-2); min-width: 0; }
 .launch-panel[hidden] { display: none; }
 .launch-panel input[type=search] { min-height: var(--button-height); padding: 0 var(--space-3); color: var(--ink); background: var(--panel); border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-card); }
-/* The list scrolls on its own so the supervisor choice and Start stay in reach. */
-.launch-list { display: flex; flex-direction: column; gap: var(--space-1); max-height: min(30dvh, 244px); overflow-y: auto; overscroll-behavior: contain; padding: var(--focus-ring-width); margin: calc(-1 * var(--focus-ring-width)); }
+/* The sheet scrolls once; lists never scroll inside it (the filter narrows a long project list). */
+.launch-list { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--focus-ring-width); margin: calc(-1 * var(--focus-ring-width)); }
 .launch-list > * { flex: none; }
 .launch-row { display: flex; align-items: center; gap: var(--space-3); min-height: 48px; min-width: 0; padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--color-transparent); border-radius: var(--radius-card); font-size: var(--fs-base); text-align: left; cursor: pointer; }
 .launch-row:hover { background: var(--bg-hover); }
@@ -2856,10 +2864,11 @@ button.chip:disabled { cursor: default; }
    Supervisor and Account takes the full width under both. */
 .launch-options { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: var(--space-3); }
 @media (min-width: 40.01rem) and (max-width: 61.99rem) and (min-height: 30.01rem) {
-  .launch-options { grid-template-columns: minmax(0, 1fr) 9.5rem; grid-template-areas: "cli workers" "account account"; column-gap: var(--space-4); }
+  .launch-options { grid-template-columns: minmax(0, 1fr) 9.5rem; grid-template-areas: "cli workers" "account account" "route route"; column-gap: var(--space-4); }
   .launch-options > .launch-cli { grid-area: cli; }
   .launch-options > .launch-workers { grid-area: workers; }
   .launch-options > .launch-account { grid-area: account; }
+  .launch-options > .launch-route { grid-area: route; }
 }
 .launch-cli-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-1); }
 .launch-cli-option { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-2); min-height: var(--button-height); padding: var(--space-1) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); font-size: var(--fs-base); cursor: pointer; }
@@ -2881,20 +2890,24 @@ button.chip:disabled { cursor: default; }
 /* Account (cas-9666): every account for the chosen CLI. Names are usually
    email addresses; they wrap anywhere rather than widen the sheet. */
 .launch-account[hidden] { display: none; }
-/* The account list never scrolls on its own: a logged-out row's command and Copy stay whole. */
-.launch-list.launch-accounts { max-height: none; overflow: visible; }
+/* Worker route (gateway work): the two choices share the supervisor picker's
+   option treatment; an unavailable hub dims its option and says why below. */
+.launch-route[hidden], .launch-route-note[hidden] { display: none; }
+.launch-route .launch-cli-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.launch-cli-option.is-disabled { color: var(--text-mid); cursor: not-allowed; }
 .launch-account-out { flex-wrap: wrap; row-gap: var(--space-2); cursor: default; color: var(--text-mid); }
 .launch-account-out:hover { background: var(--panel); }
-.launch-account-label { display: flex; align-items: center; gap: var(--space-3); min-width: 0; flex: 1 1 100%; }
-.launch-account-label input { flex: none; width: 18px; height: 18px; margin: 0; }
 .launch-account-state { color: var(--text-mid); font-size: var(--fs-xs); }
 .launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
 .launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
-.launch-login button { min-height: 36px; font-size: var(--fs-meta); border: var(--line-width) solid var(--color-transparent); }
+/* One Copy style for every login command: the outlined pill Accounts uses. */
+.launch-login button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.launch-login button:hover, .accounts-login button:hover { background: var(--bg-hover); }
 .launch-account-note { padding-inline: 0; }
 .launch-retry { justify-self: start; width: auto; min-height: 36px; font-size: var(--fs-meta); }
 .launch-account-body { display: grid; gap: var(--space-2); }
-.launch-summary { flex: 1 0 100%; order: -1; margin: 0; color: var(--text-hi); font-size: var(--fs-meta); }
+/* One line by Start: the plan strip above carries the detail. */
+.launch-summary { flex: 1 1 auto; order: 0; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-hi); font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
 .launch-grant-command[hidden], .launch-grant-invite[hidden], .launch-grant-note[hidden], .launch-grant-error[hidden], .launch-grant [data-launch-action="allow"][hidden] { display: none; }
@@ -2922,10 +2935,9 @@ button.chip:disabled { cursor: default; }
 .launch-error-detail summary::before { content: "▸"; font-size: 0.9em; }
 .launch-error-detail[open] summary::before { content: "▾"; }
 .launch-error-detail pre { margin: var(--space-2) 0 0; padding: var(--space-3); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-hi); background: var(--panel); border-radius: var(--radius-card); font-size: var(--fs-xs); }
-.launch-sheet .dialog-actions { background: var(--bg-raised); }
+:root .launch-sheet .dialog-actions { background: var(--bg-raised); -webkit-backdrop-filter: none; backdrop-filter: none; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .launch-sheet { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: calc(var(--space-4) + env(safe-area-inset-top)) calc(var(--space-4) + env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom)) calc(var(--space-4) + env(safe-area-inset-left)); border-radius: 0; }
-  .launch-list { max-height: none; }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
   .launch-sheet .dialog-actions button, .launch-tabs [role=tab] { min-height: var(--rail-item-min); }
@@ -2943,20 +2955,23 @@ button.chip:disabled { cursor: default; }
      neither is pushed under the sticky actions (cas-9666). */
   .launch-view[data-launch-view="form"] {
     grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-    grid-template-areas: "project cli" "project account" "workers account" "invalid invalid" "actions actions";
-    column-gap: var(--space-6); row-gap: var(--space-3); align-items: start;
+    /* The filler row soaks up a tall account list, so the left column keeps one section gap. */
+    grid-template-areas: "plan plan" "project cli" "project account" "workers account" "route account" ". account" "invalid invalid" "actions actions";
+    grid-template-rows: auto auto auto auto auto 1fr auto auto;
+    column-gap: var(--space-6); row-gap: var(--space-4); align-items: start;
   }
+  .launch-view[data-launch-view="form"] > .launch-plan { grid-area: plan; }
   .launch-view[data-launch-view="form"] > .launch-project { grid-area: project; }
   .launch-view[data-launch-view="form"] > .launch-options { display: contents; }
   .launch-options > .launch-cli { grid-area: cli; }
   .launch-options > .launch-account { grid-area: account; }
   .launch-options > .launch-workers { grid-area: workers; }
+  .launch-options > .launch-route { grid-area: route; }
   .launch-view[data-launch-view="form"] > .launch-invalid { grid-area: invalid; }
   .launch-view[data-launch-view="form"] > .launch-actions { grid-area: actions; }
 }
 @media (min-width: 62rem) and (min-height: 30.01rem) {
   .launch-sheet { width: min(880px, calc(100vw - var(--space-6))); }
-  .launch-list { max-height: min(46dvh, 380px); }
   .launch-workers input { max-width: 9.5rem; }
 }
 @media (max-height: 30rem) and (min-width: 40rem) {
@@ -2965,7 +2980,6 @@ button.chip:disabled { cursor: default; }
   .launch-head h2 { font-size: var(--fs-md); }
   .launch-machine { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-3); }
   .launch-view[data-launch-view="form"] { column-gap: var(--space-4); row-gap: var(--space-2); }
-  .launch-list { max-height: calc(100dvh - 15rem); }
   .launch-row { min-height: 44px; padding-block: var(--space-1); }
   #launch-cli-hint, #launch-workers-hint { display: none; }
   .launch-workers { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-2); }
@@ -3505,6 +3519,12 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-card .conversation-machine-name { flex: 0 1000 auto; color: var(--ink-mid); font-size: var(--fs-xs); }
 .project-card .conversation-session-slot[aria-hidden="true"] { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
 .project-card .conversation-machine-name::before { content: "· "; }
+/* cas-0d58: in the card the version badge yields before the machine name and
+   ellipsises in its own box; its title keeps the whole line. Its weight dwarfs
+   the name's 1000 because even a sub-pixel loss shows the name's ellipsis. The
+   open row's machine name clips too: the one-line card cannot wrap it. */
+.project-card .supervisor-version { display: block; flex: 0 10000000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.project-card .conversation-row:is(:focus-visible, [aria-current="true"]) .conversation-machine-name { overflow: hidden; text-overflow: ellipsis; }
 .project-card .conversation-supervisor-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .project-card .conversation-when { font-family: var(--font-mono); }
 .project-card .conversation-marks { grid-column: 4; grid-row: 1; display: inline-flex; align-items: center; gap: var(--space-1); }
@@ -3662,15 +3682,6 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .conversation-resume button:disabled { color: var(--ink-mid); cursor: default; }
 
 
-/* Explicit native account rechecks use the existing quiet action/evidence roles. */
-.account-usage-check { display: grid; justify-items: start; gap: var(--space-2); margin-block: var(--space-2); min-width: 0; }
-.account-usage-check button { min-height: var(--rail-item-min); padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--color-action); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
-.account-usage-check button:disabled { color: var(--ink-mid); cursor: wait; }
-.account-usage-check button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--space-1); }
-.account-usage-result { color: var(--ink-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
-.account-usage-result p { margin: 0; }
-.launch-account-entry { min-width: 0; }
-.launch-account-entry > .account-usage-check { margin-inline: var(--space-3); }
 @media print { .account-usage-check button { display: none; } }
 
 /* Live epics in Tasks & progress (cas-9b99): a three-line row grid (title and
@@ -3755,3 +3766,98 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .markdown-image[data-state="loading"] img { min-width: var(--space-16); min-height: var(--space-12); }
 .markdown-image:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 @media (forced-colors: active) { .markdown-image { border-color: CanvasText; } }
+
+/* Capacity meter (account-meters.ts), shared by Accounts and New session.
+   Always "% left": the bar is what remains. Equal widths, tabular numerals,
+   one small-caps label style; widths arrive through CSSOM (fillMeters). */
+.meter { display: grid; grid-template-columns: auto minmax(3rem, 1fr) auto; grid-template-areas: "label bar value" "label when when"; align-items: center; gap: 2px var(--space-2); min-width: 0; font-variant-numeric: tabular-nums; }
+.meter-window { grid-area: label; align-self: start; min-inline-size: 2.5rem; padding-top: 1px; color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
+.meter-bar { grid-area: bar; display: block; block-size: 6px; border-radius: var(--radius-pill); background: var(--bg-raised); box-shadow: inset 0 0 0 var(--line-width) var(--line-subtle); overflow: hidden; }
+.meter-bar > span { display: block; block-size: 100%; inline-size: 0; border-radius: inherit; background: var(--state-ok); transition: inline-size 150ms ease-out; }
+.meter[data-tone="low"] .meter-bar > span { background: var(--state-warn); }
+.meter[data-tone="crit"] .meter-bar > span { background: var(--state-crit); }
+.meter:is([data-state="stale"], [data-state="local"]) .meter-bar > span { background: var(--state-off); }
+.meter-value { grid-area: value; justify-self: end; min-inline-size: 6ch; text-align: end; color: var(--ink); white-space: nowrap; font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-mono); font-variant-numeric: tabular-nums; }
+.meter-value--none { font-family: var(--font-ui); text-align: start; }
+.meter-unit { color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/1 var(--font-ui); }
+.meter:is([data-state="stale"], [data-state="local"]) .meter-value, .meter-value--none { color: var(--ink-mid); font-weight: var(--weight-regular); }
+/* A reading with no number spans the bar and value columns: one quiet line. */
+.meter-value--none { grid-column: bar / value; grid-row: 1; justify-self: start; z-index: 0; overflow: hidden; text-overflow: ellipsis; }
+.meter:has(.meter-value--none) .meter-bar { visibility: hidden; }
+.meter-when { grid-area: when; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
+.meter-when:empty { display: none; }
+@media (prefers-reduced-motion: reduce) { .meter-bar > span { transition: none; } }
+@media (forced-colors: active) { .meter-bar { outline: 1px solid CanvasText; } .meter-bar > span { background: CanvasText; } }
+
+/* New session plan strip: the two-second answer above every control. One
+   hairline band, three aligned columns; a phone stacks them. */
+.launch-plan { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2) var(--space-4); margin: 0; padding: var(--space-3) 0; border-block: var(--line-width) solid var(--line-subtle); }
+.launch-plan > div { display: grid; align-content: start; gap: 2px; min-width: 0; }
+.launch-plan p { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.launch-plan-k { color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
+.launch-plan-v { color: var(--text-hi); font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
+/* Meta lines wrap at word boundaries rather than cut mid-word. */
+.launch-plan .launch-plan-meta { white-space: normal; text-overflow: clip; color: var(--text-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); font-variant-numeric: tabular-nums; }
+.launch-plan-meta:empty { display: none; }
+@media (max-width: 40rem) { .launch-plan { grid-template-columns: minmax(0, 1fr); } .launch-plan p { white-space: normal; } }
+/* Account rows: radio · name and the server's reason · two brief meters · ↻. */
+/* The entry is the card: the radio row and its ↻ share one edge, so cards line up with the project list. */
+.launch-account-entry { position: relative; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: start; background: var(--panel); border: var(--line-width) solid var(--color-transparent); border-radius: var(--radius-card); transition: background-color 120ms ease, border-color 120ms ease; }
+.launch-account-entry:hover { background: var(--bg-hover); }
+.launch-account-entry.is-checked { background: var(--bg-active); border-color: var(--color-action); }
+.launch-account-entry > .launch-account-row, .launch-account-entry > .launch-account-row:hover, .launch-account-entry > .launch-account-row.is-checked { background: transparent; border-color: transparent; }
+.launch-account-entry > .account-usage-check { padding: var(--space-2) var(--space-2) 0 0; }
+.launch-tabs[hidden], .launch-route-warn[hidden], .launch-route-more[hidden] { display: none; }
+.launch-route-line { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+.launch-route-line > .field-hint { flex: 1; min-width: 0; }
+.launch-route-more { flex: none; }
+.launch-route-more > summary { display: grid; place-items: center; inline-size: 24px; block-size: 24px; border-radius: var(--radius-pill); color: var(--text-mid); cursor: pointer; list-style: none; font-size: var(--fs-meta); }
+.launch-route-more > summary::-webkit-details-marker { display: none; }
+.launch-route-more > summary:hover { color: var(--text-hi); background: var(--bg-hover); }
+.launch-route-more > summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.launch-route-more[open] { flex-basis: 100%; order: 2; }
+.launch-route-line:has(.launch-route-more[open]) { flex-wrap: wrap; }
+.launch-route-more[open] > .launch-route-note { display: block; margin-top: var(--space-1); }
+.launch-route-warn { color: var(--state-warn); }
+.launch-not-offered .launch-account-out { display: grid; gap: var(--space-1); padding-inline: var(--space-3); }
+.launch-not-offered .launch-login { padding-inline-start: 0; }
+.launch-account-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
+/* Ink, not the accent: the pill sits on a checked row's own active fill, where the accent drops under 4.5:1 (cas-448f). */
+.launch-account-pick { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--ink); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
+.launch-account-why { color: var(--text-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+.launch-account-low { color: var(--state-warn); }
+.launch-meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-1) var(--space-4); margin-top: var(--space-1); }
+.launch-not-offered { color: var(--text-mid); font-size: var(--fs-meta); }
+.launch-not-offered > summary { display: inline-flex; align-items: center; min-height: 32px; padding-inline: var(--space-3); cursor: pointer; border-radius: var(--radius-pill); }
+.launch-not-offered > summary:hover { color: var(--text-hi); background: var(--bg-hover); }
+.launch-not-offered > summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.launch-not-offered[open] > summary { margin-bottom: var(--space-1); }
+/* The ↻ usage check (account-usage-check.ts), shared by Accounts and New session. */
+.account-usage-check { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.account-refresh { display: inline-grid; place-items: center; inline-size: var(--pill-action-height); block-size: var(--pill-action-height); min-width: 0; min-height: 0; padding: 0; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink-mid); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms ease; }
+.account-refresh svg { inline-size: 16px; block-size: 16px; }
+.account-refresh:hover:not(:disabled) { background: var(--bg-hover); color: var(--ink); }
+.account-refresh:active:not(:disabled) { transform: scale(0.94); }
+.account-refresh:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.account-refresh[aria-busy="true"] { cursor: progress; color: var(--color-action); border-color: var(--color-action); }
+.account-refresh[aria-busy="true"] svg { animation: account-refresh-spin 900ms linear infinite; }
+@keyframes account-refresh-spin { to { transform: rotate(360deg); } }
+.account-usage-result { max-inline-size: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-mid); font-size: var(--fs-xs); }
+.account-usage-result:empty { display: none; }
+.account-usage-result.is-error { color: var(--state-warn); white-space: normal; }
+@media (max-width: 53rem) { .account-refresh { inline-size: var(--rail-item-min); block-size: var(--rail-item-min); } }
+@media (prefers-reduced-motion: reduce) { .account-refresh { transition: none; } .account-refresh[aria-busy="true"] svg { animation: none; } }
+/* The Start bar matches the dialog's rounding instead of a square inset slab; its summary sits on the bar's inner padding. */
+.launch-sheet .launch-actions { border-radius: var(--radius-card); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4); }
+/* A local check's line names whose check it was; it wraps rather than cut. */
+.meter[data-state="local"] .meter-when { white-space: normal; }
+/* New session: a check's result lands on the row's meters; only a failure needs words beside ↻. */
+.launch-account-entry .account-usage-result:not(.is-error) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* cas-8c4f: Reload Cassy's wait. Three soft dots breathe in turn in the action ink; reduced motion keeps them still. */
+.reload-wait { display: inline-flex; gap: 3px; margin-inline-end: var(--space-1); vertical-align: middle; }
+.reload-wait i { width: 5px; height: 5px; border-radius: 50%; background: var(--color-action); opacity: 0.35; animation: reload-wait-breathe 1.2s ease-in-out infinite; }
+.reload-wait i:nth-child(2) { animation-delay: 0.2s; }
+.reload-wait i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes reload-wait-breathe { 0%, 100% { opacity: 0.35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .reload-wait i { animation: none; opacity: 0.7; } }
+@media (forced-colors: active) { .reload-wait i { background: CanvasText; } }

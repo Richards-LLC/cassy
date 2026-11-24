@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
-import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
+import { readings } from "./account-meters";
+import { accountTime, type AccountRow, type AccountOperation, type AccountsCatalog, type GatewayInventory } from "./accounts-model";
 const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
@@ -13,10 +14,10 @@ const settle = async () => {
     expect(document.querySelector('.accounts-machine-body > [role="status"]')).toBeNull();
   });
 };
-function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] })) {
+function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] }), gateway: AccountsHost["gateway"] = async () => { throw new Error("404"); }) {
   const host: AccountsHost = {
     machines: () => [{ id: "linux", label: "Soundwave", scopes: manage ? ["machine-read", "factory-manage"] : ["machine-read"] }],
-    checkUsage: vi.fn(), list: vi.fn(list), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
+    checkUsage: vi.fn(), list: vi.fn(list), gateway: vi.fn(gateway), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
   };
   const sheet = new AccountsSheet(host); sheet.open();
   return { sheet, host };
@@ -43,7 +44,9 @@ it("shows read-only pairings their disabled actions and the exact manage-access 
   click("[data-accounts-close]"); expect(host.returnFocus).toHaveBeenCalledOnce();
 });
 
-it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOperation[])("performs %s with required confirmation and invalidates New session", async operation => {
+// Plain literal tables: the worker stability check derives each row from the source.
+it.each(["remove", "disable", "rename", "enable", "set_default"])("performs %s with required confirmation and invalidates New session", async (name: string) => {
+  const operation = name as AccountOperation;
   const { host, sheet } = setup(true, operation === "enable" ? { ...row, disabled: true, capabilities: { ...row.capabilities, enable: null, disable: "Already disabled" } } : row);
   await settle();
   click(`[data-operation="${operation}"]`);
@@ -113,15 +116,14 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   const { host, sheet } = setup(true, healthy);
   vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy, protectedMain] });
   sheet.open(); await settle();
+  // One ledger per provider in one stable order: by name, removable cleanup rows last.
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
-  expect(groups.map(group => group.querySelectorAll(".accounts-row").length)).toEqual([3, 1]);
-  expect(groups[1]!.querySelector<HTMLElement>(".accounts-identity strong")!.title).toBe(duplicate.key);
-  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-identity strong")].map(name => name.title)).toEqual([healthy.key, tight.key, protectedMain.key]);
+  expect(groups).toHaveLength(1);
+  expect([...groups[0]!.querySelectorAll<HTMLElement>("[data-account-key]")].map(row => row.dataset.accountKey)).toEqual([protectedMain.key, tight.key, healthy.key, duplicate.key]);
   for (const line of document.querySelectorAll("[data-duplicate-of]")) expect(line.textContent).not.toContain(healthy.key);
-  expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
-  expect(groups[0]!.textContent).toContain("~/.claude-work");
-  expect(groups[0]!.textContent).toContain("62%");
-  expect(groups[1]!.textContent).toBeTruthy();
+  expect(groups[0]!.querySelector('[data-testid="account-meter"][data-tone="crit"]')).not.toBeNull();
+  expect(groups[0]!.querySelector(`[data-account-key="${healthy.key}"] [title^="~/.claude-work"]`)).not.toBeNull();
+  expect(groups[0]!.querySelector(`[data-account-key="${healthy.key}"] [data-testid="account-meter"][data-window="week"]`)!.getAttribute("data-left")).toBe("62");
   click("[data-cleanup]");
   // The shared dialog form is a zero-intrinsic-width grid container; inside the banner's flex row it was squeezed to a sliver.
   const editor = document.querySelector(".accounts-editor")!;
@@ -137,11 +139,11 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
 
 it("formats reset and observation times locally in 12-hour form and clears expired capacity", () => {
   const now = new Date("2026-10-28T16:00:00Z").getTime();
-  const fresh = accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T13:00:00Z", now)[0];
-  expect(fresh).toContain("weekly"); expect(fresh).toContain("62%"); expect(fresh).toContain(accountTime("2026-10-28T13:00:00Z")); expect(fresh).toMatch(/AM|PM/);
-  expect(accountMeters([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], now)[0]).toMatchObject({ left: null, reset: null });
-  // cas-eae3: a reset already past is a stale fact, not a time to show.
-  expect(accountCapacity([{ name: "weekly", used_percent: null, resets_at: "2026-10-27T16:00:00Z" }], null, now)).toEqual(["weekly usage unknown"]);
+  // The production renderer's readings: a coming reset keeps its number and 12-hour time.
+  const week = readings([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T15:30:00Z", now)[1]!;
+  expect(week).toMatchObject({ slot: "week", kind: "live", left: 62, reset: accountTime("2026-10-29T16:20:00Z") });
+  // cas-eae3: a reset already past is a stale fact, not a number or a time to show.
+  expect(readings([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], "2026-10-26T16:00:00Z", now)[1]).toEqual({ slot: "week", kind: "reset" });
   const zone = process.env.TZ;
   try { process.env.TZ = "America/New_York"; expect(accountTime("2026-10-29T17:10:00Z")).toMatch(/1:10\sPM ET$/); }
   finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
@@ -151,28 +153,92 @@ it("formats reset and observation times locally in 12-hour form and clears expir
 it("shows the Codex alias and valid login help when identity metadata is unavailable", async () => {
   const { host } = setup(false, { ...row, key: "codex:work", provider: "codex", name: "work", display_name: "work", login_state: "unknown" });
   await settle();
-  expect(document.querySelector(".accounts-identity strong")!.textContent).toBe("work");
+  expect(document.querySelector(".accounts-name strong")!.textContent).toBe("work");
   expect(document.body.textContent).toContain("codex:work");
   click("[data-login]"); await settle();
   expect(host.copy).toHaveBeenCalledWith("cas codex login work");
 });
 
-it.each(["claude", "codex"] as const)("rechecks %s usage without management or switching, with dated snapshots and retry", async provider => {
+it.each(["claude", "codex"])("rechecks %s usage without management or switching, with dated snapshots and retry", async (name: string) => {
+  const provider = name as "claude" | "codex";
   const account = { ...row, key: `${provider}:spare`, provider, login_state: "logged_in" as const };
   const { host } = setup(false, account);
-  const check = vi.fn().mockResolvedValue({ checked_at: "2026-11-03T17:00:00Z", observed_at: "2026-11-03T16:00:00Z", source: "native snapshot", reason: "Snapshot is stale; open a session on this account to refresh.", windows: [{ name: "5h", used_percent: 23, resets_at: "2026-11-03T20:00:00Z" }, { name: "weekly", used_percent: 44, resets_at: "2026-11-08T16:57:00Z" }] });
+  const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+  const check = vi.fn().mockResolvedValue({ checked_at: at(0), observed_at: at(-10), source: "native snapshot", reason: "Snapshot is stale; open a session on this account to refresh.", windows: [{ name: "5h", used_percent: 23, resets_at: at(120) }, { name: "weekly", used_percent: 44, resets_at: at(3 * 1440) }] });
   Object.assign(host, { checkUsage: check });
   await settle();
-  const button = () => [...document.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === "Check usage")!;
-  expect(button()).toBeDefined(); button().click();
-  await vi.waitFor(() => expect(document.body.textContent).toMatch(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)")));
+  const button = () => document.querySelector<HTMLButtonElement>('[data-testid="account-refresh"]')!;
+  expect(button()).not.toBeNull(); button().click();
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="account-meter"][data-window="5h"]')?.getAttribute("data-left")).toBe("77"));
   expect(check).toHaveBeenCalledWith("linux", `${provider}:spare`, expect.any(AbortSignal));
-  expect(document.body.textContent).toMatch(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*11)(?=[\\s\\S]*00)"));
-  expect(document.body.textContent).toMatch(new RegExp("(?=[\\s\\S]*5h)(?=[\\s\\S]*23%)"));
-  expect(document.body.textContent).toContain("44%");
-  expect(document.body.textContent).toContain("Snapshot is stale");
+  expect(document.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-left")).toBe("56");
+  expect(document.querySelector('[data-testid="account-usage-status"]')!.textContent).toContain(check.mock.results[0] ? "Snapshot is stale" : "");
   expect(host.change).not.toHaveBeenCalled(); expect(host.changed).not.toHaveBeenCalled();
   check.mockRejectedValueOnce(Object.assign(new Error("GET usage failed (429)"), { status: 429 })); button().click();
   await vi.waitFor(() => expect(document.body.textContent).toBeTruthy());
   expect(button().disabled).toBe(false);
+});
+
+it("lists hub accounts apart from native profiles, read-only, and only when the machine has a hub", async () => {
+  const hub: GatewayInventory = { status: "unavailable", reason: "hub unreachable", host: "loopback", inventory: "ok", team_accounts: 1,
+    accounts: [{ provider: "claude", label: "hel***@example.test", state: "active", recent_requests: 6, recent_failed: 1, recent_minutes: 200 }, { provider: "codex", label: "pro***@example.test", state: "disabled", recent_requests: 0, recent_failed: 0 }] };
+  // An older hub's catch-all `{}` must not take the native ledger down with it (lane CI HUB-J13).
+  // No route or an unknown answer draws nothing; a machine with no hub says so; a configured hub lists its accounts.
+  for (const [gateway, shown] of [[async () => { throw new Error("404"); }, undefined], [async () => ({}) as GatewayInventory, undefined], [async () => ({ ...hub, status: "off" as const, inventory: "off" as const, accounts: [] }), "off"], [async () => hub, "unavailable"], [async () => ({ ...hub, status: "off" as const, reason: undefined }), "off-listed"]] as const) {
+    setup(true, row, undefined, gateway);
+    await settle();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.querySelector('.accounts-row[data-login-state="stale_login"]')).not.toBeNull();
+    const section = document.querySelector<HTMLElement>('[data-testid="accounts-gateway"]');
+    expect(section?.dataset.gatewayStatus).toBe(shown === "off-listed" ? "off" : shown);
+    // A dashboard-only machine (routing off) still lists the hub's accounts, read-only.
+    if (section && shown === "off-listed") {
+      expect(section.querySelectorAll(".accounts-hub-row")).toHaveLength(2);
+      expect(section.querySelector('[data-testid="gateway-routing-off"]')).not.toBeNull();
+      expect(section.querySelectorAll("button, input, select")).toHaveLength(0);
+    }
+    if (section && shown === "unavailable") {
+      expect(section.querySelectorAll(".accounts-hub-row")).toHaveLength(2);
+      expect(section.querySelectorAll("button, input, select")).toHaveLength(0);
+      expect(section.querySelector('[data-testid="gateway-reason"]')).not.toBeNull();
+      expect(section.querySelector('[data-testid="gateway-team"]')).not.toBeNull();
+      expect(section.closest(".accounts-provider-group")).toBeNull();
+    }
+    document.body.innerHTML = "";
+  }
+});
+
+it("an unreachable hub shows no capacity number, and a recommended account under 20% left says why on its row", async () => {
+  const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+  const low: AccountRow = { ...row, key: "codex:pippenz", provider: "codex", name: "pippenz", login_state: "logged_in", recommendation: "resets Wed 9:12 AM, 14% left", usage_source: "hub", usage_observed_at: at(-5), windows: [{ name: "weekly", used_percent: 86, resets_at: at(2 * 1440) }] };
+  setup(true, low, async () => ({ accounts: [low], quota_source: { state: "hub" } }));
+  await settle();
+  expect(document.querySelector('[data-testid="account-next"]')).not.toBeNull();
+  expect(document.querySelector('[data-testid="account-low-pick"]')).not.toBeNull();
+  // A window the provider doesn't report stays a visible, named state on the row.
+  expect(document.querySelector('[data-testid="account-meter"][data-window="5h"]')?.getAttribute("data-state")).toBe("missing");
+  document.body.innerHTML = "";
+
+  const unreachable: AccountRow = { ...low, recommendation: null, usage_source: "hub_unreachable", windows: [], usage_observed_at: null };
+  setup(true, unreachable, async () => ({ accounts: [unreachable], quota_source: { state: "unreachable", reason: "dashboard unreachable (ConnectionFailed)" } }));
+  await settle();
+  expect(document.querySelector('[data-testid="accounts-hub-unreachable"]')).not.toBeNull();
+  const meters = [...document.querySelectorAll<HTMLElement>('[data-testid="account-meter"]')];
+  expect(meters.map(meter => meter.dataset.state)).toEqual(["unreachable", "unreachable"]);
+  expect(meters.some(meter => meter.hasAttribute("data-left"))).toBe(false);
+});
+
+it("draws a ↻ check taken while a hub is configured as this machine's own, muted and named, never as the shared number", async () => {
+  const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+  const shared: AccountRow = { ...row, key: "claude:work", name: "work", login_state: "logged_in", usage_source: "hub", usage_observed_at: at(-5), windows: [{ name: "weekly", used_percent: 20, resets_at: at(2 * 1440) }] };
+  const { host } = setup(false, shared);
+  const check = vi.fn().mockResolvedValue({ checked_at: at(0), observed_at: at(-2), source: "native snapshot", reason: null, windows: [{ name: "weekly", used_percent: 30, resets_at: at(2 * 1440) }] });
+  Object.assign(host, { checkUsage: check });
+  await settle();
+  expect(document.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-state")).toBe("live");
+  document.querySelector<HTMLButtonElement>('[data-testid="account-refresh"]')!.click();
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-state")).toBe("local"));
+  const meter = document.querySelector<HTMLElement>('[data-testid="account-meter"][data-window="week"]')!;
+  expect(meter.dataset.left).toBe("70");
+  expect(meter.getAttribute("aria-label")).toContain("Soundwave");
 });

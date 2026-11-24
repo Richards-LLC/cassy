@@ -154,3 +154,19 @@ pub(super) async fn check_usage<R: SessionReadModel>(
     };
     with_cors(response, &headers)
 }
+
+/// Machine-read only: the home gateway's readiness and its upstream accounts,
+/// read from the hub's existing dashboard. Never a key, address or Team row.
+pub(super) async fn gateway<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(&state, HubAction::MachineRead, Scope::MachineRead, &headers, "GET", "/v1/accounts/gateway") {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    let response = match tokio::task::spawn_blocking(super::gateway_accounts::inventory).await {
+        Ok(inventory) => Json(inventory).into_response(),
+        Err(_) => launch_error(StatusCode::SERVICE_UNAVAILABLE, "gateway_unavailable", "Could not read the home gateway. Retry on this machine."),
+    };
+    with_cors(response, &headers)
+}

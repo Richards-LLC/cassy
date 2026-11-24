@@ -182,6 +182,8 @@ impl Config {
             ("factory.gateway.enabled".into(), factory.gateway.enabled.to_string()),
             ("factory.gateway.endpoint".into(), factory.gateway.endpoint.clone().unwrap_or_default()),
             ("factory.gateway.key_file".into(), factory.gateway.key_file.clone().unwrap_or_default()),
+            ("factory.gateway.dashboard".into(), factory.gateway.dashboard.clone().unwrap_or_default()),
+            ("factory.gateway.dashboard_key_file".into(), factory.gateway.dashboard_key_file.clone().unwrap_or_default()),
             ("factory.claude.fallback_model".into(), factory.claude.fallback_model.clone().unwrap_or_default()),
             ("factory.commander_mirror_enabled".to_string(), factory.commander_mirror_enabled.to_string()),
             ("factory.write_roots".to_string(), factory.write_roots.join(",")),

@@ -436,7 +436,12 @@ pub(super) fn exec_image(
     fallback: bool,
     rollback: &Path,
 ) -> std::io::Error {
-    let error = std::process::Command::new(binary)
+    let mut command = std::process::Command::new(binary);
+    // The worker route fixed at startup survives the new image.
+    if let Some(route) = cas_mux::gateway::pinned_route() {
+        command.env(cas_mux::gateway::ROUTE_ENV, route);
+    }
+    let error = command
         .arg0(std::env::args_os().next().unwrap_or_default())
         .args(std::env::args_os().skip(1))
         .env(HANDOFF_ENV, manifest.to_string())

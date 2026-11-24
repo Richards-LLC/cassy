@@ -10,7 +10,6 @@ const casSrcRow = (page: Page) => page.getByRole("navigation", { name: "Choose a
 const newSession = (page: Page) => page.getByRole("button", { name: "New session", exact: true });
 // The Accounts confirmation form; it stays mounted (hidden) between operations.
 const accountsEditor = (dialog: Locator) => dialog.getByTestId("accounts-editor");
-const usageFor = (dialog: Locator, account: string) => dialog.getByRole("status", { name: `Usage for ${account}`, exact: true });
 
 /** Atlas with one live supervisor on cas-src; ledger-api and old-notes are idle projects. */
 const ATLAS: Machine = {
@@ -336,12 +335,13 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
       await expect(accountsEditor(dialog)).toBeHidden();
-      // The weekly meter at 38% used: its bar carries data-left="62".
-      await expect(dialog.getByTestId("accounts-meter").filter({ has: page.locator('[data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
+      // The weekly meter at 38% used carries data-left="62" and a 12-hour reset time.
+      await expect(dialog.locator('[data-testid="account-meter"][data-window="week"][data-left="62"]')).toContainText(/(AM|PM) [A-Z]/);
       const stale = dialog.getByRole("listitem").filter({ hasText: "old@example.test" });
       await expect(stale).toHaveAttribute("data-login-state", "stale_login");
       await expect(stale).toBeVisible();
-      await expect(dialog.getByRole("paragraph").filter({ hasText: "~/.claude-spare" })).toBeVisible();
+      // The row names the profile; the folder it lives in is the tooltip.
+      await expect(dialog.getByRole("listitem").filter({ hasText: "hello@example.test" }).locator('code[title^="~/.claude-spare "]')).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (width === 390) {
         await page.mouse.move(200, 600);
@@ -413,7 +413,8 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await expect(grant).toBeVisible();
     await expect(grant.getByRole("button", { name: "Copy command", exact: true })).toBeVisible();
     // Every account operation, including those folded in a closed ⋯ menu.
-    for (const button of await dialog.getByRole("group", { name: /^Actions for / }).getByRole("button", { includeHidden: true }).all()) await expect(button).toBeDisabled();
+    // Usage checks (↻) need only read access; every account change is disabled.
+    for (const button of await dialog.getByRole("group", { name: /^Actions for / }).locator("[data-operation]").all()) await expect(button).toBeDisabled();
     await expect(accountsEditor(dialog)).toBeHidden();
     expect(await accountsEditor(dialog).evaluate(node => node.getClientRects().length)).toBe(0);
   });
@@ -439,11 +440,16 @@ test("HUB-J13 check native account usage before starting without switching", jou
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
       for (const provider of ["claude", "codex"]) {
-        await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
-        const result = usageFor(dialog, `${provider}:main`);
-        await expect(result).toContainText(new RegExp("(?=[\\s\\S]*5h)(?=[\\s\\S]*23%)")); await expect(result).toContainText("44%");
-        await expect(result).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)")); await expect(result).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*11)(?=[\\s\\S]*00)"));
-        await expect(result).toContainText("Snapshot is stale");
+        // A phone row keeps its width for the name: the check sits in the ⋯ menu there.
+        if (width === 390) {
+          await dialog.getByLabel(`More actions for ${provider} main`, { exact: true }).click();
+          await dialog.locator(`[data-account-key="${provider}:main"] .accounts-menu`).getByRole("button", { name: "Refresh usage", exact: true }).click();
+        } else await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
+        // The check's windows land on the row's meters as "% left"; its reason reaches the status.
+        const row = dialog.locator(`[data-account-key="${provider}:main"]`);
+        await expect(row.locator('[data-testid="account-meter"][data-window="5h"]')).toHaveAttribute("data-left", "77");
+        await expect(row.locator('[data-testid="account-meter"][data-window="week"]')).toHaveAttribute("data-left", "56");
+        await expect(dialog.locator(`[data-usage-account="${provider}:main"] [data-testid="account-usage-status"]`)).toContainText("Snapshot is stale");
       }
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     });
@@ -453,7 +459,8 @@ test("HUB-J13 check native account usage before starting without switching", jou
       const dialog = page.getByRole("dialog", { name: "New session", exact: true });
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       await dialog.getByRole("button", { name: "Check usage for claude:support@petrastella.io", exact: true }).click();
-      await expect(usageFor(dialog, "claude:support@petrastella.io")).toContainText(new RegExp("(?=[\\s\\S]*3)(?=[\\s\\S]*12)(?=[\\s\\S]*00)"));
+      const entry = dialog.locator(".launch-account-entry").filter({ has: page.locator('input[value="support@petrastella.io"]') });
+      await expect(entry.locator('[data-testid="account-meter"][data-window="5h"]')).toHaveAttribute("data-left", "77");
 
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       expect(hub.launches).toEqual([]);
@@ -462,6 +469,65 @@ test("HUB-J13 check native account usage before starting without switching", jou
     await page.getByRole("dialog", { name: "New session", exact: true }).getByRole("button", { name: "Cancel", exact: true }).click();
   }
   expect(calls).toContain("claude:main"); expect(calls).toContain("codex:main");
+});
+
+// Home-gateway routing: New session pins the worker route and names its scope;
+// Accounts keeps hub accounts apart from native profiles, read-only.
+test("HUB-J13 choose the home gateway for workers and read the hub's accounts", journeyPart, async ({ page, journey }) => {
+  const launch = atlasLaunch();
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: launch } });
+  const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,OPTIONS" };
+  const gateway = { available: true, preselected: "direct", clients: ["claude", "codex"] };
+  await page.route(/^https:\/\/atlas\.test\/v1\/launch\/profiles(?:\?.*)?$/, route => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+    const target = new URL(route.request().url()).searchParams.get("target");
+    return route.fulfill({ headers, json: { ...launch.profiles, ...(target ? { gateway } : {}) } });
+  });
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts$/, route => route.fulfill({ headers, json: { accounts: [{ key: "claude:main", provider: "claude", name: "main", display_name: "daniel@example.test", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Protected", disable: null, enable: "Already enabled", rename: "Protected", set_default: null } }] } }));
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts\/gateway$/, route => route.fulfill({ headers, json: { status: "ready", host: "loopback", inventory: "ok", team_accounts: 0, accounts: [
+    { provider: "claude", label: "hel***@example.test", state: "active", recent_requests: 75, recent_failed: 0, recent_minutes: 200 },
+    { provider: "codex", label: "sup***@example.test", state: "active", recent_requests: 41, recent_failed: 1, recent_minutes: 200 },
+    { provider: "codex", label: "pip***@example.test", state: "disabled", recent_requests: 0, recent_failed: 0, recent_minutes: 200 },
+  ] } }));
+  await journey.open();
+  const sheet = page.getByRole("dialog", { name: "New session", exact: true });
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 }); await page.emulateMedia({ colorScheme });
+    await journey.stage(`Worker route in New session at ${width} ${colorScheme}`, async () => {
+      await newSession(page).click();
+      const route = sheet.getByTestId("launch-route");
+      await expect(route).toBeHidden();
+      await sheet.getByRole("radio", { name: /ledger-api/ }).click();
+      await expect(route).toBeVisible();
+      await expect(route.getByRole("radio", { name: "Direct", exact: true })).toBeChecked();
+      await route.getByRole("radio", { name: "Home gateway", exact: true }).click();
+      await expect(route.getByRole("radio", { name: "Home gateway", exact: true })).toBeChecked();
+      await route.scrollIntoViewIfNeeded();
+      await route.locator(".launch-route-more > summary").click();
+      await expect(route.locator(".launch-route-note")).toBeVisible();
+      expect(await sheet.evaluate(el => el.scrollWidth <= el.clientWidth), "no sideways scrolling").toBe(true);
+    });
+    await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
+    await journey.stage(`Hub accounts apart from native profiles at ${width} ${colorScheme}`, async () => {
+      await page.getByRole("button", { name: "Accounts", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
+      const section = dialog.getByTestId("accounts-gateway");
+      await section.scrollIntoViewIfNeeded();
+      await expect(section.getByRole("listitem")).toHaveCount(3);
+      await expect(section.getByRole("button")).toHaveCount(0);
+      await expect(section.getByRole("radio")).toHaveCount(0);
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), "no sideways scrolling").toBe(true);
+    });
+    await page.getByRole("button", { name: "Close accounts" }).click();
+  }
+  await journey.stage("Start pins the gateway route for the session's workers", async () => {
+    await newSession(page).click();
+    await sheet.getByRole("radio", { name: /ledger-api/ }).click();
+    await sheet.getByTestId("launch-route").getByRole("radio", { name: "Home gateway", exact: true }).click();
+    await sheet.getByRole("button", { name: "Start", exact: true }).click();
+    await expect.poll(() => hub.launches.length).toBe(1);
+    expect(hub.launches[0].body).toMatchObject({ target: target("p-ledger"), routing: "gateway" });
+  });
 });
 
 // cas-3dd7: the selected conversation's friction ledger, release over release, from the palette.

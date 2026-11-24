@@ -96,6 +96,26 @@ EOF
 expect fail - 'zero-match nextest result fails loudly' \
     env CARGO="${stub}" "${guard}" nextest run -p cas --lib stale_filter
 
+# cas-fcb1: a zero-test selection exits 4 so the capped runner can run the
+# owning crate; a real failure never does.
+status_of() { "$@" >/dev/null 2>&1; echo "exit $?"; }
+expect pass 'exit 4' 'zero-match selection exits with the zero-test status' \
+    status_of env CARGO="${stub}" "${guard}" nextest run -p cas --lib stale_filter
+stub_none="$(make_stub no-tests-nextest 4 <<'EOF'
+    Starting 0 tests across 1 binary (4 skipped)
+error: no tests to run
+EOF
+)"
+expect pass 'exit 4' "nextest's no-tests status stays the zero-test status" \
+    status_of env CARGO="${stub_none}" "${guard}" nextest run -p cas --lib -E 'test(stale)'
+stub_four="$(make_stub failing-four 4 <<'EOF'
+    Starting 1 test across 1 binary (0 skipped)
+        FAIL [   0.001s] cas tests::broken
+EOF
+)"
+expect pass 'exit 1' 'another status 4 failure is not a zero-test selection' \
+    status_of env CARGO="${stub_four}" "${guard}" nextest run -p cas --lib -E 'test(broken)'
+
 echo 99 >"${count_file}"
 expect fail - 'zero-match retry clears stale exported count' \
     env CARGO="${stub}" VERIFIED_TEST_COUNT_FILE="${count_file}" "${guard}" nextest run -p cas --lib -E 'test(stale)'

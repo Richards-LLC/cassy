@@ -466,12 +466,19 @@ describe("accounts (cas-9666)", () => {
     const step = dialog().querySelector<HTMLElement>(".launch-account")!;
     expect(step.hidden).toBe(false);
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="main"]')!.checked).toBe(true);
-    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="old@petrastella.io"]')!.disabled).toBe(true);
+    // A logged-out login is a help row with its login command, never a choice.
+    expect(dialog().querySelector('input[name="launch-account"][value="old@petrastella.io"]')).toBeNull();
     expect(step.querySelector(".launch-account-out code")!.textContent).toBe("cas claude login old@petrastella.io");
+    // Logged-out logins sit under one disclosure, apart from the pickable rows.
+    expect(step.querySelector('[data-testid="launch-not-offered"] [data-account="old@petrastella.io"] code')).not.toBeNull();
     pick(dialog(), 'input[name="launch-project"]');
     await flush();
     pick(dialog(), 'input[name="launch-account"][value="support@petrastella.io"]');
     expect(dialog().querySelector(".launch-summary")!.textContent).toContain("cas-src");
+    // The plan strip follows every choice.
+    const plan = dialog().querySelector<HTMLElement>('[data-testid="launch-plan"]')!;
+    expect(plan.querySelector('[data-plan="project"]')!.textContent).toContain("cas-src");
+    expect(plan.querySelector('[data-plan="supervisor"]')!.textContent).toContain("support@petrastella.io");
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
     await vi.waitFor(() => expect(calls.launches[0]?.request).toEqual({ target: { kind: "project", id: "p-cas-src" }, supervisor_cli: "claude", profile: "support@petrastella.io" }));
   });
@@ -494,6 +501,45 @@ describe("accounts (cas-9666)", () => {
     pick(dialog(), 'input[name="launch-account"][value="main"]');
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
     await vi.waitFor(() => expect(calls.launches[0]?.request.profile).toBe("main"));
+  });
+
+  it("builds the recommendation's reason from the readings its meters draw, and claims soonest only when it is", async () => {
+    const at = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
+    const profiles = structuredClone(ACCOUNTS);
+    Object.assign(profiles.claude!.profiles[1], { recommendation: "resets Wed 9:12 AM, 14% left", windows: [{ name: "weekly", used_percent: 86, resets_at: at(48) }], usage_observed_at: at(0) });
+    Object.assign(profiles.claude!.profiles[0], { windows: [{ name: "weekly", used_percent: 87, resets_at: at(17) }], usage_observed_at: at(0) });
+    const { sheet: s, dialog } = sheet({ machines: [ATLAS], profiles, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+    s.open();
+    await flush();
+    const row = dialog().querySelector('input[value="support@petrastella.io"]')!.closest(".launch-account-entry")!;
+    const reason = row.querySelector<HTMLElement>('[data-testid="account-pick-reason"]')!;
+    expect(reason.dataset.reset).toBe(row.querySelector<HTMLElement>('[data-testid="account-meter"][data-window="week"]')!.dataset.reset);
+    expect(reason.dataset.soonest).toBe("false");
+    // No offered login reports a 5h window, and every row still says so rather than dropping it.
+    for (const entry of dialog().querySelectorAll(".launch-accounts .launch-account-entry")) {
+      expect(entry.querySelector('[data-testid="account-meter"][data-window="5h"]')?.getAttribute("data-state")).toBe("missing");
+    }
+  });
+
+  it("pins the worker route shown for the chosen project and never offers a hub that isn't ready", async () => {
+    for (const [available, choose, sent] of [[true, "gateway", "gateway"], [false, "gateway", "direct"]] as const) {
+      const gateway = { available, preselected: "direct" as const, clients: ["claude", "codex"], ...(available ? {} : { reason: "hub unreachable" }) };
+      const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: async (target) => ({ ...ACCOUNTS, ...(target ? { gateway } : {}) }), catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+      s.open();
+      await flush();
+      const route = dialog().querySelector<HTMLElement>(".launch-route")!;
+      expect(route.hidden).toBe(true);
+      pick(dialog(), 'input[name="launch-project"]');
+      await vi.waitFor(() => expect(route.hidden).toBe(false));
+      expect(route.querySelector("#launch-route-scope")!.textContent).not.toBe("");
+      const option = dialog().querySelector<HTMLInputElement>(`input[name="launch-route"][value="${choose}"]`)!;
+      expect(option.disabled).toBe(!available);
+      if (available) pick(dialog(), `input[name="launch-route"][value="${choose}"]`);
+      dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+      await vi.waitFor(() => expect(calls.launches[0]?.request.routing).toBe(sent));
+      s.close();
+      document.body.innerHTML = "";
+    }
   });
 
   it("hides the step for Grok, shows a failed check with a retry for Codex, and sends no account for either", async () => {

@@ -82,6 +82,8 @@ impl FactoryApp {
 
         super::super::session::validate_factory_project(&config.cwd)?;
         let cas_dir = find_cas_root_from(&config.cwd)?;
+        // The worker route is fixed for this session now, not read live at each spawn.
+        cas_mux::gateway::pin_at_start(&cas_dir);
 
         let (supervisor_name, worker_names) = fallback_names(
             &cas_dir,
@@ -262,6 +264,7 @@ impl FactoryApp {
             cas_dir,
             director_stores,
             lane_ci_pending: Default::default(),
+            supervisor_cassy_badge: None,
             merge_alert_retries: Default::default(),
             delivery_containment: Default::default(),
             parked_facts: Default::default(),
@@ -460,6 +463,7 @@ impl FactoryApp {
             cas_dir,
             director_stores,
             lane_ci_pending: Default::default(),
+            supervisor_cassy_badge: None,
             merge_alert_retries: Default::default(),
             delivery_containment: Default::default(),
             parked_facts: Default::default(),
@@ -728,6 +732,7 @@ impl FactoryApp {
             cas_dir: PathBuf::from("/tmp/cas-test"),
             director_stores: None,
             lane_ci_pending: Default::default(),
+            supervisor_cassy_badge: None,
             merge_alert_retries: Default::default(),
             delivery_containment: Default::default(),
             parked_facts: Default::default(),

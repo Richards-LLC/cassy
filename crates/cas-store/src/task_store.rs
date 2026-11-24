@@ -336,6 +336,23 @@ impl SqliteTaskStore {
                 )
                 .optional()?;
             let mut persisted_deliverables = task.deliverables.clone();
+            // cas-faa9: every retarget keeps the target it left, whichever
+            // writer moved it. A stale in-memory copy cannot drop entries.
+            if let Some(stored) = tx
+                .query_row(
+                    "SELECT deliverables FROM tasks WHERE id = ?1",
+                    params![task.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            {
+                let stored = Self::parse_deliverables(&stored);
+                for previous in stored.prior_work_targets.iter()
+                    .chain(stored.work_target.as_ref())
+                {
+                    persisted_deliverables.record_prior_work_target(Some(previous));
+                }
+            }
             let mut persisted_terminal_outcome = task.terminal_outcome.clone();
             let reopening_terminal = matches!(prev_status.as_deref(), Some("closed" | "cancelled"))
                 && !task.is_terminal();
@@ -628,7 +645,8 @@ impl SqliteTaskStore {
                 if formatted_note.starts_with("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---") {
                     replacement = Some(crate::task_note_markers::replace_rendered_provenance(&notes, formatted_note));
                 } else {
-                    replacement = crate::task_note_markers::replace_raw_artifact_note(&notes, formatted_note);
+                    replacement = crate::task_note_markers::replace_raw_artifact_note(&notes, formatted_note)
+                        .or_else(|| crate::task_note_markers::replace_evidence_sync(&notes, formatted_note));
                 }
                 if replacement.as_deref() == Some(notes.as_str())
                     || (replacement.is_none()

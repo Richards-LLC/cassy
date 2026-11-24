@@ -1115,6 +1115,8 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.gateway.enabled", "true", "true"),
         ("factory.gateway.endpoint", " http://127.0.0.1:8317/ ", "http://127.0.0.1:8317"),
         ("factory.gateway.key_file", " ~/.config/hub/client.key ", "~/.config/hub/client.key"),
+        ("factory.gateway.dashboard", " http://127.0.0.1:18317/ ", "http://127.0.0.1:18317"),
+        ("factory.gateway.dashboard_key_file", " ~/.config/hub/admin.key ", "~/.config/hub/admin.key"),
         ("factory.warn_stale_assignment", "false", "false"),
         ("factory.block_stale_assignment", "false", "false"),
         ("factory.stale_threshold_commits", "3", "3"),

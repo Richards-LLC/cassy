@@ -7,6 +7,100 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.53.0] - 2026-11-24
+
+### Fixed — Commander
+
+- **Reload Cassy badges stay whole and in their own space** — Was: at 1280 px
+  the supervisor card's version badge painted over the machine name, and the
+  header's "cassy 4.52.0 · loaded 9:52 PM ET" ran under Raw output. Now: the
+  card pill shows the version alone (the load time is in its tooltip), and the
+  header shows a fixed "4.52.0 · 9:52 PM" pill beside the subtitle, whose
+  machine and session text shortens first, at desktop and phone widths.
+- **No false reload failure under a brief database hold** — Was: a reload that
+  worked could show "shared SQLite connection held" when another thread held
+  the database for a few milliseconds. Now: receipt writes get their own short
+  wait budget, and a contended receipt copy is retried instead of reported as a
+  failure.
+
+### Fixed — Task close
+
+- **Park evidence requires only cited files** — Was: a close reason that used
+  the words "target" or "target/owner" made the park require a missing file,
+  every fetched artifact copy was published again on each park, and each retry
+  added another evidence-sync note. Now: only concrete cited files are
+  required, fetched copies are skipped, a retry replaces its evidence note,
+  and two restores of the same peer artifact no longer collide.
+- **Operations-only epics close normally** — Was: an epic whose children all
+  closed without code, with an approved epic verification, was refused by the
+  pre-close structural lint when its branch was the repository's root commit,
+  and no supported close remained. Now: such an epic closes by the ordinary
+  path with an audit note naming the approved verdict; any child code delivery
+  still runs the lint and keeps its refusal.
+
+### Added — Commander
+
+- **Choose the worker route in New session** — Was: a project's own config was the only way to turn the home gateway on, and that setting was read again at every worker spawn. Now: New session offers Direct or Home gateway for the chosen project. It says which workers move (Claude and Codex) and that the supervisor stays direct. The gateway option is disabled, with the reason, when the hub isn't ready. The choice is pinned for that session, so a later config edit never changes a running session. Sessions started from the CLI pin the project's setting when their daemon starts.
+- **See each worker's route** — Was: the route and any fallback were visible only in `worker_status`. Now: each Team lane shows Home gateway, Direct, or Direct · gateway fallback with its reason, and the Team header totals the routes.
+- **Hub accounts in Accounts** — Was: Accounts listed native profiles only. Now: a read-only Home gateway section per machine shows hub readiness and the hub's upstream accounts, each with state and recent requests. These rows are kept separate from native profiles. Codex Team accounts are counted and never listed, and no key or hub address reaches the browser.
+- **Reload Cassy on Codex supervisors** — Was: Reload Cassy was refused for
+  Codex. Now: after a one-line confirmation it restarts the Codex supervisor on
+  the installed build while workers keep running, and shows the same proof.
+- **Loaded-build badge** — Was: nothing showed which Cassy build a supervisor
+  had loaded after a reload. Now: the supervisor card, the conversation header
+  and the factory status bar show "cassy 4.52.0 · loaded 5:44 PM ET" from the
+  live MCP process until the next reload.
+- **`/reload-cassy`** — Was: only `/mcp` ran Reload Cassy. Now: `/reload-cassy`
+  runs the same command, with the same Codex confirmation.
+
+### Changed — Commander
+
+- **One usage number per login, from the hub** — Was: each machine showed its own read of an account's usage, so soundwave and prowl disagreed and reads went stale or unknown. Now: when `factory.gateway.dashboard` and `dashboard_key_file` are set, Accounts and New session take each login's quota from the hub's dashboard, so every machine shows the same number. A machine that can't reach the hub says so and shows no number. Setting only the dashboard keys never turns on gateway routing.
+- **Accounts and New session redesigned** — Was: card layouts mixed % used and % left, hid missing windows, and offered duplicate and logged-out logins as choices. Now: one ledger shows the 5-hour and weekly windows as "% left" meters, each with its reset. Old reads are marked "≤ N%" with their age. The recommended login says why, using the same reading its meters show. Duplicates offer Remove, and logins shared with another machine say where else they live. New session opens with a plan strip (project, supervisor capacity, workers' route) and puts logged-out logins and duplicates under "N not offered".
+- **Reload Cassy waits instead of refusing** — Was: a busy supervisor refused
+  Reload Cassy. Now: it shows a small waiting animation and reloads at the next
+  quiet moment, without interrupting a running tool call. A supervisor already
+  on the installed build gets its badge and nothing is sent.
+- **Reload proof checks the installed build** — Was: any replacement MCP process
+  counted as reloaded. Now: success needs the live version to equal
+  `cas --version`; a mismatch says which version runs and what to do next.
+
+### Fixed — Factory delivery
+
+- **Retargeted lanes keep their reviewed history** — Was: a task laned off a
+  release train, then moved to the successor train, was refused at close
+  because that train's already-reviewed commits counted as foreign work. Now:
+  history from an earlier epic or release-train target counts as upstream;
+  other branches stay foreign, and a deleted target is named as missing.
+- **Adopted lanes own their delivery** — Was: `transfer adopt_branch` left the
+  start record on the old worker's lane, so start, rebind and close measured
+  the wrong branch. Now: adoption records the receiver's lane and base.
+- **The no-branch close refusal gives a push the guard allows** — Was: it told
+  the worker to push to a per-task ref that the push guard refuses. Now: it
+  names the per-task branch locally, then pushes it under the same name.
+
+### Fixed — Factory
+
+- **Test-proof gate never demands a run that cannot happen** — Was: a worker
+  could be refused at park with no way out. A Vitest spec that
+  also imported Playwright's browser library was prescribed a Playwright run.
+  A page no test imports was prescribed `vitest related`, which ran zero tests
+  and recorded nothing; a named changed-test run that matched no runtime test
+  failed the same way, and a package with no JavaScript change got a
+  placeholder command. Deleted specs were named as package inputs. Journey
+  specs the QA registry declares (deployed staging) owed five capped passes.
+  A worker-check pass recorded in one worktree never counted for a close read
+  from another checkout. Now: the test API import picks the runner. Any
+  JavaScript selection that runs no test runs the owning package instead, and
+  park accepts that package pass for the changed tests and inputs inside it.
+  `worker-check -- <runner> <package>/package.json` runs a package directly.
+  A named Rust selection that runs zero tests runs its crate once instead, and
+  park accepts that crate pass for the changed tests; the Rust prescription
+  names the crate, harness and exact test. Deleted files owe nothing.
+  Registry journey specs whose Playwright config starts no local server (a
+  deployed host), and helpers only those journeys import, follow the journey
+  lane; locally served journeys stay owed by the worker. A pass at the exact commit counts from any worktree of the repository.
+
 ## [4.52.0] - 2026-11-23
 
 ### Fixed — CI watcher

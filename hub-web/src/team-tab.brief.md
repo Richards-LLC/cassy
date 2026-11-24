@@ -59,3 +59,7 @@ Two independent reads of round three's surface disagree: 4/3/3 on real-hub captu
 ## Same-state attention follow-up
 
 Task titles now lead the lanes, so workers sharing a harness and liveness differ by their work. Reported stalls, budget stops and blocked tasks come first with a critical edge; merge waits follow with a warning edge. The finding gives the attention count a strong underline, and Needs you names the worker and reason with a keyboard-reachable shortcut. The shared worker projection shows Blocked when its current task is blocked; the rail and Team agree. The task board explicitly names task lifecycle separately from worker liveness. Focus uses a dotted ink inset, leaving the critical edge intact. Unreported receipts stay open marks. This addresses the open real-hub concern above; independent capture scoring is recorded on the follow-up task.
+
+### Worker route on lanes
+
+Each lane adds one meta line under the model: Home gateway, Direct, or Direct · gateway fallback with the reported reason. A fallback takes the needs-attention ink. A worker with no report says "Route not reported" and is never guessed as direct. Once any worker reports a gateway route, the Team header adds one line with the route counts and states that the supervisor runs direct. The data is the worker's recorded transport, projected without the hub address. Covered by team-view vitest; batch QA walks HUB-J26 with a live fallback.

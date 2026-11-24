@@ -17,6 +17,9 @@ pub(super) struct AdoptedBranch {
     pub source_branch: String,
     pub branch: String,
     pub tip: String,
+    /// Start boundary of the adopted delivery: the recorded base when the
+    /// delivery still descends from it, else the delivery's fork from target.
+    pub base: Option<String>,
 }
 
 struct Git<'a> {
@@ -309,9 +312,23 @@ pub(super) fn adopt_task_branch(
     }
     verify_worker_worktree_binding(&receiver.name, destination, Some(&branch))
         .map_err(|e| e.to_string())?;
+    let recorded_base = task.deliverables.factory_branch_start.as_ref()
+        .map(|start| start.base_sha.clone())
+        .filter(|base| git.ancestor(base, &tip).unwrap_or(false));
+    let base = match (recorded_base, task.deliverables.work_target.as_ref()) {
+        (Some(base), _) => Some(base),
+        (None, Some(target)) => {
+            let reference = close_ops::preferred_diff_target_ref_for_delivery(
+                &repo_root, &target.target_branch, task.delivery_mode,
+            );
+            git.run(&["merge-base", &tip, &reference]).ok()
+        }
+        (None, None) => None,
+    };
     Ok(AdoptedBranch {
         source_branch,
         branch,
         tip,
+        base,
     })
 }

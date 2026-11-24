@@ -15,6 +15,29 @@ use crate::pty::PtyConfig;
 
 /// Worker transport recorded on the agent row and shown by worker_status.
 pub const TRANSPORT_ENV: &str = "CAS_FACTORY_WORKER_TRANSPORT";
+/// A session's pinned worker route (`gateway` or `direct`), set on the
+/// factory daemon by Commander's New Session, or by [`pin_at_start`] for any
+/// other start.
+pub const ROUTE_ENV: &str = "CAS_FACTORY_GATEWAY";
+
+/// The route a daemon fixed at startup when nothing set [`ROUTE_ENV`].
+static STARTUP_ROUTE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// A factory daemon fixes its worker route once, when it starts. Commander's
+/// launch already set [`ROUTE_ENV`]; any other start (`cas claude`, `cas
+/// factory`) takes the project's setting now, so a later config edit never
+/// changes this session's workers. The daemon's re-exec carries
+/// [`pinned_route`] forward in [`ROUTE_ENV`].
+pub fn pin_at_start(cas_root: &Path) {
+    if std::env::var_os(ROUTE_ENV).is_none() {
+        STARTUP_ROUTE.get_or_init(|| if merged(cas_root).enabled { "gateway" } else { "direct" });
+    }
+}
+
+/// This process's pinned worker route: Commander's, else the one fixed at startup.
+pub fn pinned_route() -> Option<String> {
+    std::env::var(ROUTE_ENV).ok().or_else(|| STARTUP_ROUTE.get().map(|route| route.to_string()))
+}
 const CODEX_PROVIDER: &str = "cas_gateway";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,7 +50,8 @@ enum Plan {
 /// Route a Claude or Codex worker through the hub when its project opted in.
 pub(crate) fn apply(config: &mut PtyConfig, cas_root: Option<&PathBuf>, worker: &str) {
     let cli = config.effective_command().to_string();
-    let settings = load(cas_root.map(PathBuf::as_path));
+    let pin = pinned_route();
+    let settings = load(cas_root.map(PathBuf::as_path), pin.as_deref());
     apply_plan(config, &cli, worker, plan(&settings, &cli, probe));
 }
 
@@ -39,7 +63,8 @@ fn apply_plan(config: &mut PtyConfig, cli: &str, worker: &str, plan: Plan) {
             format!("direct (gateway fallback: {reason})")
         }
         Plan::Gateway { endpoint, key_file } => {
-            tracing::info!(worker, cli, %endpoint, "factory worker gateway transport");
+            // The hub's address stays in the request config only: never logged or recorded (operator, 6:46 PM).
+            tracing::info!(worker, cli, "factory worker gateway transport");
             let client = format!("cassy/{worker}");
             config.env.push((GATEWAY_KEY_FILE_ENV.into(), key_file.to_string_lossy().into_owned()));
             if cli == "codex" {
@@ -60,7 +85,7 @@ fn apply_plan(config: &mut PtyConfig, cli: &str, worker: &str, plan: Plan) {
                 config.env.push(("ANTHROPIC_BASE_URL".into(), endpoint.clone()));
                 config.env.push(("CLAUDE_AGENT_SDK_CLIENT_APP".into(), client));
             }
-            format!("gateway {endpoint}")
+            "gateway".to_string()
         }
     };
     if cli == "codex" {
@@ -72,22 +97,91 @@ fn apply_plan(config: &mut PtyConfig, cli: &str, worker: &str, plan: Plan) {
 }
 
 /// Hub settings come from the user-level `~/.cas/config.toml`, overridden
-/// field by field by the project; `enabled` counts only from the project.
-fn load(cas_root: Option<&Path>) -> FactoryGatewayConfig {
+/// field by field by the project. A session pin decides `enabled`; without
+/// one, only the project's own `enabled` counts.
+fn load(cas_root: Option<&Path>, pin: Option<&str>) -> FactoryGatewayConfig {
     let Some(root) = cas_root else { return FactoryGatewayConfig::default() };
-    let project = read_table(&root.join("config.toml"));
-    if !project.enabled {
+    let settings = merged(root);
+    let enabled = match pin.map(str::trim) {
+        Some("gateway") => true,
+        Some("direct") => false,
+        _ => settings.enabled,
+    };
+    if !enabled {
         return FactoryGatewayConfig::default();
     }
+    FactoryGatewayConfig { enabled, ..settings }
+}
+
+fn merged(root: &Path) -> FactoryGatewayConfig {
+    let project = read_table(&root.join("config.toml"));
     let user = dirs::home_dir()
         .map(|home| read_table(&home.join(".cas/config.toml")))
         .unwrap_or_default();
     FactoryGatewayConfig {
-        enabled: true,
+        enabled: project.enabled,
         endpoint: project.endpoint.or(user.endpoint),
         key_file: project.key_file.or(user.key_file),
         clients: project.clients.or(user.clients),
+        // The dashboard is user-level only.
+        dashboard: user.dashboard,
+        dashboard_key_file: user.dashboard_key_file,
     }
+}
+
+/// What New Session may offer for a project: the route preselected by the
+/// project's own setting, the routed worker harnesses, and whether the hub is
+/// ready now. Never carries the endpoint or key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionRouteOption {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub preselected: &'static str,
+    pub clients: Vec<String>,
+}
+
+pub fn session_route_option(cas_root: &Path) -> SessionRouteOption {
+    let settings = merged(cas_root);
+    let clients = ["claude", "codex"]
+        .into_iter()
+        .filter(|cli| settings.clients.as_ref().is_none_or(|clients| clients.iter().any(|c| c.trim() == *cli)))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let readiness = if clients.is_empty() {
+        Err("factory.gateway.clients routes no Claude or Codex workers".to_string())
+    } else {
+        ready(&settings, probe).map(|_| ())
+    };
+    SessionRouteOption {
+        available: readiness.is_ok(),
+        reason: readiness.err(),
+        preselected: if settings.enabled { "gateway" } else { "direct" },
+        clients,
+    }
+}
+
+/// The machine's own hub settings (`~/.cas/config.toml`), independent of any project.
+pub fn user_settings() -> FactoryGatewayConfig {
+    dirs::home_dir().map(|home| read_table(&home.join(".cas/config.toml"))).unwrap_or_default()
+}
+
+/// The same spawn-time readiness check workers get: private endpoint, 0600
+/// key file, and a 200 model listing for that key.
+pub fn readiness(settings: &FactoryGatewayConfig) -> Result<(), String> {
+    ready(settings, probe).map(|_| ())
+}
+
+/// `loopback` or `tailnet` for a validated endpoint, so callers can say where
+/// the hub is without showing its address.
+pub fn host_kind(endpoint: &str) -> Option<&'static str> {
+    let host = url::Url::parse(validate_endpoint(endpoint).ok()?.as_str()).ok()?.host()?.to_owned();
+    Some(match host {
+        url::Host::Ipv4(ip) if ip.is_loopback() => "loopback",
+        url::Host::Ipv6(ip) if ip.is_loopback() => "loopback",
+        url::Host::Domain(name) if name.eq_ignore_ascii_case("localhost") => "loopback",
+        _ => "tailnet",
+    })
 }
 
 fn read_table(path: &Path) -> FactoryGatewayConfig {
@@ -116,20 +210,21 @@ fn plan(settings: &FactoryGatewayConfig, cli: &str, probe: impl Fn(&str, &str) -
     if !routed {
         return Plan::Off;
     }
-    let ready = || -> Result<Plan, String> {
-        let endpoint = validate_endpoint(settings.endpoint.as_deref().unwrap_or_default())?;
-        let key_file = settings
-            .key_file
-            .as_deref()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(|path| PathBuf::from(cas_pty::expand_codex_home(path)))
-            .ok_or("factory.gateway.key_file is not set")?;
-        let key = read_gateway_key(&key_file)?;
-        probe(&endpoint, &key)?;
-        Ok(Plan::Gateway { endpoint, key_file })
-    };
-    ready().unwrap_or_else(Plan::Fallback)
+    ready(settings, probe).unwrap_or_else(Plan::Fallback)
+}
+
+fn ready(settings: &FactoryGatewayConfig, probe: impl Fn(&str, &str) -> Result<(), String>) -> Result<Plan, String> {
+    let endpoint = validate_endpoint(settings.endpoint.as_deref().unwrap_or_default())?;
+    let key_file = settings
+        .key_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(cas_pty::expand_codex_home(path)))
+        .ok_or("factory.gateway.key_file is not set")?;
+    let key = read_gateway_key(&key_file)?;
+    probe(&endpoint, &key)?;
+    Ok(Plan::Gateway { endpoint, key_file })
 }
 
 /// Accept only loopback and tailnet hubs, normalized without a trailing `/`.

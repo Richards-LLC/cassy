@@ -252,7 +252,7 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
 
 /// The command that proves these changed tests, one per runner (cas-1468).
 /// A file whose runner is unknown gets each valid form as its own command.
-pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -> Vec<String> {
+pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Vec<String> {
     let command = |runner: &str, files: &str| format!(
         "`cas factory worker-check --cas-root {} -- {runner} {files}`", cas_root.display());
     // Files group by runner and by the config that lists them: Jest (GH #2058),
@@ -260,9 +260,15 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
     let mut known: BTreeMap<(&str, Option<String>), BTreeSet<&str>> = BTreeMap::new();
     let mut unknown = BTreeSet::new();
     let mut rust = false;
+    // cas-fcb1: each changed Rust test's own crate, harness and exact name.
+    let mut named: BTreeMap<(String, Option<String>), BTreeSet<&str>> = BTreeMap::new();
+    let owners = rust::owners(repo, head, tests).unwrap_or_default();
     for test in tests {
         if test.path.ends_with(".rs") {
-            rust = true;
+            match owners.get(test) {
+                Some(selection) => { named.entry(selection.clone()).or_default().insert(test.name.as_str()); }
+                None => rust = true,
+            }
         } else if let Some(runner) = super::javascript::runner_hint(repo, &test.path) {
             let owner = match runner {
                 "jest" => super::javascript::jest_owner(repo, &test.path),
@@ -285,6 +291,13 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
         "no runner config, dependency or local executable identifies {file}; run the one it uses: {}",
         ["jest", "vitest", "playwright"].map(|runner| command(runner, file)).join(" or "),
     )));
+    commands.extend(named.into_iter().map(|((package, harness), names)| {
+        let target = harness.map_or("--lib".to_owned(), |harness| format!("--test {harness}"));
+        let filter = names.into_iter().map(|name| format!("test(={name})")).collect::<Vec<_>>().join(" | ");
+        // cas-e751: outside the worker hook the capped runner needs --cas-root.
+        format!("`cargo nextest run -p {package} {target} -E '{filter}'` (the worker hook caps it; elsewhere {})",
+            command(&format!("nextest run -p {package} {target} -E"), &format!("'{filter}'")))
+    }));
     if rust {
         // cas-e751: outside the worker hook the capped runner needs --cas-root.
         commands.push(format!("`cargo nextest run -p <crate> --lib -E 'test(<name>)'` (the worker hook caps it; elsewhere {})",

@@ -1,3 +1,3 @@
 ### Fixed — Commander
 
-- **Reload Cassy confirmation stays open** — Typing `/reload-cassy` on a Codex supervisor keeps the restart confirmation and its focused action through composer, connection, and session list updates. Ordinary chat still sends.
+- **Reload Cassy confirmation stays open** — Session list updates no longer interrupt a pressed confirmation or lose a reload that's waiting for pane control. Commander clears the command draft after sending, or keeps it and shows who controls the pane if the request is refused.

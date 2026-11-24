@@ -36,7 +36,18 @@ interface Options {
   harness(): string | undefined;
   unavailable(): string | undefined;
   label(): string;
-  run(command: SupervisorCommand, confirmed: boolean): Promise<void>;
+  session: SupervisorCommandSession;
+}
+
+type CommandOrigin = "composer" | "header";
+interface CommandIntent {
+  birth?: string;
+  origin: CommandOrigin;
+  command: SupervisorCommand;
+  phase: "confirming" | "sending" | "failed";
+  draft?: string;
+  focus?: "cancel" | "confirm";
+  message?: string;
 }
 
 /** Owns only the mounted composer's local menu, never session or lease state. */
@@ -44,8 +55,6 @@ export class SlashCommands {
   private readonly panel: HTMLElement;
   private open = false;
   private escaped = false;
-  private confirming?: typeof commands[number];
-  private pending = false;
   private anchor?: HTMLElement;
   private readonly events = new AbortController();
   constructor(private readonly input: HTMLTextAreaElement, private readonly options: Options) {
@@ -58,11 +67,14 @@ export class SlashCommands {
     input.parentElement!.insertBefore(this.panel, input);
     input.setAttribute("aria-controls", this.panel.id);
     input.addEventListener("input", () => {
-      if (this.confirming) return;
+      const intent = this.options.session.intent;
+      if (intent && intent.phase !== "failed") return;
+      this.options.session.cancel();
       this.mountAtComposer(); this.open = false; this.escaped = false; this.sync();
     }, { signal: this.events.signal });
     document.addEventListener("pointerdown", event => {
-      if (!this.confirming && this.anchor && !this.anchor.contains(event.target as Node) && !this.panel.contains(event.target as Node)) this.close();
+      const target = event.target as Node;
+      if (this.anchor && !this.anchor.contains(target) && !this.visibleAnchor()?.contains(target) && !this.panel.contains(target)) this.close();
     }, { signal: this.events.signal });
     window.addEventListener("resize", () => this.positionDropdown(), { signal: this.events.signal });
     input.addEventListener("keydown", event => {
@@ -78,7 +90,7 @@ export class SlashCommands {
       }
     }, { capture: true, signal: this.events.signal });
     this.panel.addEventListener("keydown", event => {
-      if (event.key === "Escape") { event.preventDefault(); const target = this.visibleAnchor() ?? input; this.close(); target.focus(); return; }
+      if (event.key === "Escape") { event.preventDefault(); this.dismiss(); return; }
       // cas-c009: the confirmation's actions are one roving group; Tab and
       // every arrow cycle inside it while it is open.
       const actions = [...this.panel.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button:not(:disabled)')];
@@ -95,29 +107,33 @@ export class SlashCommands {
       if (index < 0) return;
       event.preventDefault(); buttons[(index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
     }, { signal: this.events.signal });
+    this.panel.addEventListener("focusin", event => {
+      const intent = this.options.session.intent;
+      if (intent?.phase === "confirming" && event.target instanceof HTMLButtonElement) {
+        intent.focus = event.target.hasAttribute("data-command-confirm") ? "confirm" : "cancel";
+      }
+    }, { signal: this.events.signal });
     this.sync();
   }
   dispose(): void { this.anchor?.setAttribute("aria-expanded", "false"); this.events.abort(); this.panel.remove(); }
   show(anchor?: HTMLElement): void {
-    if (this.confirming) return;
     if (anchor && this.anchor === anchor && !this.panel.hidden) { this.close(); return; }
+    if (this.options.session.intent) return;
     if (anchor) this.mountAtAnchor(anchor); else this.mountAtComposer();
     this.open = true; this.escaped = false; this.sync(); this.positionDropdown();
     this.panel.querySelector<HTMLButtonElement>("button")?.focus();
   }
-  close(): void { this.confirming = undefined; this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false"); }
-  preserveConfirmation(): ((replacement: SlashCommands) => void) | undefined {
-    const command = this.confirming;
-    if (!command) return;
-    const anchorId = this.anchor?.id;
-    const active = document.activeElement;
-    const focus = this.panel.contains(active) ? active?.matches("[data-command-confirm]") ? "confirm" : "cancel" : undefined;
-    return replacement => {
-      const anchor = anchorId && document.getElementById(anchorId);
-      if (anchor) replacement.mountAtAnchor(anchor);
-      replacement.renderConfirmation(command, focus);
-      replacement.positionDropdown();
-    };
+  close(): void { this.hide(); this.options.session.cancel(); }
+  private hide(): void {
+    this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false");
+  }
+  private dismiss(): void {
+    const origin = this.anchor ? "header" : "composer";
+    this.close(); this.returnFocus(origin);
+  }
+  returnFocus(origin: CommandOrigin): void {
+    const target = origin === "header" ? this.visibleAnchor(document.getElementById("conversation-commands") ?? undefined) : undefined;
+    (target?.getClientRects().length ? target : this.input).focus({ preventScroll: true });
   }
   private mountAtAnchor(anchor: HTMLElement): void {
     this.anchor = anchor;
@@ -130,11 +146,11 @@ export class SlashCommands {
     this.input.parentElement!.insertBefore(this.panel, this.input);
   }
   /** An anchor inside a closed overflow menu stands in for its visible invoker (cas-e1db). */
-  private visibleAnchor(): HTMLElement | undefined {
-    if (!this.anchor || this.anchor.getClientRects().length) return this.anchor;
-    const menu = this.anchor.closest<HTMLElement>("[popover]");
+  private visibleAnchor(anchor = this.anchor): HTMLElement | undefined {
+    if (!anchor || anchor.getClientRects().length) return anchor;
+    const menu = anchor.closest<HTMLElement>("[popover]");
     const invoker = menu?.id ? document.querySelector<HTMLElement>(`[popovertarget="${menu.id}"]`) : null;
-    return invoker?.getClientRects().length ? invoker : this.anchor;
+    return invoker?.getClientRects().length ? invoker : anchor;
   }
   private positionDropdown(): void {
     const anchor = this.visibleAnchor();
@@ -147,12 +163,35 @@ export class SlashCommands {
     this.panel.style.top = `${top}px`;
     this.panel.style.maxHeight = `${Math.max(0, window.innerHeight - top - gap)}px`;
   }
+  reconcile(): void {
+    const intent = this.options.session.intent;
+    if (!intent) {
+      if (this.panel.dataset.intentPhase) {
+        delete this.panel.dataset.intentPhase;
+        this.hide(); this.panel.replaceChildren(); this.mountAtComposer();
+      }
+      return;
+    }
+    const anchor = intent.origin === "header" ? document.getElementById("conversation-commands") : null;
+    if (anchor && anchor !== this.anchor) this.mountAtAnchor(anchor);
+    this.panel.hidden = false;
+    if (this.panel.dataset.intentPhase !== intent.phase) {
+      this.panel.dataset.intentPhase = intent.phase;
+      this.panel.replaceChildren();
+      const command = commandsForHarness(this.options.harness()).find(item => item.id === intent.command);
+      if (intent.phase === "failed") this.notice(intent.message!);
+      else if (command?.confirm) this.renderConfirmation(command, intent);
+      else this.notice("Requesting command…");
+    }
+    this.positionDropdown();
+  }
   sync(): void {
-    if (this.confirming) return;
+    this.reconcile();
+    if (this.options.session.intent) return;
     const query = !this.anchor && this.input.value.startsWith("/") ? this.input.value.slice(1).toLowerCase() : "";
     const suggestion = this.input.value.startsWith("/") && commands.some(command => commandMatches(command.id, query));
     this.panel.hidden = this.escaped || (!this.open && !suggestion);
-    if (this.panel.hidden || this.pending) return;
+    if (this.panel.hidden) return;
     this.panel.replaceChildren();
     const heading = document.createElement("strong"); heading.textContent = `Commands · ${this.options.label()}`; this.panel.append(heading);
     const unavailable = this.options.unavailable();
@@ -173,29 +212,30 @@ export class SlashCommands {
     // The normal composer trims chat text; /mcp must stay semantic even
     // when pasted with surrounding whitespace, rather than open Claude's menu.
     const trimmed = this.input.value.trim();
-    if (trimmed === "/mcp" || trimmed === "/reload-cassy") this.input.value = trimmed;
-    const token = this.input.value.split(/\s/, 1)[0];
+    const text = trimmed === "/mcp" || trimmed === "/reload-cassy" ? trimmed : this.input.value;
+    const token = text.split(/\s/, 1)[0];
     const command = commands.find(item => `/${item.id}` === token || (token.startsWith("/") && COMMAND_ALIASES[token.slice(1)] === item.id));
     if (!command) return false;
-    this.escaped = false; this.open = true; this.sync();
-    if (this.confirming || this.pending || this.options.unavailable()) return true;
+    const intent = this.options.session.intent;
+    if (intent && intent.phase !== "failed") return true;
+    if (intent) this.close();
+    this.mountAtComposer(); this.escaped = false; this.open = true; this.sync();
+    if (this.options.unavailable()) return true;
     const supported = commandsForHarness(this.options.harness()).find(item => item.id === command.id);
-    if (this.input.value.trimEnd() === token && supported) this.choose(supported);
+    if (text.trimEnd() === token && supported) this.choose(supported);
     return true;
   }
   private notice(text: string): void {
     const notice = document.createElement("p"); notice.setAttribute("role", "status"); notice.textContent = text; this.panel.append(notice);
   }
   private choose(command: typeof commands[number]): void {
-    if (this.pending) return;
     const unavailable = this.options.unavailable();
     if (unavailable) { this.panel.replaceChildren(); this.notice(unavailable); return; }
-    if (!command.confirm) { void this.run(command.id, false); return; }
-    this.renderConfirmation(command, "cancel");
+    const original = this.input.value.trim();
+    const draft = !this.anchor && original.startsWith("/") && commandMatches(command.id, original.slice(1)) ? this.input.value : undefined;
+    this.options.session.choose(command.id, !!command.confirm, this.anchor ? "header" : "composer", draft);
   }
-  private renderConfirmation(command: typeof commands[number], focus?: "cancel" | "confirm"): void {
-    this.confirming = command;
-    this.panel.hidden = false; this.panel.replaceChildren();
+  private renderConfirmation(command: typeof commands[number], intent: CommandIntent): void {
     const confirmation = document.createElement("div"); confirmation.setAttribute("role", "alertdialog");
     const subject = document.createElement("strong"); subject.textContent = this.options.label();
     subject.id = `${this.panel.id}-subject`; confirmation.setAttribute("aria-labelledby", subject.id);
@@ -204,30 +244,12 @@ export class SlashCommands {
     // cas-c009: content-width actions, Cancel first and the command last.
     const actions = document.createElement("div"); actions.className = "supervisor-command-actions";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "secondary"; cancel.textContent = "Cancel";
-    cancel.onclick = () => { this.close(); this.input.focus(); };
+    cancel.onclick = () => this.dismiss();
     const confirm = document.createElement("button"); confirm.type = "button"; confirm.className = "primary"; confirm.dataset.commandConfirm = command.id;
-    confirm.textContent = command.label; confirm.onclick = () => { void this.run(command.id, true); };
+    confirm.textContent = command.label; confirm.onclick = () => this.options.session.confirm();
+    cancel.disabled = confirm.disabled = intent.phase === "sending";
     actions.append(cancel, confirm); confirmation.append(subject, consequence, actions); this.panel.append(confirmation);
-    if (focus) (focus === "confirm" ? confirm : cancel).focus({ preventScroll: true });
-  }
-  private async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
-    if (this.pending) return;
-    this.confirming = undefined;
-    this.pending = true;
-    this.panel.querySelectorAll("button").forEach(button => { button.disabled = true; });
-    const original = this.input.value;
-    const returnTo = this.anchor ?? this.input;
-    try {
-      await this.options.run(command, confirmed);
-      // An autocomplete choice consumes its prefix, an exact token or an alias.
-      // Header commands and text edited while the request waits keep their draft.
-      if (!this.anchor && this.input.value === original && original.trim().startsWith("/") && commandMatches(command, original.trim().slice(1))) {
-        this.input.value = ""; this.input.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      this.close(); returnTo.focus();
-    } catch (error) {
-      this.panel.replaceChildren(); this.notice(error instanceof Error ? error.message : "The command could not be sent. Try again once connected.");
-    } finally { this.pending = false; }
+    if (intent.phase === "confirming") (intent.focus === "confirm" ? confirm : cancel).focus({ preventScroll: true });
   }
 }
 
@@ -300,6 +322,9 @@ interface SessionOptions {
   control(): Promise<void>;
   send(message: unknown): boolean;
   changed(): void;
+  birth?(): string | undefined;
+  clearDraft?(original: string): void;
+  completed?(origin: CommandOrigin): void;
   /** A finished command's one-line outcome, shown once as a self-clearing toast. */
   settled?(receipt: CommandReceipt): void;
   /** The hub's retained receipt for a command whose daemon is gone (cas-b521);
@@ -325,6 +350,43 @@ function settlesToToast(receipt: CommandReceipt): boolean {
 }
 /** One conversation owns its mutations and polls only for their outcomes. */
 export class SupervisorCommandSession {
+  private currentIntent?: CommandIntent;
+  get intent(): CommandIntent | undefined {
+    if (this.currentIntent && this.currentIntent.birth !== this.options.birth?.()) this.currentIntent = undefined;
+    return this.currentIntent;
+  }
+  choose(command: SupervisorCommand, needsConfirmation: boolean, origin: CommandOrigin, draft?: string): void {
+    if (this.intent) return;
+    const intent: CommandIntent = { birth: this.options.birth?.(), origin, command, draft, phase: "confirming" };
+    this.currentIntent = intent;
+    if (needsConfirmation) this.options.changed();
+    else void this.sendIntent(intent, false);
+  }
+  confirm(): void {
+    const intent = this.intent;
+    if (intent?.phase === "confirming") void this.sendIntent(intent, true);
+  }
+  cancel(): void {
+    if (!this.currentIntent) return;
+    this.currentIntent = undefined;
+    this.options.changed();
+  }
+  private async sendIntent(intent: CommandIntent, confirmed: boolean): Promise<void> {
+    intent.phase = "sending";
+    this.options.changed();
+    try {
+      await this.execute(intent.command, confirmed, intent);
+      if (this.intent !== intent) return;
+      if (intent.draft !== undefined) this.options.clearDraft?.(intent.draft);
+      this.cancel();
+      this.options.completed?.(intent.origin);
+    } catch (error) {
+      if (this.intent !== intent) return;
+      intent.phase = "failed";
+      intent.message = error instanceof Error ? error.message : "The command could not be sent. Try again once connected.";
+      this.options.changed();
+    }
+  }
   readonly receipts = new Map<string, CommandReceipt>();
   private readonly dismissed = new Set<string>();
   private readonly cancelling = new Set<string>();
@@ -359,7 +421,10 @@ export class SupervisorCommandSession {
   private readonly refusals = new Map<SupervisorCommand, number>();
   private requesting = false;
   constructor(private readonly options: SessionOptions) {}
-  async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
+  run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
+    return this.execute(command, confirmed);
+  }
+  private async execute(command: SupervisorCommand, confirmed: boolean, intent?: CommandIntent): Promise<void> {
     const reason = this.options.unavailable(); if (reason) throw new Error(reason);
     const blocking = [...this.receipts.values()].find(receipt => receipt.phase === "queued" || receipt.phase === "submitted" || receipt.interactive);
     if (blocking) throw new Error(blocking.phase === "submitted"
@@ -367,10 +432,11 @@ export class SupervisorCommandSession {
       : `/${blocking.command} is pending. Use Dismiss command status on its card to cancel it, or Close chooser to close its native view.`);
     if (this.requesting) throw new Error("Wait for the current command request.");
     this.requesting = true;
-    try { await this.request(command, confirmed); } finally { this.requesting = false; }
+    try { await this.request(command, confirmed, intent); } finally { this.requesting = false; }
   }
-  private async request(command: SupervisorCommand, confirmed: boolean): Promise<void> {
+  private async request(command: SupervisorCommand, confirmed: boolean, intent?: CommandIntent): Promise<void> {
     await this.options.control();
+    if (intent && this.intent !== intent) return;
     const changed = this.options.unavailable(); if (changed) throw new Error(changed);
     const ref = `cmd-${crypto.randomUUID()}`;
     this.receipts.set(ref, { client_ref: ref, command, phase: "submitted", detail: "Command requested; harness execution is not confirmed yet.", output: "", interactive: false });

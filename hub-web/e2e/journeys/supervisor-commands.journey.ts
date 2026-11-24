@@ -399,6 +399,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.holdLease(PELICAN, "Studio iPad");
         await page.reload();
         const input = composer(page);
+        await expect(input).toHaveValue("");
         await input.fill("/reload-cassy");
         await expect(commandButton(page, "mcp")).toBeVisible();
         await input.press("Enter");

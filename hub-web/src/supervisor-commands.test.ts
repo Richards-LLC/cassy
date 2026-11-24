@@ -1,7 +1,52 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
+import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt, type SupervisorCommand } from "./supervisor-commands";
 import { sendsOnEnter } from "./supervisor-message";
+
+function commandComposer(harness: string | undefined, run: (command: SupervisorCommand, confirmed: boolean) => unknown, options: {
+  unavailable?: () => string | undefined;
+  control?: () => Promise<void>;
+  birth?: () => string;
+} = {}) {
+  let input: HTMLTextAreaElement;
+  let palette: SlashCommands | undefined;
+  let storedDraft = "";
+  const unavailable = options.unavailable ?? (() => undefined);
+  const session = new SupervisorCommandSession({
+    unavailable,
+    control: options.control ?? (async () => {}),
+    birth: options.birth,
+    send: message => {
+      const { SupervisorCommand: { client_ref, command, confirmed } } = message as { SupervisorCommand: { client_ref: string; command: SupervisorCommand; confirmed: boolean } };
+      run(command, confirmed);
+      queueMicrotask(() => session.receive({ client_ref, command, phase: "observed", detail: "", output: "", interactive: false }));
+      return true;
+    },
+    changed: () => palette?.reconcile(),
+    clearDraft: original => {
+      if (storedDraft === original) storedDraft = "";
+      if (input.value === original) input.value = "";
+    },
+    completed: origin => palette?.returnFocus(origin),
+  });
+  return {
+    session,
+    get draft() { return storedDraft; },
+    mount(next: HTMLTextAreaElement) {
+      input = next;
+      input.addEventListener("input", () => { storedDraft = input.value; });
+      palette = new SlashCommands(input, { harness: () => harness, unavailable, label: () => "test supervisor", session });
+      return palette;
+    },
+  };
+}
+
+function holdControl() {
+  let resolve!: () => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<void>((release, refuse) => { resolve = release; reject = refuse; });
+  return { promise, resolve, reject };
+}
 
 describe("supervisor slash commands", () => {
   it("offers Standby with one confirmation on every supported harness", () => {
@@ -16,7 +61,7 @@ describe("supervisor slash commands", () => {
       document.body.innerHTML = '<section><textarea></textarea></section>';
       const input = document.querySelector("textarea")!;
       const run = vi.fn().mockResolvedValue(undefined);
-      const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
+      const commands = commandComposer(harness, run).mount(input);
       input.value = typed;
       const typeAndSubmit = () => {
         input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -62,7 +107,7 @@ describe("supervisor slash commands", () => {
     document.body.innerHTML = '<section><textarea></textarea></section>';
     const input = document.querySelector("textarea")!;
     const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    const commands = commandComposer("claude", run).mount(input);
     input.value = "\\reload-cassy";
     expect(commands.submit()).toBe(false);
     await Promise.resolve();
@@ -73,7 +118,7 @@ describe("supervisor slash commands", () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
     const input = document.querySelector("textarea")!;
     const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => undefined, label: () => "test supervisor", run });
+    const commands = commandComposer("codex", run).mount(input);
     input.value = "/us"; input.dispatchEvent(new Event("input"));
     expect(document.querySelectorAll("[data-supervisor-command]")).toHaveLength(1);
     expect(document.querySelector("[data-supervisor-command]")?.textContent).toBeTruthy();
@@ -84,8 +129,10 @@ describe("supervisor slash commands", () => {
     document.querySelector<HTMLButtonElement>("[data-supervisor-command]")!.click();
     await Promise.resolve();
     expect(run).toHaveBeenCalledWith("usage", false);
-    expect(input.value).toBe("");
-    expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden).toBe(true);
+    await vi.waitFor(() => {
+      expect(input.value).toBe("");
+      expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden).toBe(true);
+    });
     run.mockClear();
     input.value = "/usage"; input.dispatchEvent(new Event("input"));
     const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
@@ -102,7 +149,7 @@ describe("supervisor slash commands", () => {
     const input = document.querySelector("textarea")!;
     const run = vi.fn();
     const sendChat = vi.fn();
-    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => undefined, label: () => "test supervisor", run });
+    const commands = commandComposer("codex", run).mount(input);
     input.onkeydown = event => {
       if (event.defaultPrevented || !sendsOnEnter(event)) return;
       event.preventDefault();
@@ -129,7 +176,7 @@ describe("supervisor slash commands", () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
     const input = document.querySelector("textarea")!;
     const run = vi.fn();
-    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => "No command control", label: () => "test supervisor", run });
+    const commands = commandComposer("codex", run, { unavailable: () => "No command control" }).mount(input);
     for (const text of ["/home/pippenz/notes.md", "/mnt/notes.md review this", "/shell whoami", "/usage-report", "//usage", " /usage"]) {
       input.value = text; input.dispatchEvent(new Event("input"));
       const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
@@ -147,7 +194,7 @@ describe("supervisor slash commands", () => {
     document.body.innerHTML = '<section><textarea></textarea></section>';
     const input = document.querySelector("textarea")!;
     const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    const commands = commandComposer("claude", run).mount(input);
     input.value = "/clear";
     commands.submit();
     expect(run).not.toHaveBeenCalled();
@@ -155,13 +202,15 @@ describe("supervisor slash commands", () => {
     expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("test supervisor");
     confirm.click(); await Promise.resolve();
     expect(run).toHaveBeenCalledWith("clear", true);
+    await vi.waitFor(() => expect(input.value).toBe(""));
+    commands.dispose();
   });
 
   it("runs the confirmation by keyboard: Cancel first, arrows rove, Tab stays inside, Esc returns to the composer (cas-c009)", () => {
     document.body.innerHTML = '<section><textarea></textarea></section>';
     const input = document.querySelector("textarea")!;
     const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    const commands = commandComposer("claude", run).mount(input);
     const key = (key: string, shiftKey = false) => {
       const event = new KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true });
       document.activeElement!.dispatchEvent(event);
@@ -183,6 +232,93 @@ describe("supervisor slash commands", () => {
     expect(document.activeElement).toBe(input);
     expect(run).not.toHaveBeenCalled();
     commands.dispose();
+  });
+
+  it.each(["confirming", "sending", "refused"] as const)("reconciles a %s reload onto the replacement composer", async phase => {
+    const lease = holdControl();
+    const send = vi.fn();
+    const controller = commandComposer("codex", send, { control: () => lease.promise });
+    const textarea = () => {
+      document.body.innerHTML = '<section><textarea></textarea></section>';
+      const input = document.querySelector("textarea")!;
+      input.value = "/reload-cassy";
+      return input;
+    };
+    const confirm = () => document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!;
+    const first = textarea();
+    const original = controller.mount(first);
+    first.dispatchEvent(new Event("input"));
+    original.submit();
+    confirm().focus();
+    if (phase !== "confirming") confirm().click();
+    original.dispose();
+    const input = textarea();
+    const replacement = controller.mount(input);
+    if (phase === "confirming") {
+      expect(document.activeElement).toBe(confirm());
+      expect(confirm().disabled).toBe(false);
+    } else {
+      expect(confirm().disabled).toBe(true);
+      expect(replacement.submit()).toBe(true);
+      if (phase === "sending") {
+        lease.resolve();
+        await vi.waitFor(() => expect(input.value).toBe(""));
+        expect(controller.draft).toBe("");
+        expect(send.mock.calls).toEqual([["mcp", true]]);
+        expect(document.activeElement).toBe(input);
+      } else {
+        const refusal = new Error("Studio iPad");
+        lease.reject(refusal);
+        await vi.waitFor(() => expect(document.querySelector('[role="status"]')?.textContent).toBe(refusal.message));
+        expect(input.value).toBe("/reload-cassy");
+        expect(controller.draft).toBe("/reload-cassy");
+        expect(send).not.toHaveBeenCalled();
+      }
+    }
+    replacement.dispose();
+  });
+
+  it("dismisses the header confirmation by re-click or outside press and removes the body panel on dispose", () => {
+    document.body.innerHTML = '<button id="conversation-commands"></button><section><textarea></textarea></section>';
+    const anchor = document.querySelector<HTMLButtonElement>("#conversation-commands")!;
+    const send = vi.fn();
+    const { mount, session } = commandComposer("codex", send);
+    const palette = mount(document.querySelector("textarea")!);
+    const confirmFromHeader = () => {
+      palette.show(anchor);
+      document.querySelector<HTMLButtonElement>('[data-supervisor-command="mcp"]')!.click();
+      expect(document.querySelector("body > #supervisor-command-palette [role=alertdialog]")).not.toBeNull();
+    };
+    confirmFromHeader();
+    palette.show(anchor);
+    expect(session.intent).toBeUndefined();
+    confirmFromHeader();
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(session.intent).toBeUndefined();
+    confirmFromHeader();
+    palette.dispose();
+    expect(document.querySelector("#supervisor-command-palette")).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("drops a sending intent on a new session birth before any frame is sent", async () => {
+    const lease = holdControl();
+    const send = vi.fn();
+    let birth = "first";
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const controller = commandComposer("claude", send, { control: () => lease.promise, birth: () => birth });
+    const input = document.querySelector("textarea")!;
+    const palette = controller.mount(input);
+    input.value = "/mcp";
+    palette.submit();
+    birth = "replacement";
+    palette.reconcile();
+    expect(controller.session.intent).toBeUndefined();
+    lease.resolve();
+    await lease.promise;
+    expect(send).not.toHaveBeenCalled();
+    expect(input.value).toBe("/mcp");
+    palette.dispose();
   });
 
   it("keeps submission separate from execution and allows only Close for uncertain Usage", async () => {

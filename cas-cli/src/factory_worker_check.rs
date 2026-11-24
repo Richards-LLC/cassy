@@ -2546,6 +2546,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
 }
 
+// gate-audit[crate_run]: selector Runs the owning crate once after a named selection ran zero tests; admission, the zero-test guard and every refusal still apply, and a failing crate run still fails.
 #[allow(clippy::too_many_arguments)]
 fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String], crate_run: bool) -> Result<()> {
     if javascript::allowed_args(args) {

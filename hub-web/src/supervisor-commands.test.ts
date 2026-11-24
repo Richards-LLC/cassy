@@ -17,15 +17,33 @@ describe("supervisor slash commands", () => {
       const run = vi.fn().mockResolvedValue(undefined);
       const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
       input.value = typed;
-      expect(commands.submit()).toBe(true);
+      const typeAndSubmit = () => {
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+        input.dispatchEvent(enter);
+        expect(enter.defaultPrevented).toBe(true);
+      };
+      typeAndSubmit();
       if (harness === "claude") {
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", false);
         await vi.waitFor(() => expect(input.value).toBe(""));
       } else if (harness === "codex") {
-        // cas-8c4f: a Codex reload restarts the supervisor, so it runs only after confirmation.
+        const panel = document.querySelector<HTMLElement>("#supervisor-command-palette")!;
+        const reload = () => panel.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]');
+        const confirmation = reload();
+        expect(confirmation).not.toBeNull();
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        expect(reload()).toBe(confirmation);
+        commands.sync();
+        expect(reload()).toBe(confirmation);
+        expect(panel.hidden).toBe(false);
+        expect(panel.querySelector("[data-supervisor-command]")).toBeNull();
+        panel.querySelector<HTMLButtonElement>('[role="alertdialog"] button.secondary')!.click();
+        expect(panel.hidden).toBe(true);
         expect(run).not.toHaveBeenCalled();
-        document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!.click();
+        typeAndSubmit();
+        reload()!.click();
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", true);
         await vi.waitFor(() => expect(input.value).toBe(""));

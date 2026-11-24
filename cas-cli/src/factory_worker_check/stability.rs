@@ -260,9 +260,14 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
     let mut known: BTreeMap<(&str, Option<String>), BTreeSet<&str>> = BTreeMap::new();
     let mut unknown = BTreeSet::new();
     let mut rust = false;
+    // cas-fcb1: each changed Rust test's own crate, harness and exact name.
+    let mut named: BTreeMap<(String, Option<String>), BTreeSet<&str>> = BTreeMap::new();
     for test in tests {
         if test.path.ends_with(".rs") {
-            rust = true;
+            match rust_selection(repo, &test.path) {
+                Some(selection) => { named.entry(selection).or_default().insert(test.name.as_str()); }
+                None => rust = true,
+            }
         } else if let Some(runner) = super::javascript::runner_hint(repo, &test.path) {
             let owner = match runner {
                 "jest" => super::javascript::jest_owner(repo, &test.path),
@@ -285,12 +290,41 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
         "no runner config, dependency or local executable identifies {file}; run the one it uses: {}",
         ["jest", "vitest", "playwright"].map(|runner| command(runner, file)).join(" or "),
     )));
+    commands.extend(named.into_iter().map(|((package, harness), names)| {
+        let target = harness.map_or("--lib".to_owned(), |harness| format!("--test {harness}"));
+        let filter = names.into_iter().map(|name| format!("test(={name})")).collect::<Vec<_>>().join(" | ");
+        // cas-e751: outside the worker hook the capped runner needs --cas-root.
+        format!("`cargo nextest run -p {package} {target} -E '{filter}'` (the worker hook caps it; elsewhere {})",
+            command(&format!("nextest run -p {package} {target} -E"), &format!("'{filter}'")))
+    }));
     if rust {
         // cas-e751: outside the worker hook the capped runner needs --cas-root.
         commands.push(format!("`cargo nextest run -p <crate> --lib -E 'test(<name>)'` (the worker hook caps it; elsewhere {})",
             command("nextest run -p <crate> --lib -E", "'test(<name>)'")));
     }
     commands
+}
+
+/// The crate that owns a Rust test file and its integration-test harness
+/// (`tests/<name>.rs` or `tests/<name>/main.rs`); `None` harness is `--lib`.
+fn rust_selection(repo: &Path, path: &str) -> Option<(String, Option<String>)> {
+    let file = repo.join(path);
+    let mut directory = file.clone();
+    while directory.pop() && directory.starts_with(repo) {
+        let Some(name) = std::fs::read_to_string(directory.join("Cargo.toml")).ok()
+            .and_then(|body| toml::from_str::<toml::Value>(&body).ok())
+            .and_then(|manifest| manifest.get("package")?.get("name")?.as_str().map(str::to_owned))
+        else { continue };
+        let parts: Vec<String> = file.strip_prefix(&directory).ok()?.components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
+        let harness = match parts.as_slice() {
+            [tests, file] if tests == "tests" => file.strip_suffix(".rs").map(str::to_owned),
+            [tests, harness, main] if tests == "tests" && main == "main.rs" => Some(harness.clone()),
+            _ => None,
+        };
+        return Some((name, harness));
+    }
+    None
 }
 
 /// A failed rerun may not leave an earlier overlapping five-pass proof usable.

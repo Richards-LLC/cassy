@@ -2525,7 +2525,29 @@ fn with_classification_progress<T>(interval: std::time::Duration, package: &str,
     })
 }
 
+/// A named Rust selection that ran zero tests (verified-test guard status 4).
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ZeroSelection(String);
+
+/// The verified-test guard's exit status for a selection that ran no test.
+const ZERO_SELECTION_STATUS: i32 = 4;
+
+/// cas-fcb1: a named selection that runs zero tests is no failure; the capped
+/// runner runs the owning crate once instead, and park accepts that crate
+/// receipt for the selection's changed tests. A failing run still fails.
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    match execute_selection_at(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, test_env, false) {
+        Err(error) if error.downcast_ref::<ZeroSelection>().is_some() => {
+            eprintln!("{error:#}; running the owning crate once instead");
+            execute_selection_at(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, test_env, true)
+        }
+        result => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String], crate_run: bool) -> Result<()> {
     if javascript::allowed_args(args) {
         validate_test_environment(args, test_env)?;
         if isolated_test_env.is_some() {
@@ -2560,7 +2582,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
     let mut widened_proof = None;
-    let owned_tests = if let Some(test) = &test {
+    let mut owned_tests = if let Some(test) = &test {
         capacity_preflight(&cas_root, &repo, &config, &cas_root.join("worker-check-slots"))?;
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         let classified = with_classification_progress(
@@ -2589,6 +2611,12 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
             }
         }
     } else { Vec::new() };
+    if crate_run && let Some(test) = &test {
+        let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
+        widened::invalidate(&cas_root, &repo, &head, &scope)?;
+        widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: widened::ZERO_SELECTION_REASON.into(), configs: Default::default() });
+        owned_tests.clear();
+    }
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
@@ -2854,6 +2882,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         if let Some(log) = &selected_log {
             stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, log)?;
         }
+        if test.is_some() && !crate_run && status.code() == Some(ZERO_SELECTION_STATUS) {
+            bail!(ZeroSelection(crate::gates::tag("G-61", format!("test: ZERO {head}: the selection ran no test"))));
+        }
         bail!(crate::gates::tag("G-61", format!(
             "{}: FAIL {head} ({status})",
             if test.is_some() { "test" } else { "check" }
@@ -2869,6 +2900,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 .trim()
                 .parse()?;
             std::fs::remove_file(&count_file)?;
+            if count == 0 && !crate_run {
+                bail!(ZeroSelection("Worker test executed zero tests; no PASS receipt recorded".into()));
+            }
             if count == 0 {
                 bail!("Worker test executed zero tests; no PASS receipt recorded");
             }

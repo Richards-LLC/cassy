@@ -2558,14 +2558,15 @@ sys.exit(0 if ok else 1)
     #[test]
     fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
         use crate::factory_worker_check::{javascript, widened};
-        let _env = crate::test_support::TestEnvGuard::new();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         // `related` finds no importer; a named run matches no runtime name;
         // the package run passes.
         const VITEST: &str = "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nrelated = 'related' in args\nnamed = '--testNamePattern' in args\nresults = [] if related else [{'name': str(Path('pages/index.test.ts').resolve()), 'status': 'passed',\n    'assertionResults': [{'fullName': 'renders at runtime' if named else 'renders', 'status': 'skipped' if named else 'passed'}]}]\nPath(args[args.index('--outputFile') + 1]).write_text(json.dumps({'success': not related, 'testResults': results}))\nraise SystemExit(1 if related else 0)\n";
         const REGISTRY: &str = "journeys:\n- id: join\n  status: live\n  spec: tests/journeys/join.spec.ts\n- id: delete\n  status: live\n  spec: tests/journeys/O1.spec.ts\n- id: audit\n  status: live\n  spec: tests/journeys/Q1.spec.ts\n";
         let pw = "import { test } from '@playwright/test';\n";
         // (issue, base files, delivered files, deleted files)
-        let rows: [(&str, Vec<(&str, String)>, Vec<(&str, String)>, Vec<&str>); 6] = [
+        let rows: [(&str, Vec<(&str, String)>, Vec<(&str, String)>, Vec<&str>); 7] = [
             ("#2380", vec![
                 ("package.json", "{}".into()), ("playwright.config.ts", "export default {};\n".into()),
                 ("docs/qa/journeys.yaml", REGISTRY.into()),
@@ -2604,6 +2605,11 @@ sys.exit(0 if ok else 1)
                 ("tests/journeys/flows.ts", "export const flow = () => 2;\n".into()),
                 ("tests/journeys/O1.spec.ts", format!("{pw}import {{ flow }} from './flows';\ntest('deletes workspace', () => {{ flow(); flow(); }});\n")),
             ], vec![]),
+            // A named Rust selection that runs zero tests.
+            ("rust", vec![
+                ("Cargo.toml", "[package]\nname='fixture'\nversion='0.1.0'\nautotests=false\n".into()),
+                ("src/lib.rs", "#[test]\nfn kept() { let before = 0; }\n".into()),
+            ], vec![("src/lib.rs", "#[test]\nfn kept() {}\n".into())], vec![]),
             ("#2378", vec![
                 ("package.json", "{}".into()),
                 ("a.test.mjs", "import { test } from 'node:test';\ntest('fixed', () => {});\n".into()),
@@ -2632,7 +2638,7 @@ sys.exit(0 if ok else 1)
             };
             git(&checkout, &["init", "-q", "-b", "main"]);
             write(&base_files);
-            write(&[(".gitignore", "node_modules/\n".into())]);
+            write(&[(".gitignore", "node_modules/\ntarget/\n".into())]);
             git(&checkout, &["add", "."]);
             git(&checkout, &["commit", "-qm", "base"]);
             git(&checkout, &["checkout", "-qb", "delivery"]);
@@ -2651,8 +2657,14 @@ sys.exit(0 if ok else 1)
                 .flat_map(|refusal| refusal.split("worker-check --cas-root ").skip(1))
                 .filter_map(|tail| tail.split_once(" -- ").map(|(_, command)| command.split(['`', ';']).next().unwrap()
                     .split(". ").next().unwrap().trim_end_matches(['.', '\n']).to_string()))
-                .map(|command| javascript::invocation(&command.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
-                    .unwrap_or_else(|| panic!("{issue}: unrunnable prescription {command}")))
+                .filter_map(|command| {
+                    let words = command.replace('\'', "").split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+                    if words.first().is_some_and(|word| word == "nextest") {
+                        assert!(crate::factory_worker_check::allowed_args(&words), "{issue}: unrunnable prescription {command}");
+                        return None;
+                    }
+                    Some(javascript::invocation(&words).unwrap_or_else(|| panic!("{issue}: unrunnable prescription {command}")))
+                })
                 .collect();
             for run in &prescribed {
                 assert!(run.files.iter().all(|file| checkout.join(file).exists()), "{issue}: {held:?}");
@@ -2690,6 +2702,21 @@ sys.exit(0 if ok else 1)
                         scope: widened::Scope::Package(String::new()), reason: String::new(), configs: Default::default() }, 1).unwrap();
                 }
                 "#2362" => {}
+                "rust" => {
+                    // nextest's own zero-selection status for the named run;
+                    // the crate run (no filter) passes.
+                    let cargo = root.path().join("fake-cargo");
+                    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in\n  *' -E '*) echo '    Starting 0 tests across 1 binary (1 skipped)'; echo 'error: no tests to run'; exit 4;;\nesac\necho '        PASS [ 0.01s] (1/1) fixture kept'\necho '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped'\n").unwrap();
+                    #[cfg(unix)] {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    }
+                    let args = ["nextest", "run", "-p", "fixture", "--lib", "-E", "test(=kept)"].map(String::from);
+                    if let Err(error) = crate::factory_worker_check::execute_at(root.path(), &args, &repo, &cargo) {
+                        failures.push((issue, vec![format!("{error:#}")]));
+                        continue;
+                    }
+                }
                 "#2378" => {
                     javascript::execute(root.path(), &["node".into(), "--test".into(), "a.test.mjs".into()], &repo, &[]).unwrap();
                 }

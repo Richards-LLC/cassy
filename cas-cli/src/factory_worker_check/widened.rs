@@ -82,9 +82,10 @@ pub(crate) fn owning_package(repo: &Path, path: &str, runner: &str) -> Scope {
         .unwrap_or_else(|| package(repo, path))
 }
 
-/// The JavaScript package runs that prove `path` (GH #2369): run more, never
-/// an impossible narrower demand. Rust keeps its own crate proof.
+/// The package or crate runs that prove `path` (GH #2369): run more, never
+/// an impossible narrower demand. A Rust file's owner is its crate's run.
 fn owners(repo: &Path, path: &str) -> Vec<Scope> {
+    if path.ends_with(".rs") { return vec![package(repo, path)]; }
     if !javascript::javascript(path) { return Vec::new(); }
     let mut owners = vec![package(repo, path)];
     if let Some(runner) = javascript::runner_hint(repo, path).filter(|runner| *runner != "node --test") {
@@ -95,10 +96,18 @@ fn owners(repo: &Path, path: &str) -> Vec<Scope> {
 
 /// Whether a passing run of the package owning `path` is recorded: it proves
 /// that file's changed tests and widened scopes alike (GH #2369).
+///
+/// A Rust changed test keeps its five-pass proof unless its named selection
+/// ran zero tests; only that fallback's crate run stands in for it.
 pub(crate) fn package_proves(passing: &PassingTests<'_>, path: &str) -> bool {
+    let rust = path.ends_with(".rs");
     owners(passing.repo, path).iter().any(|owner| passing.records().iter()
-        .filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| &proof.scope == owner))
+        .filter_map(|(_, _, test)| test.widened.as_ref())
+        .any(|proof| &proof.scope == owner && (!rust || proof.reason == ZERO_SELECTION_REASON)))
 }
+
+/// The recorded reason of a crate run that replaced a zero-test selection.
+pub(crate) const ZERO_SELECTION_REASON: &str = "widened:zero-test selection";
 
 /// The test files the journey registry declares at `head`. Their declared lane
 /// (batch QA against the deployed target) proves them, never a worker's capped

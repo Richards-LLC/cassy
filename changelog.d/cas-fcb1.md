@@ -12,6 +12,9 @@
   from another checkout. Now: the test API import picks the runner. Any
   JavaScript selection that runs no test runs the owning package instead, and
   park accepts that package pass for the changed tests and inputs inside it.
-  `worker-check -- <runner> <package>/package.json` runs a package directly. Deleted files owe nothing.
+  `worker-check -- <runner> <package>/package.json` runs a package directly.
+  A named Rust selection that runs zero tests runs its crate once instead, and
+  park accepts that crate pass for the changed tests; the Rust prescription
+  names the crate, harness and exact test. Deleted files owe nothing.
   Registry journey specs, and helpers only journeys import, follow the journey
   lane. A pass at the exact commit counts from any worktree of the repository.

@@ -1,0 +1,4 @@
+title: An expired daemon verifier claim with no heartbeat and no active lane is released by the owning merge retry so one replacement reviews the same dispatch and candidate
+tasks: [cas-81c2]
+invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+journeys: [FACTORY-MERGE]

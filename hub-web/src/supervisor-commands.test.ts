@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
+import { sendsOnEnter } from "./supervisor-message";
 
 describe("supervisor slash commands", () => {
   it("offers Standby with one confirmation on every supported harness", () => {
@@ -91,6 +92,34 @@ describe("supervisor slash commands", () => {
     expect(run).toHaveBeenCalledWith("usage", false);
     expect(commandsForHarness("grok")).toEqual([]);
     commands.dispose();
+  });
+
+  it("sends an ordinary chat message with a command confirmation open", () => {
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const input = document.querySelector("textarea")!;
+    const run = vi.fn();
+    const sendChat = vi.fn();
+    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => undefined, label: () => "test supervisor", run });
+    input.onkeydown = event => {
+      if (event.defaultPrevented || !sendsOnEnter(event)) return;
+      event.preventDefault();
+      if (!commands.submit()) sendChat(input.value);
+    };
+    const pressEnter = (text: string) => {
+      input.focus();
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    };
+    try {
+      pressEnter("/reload-cassy");
+      expect(document.querySelector('[data-command-confirm="mcp"]')).not.toBeNull();
+      pressEnter("Continue with the review.");
+      expect(sendChat.mock.calls).toEqual([["Continue with the review."]]);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      commands.dispose();
+    }
   });
 
   it("lets pasted paths and unsupported slash text reach the normal composer send", () => {

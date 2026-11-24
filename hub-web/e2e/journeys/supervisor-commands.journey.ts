@@ -339,12 +339,27 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await captureReload(page, "codex-mismatch", viewport.width);
         expect(hub.sends).toHaveLength(0);
       });
-      await journey.stage("Typed /mcp on Codex asks for the same restart confirmation", async () => {
+      await journey.stage("Typed Reload Cassy keeps its focused action when the session list changes", async () => {
         const input = composer(page);
-        await input.fill("/mcp");
+        await input.fill("/reload-cassy");
         await input.press("Enter");
-        await expect(page.locator('[data-command-confirm="mcp"]')).toBeVisible();
+        const reload = page.locator('[data-command-confirm="mcp"]');
+        await expect(reload).toBeVisible();
+        await page.keyboard.press("ArrowRight");
+        await expect(reload).toBeFocused();
+        const priorComposer = await input.elementHandle();
+        const peer = { ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/peer-project", workers: [] };
+        machine.sessions.push(peer);
+        await hub.announceCatalog(machine.id, { added: [peer.name] });
+        const navigation = page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true });
+        await expect(navigation.getByRole("button", { name: /^peer-project on /, includeHidden: true })).toHaveCount(1);
+        await expect.poll(() => priorComposer.evaluate(composer => composer.isConnected)).toBe(false);
+        await expect(reload).toBeFocused();
         expect(mutations()).toHaveLength(1);
+        await reload.click();
+        await expect.poll(() => mutations().length).toBe(2);
+        expect(mutations()[1].body).toMatchObject({ command: "mcp", confirmed: true });
+        await expect(input).toHaveValue("");
         expect(hub.sends).toHaveLength(0);
       });
     });

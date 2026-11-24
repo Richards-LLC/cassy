@@ -1942,11 +1942,12 @@ pub fn recover_expired_dead_verifier_dispatch(
          AND machine_id IS ?3 AND registered_at=?4 AND status=?5 AND pid IS ?6
          AND pid_starttime IS ?7 AND factory_session IS ?8
          AND json_extract(metadata,'$.pid_starttime') IS ?9
-         AND json_extract(metadata,'$.automatic_premerge_dispatch') IS ?10)",
+         AND json_extract(metadata,'$.automatic_premerge_dispatch') IS ?10
+         AND last_heartbeat=?11)",
         params![dead_child.id, owner.id, dead_child.machine_id, dead_child.registered_at.to_rfc3339(),
             dead_child.status.to_string(), dead_child.pid, dead_child.pid_starttime.map(|v| v as i64),
             dead_child.factory_session, dead_child.metadata.get("pid_starttime"),
-            dead_child.metadata.get(AUTOMATIC_PREMERGE_OWNER_KEY)],
+            dead_child.metadata.get(AUTOMATIC_PREMERGE_OWNER_KEY), dead_child.last_heartbeat.to_rfc3339()],
         |row| row.get(0),
     )?;
     let task_active: bool = tx.query_row(

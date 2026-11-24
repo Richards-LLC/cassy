@@ -1062,15 +1062,21 @@ mod tests {
         let dir = task_evidence_dir(&root, &task).unwrap();
         let sweep = dir.join("visual-qa");
         std::fs::create_dir_all(&sweep).unwrap();
-        let report = |status, urls, findings| serde_json::json!({
+        let report = |status, urls, findings, revision, sha256| serde_json::json!({
             "status": status, "strict": true, "generatedAt": chrono::Utc::now().to_rfc3339(),
             "urls": [urls], "findings": findings,
-            "screenshots": [{"path": "ranking.png", "url": urls, "state": "ranking"}]
+            "build": {"revision": revision, "sha256": "a".repeat(64)},
+            "screenshots": [{"path": "ranking.png", "url": urls, "state": "ranking", "sha256": sha256}]
         });
         let tip_report = sweep.join("visual-qa.json");
         let url = "http://localhost:8180/ranking";
-        std::fs::write(&tip_report, report("PASS", url, serde_json::json!([])).to_string()).unwrap();
         let capture = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/ranking.after.png"));
+        let digest = |bytes: &[u8]| format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes));
+        let capture_digest = digest(capture);
+        let passing_run = |revision: &str, checksum: &str| {
+            std::fs::write(&tip_report, report("PASS", url, serde_json::json!([]), revision, checksum).to_string()).unwrap();
+        };
+        passing_run(&head, &capture_digest);
         std::fs::write(dir.join("unrelated.png"), capture).unwrap();
 
         let ledger = dir.join("LEDGER.md");
@@ -1096,18 +1102,34 @@ mod tests {
         assert!(park().is_ok());
         assert!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
 
+        let gate_codes = || park().err().map(|error| crate::gates::codes_in(&error)).unwrap_or_default();
+        let corrupt = b"\x89PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x06IDATx\x9c\xff\xff\xff\xff\x1d\xca|\x9e\x00\x00\x00\x00IEND\xaeB\x60\x82";
+        std::fs::write(sweep.join("ranking.png"), corrupt).unwrap();
+        passing_run(&head, &digest(corrupt));
+        let corrupt_codes = gate_codes();
+        std::fs::write(sweep.join("ranking.png"), capture).unwrap();
+        passing_run(&base, &capture_digest);
+        let wrong_tip_codes = gate_codes();
+
         let baseline = dir.join("visual-qa-baseline");
         std::fs::create_dir_all(&baseline).unwrap();
         let findings = serde_json::json!([{"type": "contrast", "selector": ".caption"}]);
-        std::fs::write(baseline.join("visual-qa.json"), report("FAIL", "http://localhost:8181/ranking", findings.clone()).to_string()).unwrap();
-        std::fs::write(tip_report, report("FAIL", url, findings).to_string()).unwrap();
+        let baseline_run = |revision: &str| {
+            std::fs::write(baseline.join("visual-qa.json"), report("FAIL", "http://localhost:8181/ranking", findings.clone(), revision, &capture_digest).to_string()).unwrap();
+        };
+        std::fs::write(baseline.join("ranking.png"), capture).unwrap();
+        std::fs::write(&tip_report, report("FAIL", url, findings.clone(), &head, &capture_digest).to_string()).unwrap();
+        baseline_run(&base);
         assert!(park().is_ok());
+        baseline_run(&head);
+        let wrong_base_codes = gate_codes();
 
         git(repo, &["switch", "--detach", "-q", &base]);
         let api_head = commit_file(repo, "server/routes/ranking.ts", "export const ranking = [];\n");
         let api_task = Task::new("cas-0304-api".into(), "Ranking API".into());
         crate::store::open_task_store(&root).unwrap().add(&api_task).unwrap();
         assert!(qa_evidence_close_gate_for_paths(&root, &api_task, repo, "main", Some(&api_head), None, Some(&base)).is_ok());
+        assert_eq!((corrupt_codes, wrong_tip_codes, wrong_base_codes), (vec!["G-171"], vec!["G-171"], vec!["G-171"]));
     }
 
     #[test]

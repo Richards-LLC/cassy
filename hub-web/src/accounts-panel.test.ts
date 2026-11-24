@@ -218,3 +218,18 @@ it("an unreachable hub shows no capacity number, and a recommended account under
   expect(meters.map(meter => meter.dataset.state)).toEqual(["unreachable", "unreachable"]);
   expect(meters.some(meter => meter.hasAttribute("data-left"))).toBe(false);
 });
+
+it("draws a ↻ check taken while a hub is configured as this machine's own, muted and named, never as the shared number", async () => {
+  const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+  const shared: AccountRow = { ...row, key: "claude:work", name: "work", login_state: "logged_in", usage_source: "hub", usage_observed_at: at(-5), windows: [{ name: "weekly", used_percent: 20, resets_at: at(2 * 1440) }] };
+  const { host } = setup(false, shared);
+  const check = vi.fn().mockResolvedValue({ checked_at: at(0), observed_at: at(-2), source: "native snapshot", reason: null, windows: [{ name: "weekly", used_percent: 30, resets_at: at(2 * 1440) }] });
+  Object.assign(host, { checkUsage: check });
+  await settle();
+  expect(document.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-state")).toBe("live");
+  document.querySelector<HTMLButtonElement>('[data-testid="account-refresh"]')!.click();
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-state")).toBe("local"));
+  const meter = document.querySelector<HTMLElement>('[data-testid="account-meter"][data-window="week"]')!;
+  expect(meter.dataset.left).toBe("70");
+  expect(meter.getAttribute("aria-label")).toContain("Soundwave");
+});

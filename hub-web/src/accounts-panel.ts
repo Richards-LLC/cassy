@@ -281,7 +281,8 @@ export class AccountsSheet {
     const flag = !account.duplicate_of && account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
     // The reason comes from the same readings as the meters; it is the tag's tooltip, and spoken on the row only when the pick is low.
     const nextTag = next ? `<span class="accounts-next" data-testid="account-next"${reason?.reset ? ` data-reset="${reason.reset}"` : ""} title="${escapeHtml(reason?.text ?? "")}">Recommended</span>` : "";
-    const lowTag = reason?.low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(reason.text)}</span>` : "";
+    // The reason is always on the row: amber when the pick is low, muted otherwise.
+    const lowTag = !reason ? "" : reason.low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(reason.text)}</span>` : `<span class="accounts-sub accounts-why" data-testid="account-pick-reason">${escapeHtml(reason.text)}</span>`;
     const others = this.elsewhere(machine, account);
     const lives = others.length ? `<span class="accounts-sub" data-testid="account-elsewhere">also on ${escapeHtml(others.join(", "))}</span>` : "";
     // With a hub configured, a number that isn't the hub's says whose it is.

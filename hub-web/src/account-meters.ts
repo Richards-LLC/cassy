@@ -55,7 +55,7 @@ export function readings(windows: readonly AccountWindow[] | undefined, observed
     if (reset !== undefined && Number.isFinite(reset) && reset <= now) return { slot, kind: "reset" };
     const used = window.used_percent;
     if (used === null || !Number.isFinite(used) || used < 0 || used > 100) return { slot, kind: "unknown" };
-    const ago = observed ? readAge(observed, now)?.replace(/^read /, "") : undefined;
+    const ago = observed ? readAge(observed, now)?.replace(/^read\s/, "") : undefined;
     return {
       slot, kind: checkedOn ? "local" : stale ? "stale" : "live", left: Math.round(100 - used),
       reset: window.resets_at && reset !== undefined && Number.isFinite(reset) ? accountTime(window.resets_at) : undefined,
@@ -115,10 +115,15 @@ export function pickReason(pick: PickCandidate, others: readonly PickCandidate[]
   const low = left < LOW_PICK;
   const lead = low ? `Only ${left}% left; ${resets}.` : `Week ${resets}.`;
   const earlier = others.filter(other => at(weekOf(other.list)) < at(week));
-  const why = !sooner ? " Soonest here, so it's used before it expires."
+  const first = sooner?.week;
+  const why = !others.length ? " Only login here."
+    : !sooner ? " Soonest here, so it's used before it expires."
     : earlier.every(other => other.exclusion?.includes("floor")) ? ` Sooner login${earlier.length === 1 ? " is" : "s are"} under the floor.`
-    : earlier.every(other => other.exclusion) ? ` Sooner login${earlier.length === 1 ? " is" : "s are"} excluded.`
-    : " A sooner login wasn't chosen.";
+    : earlier.every(other => other.exclusion) ? ` Sooner login${earlier.length === 1 ? " is" : "s are"} excluded: ${sooner.other.exclusion}.`
+    // The recommender ranked on the reads it had; say which read differs rather than leave a bare "not chosen".
+    : first?.kind === "stale" ? ` ${sooner.other.name} resets sooner, but its read is ${first.age ?? "old"}.`
+    : first?.kind === "local" ? ` ${sooner.other.name} resets sooner by ${first.age ?? "this machine's check"}, which the recommender didn't use.`
+    : ` ${sooner.other.name} resets sooner (${first?.resetsIn ?? "unknown"}) on this read, newer than the recommender's.`;
   const text = `${lead}${why}`;
   return { text, low, reset: week.resetAt, soonest: !sooner };
 }
@@ -130,7 +135,7 @@ export function pickReason(pick: PickCandidate, others: readonly PickCandidate[]
 export function localReadLine(list: readonly WindowReading[], observed: string | null | undefined, now = Date.now()): string {
   const known = list.filter((reading): reading is Known => "left" in reading);
   const age = observed ? readAge(observed, now) : undefined;
-  return `Not on the hub${known.length ? ` · ${known.map(reading => `${reading.kind === "stale" ? "≤" : ""}${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}`).join(", ")} left${age ? `, ${age}` : ""}` : ""}`;
+  return `Not on the hub${known.length ? ` · ${known.map(reading => `${reading.kind === "stale" ? AT_MOST : ""}${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}`).join(", ")} left${age ? `, ${age}` : ""}` : ""}`;
 }
 
 /**
@@ -147,10 +152,14 @@ export function exclusionText(exclusion: string | null | undefined): string | un
   return `${100 - Number(used)}% ${window === "weekly" ? "week" : window} left, under the ${100 - Number(limit)}% floor`;
 }
 
-/** "77% 5h · 62% week · resets in 2 h": the plan strip's one-line summary. */
+/** "≤ 81%": one form for an upper bound everywhere (no break after ≤). */
+const AT_MOST = "≤\u00a0";
+
+/** "77% 5h left · 62% week left · 5h resets in 2 h": the plan strip's one-line summary. */
 export function capacityLine(list: readonly WindowReading[]): string {
   if (list.every(reading => reading.kind === "unreachable")) return "hub unreachable";
-  const parts = list.map(reading => reading.kind === "live" || reading.kind === "local" ? `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "stale" ? `≤${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}` : reading.kind === "missing" ? `${SLOT_LABEL[reading.slot]} not reported` : `${SLOT_LABEL[reading.slot].toLowerCase()} unknown`);
+  // Every figure says "left"; a window the provider doesn't report is left out.
+  const parts = list.filter(reading => reading.kind !== "missing").map(reading => "left" in reading ? `${reading.kind === "stale" ? AT_MOST : ""}${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()} left` : `${SLOT_LABEL[reading.slot].toLowerCase()} unknown`);
   const known = list.filter((reading): reading is Known => "left" in reading && Boolean(reading.resetsIn));
   const soonest = known.sort((a, b) => Date.parse(a.resetAt ?? "") - Date.parse(b.resetAt ?? ""))[0];
   const local = list.find((reading): reading is Known => reading.kind === "local");

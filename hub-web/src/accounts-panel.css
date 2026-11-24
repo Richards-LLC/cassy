@@ -124,3 +124,4 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-duplicate button:disabled { border-style: dashed; color: var(--ink-mid); border-color: var(--line-strong); cursor: not-allowed; }
 .accounts-row .meter-value--none { color: var(--ink-mid); }
 .accounts-nowrap { white-space: nowrap; }
+.accounts-sub.accounts-why { white-space: normal; overflow: visible; }

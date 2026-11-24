@@ -3839,7 +3839,9 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .account-usage-result.is-error { color: var(--state-warn); white-space: normal; }
 @media (max-width: 53rem) { .account-refresh { inline-size: var(--rail-item-min); block-size: var(--rail-item-min); } }
 @media (prefers-reduced-motion: reduce) { .account-refresh { transition: none; } .account-refresh[aria-busy="true"] svg { animation: none; } }
-/* New session rows are narrow: the value says "77%", the column already means left. */
-.launch-meters .meter-unit { display: none; }
 /* The Start bar matches the dialog's rounding instead of a square inset slab; its summary sits on the bar's inner padding. */
 .launch-sheet .launch-actions { border-radius: var(--radius-card); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4); }
+/* A local check's line names whose check it was; it wraps rather than cut. */
+.meter[data-state="local"] .meter-when { white-space: normal; }
+/* New session: a check's result lands on the row's meters; only a failure needs words beside ↻. */
+.launch-account-entry .account-usage-result:not(.is-error) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

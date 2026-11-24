@@ -1128,8 +1128,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
     let cargo = Path::new(env!("CARGO"));
     let nextest = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::regression)"];
     let parameterized = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear::regression)"];
-    let mut versioned = parameterized;
-    versioned[2] = "widget@0.1.0";
+    let versioned = ["nextest", "run", "-p", "widget@0.1.0", "--lib", "-E", parameterized[6]];
     let unrelated = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::unrelated)"];
     let check = ["-p", "widget", "--tests"];
     let node = ["node", "--test", "gear.test.mjs"];

@@ -3,6 +3,7 @@ pub(crate) mod gate_text;
 mod loaded_proof;
 mod registry_upkeep;
 mod report_quality;
+mod ac_checklist;
 mod fast_lane_gate;
 mod proof_claims;
 pub(crate) mod gate_preflight;
@@ -17,11 +18,13 @@ mod delivery_evolution;
 mod delivery_git;
 mod snapshot_approval;
 mod rule_references;
+mod dead_code;
 mod rebased_delivery;
 pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_patches;
 pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
+mod doc_fragment_gate;
 mod merge_queue_proof;
 mod verified_delivery;
 mod epic_autoclose;
@@ -307,6 +310,20 @@ tokio::task_local! {
     /// GH #2282: present while Cassy closes a parked delivery it observed
     /// already contained in its recorded target.
     static CONTAINED_RECONCILE_CLOSE: ();
+    /// GH #2383: the exact dispatch owner Cassy acts for while it closes an
+    /// approved verdict's saved close intent.
+    static VERDICT_CLOSE_OWNER: String;
+}
+
+/// GH #2383: run `close` as Cassy's close of an approved exact-dispatch
+/// verdict. Train authority is the dispatch owner Cassy acts for, never the
+/// verifier that recorded the verdict; every other gate is unchanged.
+pub(crate) async fn as_verdict_owner_close<F: std::future::Future>(owner: String, close: F) -> F::Output {
+    VERDICT_CLOSE_OWNER.scope(owner, as_cassy_merge_close(close)).await
+}
+
+fn verdict_close_owner() -> Option<String> {
+    VERDICT_CLOSE_OWNER.try_with(Clone::clone).ok()
 }
 
 /// GH #2282: run `close` as Cassy's reconcile of a parked delivery that
@@ -8190,7 +8207,7 @@ impl CasCore {
             }
         }
 
-        if let Ok(id) = self.get_registered_agent_id_read_only()
+        if let Some(id) = verdict_close_owner().or_else(|| self.get_registered_agent_id_read_only().ok())
             && let Ok(actor) = self.open_agent_store()?.get(&id) && actor.role != cas_types::AgentRole::Worker {
             crate::cloud::peer_mailbox::train_parks::authorize(&self.cas_root,&task,&actor)
                 .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST,error))?;
@@ -9755,6 +9772,20 @@ impl CasCore {
             ) {
                 gate_refusals.push(message);
             }
+            // cas-d68f: name every symbol the delivery left without a caller.
+            // gate[G-169 park as-of]: Delivery leaves symbols without callers (dead-code sweep)
+            match dead_code::at_park(&evidence_repo, &resolved_parent_branch, rule_head.as_deref()) {
+                Ok(None) => {}
+                Ok(Some(note)) => close_notes.record(&mut task, &note),
+                Err(message) if supervisor_override => {
+                    accepted_override_codes.push("G-169");
+                    close_notes.record(&mut task, &format!(
+                        "✅ DECISION dead-code sweep waived by supervisor override: {}. Waived refusal: {message}",
+                        req.reason.as_deref().unwrap_or("").trim()
+                    ));
+                }
+                Err(message) => gate_refusals.push(crate::gates::tag("G-169", message)),
+            }
             // cas-4b33: journey registry upkeep (G-49) runs as the lane lint
             // and CODEMAP/PRODUCT_OVERVIEW are regenerated at release prep, so
             // park no longer re-judges shared docs (G-50 removed).
@@ -9778,6 +9809,13 @@ impl CasCore {
                 )
             });
             if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, false) {
+                gate_refusals.push(message);
+            }
+            // GH #2401: judged at every park; a parked or merged delivery keeps its checklist.
+            if task.status != TaskStatus::AwaitingMerge
+                && task.deliverables.green_merge_commit.is_none()
+                && let Err(message) = ac_checklist::at_park(&self.cas_root, &task)
+            {
                 gate_refusals.push(message);
             }
             let fast_lane_qa = match &fast_lane_stage {
@@ -12591,7 +12629,8 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
         if owner_train.is_some()
             || crate::cloud::peer_mailbox::train_parks::parked(&task).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e))?.is_some() {
-            let actor = self.open_agent_store()?.get(&self.get_agent_id()?).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e.to_string()))?;
+            let actor_id = match verdict_close_owner() { Some(owner) => owner, None => self.get_agent_id()? };
+            let actor = self.open_agent_store()?.get(&actor_id).map_err(|e| Self::error(ErrorCode::INVALID_REQUEST,e.to_string()))?;
             // gate-audit[train_owner_park]: G-113 Worker publication waits for
             // the pinned owner; it cannot turn an artifact-only close into a verdict.
             if actor.role == cas_types::AgentRole::Worker
@@ -49601,6 +49640,9 @@ mod no_code_close_tests;
 #[cfg(test)]
 #[path = "close_ops/blast_radius_park_tests.rs"]
 mod blast_radius_park_tests;
+#[cfg(test)]
+#[path = "close_ops/dead_code_tests.rs"]
+mod dead_code_tests;
 #[cfg(test)]
 #[path = "close_ops/g61_family_close_tests.rs"]
 mod g61_family_close_tests;

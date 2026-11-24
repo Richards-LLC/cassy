@@ -891,6 +891,8 @@ mod tests {
             (true, "good"), (true, "corrupt"), (true, "missing"),
             (true, "revoked"), (true, "foreign-artifact"),
             (true, "foreign-project"), (true, "id-only"), (true, "unreferenced"),
+            // GH #2397 (Nov 23): the epic's prose names an artifact another in-scope task published.
+            (true, "other-task"),
         ] {
             let server = MockServer::start().await;
             let (_dir, core, _owner, mut rows) = contention_fixture(&["cas-f6ca-fixture"]);
@@ -911,8 +913,11 @@ mod tests {
             // child; changing the receiver's pin afterwards makes it foreign.
             let project = crate::cloud::resolve_canonical_id(&core.cas_root).unwrap();
             parent.origin_project = Some(if mode == "foreign-project" { "foreign".into() } else { project });
+            let mut sibling = Task::new("cas-peer-sibling".into(), "Another task's design brief".into());
+            sibling.origin_project = parent.origin_project.clone();
+            let owner = if mode == "other-task" { &sibling } else { &parent };
             let record = cas_store::PublishedArtifact {
-                id:"art-peer-plan".into(), task_id:if parent_scope { parent.id.clone() } else { task.id.clone() }, name:"decision-brief.md".into(),
+                id:"art-peer-plan".into(), task_id:if parent_scope { owner.id.clone() } else { task.id.clone() }, name:"decision-brief.md".into(),
                 mime:"text/markdown".into(), size_bytes:bytes.len() as u64,
                 sha256:format!("{:x}", Sha256::digest(bytes)),
                 cloud_artifact_id:Some("cloud-peer-plan".into()), status:"committed".into(),
@@ -922,7 +927,7 @@ mod tests {
                 // Only publication notes cross machines: the reviewer never
                 // shares the publisher's artifact database or cached bytes.
                 let publishing_tasks = crate::store::open_task_store(&publisher).unwrap();
-                publishing_tasks.add(&parent).unwrap();
+                publishing_tasks.add(owner).unwrap();
                 let publishing_artifacts = cas_store::SqliteArtifactStore::open(&publisher).unwrap();
                 publishing_artifacts.record_local(&cas_store::NewArtifact {
                     id:record.id.clone(), task_id:record.task_id.clone(), name:record.name.clone(),
@@ -931,14 +936,19 @@ mod tests {
                 publishing_artifacts.mark_uploaded(&record.id, record.cloud_artifact_id.as_deref().unwrap()).unwrap();
                 publishing_artifacts.mark_committed(&record.id, None).unwrap();
                 crate::artifacts::proof::record_published(&publisher, &record).unwrap();
-                let mut synced = publishing_tasks.get(&parent.id).unwrap();
+                let mut synced = publishing_tasks.get(&owner.id).unwrap();
                 let mut notes = std::mem::take(&mut synced.notes);
                 if mode == "foreign-artifact" {
                     notes = notes.replace(&parent.id, "cas-unrelated-owner");
                 }
                 let receiving_tasks = core.open_task_store().unwrap();
                 receiving_tasks.add(&synced).unwrap();
-                receiving_tasks.append_trusted_note(&parent.id, &notes).unwrap();
+                receiving_tasks.append_trusted_note(&owner.id, &notes).unwrap();
+                if mode == "other-task" {
+                    // The epic only mentions the sibling's artifact in an appended note.
+                    receiving_tasks.add(&parent).unwrap();
+                    receiving_tasks.append_trusted_note(&parent.id, "Design sign-off cites art-peer-plan from the sibling task").unwrap();
+                }
                 receiving_tasks.add_dependency(&cas_types::Dependency::new(
                     task.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,
                 )).unwrap();
@@ -948,7 +958,7 @@ mod tests {
             }
             task = core.open_task_store().unwrap().get(&task.id).unwrap();
             let expected = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
-                &core.cas_root, if parent_scope { &parent } else { &task }).unwrap().join("art-peer-plan-decision-brief.md");
+                &core.cas_root, if parent_scope { owner } else { &task }).unwrap().join("art-peer-plan-decision-brief.md");
             assert!(!expected.exists());
             let view = if mode == "missing" { ResponseTemplate::new(404) } else if mode == "revoked" { ResponseTemplate::new(410) } else {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -973,7 +983,7 @@ mod tests {
                 }).unwrap().unwrap();
                 handle.join().unwrap();
                 let prepared = received.try_recv().ok();
-                if mode == "good" {
+                if matches!(mode, "good" | "other-task") {
                     assert!(prepared.as_ref().is_some_and(|result| result.is_ok()),
                         "parent={parent_scope} attempt={attempt}: {prepared:?}; notices={:?}",
                         crate::store::open_prompt_queue_store(&core.cas_root).unwrap().peek_all(10).unwrap());
@@ -986,9 +996,9 @@ mod tests {
                     let reference = inputs["artifacts"].as_array().unwrap().iter()
                         .find(|reference| reference["artifact_id"] == record.id).unwrap();
                     assert_eq!(Path::new(reference["path"].as_str().unwrap()), expected);
-                    if parent_scope { assert_eq!(reference["task_id"], parent.id); }
+                    if parent_scope { assert_eq!(reference["task_id"], owner.id); }
                     std::fs::remove_file(&expected).unwrap();
-                    if parent_scope && attempt == 1 {
+                    if parent_scope && attempt == 1 && mode == "good" {
                         let before = context_digest(&core.cas_root, &task).unwrap();
                         let mut sequence = record.clone();
                         sequence.id = "art-peer-sequence".into();
@@ -1003,10 +1013,21 @@ mod tests {
                     assert!(prepared.is_some());
                     assert!(!expected.exists());
                     assert!(server.received_requests().await.unwrap().is_empty());
+                } else if matches!(mode, "foreign-artifact" | "id-only") {
+                    // GH #2397: a mention no in-scope task owns is missing context, not a refusal.
+                    assert!(prepared.is_some(), "an unresolvable mention refused the merge: {mode}");
+                    assert!(!expected.exists());
+                    assert!(server.received_requests().await.unwrap().is_empty());
+                    let input = std::fs::read_to_string(core.cas_root.join("prompt.txt")).unwrap();
+                    let inputs: serde_json::Value = input.lines()
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .find(|value: &serde_json::Value| value.get("artifacts").is_some()).unwrap();
+                    assert!(inputs["artifacts"].as_array().unwrap().iter()
+                        .any(|reference| reference["missing_context"].is_string()), "{mode}: {inputs}");
                 } else {
                     assert!(prepared.is_none(), "unverified bytes reached verifier preparation: {mode}");
                     assert!(!expected.exists());
-                    if matches!(mode, "foreign-project" | "foreign-artifact" | "id-only") {
+                    if mode == "foreign-project" {
                         assert!(server.received_requests().await.unwrap().is_empty());
                     }
                 }
@@ -2040,8 +2061,11 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         }
         // GH #1867: a no-code close dispatch has no candidate proof. The same
         // daemon-owned verifier reviews it and records the exact verdict, and
-        // the owner hears about either outcome.
-        for status in ["approved", "rejected"] {
+        // the owner hears about either outcome. GH #2383: an approval of a
+        // train delivery whose worker blocked on the wait closes it for the
+        // train owner; a real gate stays held and is recorded on the task.
+        for case in ["approved", "foreign-train", "rejected"] {
+            let status = if case == "rejected" { "rejected" } else { "approved" };
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path();
             super::super::tests::run(repo, &["init", "-q", "-b", "main"]);
@@ -2124,6 +2148,13 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             task.execution_note = Some("no-code".into());
             task.external_ref = Some("artifact:cas-e50f/report".into());
             core.open_task_store().unwrap().add(&task).unwrap();
+            let mut train = Task::new("cas-2383-train".into(), "Train".into());
+            train.task_type = cas_types::TaskType::Epic;
+            train.epic_verification_owner = Some(if case == "foreign-train" { "other-owner".into() } else { owner.id.clone() });
+            core.open_task_store().unwrap().add(&train).unwrap();
+            core.open_task_store().unwrap().add_dependency(&cas_types::Dependency::new(
+                task.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild,
+            )).unwrap();
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let request = serde_json::from_value(serde_json::json!({
                 "id": task.id, "reason": "External artifact published; no source changes",
@@ -2142,6 +2173,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert!(owns(&root, &dispatch));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(worker.id.as_str()));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(owner.id.as_str()));
+            // The worker records the documented verification wait (GH #2383).
+            let wait = crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id);
+            let blocked = runtime.block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value(serde_json::json!({"id": task.id, "status": "blocked", "notes": wait})).unwrap(),
+            ))).unwrap();
+            assert_ne!(blocked.is_error, Some(true), "{blocked:?}");
             std::fs::write(&gate, "go").unwrap();
             broker.join().unwrap();
             let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
@@ -2152,14 +2189,23 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_eq!(verdict.status.to_string(), status);
             assert_eq!(verdict.agent_id,
                 cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id);
-            // Approval queues the ordinary close recovery; a held verdict
-            // queues its own notice. Either way the owner sees one row.
+            let closed = core.open_task_store().unwrap().get(&task.id).unwrap();
+            assert_eq!(closed.status == cas_types::TaskStatus::Closed, case == "approved",
+                "{case}: {:?} notes {}; notices {prompts:?}", closed.status, closed.notes);
+            if case == "foreign-train" {
+                assert_eq!(closed.status, cas_types::TaskStatus::Blocked);
+                let gate = crate::mcp::tools::core::task::lifecycle::merge_close::no_delivery_close_hold(&closed.notes, &dispatch.id);
+                assert!(gate.is_some_and(|gate| gate.contains("G-113")), "{case}: {}", closed.notes);
+                continue;
+            }
+            // Approval closes and tells the worker; a held verdict queues its
+            // own notice. Either way one row names the dispatch.
             assert_eq!(
                 prompts.iter().filter(|row| row.prompt.contains(&dispatch.id)).count(),
                 1,
                 "{status}: {prompts:?}"
             );
-            eprintln!("NO_CODE_CLOSE status={status} dispatch={} verifier={:?} verdict={}",
+            eprintln!("NO_CODE_CLOSE case={case} status={status} dispatch={} verifier={:?} verdict={}",
                 dispatch.id, verdict.agent_id, verdict.id);
         }
         // With no eligible home left, the refusal names each home's state

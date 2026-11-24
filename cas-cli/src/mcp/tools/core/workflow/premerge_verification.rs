@@ -542,9 +542,16 @@ fn task_context(task: &Task) -> serde_json::Value {
     })
 }
 
-/// A parent relation grants context, not access to an arbitrary artifact ID.
-/// Resolve only cited proof in that parent's own project/task authority.
-fn referenced_parent_artifacts(root: &Path, task: &Task) -> Result<Vec<cas_store::PublishedArtifact>, String> {
+/// A parent epic's text cites artifacts as context. Each cited ID resolves
+/// against the task that owns it, and only within this project's task scope.
+/// A mention that resolves nowhere (or to a task outside scope) is reported
+/// to the verifier as missing context, never a merge refusal (GH #2397).
+enum ParentArtifact {
+    Found(cas_store::PublishedArtifact),
+    Missing { id: String, reason: String },
+}
+
+fn referenced_parent_artifacts(root: &Path, task: &Task) -> Result<Vec<ParentArtifact>, String> {
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let Some(parent) = tasks.get_parent_epic(&task.id).map_err(|error| error.to_string())? else {
         return Ok(Vec::new());
@@ -565,22 +572,46 @@ fn referenced_parent_artifacts(root: &Path, task: &Task) -> Result<Vec<cas_store
         }
     }
     ids.into_iter().map(|id| {
-        let artifact = crate::artifacts::proof::lookup_metadata(root, Some(&parent.id), &id)
-            .map_err(|error| format!("Parent plan {} artifact {id} unavailable: {error:#}", parent.id))?;
-        crate::artifacts::proof::validate(&artifact, &parent.id)
-            .map_err(|error| format!("Parent plan {} artifact {id} unavailable: {error:#}", parent.id))?;
-        Ok(artifact)
+        // Which task owns the ID, if any in scope: an unresolvable mention is context, not a defect.
+        let owned = crate::artifacts::proof::lookup_metadata(root, None, &id)
+            .map_err(|error| format!("{error:#}"))
+            .and_then(|artifact| match tasks.get(&artifact.task_id) {
+                Ok(owner) if scope.shows(&owner) => Ok(artifact),
+                Ok(_) => Err(format!("owner {} is outside this project's task scope", artifact.task_id)),
+                Err(_) => Err(format!("owner {} is not a known task", artifact.task_id)),
+            });
+        match owned {
+            // A resolved artifact must still be its owner's, available and unrevoked.
+            Ok(artifact) => crate::artifacts::proof::validate(&artifact, &artifact.task_id)
+                .map(|()| ParentArtifact::Found(artifact))
+                .map_err(|error| format!("Parent plan {} artifact {id} unavailable: {error:#}", parent.id)),
+            Err(reason) => Ok(ParentArtifact::Missing { id, reason }),
+        }
     }).collect()
 }
 
 fn materialize_parent_plan_artifacts(root: &Path, task: &Task) -> Result<Vec<serde_json::Value>, String> {
-    referenced_parent_artifacts(root, task)?.into_iter().map(|artifact| {
-        let (record, path) = crate::artifacts::proof::fetch_task(root, &artifact.task_id, &artifact.id)
-            .map_err(|error| format!("Parent plan {} artifact {} unavailable: {error:#}", artifact.task_id, artifact.id))?;
-        Ok(serde_json::json!({
-            "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
-        }))
+    referenced_parent_artifacts(root, task)?.into_iter().map(|artifact| match artifact {
+        // A resolved artifact still proves its bytes before the verifier reads them.
+        ParentArtifact::Found(artifact) => {
+            let (record, path) = crate::artifacts::proof::fetch_task(root, &artifact.task_id, &artifact.id)
+                .map_err(|error| format!("Parent plan artifact {} ({}) unavailable: {error:#}", artifact.id, artifact.task_id))?;
+            Ok(serde_json::json!({
+                "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
+            }))
+        }
+        ParentArtifact::Missing { id, reason } => Ok(serde_json::json!({ "artifact_id": id, "missing_context": reason })),
     }).collect()
+}
+
+/// The digest covers what each parent mention resolved to, so new proof or a
+/// newly resolvable mention invalidates the candidate.
+fn parent_artifact_digest(root: &Path, task: &Task) -> Result<Vec<u8>, String> {
+    let resolved: Vec<serde_json::Value> = referenced_parent_artifacts(root, task)?.into_iter().map(|artifact| match artifact {
+        ParentArtifact::Found(artifact) => serde_json::to_value(artifact).unwrap_or_default(),
+        ParentArtifact::Missing { id, .. } => serde_json::json!({ "missing": id }),
+    }).collect();
+    serde_json::to_vec(&resolved).map_err(|error| error.to_string())
 }
 
 fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), String> {
@@ -615,8 +646,7 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(b"cas-premerge-candidate-v2-regenerated\0");
     hash_plan_context(root, task, &mut hash)?;
-    hash.update(serde_json::to_vec(&referenced_parent_artifacts(root, task)?)
-        .map_err(|error| error.to_string())?);
+    hash.update(parent_artifact_digest(root, task)?);
     if let Some(train) = crate::cloud::peer_mailbox::train_parks::owner_train(root,task)? {
         hash.update(crate::factory_session_scope::train_owner_generation(&train)?.as_bytes());
     }

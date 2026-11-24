@@ -271,6 +271,21 @@ pub struct ReviewEvidence {
     pub supersedes: Option<String>,
 }
 
+/// What a turn ran on, recorded where the turn is read so a report never has to
+/// re-parse a transcript. `cached_input_tokens` is the part of `input_tokens`
+/// the harness served from cache.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TurnSpend {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+}
+
 /// Kind-specific metrics. Strings are slugs, versions or hex; never free text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -295,6 +310,8 @@ pub enum QualityPayload {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
         minutes: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spend: Option<TurnSpend>,
     },
     CheckRun {
         check_id: String,
@@ -381,10 +398,14 @@ impl QualityPayload {
                 if !is_slug(estimate_id) || !is_slug(subject) || !is_slug(reason) || !actual_minutes.is_finite() || *actual_minutes<0.0
                     || (*below_typical && !inside_range) { return Err("invalid estimate outcome".into()); }
             }
-            Self::Turn { actions, no_op, minutes, notice_kind, supersedes, .. } => {
+            Self::Turn { actions, no_op, minutes, notice_kind, supersedes, spend, .. } => {
                 if notice_kind.as_deref().is_some_and(|kind| !is_slug(kind))
                     || supersedes.as_deref().is_some_and(|id| !is_slug(id)) {
                     return Err("invalid notice kind".into());
+                }
+                if spend.as_ref().is_some_and(|s| [&s.harness, &s.model, &s.effort]
+                    .into_iter().flatten().any(|value| !is_slug(value))) {
+                    return Err("invalid turn spend identity".into());
                 }
                 if *no_op != actions.is_empty() || actions.len() > 8
                     || actions.iter().collect::<std::collections::BTreeSet<_>>().len() != actions.len()
@@ -519,13 +540,25 @@ impl QualityEvent {
             actor: self.actor.clone(),
             title: self.title.clone(),
             link: self.link.clone(),
-            payload: self.payload.clone(),
+            payload: self.wire_payload(),
             project_id: None,
         }
     }
+
+    /// Cloud accepts only the turn fields it knows and refuses a turn carrying
+    /// anything else, which would park the whole turn lane. Spend stays local
+    /// until Cloud lists it.
+    fn wire_payload(&self) -> QualityPayload {
+        let mut payload = self.payload.clone();
+        if let QualityPayload::Turn { spend, .. } = &mut payload {
+            *spend = None;
+        }
+        payload
+    }
 }
 
-fn is_slug(value: &str) -> bool {
+/// Whether a payload string may be stored: a slug, version or hex, never free text.
+pub fn is_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 96
         && value
@@ -1002,7 +1035,7 @@ mod tests {
         assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap(), before);
         let mut turn = NewQualityEvent::new("turn", QualityPayload::Turn { supersedes: None, notice_kind: None,
             woken_by: WakeChannel::Unknown, actions: vec![], no_op: true,
-            input_tokens: None, output_tokens: None, minutes: Some(0.5),
+            input_tokens: None, output_tokens: None, minutes: Some(0.5), spend: None,
         });
         assert!(record_quality_event(dir.path(), &turn).unwrap());
         let rows = quality_events_after(dir.path(), 0, 10).unwrap();
@@ -1060,5 +1093,24 @@ mod tests {
             minutes: None,
         };
         assert!(record_quality_event(dir.path(), &code).is_err());
+    }
+    #[test]
+    fn a_turn_on_the_wire_carries_only_the_fields_cloud_accepts() {
+        // Cloud's turn whitelist (quality-events.ts TURN_FIELDS).
+        const CLOUD_TURN_FIELDS: [&str; 9] = ["kind", "woken_by", "notice_kind", "supersedes", "actions", "no_op",
+            "input_tokens", "output_tokens", "minutes"];
+        let root = tempfile::tempdir().unwrap();
+        let turn = NewQualityEvent::new("spend-turn", QualityPayload::Turn {
+            woken_by: WakeChannel::Worker, notice_kind: Some("merge_ready".into()), supersedes: None,
+            actions: vec![], no_op: true, input_tokens: Some(10), output_tokens: Some(2), minutes: Some(0.5),
+            spend: Some(TurnSpend { harness: Some("codex".into()), model: Some("gpt-6.1-sol".into()),
+                effort: Some("high".into()), cached_input_tokens: Some(4) }),
+        });
+        assert!(record_quality_event(root.path(), &turn).unwrap());
+        let row = quality_events_after(root.path(), 0, 10).unwrap().pop().unwrap();
+        assert!(matches!(&row.payload, QualityPayload::Turn { spend: Some(_), .. }), "local row keeps its spend");
+        let wire = serde_json::to_value(row.to_wire()).unwrap();
+        let keys: Vec<_> = wire["payload"].as_object().unwrap().keys().filter(|k| !CLOUD_TURN_FIELDS.contains(&k.as_str())).collect();
+        assert!(keys.is_empty(), "fields Cloud would refuse: {keys:?}");
     }
 }

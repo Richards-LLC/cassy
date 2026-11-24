@@ -626,3 +626,205 @@ test("HUB-J14 a project group ends before the next project's conversation (cas-6
     for (const other of await listed.getByRole("button", { name: /^gabber-studio on /, includeHidden: true }).all()) await expect(other).toHaveAttribute("aria-current", "false");
   });
 });
+
+test("HUB-J14 project navigation spans machines, decisions and device collapse (cas-6024)", journeyPart, async ({ page, journey }) => {
+  const machine = atlas();
+  const endedSession = (name: string, offset: number) => {
+    const at = journeyStamp(offset);
+    return { name, started_at: journeyStamp(offset - 60_000), supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], orphans: [] } };
+  };
+  machine.sessions = [{ ...machine.sessions[1]!, project: "github.com/acme/studio", project_name: "Studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
+    name: "golden-jaguar-44", supervisor: "ready-cobra-72", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
+  }, endedSession("watchful-heron-16", -3_600_000), endedSession("solid-parrot-40", -2 * 3_600_000), endedSession("patient-heron-27", -3 * 3_600_000)];
+  const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "github.com/acme/studio", project_name: "Studio", harness: "claude", machine_online: true }] };
+  const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
+    [PUMA]: [{ has_earlier: false, messages: [], replies: [sup(701, "Which mix should I export?", PUMA, journeyStamp(-30_000), "ask")] }],
+  } });
+  const list = conversationList(page);
+  const filters = page.getByRole("group", { name: "Filter conversations", exact: true });
+  const studio = () => list.getByRole("group", { name: /^Studio ·/ });
+  const studioRows = () => studio().getByRole("button", { name: /^Studio on / });
+  const studioToggle = () => studio().getByRole("button", { name: /^Studio\s+\d+ conversations?$/ });
+  const pulse = () => list.getByRole("group", { name: /^pulse-card ·/ });
+  const pulseRows = () => pulse().getByRole("button", { name: /^pulse-card on / });
+  const allRows = () => list.getByRole("button", { name: /^(Studio|pulse-card) on / });
+  const machineChip = (card: Locator, name: string, state: "online" | "offline") => card.getByRole("button", { name: `Filter conversations on ${name}, ${state}`, exact: true });
+  const back = async () => { if (await backButton(page).isVisible()) await backButton(page).click(); };
+  // A machine that comes back is settled when its open conversation is live and
+  // its catalog says online again; assert states only after both.
+  const settled = async (card: Locator) => {
+    await expect(connection(page)).toHaveAttribute("data-phase", "live");
+    await expect(connection(page)).toHaveAttribute("data-degraded", "false");
+    await expect(machineChip(card, "Atlas", "online")).toBeVisible();
+  };
+
+  await journey.stage("A project contains supervisors on both machines and pins its decision", async () => {
+    await journey.open();
+    await expect(studioRows()).toHaveCount(2);
+    // cas-6f79: the card reads the project's display name; its identity stays a detail.
+    await expect(studio().getByTestId("project-card-name")).toHaveText("Studio");
+    await expect(studio().getByTestId("project-card-name")).toHaveAttribute("title", "github.com/acme/studio");
+    await expect(machineChip(studio(), "Atlas", "online")).toBeVisible();
+    await expect(machineChip(studio(), "Borealis", "online")).toBeVisible();
+    await expect(studio().getByRole("button", { name: /^Studio on .*operator@example\.test/ })).toHaveCount(1);
+    // DESIGN.md Avatars: each provider's mark at a legible 24px, not a glyph.
+    for (const [harness, provider] of [["codex", "OpenAI"], ["claude", "Claude"]]) {
+      const avatar = studio().getByRole("button", { name: new RegExp(`^Studio on [^,]+, [^,]+, ${harness},`) }).getByTestId("conversation-avatar");
+      await expect(avatar).toHaveAttribute("data-harness", harness!);
+      await expect(avatar).toHaveAttribute("title", provider!);
+      expect(await avatar.evaluate(node => node.querySelector("svg.provider-mark")?.getBoundingClientRect().width ?? 0)).toBeGreaterThanOrEqual(20);
+    }
+    await expect(studio().getByText(/\b1 worker\b/)).toBeVisible();
+    await expect(pulse().getByTestId("conversation-avatar")).not.toHaveAttribute("data-harness");
+    await expect(pulse().getByText("no workers")).toBeVisible();
+    const supervisorRow = pulseRows();
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await expect(supervisorRow.getByTestId("conversation-role")).toHaveText("ready-cobra-72");
+      await expect(supervisorRow.getByTestId("conversation-machine-name")).toHaveText("Atlas");
+      expect(await supervisorRow.evaluate(node => {
+        const who = node.querySelector<HTMLElement>(".conversation-who")!;
+        return who.scrollWidth <= who.clientWidth;
+      })).toBe(true);
+      // cas-be27: every card row, provider-mark avatars included, starts its name clear of the avatar.
+      // cas-64ee: both rects come from one DOM snapshot per poll, so a row re-rendering
+      // between two separate box reads can never yield a missing box.
+      const nameGaps = () => list.evaluate(node => [...node.querySelectorAll<HTMLElement>("[data-thread-key]")]
+        .filter(row => row.getClientRects().length > 0 && /^(Studio|pulse-card) on /.test(row.getAttribute("aria-label") ?? ""))
+        .map(row => {
+          const role = row.querySelector('[data-testid="conversation-role"]')?.getBoundingClientRect();
+          const avatar = row.querySelector('[data-testid="conversation-avatar"]')?.getBoundingClientRect();
+          return role && avatar && role.width > 0 && avatar.width > 0 ? role.x - avatar.right : null;
+        }));
+      await expect.poll(async () => {
+        const gaps = await nameGaps();
+        return gaps.length > 0 && gaps.every(gap => gap !== null && gap >= 0);
+      }, { message: "every visible card row's name starts clear of its avatar" }).toBe(true);
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const pulseMachine = machineChip(pulse(), "Atlas", "online");
+    await expect(pulseMachine).toBeVisible();
+    expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));
+    await expect(supervisorRow.getByRole("img", { name: "Offline", exact: true })).toHaveCount(0);
+    await expect(pulseRows()).toHaveCount(1);
+    await expect(list.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
+  });
+
+  for (const mode of ["light", "dark", "forced-colors"] as const) {
+    await journey.stage(`Running idle stays green in ${mode}`, async () => {
+      await page.emulateMedia({ colorScheme: mode === "dark" ? "dark" : "light", forcedColors: mode === "forced-colors" ? "active" : "none" });
+      const idle = pulseRows().getByRole("img", { name: "Idle", exact: true });
+      await pulseRows().click();
+      await expect(page.locator("html")).toHaveAttribute("data-scheme", mode === "dark" ? "dark" : "light");
+      await expect(idle).toHaveAttribute("title", "Idle");
+      const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
+      const idleLook = await look(idle);
+      if (mode !== "forced-colors") {
+        const idleFill = await idle.evaluate(node => {
+          const probe = document.body.appendChild(document.createElement("span"));
+          probe.style.background = "var(--state-idle)";
+          const fill = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return fill;
+        });
+        expect(idleLook[0]).toBe(idleFill);
+      }
+      // Gray belongs to an unreachable machine's last-known running row.
+      await hub.down("atlas", { sockets: "close" });
+      const offline = pulseRows().getByRole("img", { name: "Offline", exact: true });
+      await expect(offline).toHaveAttribute("title", "Offline");
+      expect(await look(offline)).not.toEqual(idleLook);
+      await hub.up("atlas");
+      // The row's dot follows the machine, so read it once the machine is back.
+      await settled(pulse());
+      await expect(idle).toHaveAttribute("title", "Idle");
+    });
+  }
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+
+  await journey.stage("Stopped sessions stay hidden on phone and desktop, and a running replacement returns (cas-f8ab)", async () => {
+    for (const width of [390, 1280]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await back();
+      await expect(pulseRows()).toHaveCount(1);
+      await expect(list.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
+    }
+    // The metadata and history are retained; navigation is strictly running sessions.
+    expect(hub.machine("atlas").sessions.filter(session => session.ended)).toHaveLength(3);
+    const replacement = { ...endedSession("watchful-heron-16", 60_000), liveness: "live" as const, ended: undefined, machine_online: true };
+    machine.sessions = machine.sessions.map(row => row.name === replacement.name ? replacement : row);
+    await hub.announceCatalog("atlas");
+    await expect(pulseRows()).toHaveCount(2);
+    machine.sessions = machine.sessions.map(row => row.project === "pulse-card" ? { ...row, liveness: "stale_metadata" as const } : row);
+    await hub.announceCatalog("atlas");
+    await expect(pulse()).toHaveCount(0);
+    machine.sessions = machine.sessions.map(row => row.name === "golden-jaguar-44" ? { ...row, liveness: "live" as const } : row);
+    await hub.announceCatalog("atlas");
+    await expect(pulseRows()).toHaveCount(1);
+    await page.reload();
+    await expect(pulseRows()).toHaveCount(1);
+    const capture = process.env.FULL_NAV_CAPTURE_DIR;
+    const widths = capture ? [1280, 390] : [390];
+    const schemes = capture ? ["light", "dark", "forced-colors"] as const : ["forced-colors"] as const;
+    for (const width of widths) for (const scheme of schemes) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none", reducedMotion: "reduce" });
+      await back();
+      expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
+      await expect(studioToggle()).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (capture) await page.screenshot({ path: `${capture}/${width}-${scheme}.png` });
+    }
+    await page.emulateMedia({ colorScheme: "light", forcedColors: "none", contrast: "more" });
+    expect(await page.evaluate(() => matchMedia("(prefers-contrast: more)").matches)).toBe(true);
+    if (capture) await page.screenshot({ path: `${capture}/a11y-contrast-more.png` });
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.emulateMedia({ colorScheme: "light", forcedColors: "none", contrast: "no-preference" });
+  });
+
+  await journey.stage("Filters intersect search, and a decision opens its own session", async () => {
+    await filters.getByRole("button", { name: /^Needs you/ }).click();
+    await expect(allRows()).toHaveCount(1);
+    await machineChip(studio(), "Borealis", "online").click();
+    await expect(allRows()).toHaveCount(1);
+    await expect(allRows()).toHaveAccessibleName(/wild-shark-68/);
+    await page.getByRole("searchbox", { name: "Search conversations" }).fill("calm-puma");
+    await expect(allRows()).toHaveCount(0);
+    // The empty state is the list's only paragraph; no project card is left.
+    await expect(list.getByRole("group")).toHaveCount(0);
+    await expect(list.getByRole("paragraph")).toBeVisible();
+    await filters.getByRole("button", { name: /^Showing Borealis\./ }).click();
+    await expect(allRows()).toHaveCount(1);
+    await list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button").click();
+    await expect(page.getByRole("log")).toContainText("Which mix should I export?");
+    await back();
+    expect(hub.sends).toHaveLength(0);
+  });
+
+  await journey.stage("Keyboard collapse survives reload and footer filters the same register", async () => {
+    await studioToggle().focus();
+    await page.keyboard.press("Enter");
+    await expect(studioToggle()).toBeFocused();
+    await expect(studioToggle()).toHaveAttribute("aria-expanded", "false");
+    await page.reload();
+    await expect(studioToggle()).toHaveAttribute("aria-expanded", "false");
+    await expect(studioRows()).toHaveCount(0);
+    await studioToggle().click();
+    await page.getByTestId("hub-footer-badges").getByRole("button").first().click();
+    const dialog = page.getByRole("dialog", { name: "Paired machines", exact: true });
+    await dialog.getByRole("group", { name: "Filter conversations" }).getByRole("button", { name: "Borealis", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const machineFilter = filters.getByRole("button", { name: /^Showing Borealis\./ });
+    await expect(machineFilter).toHaveAttribute("aria-pressed", "true");
+    await expect(allRows()).toHaveCount(1);
+    await expect(allRows()).toHaveAccessibleName(/wild-shark-68/);
+    await expect(list.getByRole("region", { name: "Needs you", exact: true })).toHaveCount(0);
+    await machineFilter.click();
+    await expect(allRows()).toHaveCount(3);
+    // A kept catalog's positive online bit must yield to a lost connection.
+    await hub.down("atlas", { sockets: "close" });
+    await expect(machineChip(studio(), "Atlas", "offline")).toBeVisible();
+    await hub.up("atlas");
+    await expect(machineChip(studio(), "Atlas", "online")).toBeVisible();
+  });
+});

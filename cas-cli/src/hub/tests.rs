@@ -6597,7 +6597,7 @@ fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
         is_running: true, socket_exists: true,
     };
     let observed = ServerVersion { name: "lead".into(), role: AgentRole::Supervisor,
-        session: Some("badge-session".into()), pid: 42, version: Some("9.99.1".into()), older: true };
+        session: Some("badge-session".into()), pid: 42, version: Some("9.99.1".into()), build: None, older: true };
     for (name, role, owner, version, duplicate, live, expected) in [
         ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, Some("9.99.1")),
         ("lead", AgentRole::Supervisor, "another-session", Some("9.99.1"), None, true, None),

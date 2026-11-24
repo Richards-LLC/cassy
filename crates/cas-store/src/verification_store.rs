@@ -227,7 +227,8 @@ CREATE TABLE IF NOT EXISTS verification_dispatches (
     requested_at TEXT NOT NULL,
     deadline_at TEXT NOT NULL,
     resolved_at TEXT,
-    recovery_action TEXT NOT NULL DEFAULT 'supervisor_redispatch_or_direct'
+    recovery_action TEXT NOT NULL DEFAULT 'supervisor_redispatch_or_direct',
+    reviewed_proof TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_verifications_task ON verifications(task_id);
@@ -253,6 +254,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_dispatches_active_task
 /// the exact same DDL.
 pub const VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT: &str =
     "ALTER TABLE verification_dispatches ADD COLUMN repository_proof TEXT";
+
+pub const VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT: &str =
+    "ALTER TABLE verification_dispatches ADD COLUMN reviewed_proof TEXT";
 
 const VERIFIER_CAPABILITY_TTL_MINUTES: i64 = 30;
 const SERVER_HANDOFF_ID_PREFIX: &str = "vhnd-";
@@ -1050,6 +1054,15 @@ pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result
     ).map_err(StoreError::Database)
 }
 
+pub fn verification_dispatch_reviewed_proof(cas_dir: &Path, dispatch_id: &str) -> Result<Option<String>> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
+    conn.query_row(
+        "SELECT reviewed_proof FROM verification_dispatches WHERE id = ?1",
+        params![dispatch_id], |row| row.get(0),
+    ).map_err(StoreError::Database)
+}
+
 pub fn get_verification_dispatch_with_conn(
     conn: &Connection,
     dispatch_id: &str,
@@ -1153,6 +1166,7 @@ pub fn create_verification_dispatch_bound(
         requester_agent_id,
         owner_agent_id,
         boundary,
+        None,
         deadline_at,
         supervisor_recovery,
     )?;
@@ -1175,6 +1189,29 @@ pub fn create_verification_dispatch_bound_with_conn(
     deadline_at: DateTime<Utc>,
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
+    create_verification_dispatch_reviewing_with_conn(
+        conn,
+        task_id,
+        requester_agent_id,
+        owner_agent_id,
+        boundary,
+        None,
+        deadline_at,
+        supervisor_recovery,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_verification_dispatch_reviewing_with_conn(
+    conn: &Connection,
+    task_id: &str,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    boundary: &VerificationProofBoundary,
+    reviewed_proof: Option<&str>,
+    deadline_at: DateTime<Utc>,
+    supervisor_recovery: bool,
+) -> Result<VerificationDispatch> {
     if conn.is_autocommit() {
         let tx = crate::shared_db::begin_immediate_with_retry(conn)?;
         let dispatch = create_verification_dispatch_bound_in_transaction(
@@ -1183,6 +1220,7 @@ pub fn create_verification_dispatch_bound_with_conn(
             requester_agent_id,
             owner_agent_id,
             boundary,
+            reviewed_proof,
             deadline_at,
             supervisor_recovery,
         )?;
@@ -1196,17 +1234,20 @@ pub fn create_verification_dispatch_bound_with_conn(
         requester_agent_id,
         owner_agent_id,
         boundary,
+        reviewed_proof,
         deadline_at,
         supervisor_recovery,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_verification_dispatch_bound_in_transaction(
     conn: &Connection,
     task_id: &str,
     requester_agent_id: &str,
     owner_agent_id: &str,
     boundary: &VerificationProofBoundary,
+    reviewed_proof: Option<&str>,
     deadline_at: DateTime<Utc>,
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
@@ -1294,8 +1335,8 @@ fn create_verification_dispatch_bound_in_transaction(
         "INSERT INTO verification_dispatches
          (id, task_id, receipt_id, delivery_transaction_id, repository_proof, requester_agent_id,
           owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
-          deadline_at, resolved_at, recovery_action)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, NULL, ?11)",
+          deadline_at, resolved_at, recovery_action, reviewed_proof)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, NULL, ?11, ?12)",
         params![
             dispatch.id,
             dispatch.task_id,
@@ -1313,6 +1354,7 @@ fn create_verification_dispatch_bound_in_transaction(
             dispatch.requested_at.to_rfc3339(),
             dispatch.deadline_at.to_rfc3339(),
             dispatch.recovery_action.to_string(),
+            reviewed_proof,
         ],
     )?;
     Ok(dispatch)
@@ -3954,6 +3996,12 @@ impl VerificationStore for SqliteVerificationStore {
                 "verification_dispatches",
                 "repository_proof",
                 VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "verification_dispatches",
+                "reviewed_proof",
+                VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT,
             )?;
 
             // Serve-first startup can open current store code against a legacy

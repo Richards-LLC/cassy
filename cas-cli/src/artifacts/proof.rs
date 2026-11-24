@@ -67,6 +67,12 @@ pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<Arti
     })
 }
 
+pub fn committed_task_artifacts(cas_root: &Path, task_id: &str) -> anyhow::Result<Vec<PublishedArtifact>> {
+    Ok(list_task_metadata(cas_root, task_id)?.artifacts.into_iter()
+        .filter(|artifact| artifact.status == "committed" && artifact.cloud_artifact_id.is_some())
+        .collect())
+}
+
 /// Share every successful publication through the existing trusted task-note
 /// transport, including publications that did not request a prose proof note.
 pub(crate) fn record_published(

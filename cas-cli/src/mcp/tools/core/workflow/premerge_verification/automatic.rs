@@ -21,11 +21,10 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     // proof here, on the common launch path, before constructing the verifier
     // command. fetch_task checks task scope, revocation, size and SHA-256 and
     // derives this receiver's project namespace instead of a publisher path.
-    let published = crate::artifacts::proof::list_task_metadata(&core.cas_root, &task.id)
+    let published = crate::artifacts::proof::committed_task_artifacts(&core.cas_root, &task.id)
         .map_err(|error| error.to_string())?;
     let mut artifacts = Vec::new();
-    for artifact in published.artifacts.into_iter().filter(|artifact|
-        artifact.status == "committed" && artifact.cloud_artifact_id.is_some()) {
+    for artifact in published {
         let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &artifact.id)
             .map_err(|error| format!("Verifier artifact {} unavailable: {error:#}", artifact.id))?;
         artifacts.push(serde_json::json!({

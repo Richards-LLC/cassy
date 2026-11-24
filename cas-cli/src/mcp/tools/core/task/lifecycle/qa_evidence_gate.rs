@@ -600,6 +600,8 @@ fn waiver_note(evidence: &str, waiver: &cas_types::QaPass) -> String {
     )
 }
 
+// gate-audit[exact_qa_waiver]: bypass G-171 An authenticated supervisor waiver for the exact delivered tip is accepted and logged.
+// gate-audit[fast_lane_visual_only]: selector Routes other QA checks to the existing post-merge receipt without bypassing rendered batch visual proof.
 #[allow(clippy::too_many_arguments)]
 fn delivery_evidence_gate(
     cas_root: &Path,
@@ -724,7 +726,7 @@ fn delivery_evidence_gate(
         .map_err(|problem| batch_visual_refusal(repo, &artifacts_dir, problem));
     if fast_lane_visual_only {
         if let Some(waiver) = exact_qa_waiver(cas_root, &task.id, &head)? {
-            return Ok(vec![waiver_note("batch visual evidence", &waiver)]);
+            return Ok(vec![crate::gates::override_tag("G-171", waiver_note("batch visual evidence", &waiver))]);
         }
         require_visual()?;
         return Ok(Vec::new());
@@ -921,7 +923,12 @@ fn delivery_evidence_gate(
             EvidenceTier::Ledger { .. } => "ledger",
             EvidenceTier::None => "pair coverage",
         };
-        pass.notes.push(waiver_note(evidence, &waiver));
+        let note = waiver_note(evidence, &waiver);
+        pass.notes.push(if batch_defer && tier == EvidenceTier::Bundle {
+            crate::gates::override_tag("G-171", note)
+        } else {
+            note
+        });
     }
     if !pass.deferred_deployed.is_empty() {
         let agents = crate::store::open_agent_store(cas_root)

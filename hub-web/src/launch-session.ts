@@ -670,7 +670,9 @@ export class LaunchSheet {
     // An older hub sends no windows: its own reason is all there is.
     const reasonFor = (profile: LaunchProfile, index: number) => !profile.recommendation ? undefined
       : profile.windows || usage(profile) ? pickReason(candidates[index]!, candidates.filter((_, other) => other !== index)) : { text: profile.recommendation, low: false };
-    const rows = offered.map((profile, index) => accountRowMarkup(profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), usage(profile), reasonFor(profile, index))).join("");
+    // A window no offered login reports is left out rather than repeated as "Not reported" on every row.
+    const silent = new Set(candidates.length ? ["5h", "week"].filter((slot) => candidates.every((candidate) => candidate.list.find((reading) => reading.slot === slot)?.kind === "missing")) : []);
+    const rows = offered.map((profile, index) => accountRowMarkup(profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), usage(profile), reasonFor(profile, index), silent)).join("");
     const more = hidden.length ? `<details class="launch-not-offered" data-testid="launch-not-offered"><summary>${hidden.length} not offered</summary>${hidden.map((profile) => notOfferedMarkup(this.cli, profile)).join("")}</details>` : "";
     body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${rows || `<p class="launch-empty">No ${escapeHtml(supervisorCliLabel(this.cli))} account here can start a session.</p>`}</div>${more}`;
     fillMeters(body);
@@ -1120,7 +1122,7 @@ export function profileReadings(profile: LaunchProfile, usage: CheckedAccountUsa
 }
 
 /** One pickable account: radio, name, why it leads (from its own readings), two brief meters, and ↻. */
-function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup: string, usage: CheckedAccountUsage | undefined, reason: PickReason | undefined): string {
+function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup: string, usage: CheckedAccountUsage | undefined, reason: PickReason | undefined, silent: ReadonlySet<string> = new Set()): string {
   const name = escapeHtml(profile.name);
   const list = profileReadings(profile, usage);
   const pick = profile.recommendation ? '<small class="launch-account-pick" data-testid="account-recommended">Recommended</small>' : "";
@@ -1129,7 +1131,7 @@ function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup:
   const why = reason ? `<small class="launch-account-why${reason.low ? " launch-account-low" : ""}" data-testid="account-pick-reason"${reason.reset ? ` data-reset="${reason.reset}"` : ""}${reason.soonest === undefined ? "" : ` data-soonest="${reason.soonest}"`}>${escapeHtml(reason.text)}</small>`
     : exclusion ? `<small class="launch-account-why">${escapeHtml(exclusion)}</small>` : "";
   const meters = !usage && profile.usage_source === "local" ? `<small class="launch-account-why" data-testid="account-local-read">${escapeHtml(localReadLine(list, profile.usage_observed_at))}</small>`
-    : usage || profile.windows ? `<span class="launch-meters">${list.map((reading) => meterMarkup(reading, { labelled: true, brief: true })).join("")}</span>`
+    : usage || profile.windows ? `<span class="launch-meters">${list.filter((reading) => !silent.has(reading.slot)).map((reading) => meterMarkup(reading, { labelled: true, brief: true })).join("")}</span>`
     : profile.usage ? `<small class="launch-account-why">${escapeHtml(profile.usage)}</small>` : "";
   return `<div class="launch-account-entry"><label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-account-line"><span class="launch-row-name">${name}</span>${pick}${profile.is_default ? '<small class="launch-account-tag">Default</small>' : ""}</span>${why}${meters}</span></label>${checkMarkup}</div>`;
 }

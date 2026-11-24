@@ -19,7 +19,8 @@
    Identity and actions, then the 5-hour and weekly windows, aligned across
    rows, providers and the hub ledger; one hairline per row, no nested cards. */
 .accounts-sheet { --accounts-grid: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr); }
-.accounts-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); margin: var(--space-1) 0 var(--space-3); }
+.accounts-summary { display: grid; justify-items: start; gap: var(--space-2); margin: var(--space-1) 0 var(--space-3); }
+.accounts-cleanup-banner button { white-space: nowrap; }
 .accounts-summary p { margin: 0; }
 .accounts-quiet { margin: 0; color: var(--ink-mid); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
 .accounts-flag { color: var(--state-warn); font-size: var(--fs-meta); font-weight: var(--weight-medium); }

@@ -13912,6 +13912,7 @@ printf '}'
         run("worker", &command, Some("PR_VERIFIER_REJECTED"));
         run("worker", &merge(2548), None);
         let registry = open_host_known_repo_store().unwrap();
+        registry.init().unwrap();
         let empty_repo = make_git_repo();
         registry.upsert(empty_repo.path()).unwrap();
         let discovery_failures = || {

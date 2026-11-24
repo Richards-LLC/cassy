@@ -31,6 +31,8 @@ use cas_types::{QaPass, QaPassState, Task, TaskStatus};
 use super::{branch_binds_task, gate_applies, merge_gate};
 use crate::config::QaConfig;
 
+mod verifier;
+
 /// Commit status context branch protection requires.
 pub const QA_STATUS_CONTEXT: &str = "cassy/independent-qa";
 
@@ -552,6 +554,15 @@ fn pr_ci_refusal(cwd: &Path, merge: &GithubMerge) -> Option<String> {
 /// Unreadable Cassy state fails open to the close backstop, like the git
 /// guard; a PR that cannot be mapped while a round is open fails closed.
 pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
+    github_merge_refusal_with_supervisor(cas_root, cwd, command, None)
+}
+
+pub(crate) fn github_merge_refusal_with_supervisor(
+    cas_root: &Path,
+    cwd: &Path,
+    command: &str,
+    supervisor: Option<&str>,
+) -> Option<String> {
     let merges = github_merges_in(command);
     if merges.is_empty() {
         return None;
@@ -559,15 +570,20 @@ pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Optio
     if let Some(refusal) = merges.iter().find_map(|merge| pr_ci_refusal(cwd, merge)) {
         return Some(refusal);
     }
-    let config = crate::config::Config::load(cas_root).ok()?;
-    let qa = config.qa();
+    let tasks = match crate::store::open_task_store(cas_root).and_then(|store| Ok(store.list(None)?)) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            tracing::warn!(%error, "Raw GitHub merge: delivery state unreadable");
+            return None;
+        }
+    };
+    if let Some(refusal) = verifier::merge_refusal(cas_root, cwd, &merges, &tasks, supervisor) {
+        return Some(refusal);
+    }
+    let qa = crate::config::Config::load(cas_root).ok()?.qa();
     if !qa.independent_pass {
         return None;
     }
-    let tasks = crate::store::open_task_store(cas_root)
-        .ok()?
-        .list(None)
-        .ok()?;
     let gated: Vec<(Task, Vec<QaPass>)> = tasks
         .into_iter()
         .filter(|task| task.status != TaskStatus::Closed)

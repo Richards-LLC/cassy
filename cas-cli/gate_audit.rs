@@ -153,6 +153,10 @@ impl<'ast> Visit<'ast> for Body<'_> {
             if let Some(segment) = path.path.segments.last() {
                 let name = segment.ident.to_string();
                 self.function.calls.insert(name.clone());
+                if name == "record_override_code" && let Some(code) = expr.args.iter().nth(1).and_then(literal) {
+                    self.function.emissions.push((code.clone(), "override", expr.span().start().line));
+                    self.function.overridden.insert(code);
+                }
                 if matches!(name.as_str(), "tag" | "refusal_tag" | "override_tag") {
                     if let Some(code) = expr.args.first().and_then(literal) {
                         if name != "override_tag" {

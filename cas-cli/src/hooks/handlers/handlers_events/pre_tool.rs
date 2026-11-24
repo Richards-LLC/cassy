@@ -948,8 +948,12 @@ fn handle_pre_tool_use_checked(
             .tool_input
             .as_ref()
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-        && let Some(refusal) =
-            crate::qa_pass::supervisor_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+        && let Some(refusal) = crate::qa_pass::supervisor_merge_refusal_with_actor(
+            root,
+            std::path::Path::new(&input.cwd),
+            cmd,
+            Some(&crate::hooks::handlers::handlers_state::current_agent_id(input)),
+        )
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-24", refusal)));
     }
@@ -13609,6 +13613,9 @@ mod worker_commit_guard_tests {
             &gh,
             r#"#!/bin/sh
 case "$1 $2 $3" in
+  'api graphql -f')
+    [ "$6" = "id=PR_fixture" ] || exit 1
+    printf '{"data":{"node":{"number":2546,"headRefName":"factory/proof","headRefOid":"%s","repository":{"nameWithOwner":"acme/project"}}}}' "$CAS_TEST_PR_HEAD";;
   'pr view 2546') printf '{"number":2546,"headRefName":"factory/proof","headRefOid":"%s","statusCheckRollup":[]}' "$CAS_TEST_PR_HEAD";;
   'pr view 2547') printf '{"number":2547,"headRefName":"factory/other","headRefOid":"%s","statusCheckRollup":[]}' "$CAS_TEST_PR_HEAD";;
   'pr view 2548') printf '{"number":2548,"headRefName":"factory/proof","headRefOid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","statusCheckRollup":[]}';;
@@ -13618,7 +13625,8 @@ esac
         );
         env.set("CAS_QA_GH", &gh);
         env.set("CAS_TEST_PR_HEAD", head);
-        std::fs::write(cas_root.join("config.yaml"), "qa:\n  independent_pass: false\n").unwrap();
+        let config = cas_root.join("config.toml");
+        std::fs::write(&config, "[qa]\nindependent_pass = false\n").unwrap();
 
         let mut task = Task::new("cas-verifier-pr".into(), "Raw merge verifier fixture".into());
         task.deliverables.delivery_pr_number = Some(2546);
@@ -13678,12 +13686,16 @@ esac
         let merge = |number| format!("gh {} {} {number} --squash", "pr", "merge");
         let command = merge(2546);
         let api = concat!("gh api -X PUT ", "repos/acme/project/pulls/2546/", "merge");
+        let graphql = concat!("gh api graphql -f query='mutation { mergePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
         let first = dispatch();
-        authorize(&first);
         run("worker", &command, Some("PR_VERIFIER_PENDING"));
         run("supervisor", api, Some("PR_VERIFIER_PENDING"));
         verdict(&first, VerificationStatus::Rejected);
+        std::fs::write(&config, "[qa]\nindependent_pass = true\n").unwrap();
+        run("supervisor", &command, Some("PR_VERIFIER_REJECTED"));
+        authorize(&first);
         run("worker", &command, Some("PR_VERIFIER_REJECTED"));
+        run("worker", graphql, Some("PR_VERIFIER_REJECTED"));
         run("worker", &merge(2547), None);
         run("worker", &merge(2548), None);
         run("supervisor", &command, None);
@@ -13695,8 +13707,12 @@ esac
 
         let next = dispatch();
         assert_ne!(next.id, first.id);
+        authorize(&next);
+        run("supervisor", &command, Some("PR_VERIFIER_PENDING"));
         verdict(&next, VerificationStatus::Approved);
         run("worker", &command, None);
+        run("worker", api, None);
+        run("worker", graphql, None);
     }
 
     #[test]

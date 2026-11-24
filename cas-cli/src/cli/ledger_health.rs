@@ -157,6 +157,8 @@ pub(super) fn assess(report: &LedgerReport) -> Vec<SensorHealth> {
             rows.push(row(scorer.name, Health::Broken, why.clone()));
         } else if scorer.scored == 0 {
             rows.push(row(scorer.name, Health::Empty, "0 subjects scored in the window"));
+        } else {
+            rows.push(row(scorer.name, Health::Ok, format!("{} scored, {} hit(s)", scorer.scored, scorer.hits.len())));
         }
     }
 

@@ -82,10 +82,7 @@ struct Pending {
 /// Identity strings are stored as slugs; anything else would refuse the whole event.
 fn slug(value: &str) -> Option<String> {
     let value = value.trim();
-    (!value.is_empty()
-        && value.len() <= 96
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/')))
-    .then(|| value.to_owned())
+    cas_store::is_slug(value).then(|| value.to_owned())
 }
 
 fn harness_name(cli: cas_mux::SupervisorCli) -> &'static str {

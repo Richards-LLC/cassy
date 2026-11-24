@@ -546,7 +546,8 @@ impl QualityEvent {
     }
 }
 
-fn is_slug(value: &str) -> bool {
+/// Whether a payload string may be stored: a slug, version or hex, never free text.
+pub fn is_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 96
         && value

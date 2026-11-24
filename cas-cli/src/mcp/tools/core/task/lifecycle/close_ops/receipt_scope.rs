@@ -157,6 +157,7 @@ fn listed_park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
+    refusals.extend(super::doc_fragment_gate::park_refusals(cas_root, proof_repo, task, changed_paths, head));
     // Judge the immutable delivery delta as well as caller paths: an earlier
     // push can introduce a retained checkpoint absent from a later path list.
     // A project-owned file already present at the base remains inherited.
@@ -323,7 +324,7 @@ fn listed_park_refusals(
 }
 
 
-fn product_source_path(path: &str) -> bool {
+pub(super) fn product_source_path(path: &str) -> bool {
     if path.starts_with("cas-cli/src/builtins/skills/") {
         return true;
     }
@@ -418,6 +419,11 @@ pub(super) fn has_fragment_dir_at(repo: &Path, commit: &str, dir: &str) -> bool 
 }
 
 fn has_no_changelog_decision(notes: &str) -> bool {
+    has_reasoned_decision(notes, "no changelog:")
+}
+
+/// A timestamped `✅ DECISION <prefix> <reason>` note with a real reason.
+pub(super) fn has_reasoned_decision(notes: &str, prefix: &str) -> bool {
     notes.lines().any(|line| {
         let Some((stamp, body)) = line
             .strip_prefix('[')
@@ -428,7 +434,7 @@ fn has_no_changelog_decision(notes: &str) -> bool {
         if chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").is_err() {
             return false;
         }
-        body.strip_prefix("no changelog:").is_some_and(|reason| {
+        body.strip_prefix(prefix).is_some_and(|reason| {
             let reason = reason.trim();
             !reason.is_empty() && !is_changelog_template_value(reason)
         })

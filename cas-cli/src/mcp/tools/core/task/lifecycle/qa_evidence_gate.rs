@@ -1062,12 +1062,14 @@ mod tests {
         let dir = task_evidence_dir(&root, &task).unwrap();
         let sweep = dir.join("visual-qa");
         std::fs::create_dir_all(&sweep).unwrap();
-        let report = |status, urls, findings, revision, sha256| serde_json::json!({
-            "status": status, "strict": true, "generatedAt": chrono::Utc::now().to_rfc3339(),
-            "urls": [urls], "findings": findings,
-            "build": {"revision": revision, "sha256": "a".repeat(64)},
-            "screenshots": [{"path": "ranking.png", "url": urls, "state": "ranking", "sha256": sha256}]
-        });
+        fn report(status: &str, urls: &str, findings: serde_json::Value, revision: &str, sha256: &str) -> serde_json::Value {
+            serde_json::json!({
+                "status": status, "strict": true, "generatedAt": chrono::Utc::now().to_rfc3339(),
+                "urls": [urls], "findings": findings,
+                "build": {"revision": revision, "sha256": "a".repeat(64)},
+                "screenshots": [{"path": "ranking.png", "url": urls, "state": "ranking", "sha256": sha256}]
+            })
+        }
         let tip_report = sweep.join("visual-qa.json");
         let url = "http://localhost:8180/ranking";
         let capture = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/ranking.after.png"));

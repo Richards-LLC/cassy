@@ -374,7 +374,12 @@ pub(super) fn recover_expired_claim_with_probes(
     }
     // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
     // review authority needs positive death evidence, not that ambiguity.
-    let confirmed_dead = child.status == cas_types::AgentStatus::Shutdown
+    // The daemon-hosted verifier shares its host's pid, so a verifier thread
+    // that vanished inside a live host still reads as alive. Past the deadline
+    // the daemon sweep extends only a progressing review; one with no heartbeat
+    // and no active verifier lane has stopped and cannot record a verdict.
+    let stalled = !crate::factory_review_scratch::verifier_progressing(&core.cas_root, dispatch, Some(&child), now);
+    let confirmed_dead = stalled || child.status == cas_types::AgentStatus::Shutdown
         || child.pid.is_some_and(|pid| {
             if !pid_alive(pid) { return true; }
             child.pid_starttime.or_else(|| child.metadata

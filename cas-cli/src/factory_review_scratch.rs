@@ -444,6 +444,32 @@ pub(crate) fn verifier_lane_active(
     })
 }
 
+/// A verifier is progressing while its child identity heartbeats or its
+/// verifier lane is active at the bound head. The daemon's deadline extension
+/// and the expired-claim recovery share this one definition.
+pub(crate) fn verifier_progressing(
+    cas: &Path,
+    dispatch: &cas_types::VerificationDispatch,
+    child: Option<&cas_types::Agent>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let heartbeat = child.is_some_and(|agent| {
+        matches!(agent.status, cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle)
+            && now - agent.last_heartbeat <= chrono::Duration::minutes(3)
+    });
+    heartbeat
+        || dispatch.repository.as_ref().is_some_and(|proof| {
+            verifier_lane_active(
+                cas,
+                &dispatch.task_id,
+                &dispatch.id,
+                &proof.head_commit,
+                now,
+                chrono::Duration::minutes(5),
+            )
+        })
+}
+
 /// Only marker-verified review paths widen capped admission beyond worker lanes.
 pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
     managed_checkout_task(cas, repo).is_some()

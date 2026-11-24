@@ -3,7 +3,7 @@
 use super::*;
 use std::process::Stdio;
 
-const OWNER_KEY: &str = "automatic_premerge_dispatch";
+const OWNER_KEY: &str = cas_store::AUTOMATIC_PREMERGE_OWNER_KEY;
 
 pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
     dispatch.verifier_agent_id.as_deref().is_some_and(|id| {
@@ -346,8 +346,6 @@ fn request_with_retry(
     }
 }
 
-/// An owning supervisor's retry may release only a positively dead local child.
-/// The store fences the liveness observation against registration/claim races.
 pub(super) fn recover_expired_claim(core: &CasCore, dispatch: &VerificationDispatch) -> Result<VerificationDispatch, String> {
     recover_expired_claim_with_probes(core, dispatch,
         crate::mcp::daemon::pid_alive, crate::mcp::daemon::read_pid_starttime)
@@ -369,12 +367,16 @@ pub(super) fn recover_expired_claim_with_probes(
     let Some(child) = dispatch.verifier_agent_id.as_deref().and_then(|id| agents.get(id).ok()) else {
         return Ok(dispatch.clone());
     };
-    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str()) {
+    let machine = cas_types::Agent::get_or_generate_machine_id();
+    let daemon_owned = child.metadata.get(OWNER_KEY) == Some(&dispatch.id);
+    let local = child.machine_id.as_deref() == Some(machine.as_str())
+        || (child.machine_id.is_none() && daemon_owned && owner.machine_id.as_deref() == Some(machine.as_str()));
+    if !local {
         return Ok(dispatch.clone());
     }
-    // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
-    // review authority needs positive death evidence, not that ambiguity.
-    let confirmed_dead = child.status == cas_types::AgentStatus::Shutdown
+    let stalled = daemon_owned
+        && !crate::factory_review_scratch::verifier_progressing(&core.cas_root, dispatch, Some(&child), now);
+    let confirmed_dead = stalled || child.status == cas_types::AgentStatus::Shutdown
         || child.pid.is_some_and(|pid| {
             if !pid_alive(pid) { return true; }
             child.pid_starttime.or_else(|| child.metadata
@@ -502,6 +504,7 @@ fn launch_with_preparation(
     // The daemon owns this identity and submits the harness's structured
     // verdict. The subprocess never receives a credential or this identity.
     child.pid = Some(std::process::id());
+    child.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
     crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
     child.metadata.insert(OWNER_KEY.into(), live.id.clone());
     child.factory_session = core
@@ -1074,16 +1077,49 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair[0] == "--sandbox" && pair[1] == "read-only"));
     }
 
-    /// GH #2023: after a harness failure, the merge retry starts exactly one
-    /// replacement through the factory daemon and reports it as scheduled.
     #[cfg(target_os = "linux")]
     #[test]
-    fn merge_retry_after_harness_failure_schedules_one_replacement_gh_2023() {
+    fn merge_retry_replaces_only_a_failed_or_stalled_verifier_gh_2023_gh_2325() {
+        for case in ["harness-failure", "stalled", "legacy-stalled", "heartbeat", "lane"] {
+            merge_retry(case);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn age_claim(root: &Path, claim: &VerificationDispatch, by: chrono::Duration) {
+        let aged = |at: &str| (chrono::DateTime::parse_from_rfc3339(at).unwrap() - by).to_rfc3339();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for (table, key, id, columns) in [
+            ("verification_dispatches", "id", Some(&claim.id), &["requested_at", "deadline_at"][..]),
+            ("verification_capabilities", "id", claim.capability_id.as_ref(), &["issued_at", "expires_at", "bound_at"][..]),
+            ("verification_handoffs", "capability_id", claim.capability_id.as_ref(), &["created_at", "bound_at"][..]),
+            ("agents", "id", claim.verifier_agent_id.as_ref(), &["registered_at", "last_heartbeat"][..]),
+        ] {
+            for column in columns {
+                let at: String = conn.query_row(
+                    &format!("SELECT {column} FROM {table} WHERE {key}=?1"), [id], |row| row.get(0),
+                ).unwrap();
+                conn.execute(&format!("UPDATE {table} SET {column}=?2 WHERE {key}=?1"),
+                    rusqlite::params![id, aged(&at)]).unwrap();
+            }
+        }
+        let checkout = Path::new(&claim.repository.as_ref().unwrap().worktree_root)
+            .parent().unwrap().join("owner.json");
+        let mut owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&checkout).unwrap()).unwrap();
+        for field in ["created_at", "last_used_at"] {
+            owner[field] = aged(owner[field].as_str().unwrap()).into();
+        }
+        std::fs::write(&checkout, owner.to_string()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn merge_retry(case: &'static str) {
         use crate::ui::factory::{
             ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, PROTOCOL_VERSION, SessionState,
             decode_length, encode_message, gui_socket_path, local_gui_capabilities,
         };
         use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
@@ -1109,6 +1145,7 @@ mod tests {
             "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
         );
         owner.factory_session = Some("gh-2023".into());
+        owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         core.open_agent_store().unwrap().register(&owner).unwrap();
         core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
         let mut task = Task::new("cas-2023-retry".into(), "Retry after harness failure".into());
@@ -1118,72 +1155,128 @@ mod tests {
         task.deliverables.factory_branch_anchor = Some(source);
         task.deliverables.parked_branch = Some("factory/worker".into());
         core.open_task_store().unwrap().add(&task).unwrap();
-        // The factory daemon's control socket: count each launch request.
         let socket = gui_socket_path("gh-2023");
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let (launched, launches) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            while std::time::Instant::now() < deadline {
-                let Ok((mut client, _)) = listener.accept() else {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
-                };
-                client.set_nonblocking(false).unwrap();
-                client.write_all(&encode_message(&DaemonMessage::Welcome {
-                    session_name: "gh-2023".into(),
-                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
-                        epic_title: None, cols: 80, rows: 24 },
-                    scrollback: None, protocol_version: PROTOCOL_VERSION,
-                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
-                }).unwrap()).unwrap();
-                let mut header = [0; FRAME_HEADER_SIZE];
-                client.read_exact(&mut header).unwrap();
-                let mut body = vec![0; decode_length(&header)];
-                client.read_exact(&mut body).unwrap();
-                let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
-                else {
-                    panic!("unexpected factory control");
-                };
-                client.write_all(&encode_message(&DaemonMessage::VerifierLaunched {
-                    dispatch_id: dispatch_id.clone(),
-                }).unwrap()).unwrap();
-                let _ = launched.send(dispatch_id);
-            }
-        });
-        let wait = std::time::Duration::from_secs(10);
+        let serve_launch = |attempt: usize, expected_dispatch: &str| {
+            let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            assert!(unsafe { libc::poll(&mut ready, 1, 10000) } > 0, "{case}: launch {attempt}");
+            let (mut client, _) = listener.accept().unwrap();
+            client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            client.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            client.write_all(&encode_message(&DaemonMessage::Welcome {
+                session_name: "gh-2023".into(),
+                state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                    epic_title: None, cols: 80, rows: 24 },
+                scrollback: None, protocol_version: PROTOCOL_VERSION,
+                capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+            }).unwrap()).unwrap();
+            let mut header = [0; FRAME_HEADER_SIZE];
+            client.read_exact(&mut header).unwrap();
+            let mut body = vec![0; decode_length(&header)];
+            client.read_exact(&mut body).unwrap();
+            let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+            else {
+                panic!("unexpected factory control");
+            };
+            assert_eq!(dispatch_id, expected_dispatch, "{case}");
+            let harness_fails = case == "harness-failure" && attempt == 1;
+            let output = root.join("verification-runs").join(&dispatch_id)
+                .join(format!("attempt-{attempt}")).join("verdict.json");
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            let (resume, provider_held) = std::sync::mpsc::channel::<()>();
+            let started = super::factory_launch::launch_with(&root, "gh-2023", &dispatch_id,
+                |core, task, dispatch| launch_with_preparation(core, task, dispatch, output, move |_| {
+                    if harness_fails {
+                        let mut harness = Command::new("sh");
+                        harness.args(["-c", "exit 1"]);
+                        return Ok((harness, None));
+                    }
+                    provider_held.recv().ok();
+                    Err("provider released".into())
+                }));
+            client.write_all(&encode_message(&match &started {
+                Ok(_) => DaemonMessage::VerifierLaunched { dispatch_id },
+                Err(message) => DaemonMessage::Error {
+                    message: message.clone(), client_ref: Some(dispatch_id),
+                },
+            }).unwrap()).unwrap();
+            started.unwrap().map(|review| (review, resume))
+        };
 
         assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
         let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-        assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id);
-        // The attempt's harness fails; its claim is released for one retry.
-        let directory = root.join("verification-runs").join(&dispatch.id);
-        std::fs::create_dir_all(&directory).unwrap();
-        let mut failing = Command::new("sh");
-        failing.args(["-c", "exit 1"]);
-        launch_with_preparation(&core, &task, &dispatch, directory.join("verdict.json"),
-            move |_| Ok((failing, None)))
-            .unwrap()
-            .unwrap()
-            .join()
-            .unwrap();
-        let released = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-        assert_eq!(released.state, cas_types::VerificationDispatchState::Pending);
+        let (first, resume_first) = serve_launch(1, &dispatch.id).expect("the first request claims the dispatch");
+        let stalled = if case == "harness-failure" {
+            first.join().unwrap();
+            None
+        } else {
+            let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
+            assert!(owns(&root, &claimed));
+            age_claim(&root, &claimed, chrono::Duration::minutes(11));
+            let child = claimed.verifier_agent_id.unwrap();
+            match case {
+                "legacy-stalled" => {
+                    rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                        .execute("UPDATE agents SET machine_id=NULL WHERE id=?1", [&child]).unwrap();
+                }
+                "heartbeat" => core.open_agent_store().unwrap().heartbeat(&child).unwrap(),
+                "lane" => drop(crate::factory_review_scratch::create(
+                    &root, repo, &task.id, Some(&dispatch.id),
+                    &dispatch.repository.as_ref().unwrap().head_commit,
+                ).unwrap()),
+                _ => {}
+            }
+            Some(first)
+        };
+        let before = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(before.state, if stalled.is_some() {
+            cas_types::VerificationDispatchState::Claimed
+        } else {
+            cas_types::VerificationDispatchState::Pending
+        });
 
         let held = core
             .prepare_premerge_verification(&task, repo, "factory/worker", "epic/train")
             .err()
             .expect("an unreviewed delivery stays held");
 
+        let second = serve_launch(2, &dispatch.id);
+        let after = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        let count = |sql: &str| -> i64 {
+            rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                .query_row(sql, [&dispatch.id], |row| row.get(0)).unwrap()
+        };
+        let recoveries = count("SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1");
+        let claims = count("SELECT COUNT(*) FROM verification_capabilities WHERE dispatch_id=?1 AND verifier_agent_id IS NOT NULL");
+        if matches!(case, "heartbeat" | "lane") {
+            assert!(second.is_none(), "{case}");
+            assert_eq!(serde_json::to_value(&after).unwrap(), serde_json::to_value(&before).unwrap(), "{case}");
+            assert_eq!((recoveries, claims), (0, 1), "{case}");
+            assert!(held.data.is_none(), "{case}: {held:?}");
+            drop(resume_first);
+            stalled.unwrap().join().unwrap();
+            return;
+        }
         assert_eq!(
             held.data.as_ref().map(|data| data["reason"].clone()),
             Some(serde_json::json!("verifier_replacement_scheduled")),
-            "{held:?}"
+            "{case}: {held:?}"
         );
-        assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id);
-        assert!(launches.recv_timeout(std::time::Duration::from_secs(2)).is_err());
+        let (replacement, finish) = second.expect("the retry's request claims the released dispatch");
+        assert_eq!((&after.id, &after.repository), (&dispatch.id, &dispatch.repository), "{case}");
+        assert_eq!(after.state, cas_types::VerificationDispatchState::Claimed, "{case}");
+        assert!(after.verifier_agent_id.is_some() && after.verifier_agent_id != before.verifier_agent_id, "{case}");
+        assert_eq!((recoveries, claims), (i64::from(stalled.is_some()), 2), "{case}");
+        if let Some(stalled) = stalled {
+            drop(resume_first);
+            stalled.join().unwrap();
+            let kept = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(serde_json::to_value(&kept).unwrap(), serde_json::to_value(&after).unwrap(), "{case}");
+        }
+        drop(finish);
+        replacement.join().unwrap();
     }
 
     #[test]

@@ -145,9 +145,12 @@ fn reload_observation(root: &std::path::Path, session: &str, supervisor: &str, b
     if server.pid == before { return None; }
     let running = server.version.clone()?;
     let installed = crate::factory_binary_skew::installed_version();
-    if installed.as_deref() != Some(running.as_str()) {
-        return Some((Phase::Unconfirmed, format!("Cassy reconnected but runs {running}, not the installed {}. Check which cas is first on PATH, then Reload Cassy again.",
-            installed.as_deref().unwrap_or("version (unavailable)"))));
+    // cas-724e: a rebuild at the same version is only loaded once its build hash matches too.
+    let installed_build = crate::factory_binary_skew::installed_build();
+    if installed.as_deref() != Some(running.as_str()) || server.build != installed_build {
+        let build = |version: &str, build: &Option<String>| build.as_ref().map_or(version.to_owned(), |build| format!("{version} ({build})"));
+        return Some((Phase::Unconfirmed, format!("Cassy reconnected but runs {}, not the installed {}. Check which cas is first on PATH, then Reload Cassy again.",
+            build(&running, &server.build), installed.as_deref().map_or("version (unavailable)".to_owned(), |installed| build(installed, &installed_build)))));
     }
     let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {running}"));
     Some((Phase::Observed, format!("Cassy reloaded: {badge} (PID {}, previous PID {before}).", server.pid)))
@@ -700,12 +703,14 @@ impl FactoryDaemon {
             "Reload Cassy is unavailable for {}. It requires Claude Code or Codex.", format!("{cli:?}").to_lowercase());
         anyhow::ensure!(cli == Claude || confirmed, "{CODEX_RELOAD_CONSEQUENCE} Confirm to continue.");
         let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
-        let (server, installed) = tokio::task::spawn_blocking(move || {
+        let (server, installed, installed_build) = tokio::task::spawn_blocking(move || {
             if cli == Claude { verify_claude_reload_version(&root, &session, &supervisor)?; }
-            Ok::<_, anyhow::Error>((registered_cassy_server(&root, &session, &supervisor), crate::factory_binary_skew::installed_version()))
+            Ok::<_, anyhow::Error>((registered_cassy_server(&root, &session, &supervisor),
+                crate::factory_binary_skew::installed_version(), crate::factory_binary_skew::installed_build()))
         }).await??;
         let server = server.ok_or_else(|| anyhow::anyhow!("Reload Cassy was not sent: the supervisor's live Cassy MCP PID and version are unavailable."))?;
-        if installed.is_some() && server.version == installed {
+        // cas-724e: the same version from another build is still a reload target.
+        if installed.is_some() && server.version == installed && server.build == installed_build {
             let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {}", installed.unwrap_or_default()));
             return self.record_command(owner, Command::ReloadCassy, None, Phase::Observed, format!("Already current: {badge}. Nothing was sent."))
                 .map(ReloadAdmission::Answered);
@@ -1033,6 +1038,7 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         // cas-8c4f: proof is the installed build, so the fixture names one.
         *crate::factory_binary_skew::INSTALLED_VERSION_FOR_TEST.lock().unwrap() = Some("9.99.2".into());
+        *crate::factory_binary_skew::INSTALLED_BUILD_FOR_TEST.lock().unwrap() = Some("build-a".into());
         struct Child(std::process::Child);
         impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
         fn process() -> Child { Child(std::process::Command::new("/bin/sleep").arg("120").spawn().unwrap()) }
@@ -1043,7 +1049,7 @@ mod tests {
             crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
             store.update(&agent).unwrap();
             let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
-            epoch.pid = Some(pid.into()); epoch.version = version.map(str::to_owned);
+            epoch.pid = Some(pid.into()); epoch.version = version.map(str::to_owned); epoch.build = Some("build-a".into());
             cas_store::SqliteHistoryStore::open(daemon.app.cas_dir()).unwrap().record_epoch(&epoch).unwrap();
         }
         let command: Command = serde_json::from_str("\"mcp\"").unwrap();
@@ -1223,6 +1229,12 @@ mod tests {
                 while daemon.app.supervisor_cassy_badge.is_none() { tokio::task::yield_now().await; daemon.refresh_supervisor_cassy_badge(); }
             }).await.expect("status bar badge");
             assert!(daemon.app.supervisor_cassy_badge.as_deref().is_some_and(|badge| badge.contains("9.99.2")));
+            // cas-724e: a rebuild installed at the same version is not current.
+            *crate::factory_binary_skew::INSTALLED_BUILD_FOR_TEST.lock().unwrap() = Some("build-b".into());
+            let rebuilt = daemon.dispatch_supervisor_command(Request::Run { command, confirmed: false }, "reload-rebuild".into(), owner.clone()).await.unwrap();
+            assert!(matches!(rebuilt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase != Phase::Observed));
+            assert!(reload_observation(daemon.app.cas_dir(), &daemon.session_name, &name, old.0.id()).is_some_and(|(phase, _)| phase == Phase::Unconfirmed),
+                "the same-version replacement on the old build does not prove the reload");
         }
     }
     #[tokio::test(flavor = "current_thread")]

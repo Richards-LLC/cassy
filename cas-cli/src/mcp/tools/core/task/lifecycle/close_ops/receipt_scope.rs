@@ -1212,7 +1212,7 @@ mod tests {
             let base = commit_changelog_fixture(repo.path(), "base test");
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &base])
                 .current_dir(repo.path()).status().unwrap().success());
-            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true } }
+            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true, environment_gated: false } }
                 else { Identity::exact(path, if rust { "child::owned" } else { "owned" }) };
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
                 tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
@@ -1343,7 +1343,7 @@ mod tests {
             let producer = tempfile::tempdir().unwrap();
             stability::record(producer.path(), repo.path(), &head, Proof { runner: "nextest".into(),
                 tests: ["child::planted", "child::gated::nested"].map(|name| Identity::exact("src/child.rs", name)).into(),
-                consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+                consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new() }).unwrap();
             task.deliverables.test_receipts =
                 crate::factory_worker_check::PassingTests::new(producer.path(), repo.path(), &head).portable();
             let refusals = park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None);

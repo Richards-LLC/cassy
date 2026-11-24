@@ -4011,7 +4011,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         let tested = fixture_head(&repo);
         let keeper = stability::Identity::exact("cas-cli/src/lib.rs", "keeper");
         stability::record(&root, &repo, &tested, stability::Proof {
-            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new(),
         }).unwrap();
 
         write("changelog.d/cas-e705.md", "### Fixed\n\n- Recovery.\n");
@@ -4030,7 +4030,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         fixture_commit_as(&repo, "sibling");
         let sibling = fixture_head(&repo);
         stability::record(&root, &repo, &sibling, stability::Proof {
-            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0, inactive: Vec::new(),
         }).unwrap();
         let passing = PassingTests::new(&root, &repo, &voided);
         assert_eq!(stability::missing(&passing, &[keeper.clone()]), [keeper.clone()]);

@@ -1366,7 +1366,7 @@ pub(crate) fn reconcile_blocked_task_alert(
     let sq = open_supervisor_queue_store(root).map_err(|e| e.to_string())?;
     let pq = open_prompt_queue_store(root).map_err(|e| e.to_string())?;
     let (start, _) = super::super::block_hold::alert_episode(root, &task)?;
-    let emit = |escalation, reason| {
+    let emit = |escalation: bool, reason: Option<&str>| {
         emit_task_lifecycle_transition_in_project(
             sq.as_ref(),
             Some(pq.as_ref()),

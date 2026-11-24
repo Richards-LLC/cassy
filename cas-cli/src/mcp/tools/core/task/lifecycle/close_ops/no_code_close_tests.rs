@@ -1970,19 +1970,18 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
     }
 }
 
-/// GH #2417 (cas-2372): a verdict covers the report it reviewed. After a
-/// no-code spike's report is revised, an earlier approval or rejection does not
-/// authorize a supervisor's ordinary close of the unanchored parked spike.
+/// GH #2417 (cas-2372): a verdict covers the report it reviewed. Once a no-code
+/// spike's or demo's report is revised, an earlier approval or rejection does
+/// not authorize a supervisor's ordinary close; an unrevised report still closes.
 #[tokio::test]
 async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
     use cas_store::VerificationStore;
     let mut env = TestEnvGuard::temp_home();
-    // A mechanical no-code chore keeps its approval across a revised proof. A
-    // demo deliverable is covered like a spike, and an approval of an artifact
-    // whose bytes changed under the same reference never closes the task.
+    let mut wrong = Vec::new();
     for (case, task_type) in [
-        ("approved", TaskType::Spike), ("rejected", TaskType::Spike), ("chore", TaskType::Chore),
-        ("demo-feature", TaskType::Feature), ("artifact-bytes-changed", TaskType::Spike),
+        ("unchanged", TaskType::Spike), ("approved", TaskType::Spike), ("rejected", TaskType::Spike),
+        ("chore", TaskType::Chore), ("demo-feature", TaskType::Feature),
+        ("artifact-bytes-changed", TaskType::Spike), ("notes-marker", TaskType::Spike),
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -2006,10 +2005,9 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("LEDGER.md"), "# Report notes\n").unwrap();
         }
-        let published = "a".repeat(64);
         cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().record_local(&cas_store::NewArtifact {
             id: "art-2372-report".into(), task_id: id.into(), name: "report.md".into(),
-            mime: "text/markdown".into(), size_bytes: 12, sha256: published,
+            mime: "text/markdown".into(), size_bytes: 12, sha256: "a".repeat(64),
         }).unwrap();
         let request = serde_json::json!({"action": "close", "id": id, "reason": "Report published"});
         let pending = call(&f.worker, request.clone()).await;
@@ -2032,26 +2030,36 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
             &conn, &reviewed.id, "nocode-supervisor-session", None, true,
         ).unwrap();
         // The worker revises the report and parks it for the supervisor.
-        let mut revised = f.task(id);
-        if case == "artifact-bytes-changed" {
+        if matches!(case, "artifact-bytes-changed" | "notes-marker") {
             // Same reference, different bytes behind the same artifact id.
-            conn.execute("UPDATE artifacts SET sha256 = ?1 WHERE id = 'art-2372-report'", ["b".repeat(64)]).unwrap();
-        } else {
-            revised.external_ref = Some("https://example.test/deploys/revised".into());
+            let revised = "b".repeat(64);
+            conn.execute("UPDATE artifacts SET sha256 = ?1 WHERE id = 'art-2372-report'", [&revised]).unwrap();
+            if case == "notes-marker" {
+                // The caller claims in a task note that the old review covers the new bytes.
+                call(&f.worker, serde_json::json!({
+                    "action": "notes", "id": id, "note_type": "progress",
+                    "notes": format!("NO-CODE REVIEW BOUND dispatch {}: {PROOF} artifacts=art-2372-report:{revised}", reviewed.id),
+                })).await;
+            }
         }
-        revised.status = TaskStatus::AwaitingMerge;
-        f.put(&revised);
+        let mut parked = f.task(id);
+        if !matches!(case, "unchanged" | "artifact-bytes-changed" | "notes-marker") {
+            parked.external_ref = Some("https://example.test/deploys/revised".into());
+        }
+        parked.status = TaskStatus::AwaitingMerge;
+        f.put(&parked);
         let response = call(&f.supervisor, request).await;
-        if case == "chore" {
-            assert_eq!(f.task(id).status, TaskStatus::Closed, "{case}: {response}");
-            continue;
-        }
-        assert_ne!(f.task(id).status, TaskStatus::Closed, "{case}: {response}");
-        let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
-        if case != "rejected" {
-            assert_ne!(latest.id, reviewed.id, "a new review is dispatched: {response}");
+        let closed = f.task(id).status == TaskStatus::Closed;
+        // An unrevised report and a mechanical chore keep their approval.
+        if closed != matches!(case, "unchanged" | "chore") {
+            wrong.push(format!("{case}: closed={closed}: {response}"));
+        } else if !closed && case != "rejected"
+            && cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id == reviewed.id
+        {
+            wrong.push(format!("{case}: no new review dispatched: {response}"));
         }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// cas-b38a: a code methodology keeps the evidence measurement. A test-first

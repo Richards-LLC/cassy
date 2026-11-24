@@ -6609,27 +6609,39 @@ fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
     ] {
         let model = LocalSessionReadModel::default();
         let mut servers = vec![ServerVersion { name: name.into(), role, session: Some(owner.into()),
-            version: version.map(str::to_owned), ..observed.clone() }];
+            version: version.map(str::to_owned), older: version.is_some(), ..observed.clone() }];
         if let Some(version) = duplicate {
-            servers.push(ServerVersion { pid: 43, version: Some(version.into()), ..observed.clone() });
+            servers.push(ServerVersion { pid: 43, version: Some(version.into()), older: false, ..observed.clone() });
         }
         // Inject the already independently tested Factory MCP snapshot boundary;
         // exercise the real registry/session projection and wire omission below.
         model.versions.lock().unwrap().insert(root.clone(), CachedVersions {
             read_at: std::time::Instant::now(),
-            snapshot: Some(Snapshot { installed: "9.99.2".into(), servers }),
+            snapshot: Some((Snapshot { installed: "9.99.2".into(), servers }, Some("d140f3f".into()))),
             fronts: super::mcp_fronts_stamp(&root),
         });
         let row = model.project(&[SessionInfo { is_running: live, ..session.clone() }]).remove(0);
         let wire = serde_json::to_value(row).unwrap();
         assert_eq!(wire.get("mcp_version").and_then(|value| value.as_str()), expected, "{name}/{role:?}/{owner}/{live}");
+        assert_eq!(wire["mcp_reload_needed"], expected.is_some());
         if expected.is_some() {
             assert_eq!(wire["installed_version"], "9.99.2");
+            for (build, reload_needed) in [("c140f3f", true), ("d140f3f", false)] {
+                {
+                    let mut versions = model.versions.lock().unwrap();
+                    let (snapshot, _) = versions.get_mut(&root).unwrap().snapshot.as_mut().unwrap();
+                    snapshot.servers[0].version = Some(snapshot.installed.clone());
+                    snapshot.servers[0].build = Some(build.into());
+                    snapshot.servers[0].older = false;
+                }
+                let row = model.project(std::slice::from_ref(&session)).remove(0);
+                assert_eq!(serde_json::to_value(row).unwrap()["mcp_reload_needed"], reload_needed);
+            }
             // cas-8c4f: a reload's new MCP front makes the cached pre-reload version stale at once.
             std::fs::create_dir_all(root.join("mcp-fronts")).unwrap();
             std::fs::write(root.join("mcp-fronts").join(format!("{}.json", std::process::id())), "{}").unwrap();
             let row = model.project(std::slice::from_ref(&session)).remove(0);
-            assert_ne!(row.mcp_version.as_deref(), expected, "the cached pre-reload version must not outlive a new front");
+            assert_ne!(row.mcp_version.as_deref(), Some("9.99.2"), "the cached pre-reload version must not outlive a new front");
             std::fs::remove_dir_all(root.join("mcp-fronts")).unwrap();
         }
     }

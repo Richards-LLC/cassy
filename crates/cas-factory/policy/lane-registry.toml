@@ -75,7 +75,7 @@ model = "gpt-6.1-sol"
 default_effort = "high"
 allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
-reason = "Deprecated upstream (cas-9109); no lane routes to it. Stays active so the stock default and explicit gpt-6.1-sol spawns keep working."
+reason = "Deprecated upstream; no lane routes to it. Stays active so the stock default and explicit gpt-6.1-sol spawns keep working."
 required_capability = "codex-account"
 
 [recipes.codex_sol_6]

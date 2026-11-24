@@ -21,7 +21,7 @@ The table is generated from the embedded `cas-factory` registry; change policy i
 | `— (explicit only)` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_sol_6` | `openai` | `codex` | `gpt-6-sol` | `medium` | `active` | `not lane-routed` |  |
-| `— (explicit only)` | `codex_sol_6_1` | `openai` | `codex` | `gpt-6.1-sol` | `high` | `active` | `not lane-routed` | Deprecated upstream (cas-9109); no lane routes to it. Stays active so the stock default and explicit gpt-6.1-sol spawns keep working. |
+| `— (explicit only)` | `codex_sol_6_1` | `openai` | `codex` | `gpt-6.1-sol` | `high` | `active` | `not lane-routed` | Deprecated upstream; no lane routes to it. Stays active so the stock default and explicit gpt-6.1-sol spawns keep working. |
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 

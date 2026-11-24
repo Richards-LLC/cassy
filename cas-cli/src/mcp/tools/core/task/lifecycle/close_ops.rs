@@ -22048,9 +22048,13 @@ impl<'a> CloseNoteTracker<'a> {
 /// audit text. Match complete lines so a correction that only starts with an
 /// older note cannot masquerade as retained history. Duplicate blocks have
 /// the same meaning here as in the sync union; every distinct block survives.
+/// cas-7c35 (GH #2322): a park replaces its earlier evidence-sync summary, so
+/// a superseded summary counts as retained once a newer one is present.
 fn preserves_close_note_history(before: &str, after: &str) -> bool {
-    cas_store::task_note_markers::note_blocks(before).iter().all(|block| {
-        std::iter::once(0)
+    use cas_store::task_note_markers::{is_evidence_sync_block, note_blocks};
+    let resynced = note_blocks(after).into_iter().any(is_evidence_sync_block);
+    note_blocks(before).iter().all(|block| {
+        (resynced && is_evidence_sync_block(block)) || std::iter::once(0)
             .chain(after.match_indices('\n').map(|(offset, _)| offset + 1))
             .any(|start| after[start..].strip_prefix(*block)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n')))

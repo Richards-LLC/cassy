@@ -134,6 +134,9 @@ pub(crate) struct HubQuota {
     provider: String,
     /// Lowercased login email; matched server-side, never sent to Commander.
     email: String,
+    /// The provider account id (Codex `id_token.chatgpt_account_id`); matched
+    /// server-side against the login's own rollout identity, never rendered or logged.
+    account_id: Option<String>,
     windows: Vec<UsageWindow>,
     observed_at: DateTime<Utc>,
 }
@@ -182,8 +185,15 @@ impl SharedQuota {
                     "hub_unreachable"
                 }
                 SharedQuota::Read(quotas) => {
+                    // Codex has no local email source: it matches on the account id from its own
+                    // newest rollout. Providers with a login email match on that.
                     let email = account.email.as_deref().map(|email| email.trim().to_lowercase());
-                    match quotas.iter().find(|quota| quota.provider == account.provider.name() && Some(&quota.email) == email.as_ref()) {
+                    let account_id = account.identity.as_ref().and_then(|identity| identity.account_id.as_deref());
+                    let matches = |quota: &&HubQuota| quota.provider == account.provider.name() && match account.provider {
+                        crate::accounts::Provider::Codex => account_id.is_some() && quota.account_id.as_deref() == account_id,
+                        _ => Some(&quota.email) == email.as_ref(),
+                    };
+                    match quotas.iter().find(matches) {
                         Some(quota) => {
                             account.windows = quota.windows.clone();
                             account.usage_observed_at = Some(quota.observed_at);
@@ -235,7 +245,8 @@ fn quotas(files: &serde_json::Value) -> Vec<HubQuota> {
         if windows.is_empty() {
             continue;
         }
-        out.push(HubQuota { provider: provider.into(), email: email.trim().to_lowercase(), windows, observed_at: observed_at.with_timezone(&Utc) });
+        let account_id = file["id_token"]["chatgpt_account_id"].as_str().map(str::trim).filter(|id| !id.is_empty()).map(str::to_string);
+        out.push(HubQuota { provider: provider.into(), email: email.trim().to_lowercase(), account_id, windows, observed_at: observed_at.with_timezone(&Utc) });
     }
     out
 }
@@ -332,43 +343,66 @@ mod tests {
         assert!(listener.accept().is_err(), "a refused path must not reach the dashboard");
     }
 
-    /// Two machines (two homes) each hold the same Claude login; both build
-    /// the real Accounts catalog (`GET /v1/accounts`) from one hub answer and
-    /// show one number for it. An unreachable hub shows none. A dashboard-only
-    /// machine can't route.
+    /// Two machines (two homes) each hold the same Claude and Codex logins;
+    /// both build the real Accounts catalog (`GET /v1/accounts`) from one hub
+    /// answer and show one number per login. Codex is matched through its
+    /// newest rollout's account id, so an older rollout as another account
+    /// never decides. An unreachable hub shows none. A dashboard-only machine
+    /// can't route.
     #[test]
     fn two_machines_reading_one_hub_show_one_number_for_one_login() {
         let hub = SharedQuota::Read(quotas(&serde_json::json!({"files": [
             {"provider": "claude", "email": "Daniel@Example.com", "quota": {"observed_at": "2026-11-23T18:44:57-05:00", "signals": {
                 "Anthropic-Ratelimit-Unified-7d-Utilization": "0.2", "Anthropic-Ratelimit-Unified-7d-Reset": "1795986000"}}},
-            {"provider": "codex", "email": "daniel@example.com", "quota": {"observed_at": "2026-11-23T18:12:55-05:00", "signals": {
+            {"provider": "codex", "email": "daniel@example.com", "id_token": {"chatgpt_account_id": "acct-hub"}, "quota": {"observed_at": "2026-11-23T18:12:55-05:00", "signals": {
                 "X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Used-Percent": "86", "X-Codex-Primary-Reset-At": "1795702350",
                 "X-Codex-Secondary-Window-Minutes": "0", "X-Codex-Secondary-Used-Percent": "0"}}},
         ]})));
-        let machine = || {
+        // Codex rollouts, oldest first: only the newest one's session_meta names the login.
+        let machine = |codex_rollouts: &[&str]| {
             let home = tempfile::tempdir().unwrap();
             let dir = home.path().join(".claude-daniel");
             std::fs::create_dir(&dir).unwrap();
             std::fs::write(dir.join(".claude.json"), serde_json::json!({"oauthAccount": {"emailAddress": "daniel@example.com", "accountUuid": "u1"}}).to_string()).unwrap();
             std::fs::write(dir.join(crate::accounts::Provider::Claude.credentials()), "{}").unwrap();
+            let sessions = home.path().join(".codex-daniel/sessions/2026/11/23");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let start = std::time::SystemTime::now() - Duration::from_secs(3600);
+            for (age, account) in codex_rollouts.iter().enumerate() {
+                let path = sessions.join(format!("rollout-{age}.jsonl"));
+                std::fs::write(&path, format!("{}\n", serde_json::json!({"type": "session_meta", "payload": {"creator_account_id": account}}))).unwrap();
+                std::fs::File::options().write(true).open(&path).unwrap().set_modified(start + Duration::from_secs(60 * age as u64)).unwrap();
+            }
             home
         };
-        let row = |home: &tempfile::TempDir, quota: &SharedQuota| {
+        let row = |home: &tempfile::TempDir, quota: &SharedQuota, key: &str| {
             let catalog = serde_json::to_value(crate::hub::accounts::catalog_with(home.path(), quota).unwrap()).unwrap();
-            let row = catalog["accounts"].as_array().unwrap().iter().find(|row| row["key"] == "claude:daniel").unwrap().clone();
+            let row = catalog["accounts"].as_array().unwrap().iter().find(|row| row["key"] == key).unwrap().clone();
             (catalog["quota_source"]["state"].clone(), row)
         };
-        let (soundwave, prowl) = (machine(), machine());
-        let (state, on_soundwave) = row(&soundwave, &hub);
-        let (_, on_prowl) = row(&prowl, &hub);
+        // soundwave last ran Codex as the hub's account; prowl's newest rollout is another account.
+        let (soundwave, prowl) = (machine(&["acct-old", "acct-hub"]), machine(&["acct-hub"]));
+        let switched = machine(&["acct-hub", "acct-other"]);
+        let (state, on_soundwave) = row(&soundwave, &hub, "claude:daniel");
+        let (_, on_prowl) = row(&prowl, &hub, "claude:daniel");
         assert_eq!(state, "hub");
         assert_eq!(on_soundwave["usage_source"], "hub");
         assert_eq!(on_soundwave["windows"], on_prowl["windows"]);
         assert_eq!(on_soundwave["usage_observed_at"], on_prowl["usage_observed_at"]);
         assert_eq!(on_soundwave["windows"][0]["used_percent"].as_f64().map(f64::round), Some(20.0));
 
+        // Codex: matched by the newest rollout's account id, one number on both machines.
+        let (_, codex_soundwave) = row(&soundwave, &hub, "codex:daniel");
+        let (_, codex_prowl) = row(&prowl, &hub, "codex:daniel");
+        assert_eq!(codex_soundwave["usage_source"], "hub");
+        assert_eq!(codex_soundwave["windows"], codex_prowl["windows"]);
+        assert_eq!(codex_soundwave["windows"][0]["used_percent"].as_f64().map(f64::round), Some(86.0));
+        // A newer rollout as another account wins over an older matching one: no hub number.
+        let (_, codex_switched) = row(&switched, &hub, "codex:daniel");
+        assert_eq!(codex_switched["usage_source"], "local");
+
         // An unreachable hub shows no number rather than the local one.
-        let (state, offline) = row(&prowl, &SharedQuota::Unreachable("dashboard unreachable".into()));
+        let (state, offline) = row(&prowl, &SharedQuota::Unreachable("dashboard unreachable".into()), "claude:daniel");
         assert_eq!(state, "unreachable");
         assert_eq!(offline["usage_source"], "hub_unreachable");
         assert!(offline["windows"].as_array().unwrap().is_empty() && offline["usage_observed_at"].is_null());

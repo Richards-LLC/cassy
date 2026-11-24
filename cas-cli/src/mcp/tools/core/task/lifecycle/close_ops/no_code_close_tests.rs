@@ -1912,6 +1912,58 @@ async fn parked_ops_task_closes_by_evidence_on_its_pull_request_cas_b38a() {
     );
 }
 
+/// GH #2417: a parked no-code spike is reviewed by an independent verdict for
+/// its current report before a supervisor's ordinary close accepts it. Never
+/// verified, or last rejected for an earlier report: close dispatches a new
+/// review instead of closing.
+#[tokio::test]
+async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417() {
+    use cas_store::VerificationStore;
+    let mut env = TestEnvGuard::temp_home();
+    for prior in ["never-verified", "rejected-earlier-report"] {
+        let f = fixture(&mut env, "main");
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let id = "cas-2417";
+        let mut spike = parked_ops_task(id);
+        spike.task_type = TaskType::Spike;
+        spike.execution_note = Some("no-code".into());
+        spike.external_ref = Some(PR.into());
+        spike.deliverables.parked_branch = None;
+        spike.deliverables.merge_conflicted = false;
+        f.put(&spike);
+        let earlier = (prior == "rejected-earlier-report").then(|| {
+            let dispatch = cas_store::create_verification_dispatch_bound(
+                &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap();
+            let mut verdict = cas_types::Verification::new("ver-2417-rejected".into(), id.into());
+            verdict.status = cas_types::VerificationStatus::Rejected;
+            verdict.summary = "Earlier report version rejected".into();
+            verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+            verdict.agent_id = Some("nocode-supervisor-session".into());
+            verdict.issuer_agent_id = verdict.agent_id.clone();
+            verdict.dispatch_id = Some(dispatch.id.clone());
+            cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+            let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+            cas_store::resolve_verification_dispatch_with_conn(
+                &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+            ).unwrap();
+            dispatch.id
+        });
+        let response = call(&f.supervisor, serde_json::json!({
+            "action": "close", "id": id, "reason": "Report accepted",
+        })).await;
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{prior}: {response}");
+        let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
+            .unwrap_or_else(|| panic!("{prior}: a current review must be dispatched: {response}"));
+        assert_ne!(Some(latest.id), earlier, "{prior}: {response}");
+    }
+}
+
 /// cas-b38a: a code methodology keeps the evidence measurement. A test-first
 /// task with no commit of its own is not closed on evidence alone.
 #[tokio::test]

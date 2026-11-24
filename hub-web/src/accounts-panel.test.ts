@@ -214,6 +214,8 @@ it("an unreachable hub shows no capacity number, and a recommended account under
   await settle();
   expect(document.querySelector('[data-testid="account-next"]')).not.toBeNull();
   expect(document.querySelector('[data-testid="account-low-pick"]')).not.toBeNull();
+  // A window the provider doesn't report stays a visible, named state on the row.
+  expect(document.querySelector('[data-testid="account-meter"][data-window="5h"]')?.getAttribute("data-state")).toBe("missing");
   document.body.innerHTML = "";
 
   const unreachable: AccountRow = { ...low, recommendation: null, usage_source: "hub_unreachable", windows: [], usage_observed_at: null };

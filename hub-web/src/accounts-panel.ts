@@ -248,9 +248,7 @@ export class AccountsSheet {
       const shown = new Map(accounts.map(account => [account, this.shown(machine, account)]));
       const usable = accounts.filter(row => row.login_state === "logged_in" && !row.disabled && !row.duplicate_of);
       const reason = next ? pickReason({ name: next.display_name, list: shown.get(next)! }, usable.filter(row => row !== next).map(row => ({ name: row.display_name, list: shown.get(row)!, exclusion: exclusionText(row.exclusion) }))) : undefined;
-      // A window no login in this group reports leaves its column empty rather than repeating "Not reported".
-      const silent = new Set(["5h", "week"].filter(slot => accounts.every(row => shown.get(row)!.find(reading => reading.slot === slot)?.kind === "missing")));
-      return `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${HARNESS_NAME[provider]} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts, account === next, shown.get(account)!, account === next ? reason : undefined, silent)).join("")}</ul></section>`;
+      return `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${HARNESS_NAME[provider]} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts, account === next, shown.get(account)!, account === next ? reason : undefined)).join("")}</ul></section>`;
     }).join("");
     const cols = `<div class="accounts-cols" aria-hidden="true"><span>Account</span><span>5-hour window</span><span>Weekly window</span></div>`;
     return `${summary}${cols}${groups}${gateway}${manage ? "" : this.grantCallout(machine)}`;
@@ -276,7 +274,7 @@ export class AccountsSheet {
   }
 
   /** One ledger row: identity and actions, then the two windows on the shared grid. */
-  private card(machine: AccountsMachine, account: AccountRow, manage: boolean, accounts: readonly AccountRow[], next: boolean, shown: WindowReading[], reason: PickReason | undefined, silent: ReadonlySet<string>): string {
+  private card(machine: AccountsMachine, account: AccountRow, manage: boolean, accounts: readonly AccountRow[], next: boolean, shown: WindowReading[], reason: PickReason | undefined): string {
     const attrs = `data-machine="${escapeHtml(machine.id)}" data-account="${escapeHtml(account.key)}"`;
     const grok = account.provider === "grok";
     const checked = this.usageChecks.result(machine.id, account.key);
@@ -308,7 +306,7 @@ export class AccountsSheet {
       // A duplicate is the same login twice: say so and offer the fix, rather than repeat its twin's meters.
       : account.duplicate_of ? `<div class="accounts-cell accounts-span accounts-duplicate"><p class="accounts-quiet" data-duplicate-of>Same login as ${duplicateName(account.duplicate_of, accounts)}</p>${grok ? "" : button("remove")}</div>`
       : !checked && account.usage_source === "local" ? `<div class="accounts-cell accounts-span" data-testid="account-local-read"><p class="accounts-quiet">${escapeHtml(localReadLine(shown, account.usage_observed_at))}</p></div>`
-      : shown.map(reading => silent.has(reading.slot) ? `<div class="accounts-cell accounts-silent" data-col="${reading.slot}" aria-hidden="true"></div>` : `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
+      : shown.map(reading => `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
     return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}${next ? " is-next" : ""}" data-testid="account-row" data-account-key="${escapeHtml(account.key)}" data-login-state="${escapeHtml(account.login_state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.location ? `${account.location} on ${machine.label}` : account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})${lookalike}</span><span class="accounts-subline">${sub}</span></div>${actions}</div>${cells}</li>`;
   }
 

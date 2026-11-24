@@ -92,7 +92,6 @@ code.accounts-sub { font-family: var(--font-mono); }
   /* Each meter gets its own full-width line, starting under the name. */
   .accounts-row { grid-template-columns: minmax(0, 1fr); padding: var(--space-3) var(--space-1); }
   .accounts-row > .accounts-cell { padding-inline-start: calc(40px + var(--space-3)); }
-  .accounts-row > .accounts-silent { display: none; }
   .accounts-who, .accounts-span { grid-column: 1 / -1; }
   /* The name keeps the width: ↻ moves into the ⋯ menu. */
   .accounts-actions > .account-usage-check { display: none; }

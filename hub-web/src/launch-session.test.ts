@@ -515,6 +515,10 @@ describe("accounts (cas-9666)", () => {
     const reason = row.querySelector<HTMLElement>('[data-testid="account-pick-reason"]')!;
     expect(reason.dataset.reset).toBe(row.querySelector<HTMLElement>('[data-testid="account-meter"][data-window="week"]')!.dataset.reset);
     expect(reason.dataset.soonest).toBe("false");
+    // No offered login reports a 5h window, and every row still says so rather than dropping it.
+    for (const entry of dialog().querySelectorAll(".launch-accounts .launch-account-entry")) {
+      expect(entry.querySelector('[data-testid="account-meter"][data-window="5h"]')?.getAttribute("data-state")).toBe("missing");
+    }
   });
 
   it("pins the worker route shown for the chosen project and never offers a hub that isn't ready", async () => {

@@ -263,7 +263,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(await inkOverlaps(page, "[data-testid=conversation-cassy]", "[data-testid=host-machine]")).toBe(false);
         if (phone) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
         await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toBeVisible();
-        expect(await inkOverlaps(page, "[aria-current=true] [data-testid=supervisor-version]", "[aria-current=true] [data-testid=conversation-machine-name]")).toBe(false);
+        expect(await inkOverlaps(page, "[data-testid=supervisor-version]", ".conversation-row:has([data-testid=supervisor-version]) [data-testid=conversation-machine-name]")).toBe(false);
         await captureReload(page, "badges-clear", viewport.width);
         if (phone) await conversationRow(page).click();
       });

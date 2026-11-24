@@ -1124,6 +1124,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
     env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
     env.set("RUSTUP_HOME", rustup);
     env.set("CARGO_HOME", cargo_home);
+    env.set("CARGO_NET_OFFLINE", "true");
     let cargo = Path::new(env!("CARGO"));
     let nextest = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::regression)"];
     let parameterized = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear::regression)"];
@@ -1146,6 +1147,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("compile failure at base", Some("test-first"), Some(("main", &check[..])), true),
         ("unrelated failure at base", Some("test-first"), Some(("main", &unrelated[..])), false),
         ("node file setup failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
+        ("node before hook failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node regression failure", Some("test-first"), Some(("HEAD^", &node[..])), true),
         ("node inactive regression", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("nextest timeout", Some("test-first"), Some(("HEAD^", &nextest[..])), true),
@@ -1177,6 +1179,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
         }
         if case == "parameterized Rust failure" {
             let source = |turn: u8| format!("pub fn turn() -> u8 {{ {turn} }}\n#[rstest::rstest()]\n#[case(2)]\nfn regression(#[case] expected: u8) {{ assert_eq!(turn(), expected); }}\n");
+            std::fs::write(f.worker_path.join("Cargo.lock"),
+                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"))).unwrap();
             std::fs::write(f.worker_path.join("crates/widget/Cargo.toml"),
                 "[package]\nname = 'widget'\n[dev-dependencies]\nrstest = { version = '=0.24.0', default-features = false }\n").unwrap();
             std::fs::write(&gear_path, source(1)).unwrap();
@@ -1193,6 +1197,10 @@ async fn park_requires_red_first_evidence_gh_2422() {
                 ),
                 "node file setup failure" => (
                     "import './missing-setup.mjs';\ntest('gear node regression', () => { throw Error('gear is stuck'); });\n",
+                    "test('gear node regression', () => {});\n",
+                ),
+                "node before hook failure" => (
+                    "import { before } from 'node:test';\nbefore(() => { throw Error('setup failed'); });\ntest('gear node regression', () => {});\n",
                     "test('gear node regression', () => {});\n",
                 ),
                 _ => (
@@ -1231,7 +1239,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
             let written = std::fs::read_dir(f.cas_dir().join("worker-checks")).into_iter().flatten()
                 .flatten().filter_map(|directory| std::fs::read_dir(directory.path()).ok()).flatten().flatten()
                 .any(|entry| entry.file_name().to_string_lossy().contains("-red-"));
-            if written != (case != "node file setup failure") {
+            if written != !matches!(case, "node file setup failure" | "node before hook failure") {
                 violations.push(format!("{case}: unexpected red receipt presence {written}"));
             }
             if checkout == &linked {

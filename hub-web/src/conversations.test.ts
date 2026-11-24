@@ -10,15 +10,23 @@ import { cassyLoadedBadge } from "./machine-version";
 
 import { pendingSessionLabel, visibleCatalog } from "./worker-visibility";
 
-it.each([
-  { build: "newer version", mcp_version: "4.52.0", mcp_reload_needed: true },
-  { build: "same version with a different commit", mcp_version: "4.53.0", mcp_reload_needed: true },
-  { build: "identical", mcp_version: "4.53.0", mcp_reload_needed: false },
-])("renders the Reload Cassy action for a $build build only when the hub reports a mismatch", ({ mcp_version, mcp_reload_needed }) => {
-  const row = { key: "atlas:lead", machineId: "atlas", session: "lead", supervisor: "lead", host: "Atlas", freshness: "now", connection: "Live", attention: 0, selected: false, machine_online: true, harness: "claude", mcp_version, installed_version: "4.53.0", mcp_reload_needed };
+function renderRowReload(mcp_version: string, mcp_reload_needed: boolean) {
+  const row: ConversationRow = { key: "atlas:lead", machineId: "atlas", session: "lead", supervisor: "lead", host: "Atlas", freshness: "now", connection: "Live", attention: 0, selected: false, machine_online: true, harness: "claude", mcp_version, installed_version: "4.53.0", mcp_reload_needed };
   const container = document.createElement("div");
   new ConversationList().render(container, [row], vi.fn(), undefined, vi.fn());
-  expect(container.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')?.hidden).toBe(!mcp_reload_needed);
+  return container.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')?.hidden;
+}
+
+it("shows Reload Cassy when a newer version is installed", () => {
+  expect(renderRowReload("4.52.0", true)).toBe(false);
+});
+
+it("shows Reload Cassy for the same version with a different commit", () => {
+  expect(renderRowReload("4.53.0", true)).toBe(false);
+});
+
+it("hides Reload Cassy when the installed build matches", () => {
+  expect(renderRowReload("4.53.0", false)).toBe(true);
 });
 
 it("shows the live supervisor's own Cassy version and flags an installed upgrade (cas-8125)", () => {

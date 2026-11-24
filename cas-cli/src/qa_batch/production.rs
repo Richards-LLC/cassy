@@ -139,6 +139,7 @@ pub(crate) fn admit(
     admit_scoped(root, candidate, candidate_sha, waiver_task, &scope)
 }
 
+// gate-audit[has_production_waiver]: selector Revalidates the G-94 waiver already issued and logged for this exact source, base and tree; does not issue a new waiver.
 pub(crate) fn admit_scoped(
     root: &Path, candidate: &ProductionCandidate, candidate_sha: Option<&str>, waiver_task: Option<&str>,
     scope: &[(String, String)],

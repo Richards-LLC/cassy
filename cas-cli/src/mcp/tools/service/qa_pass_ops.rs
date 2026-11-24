@@ -294,6 +294,7 @@ impl CasService {
     }
 
     // gate[G-119 release-verdict]: qa_waive authority and head binding
+    // gate-audit[production_waiver]: bypass G-94 The authenticated supervisor waiver is logged and additionally bound to the exact production candidate.
     pub(super) async fn verification_qa_waive(
         &self,
         req: VerificationRequest,

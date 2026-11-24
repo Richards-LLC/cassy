@@ -140,6 +140,7 @@ fn owner_identity(agents: &[crate::types::Agent], owner: Option<&str>) -> String
 /// `queue_busy` is true while any merge-queue run is in flight.
 // gate-audit[queue_busy]: input Measured merge-queue state prevents release; never an override.
 // gate-audit[green]: input Measured train-suite verdict at the tip; never an override.
+// gate-audit[production_checked]: input The train poll already admitted this frozen tip; a newly frozen tip still runs admission here.
 pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: bool, queue_busy: bool, now: DateTime<Utc>, production_checked: bool) -> Result<Outcome> {
     // gate[G-122 release-verdict]: Auto-cut preconditions (setup, live supervisor, repairs, fragments, queue, cadence, notes draft)
     if let Some(reason) = declined_setup(root, train) {
